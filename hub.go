@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -2115,6 +2116,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	var previousSnapshot *hubSessionSnapshotRecord
 	var previousReadiness *fleet.Readiness
 	var previousReadinessAt time.Time
+	activeJobs := make(map[string]HubActiveJob)
 	h.mu.Lock()
 	if existing := h.nodes[machineID]; existing != nil {
 		if existing.appliedTimer != nil {
@@ -2122,6 +2124,13 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		}
 		previous, previousReadiness, previousReadinessAt = existing.agent, existing.readiness, existing.readinessAt
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
+		if existing.agent == agent {
+			// A repeated hello on the same connection (a node re-registering
+			// a changed capability, hk 4632) keeps the jobs its heartbeat
+			// reported: an empty map until the next heartbeat would let a
+			// woken placement count the node's pools as free.
+			maps.Copy(activeJobs, existing.activeJobs)
+		}
 	}
 	var capabilities []string
 	if len(capabilityLists) > 0 {
@@ -2137,7 +2146,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now, appliedPending: reportsApplied,
 		capabilities: capabilitySet,
 		remoteMeta:   map[string]string{"version": version, "remote_addr": remoteAddr},
-		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
+		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: activeJobs, sessionSnapshot: previousSnapshot,
 		readiness: previousReadiness, readinessAt: previousReadinessAt,
 	}
 	if reportsApplied {

@@ -2,8 +2,11 @@ package fleet
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 func eventKinds(t *testing.T, a *App) []string {
@@ -124,4 +127,92 @@ func TestWatcherRunsADecisionOnACurrentSnapshot_t4632(t *testing.T) {
 	if e != nil || deferred || !ran {
 		t.Fatalf("deferred %v, ran %v, err %v; want it run", deferred, ran, e)
 	}
+}
+
+// #662 review: a reaper that ran after the close was journaled closed (here
+// after a local revoke) does not discard the close; settlement still writes
+// the planned record.
+func TestSettlementSurvivesAReap_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	for _, kind := range []string{"job.revoked", "job.reaped"} {
+		if e := a.event(context.Background(), "j", kind, map[string]any{"reason": "owner"}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if pending, _ := PendingHubCloseJobs(a.Jobs); !slices.Equal(pending, []string{"j"}) {
+		t.Fatalf("pending %v, want [j]", pending)
+	}
+	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
+		t.Fatalf("settle %v, %v; want settled", state, e)
+	}
+	if rec := h.record(t, "j"); str(rec, "end_reason") != hubCloseReason {
+		t.Fatalf("hk record %v, want the planned lost record", rec)
+	}
+}
+
+// #662 review: a settlement already in the watcher's snapshot still drops a
+// decision (the hand-off case, where the terminal check does not stop the
+// watcher), and the watch itself ends on it.
+func TestWatcherDropsDecisionsOnceAHubCloseSettled_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
+		t.Fatalf("settle %v, %v", state, e)
+	}
+	snapshot, e := a.job("j")
+	if e != nil {
+		t.Fatal(e)
+	}
+	ran := false
+	deferred, e := a.endUnlessHubClose("j", snapshot, func(Job) error { ran = true; return nil })
+	if e != nil || !deferred || ran {
+		t.Fatalf("deferred %v, ran %v, err %v; want dropped", deferred, ran, e)
+	}
+}
+
+// #662 review: the node's final job.lost carries a timestamp before the
+// spawn (a clock stepped backwards). The watcher folds settlement in ledger
+// order, ends, and writes no second loss.
+func TestWatcherHonorsASettlementWithABackwardsClock_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	now := a.Now
+	a.Now = func() time.Time { return now().Add(-48 * time.Hour) }
+	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
+		t.Fatalf("settle %v, %v", state, e)
+	}
+	a.Now = now
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if lost := lostEvents(t, a); len(lost) != 1 {
+		t.Fatalf("job.lost events %v, want only the settlement's", lost)
+	}
+}
+
+// #662 review: a hub revocation the node records with no kind field (only
+// "type") after the intent keeps the ledger readable, and settlement still
+// finishes the closed operation.
+func TestSettlementReadsAHubRevocationRecord_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	if e := os.WriteFile(filepath.Join(a.Jobs, "j", "events", "99999-job.revoked.json"), []byte(`{"type":"job.revoked","job_id":"j","epoch":2}`), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	if pending, e := PendingHubCloseJobs(a.Jobs); e != nil || !slices.Equal(pending, []string{"j"}) {
+		t.Fatalf("pending %v, %v; want [j]", pending, e)
+	}
+	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
+		t.Fatalf("settle %v, %v; want settled", state, e)
+	}
+	wantHubCloseFinished(t, a, h)
 }

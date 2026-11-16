@@ -330,11 +330,6 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return e
 		}
 	}
-	if launcherCommands[args[0]] {
-		// Before anything can start a watcher: this process starts only
-		// watchers that defer to hub closes (hub_close_watchers.go).
-		defer a.recordLauncherCaps()()
-	}
 	switch args[0] {
 	case "work":
 		s, e := a.workPreset(ctx, args[1:])

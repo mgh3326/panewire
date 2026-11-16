@@ -11,7 +11,10 @@ import (
 )
 
 type Event struct {
-	Kind      string         `json:"kind"`
+	Kind string `json:"kind"`
+	// Type is the kind of a hub revocation record, which the node writes
+	// with no kind field (writeHubRevocation); events reads it as the kind.
+	Type      string         `json:"type"`
 	CreatedAt string         `json:"created_at"`
 	TS        string         `json:"ts"`
 	Payload   map[string]any `json:"payload"`
@@ -81,6 +84,9 @@ func (a *App) events(id string) ([]Event, error) {
 		var ev Event
 		if e = json.Unmarshal(b, &ev); e != nil {
 			return nil, fail(exitStateConflict, "unreadable job event %s", ent.Name())
+		}
+		if ev.Kind == "" && ev.Type == "job.revoked" {
+			ev.Kind = ev.Type
 		}
 		if ev.Kind == "" {
 			return nil, fail(exitStateConflict, "event kind missing")

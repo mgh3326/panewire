@@ -87,12 +87,36 @@ func (a *App) eventSynced(ctx context.Context, job, kind string, payload map[str
 //     which it re-checks against a freshly read ledger under the lock. So no
 //     watcher end can interleave with an intent being recorded.
 //   - hubCloseWatchLock is held for its whole life by a watcher that defers to
-//     hub-close intents. A watcher of an older binary holds only the watch
-//     lock; the node refuses to open a hub close while one runs.
+//     hub-close intents and drops decisions a settled close made stale. A
+//     watcher of an older binary holds only the watch lock, or the watch lock
+//     and the v1 lock (hubCloseWatchLockV1, which lacks the stale-decision
+//     check); the node refuses to open a hub close while either runs.
+//
+// A kernel lock lives exactly as long as its process, so neither can be
+// certified by a stale file or a reused pid.
 const (
-	jobEndLock        = ".panewire-end.lock"
-	hubCloseWatchLock = ".panewire-watch-hubclose.lock"
+	jobEndLock          = ".panewire-end.lock"
+	jobWatchLock        = ".panewire-watch.lock"
+	hubCloseWatchLock   = ".panewire-watch-hubclose-v2.lock"
+	hubCloseWatchLockV1 = ".panewire-watch-hubclose.lock"
 )
+
+// FenceWatchers takes the job's watch lock for the node, without blocking,
+// and returns its release; ok is false when a watcher holds it. While the
+// node holds it, no watcher of any binary, started by any launcher, can run
+// for the job: each exits at its own tryLock. The node holds it from a hub
+// close's admission until its settlement ends (hk 4632).
+func FenceWatchers(jobDir string) (release func(), ok bool, err error) {
+	f, e := secureOpen(filepath.Join(jobDir, jobWatchLock), true, nil)
+	if e != nil {
+		return nil, false, e
+	}
+	if !tryLock(f) {
+		f.Close()
+		return nil, false, nil
+	}
+	return func() { f.Close() }, true, nil
+}
 
 // LockJobEnd takes the job's end lock, blocking, and returns its release.
 func LockJobEnd(jobDir string) (func(), error) {
@@ -155,8 +179,12 @@ func ProbeHubCloseWatcher(jobDir string) (HubCloseWatcher, error) {
 		return HubCloseWatcherAware, e
 	}
 	// A watcher takes the watch lock before the hub-close one, so a watcher
-	// caught in between reads as incompatible: the hub retries.
-	if running, e := held(".panewire-watch.lock"); e != nil || running {
+	// caught in between reads as incompatible: the hub retries. So does a v1
+	// watcher, which holds the v1 lock.
+	if running, e := held(jobWatchLock); e != nil || running {
+		return HubCloseWatcherIncompatible, e
+	}
+	if v1, e := held(hubCloseWatchLockV1); e != nil || v1 {
 		return HubCloseWatcherIncompatible, e
 	}
 	return HubCloseWatcherNone, nil
@@ -225,7 +253,7 @@ func (a *App) endUnlessHubClose(id string, seen Job, end func(j Job) error) (def
 	if e != nil {
 		return false, e
 	}
-	if _, open := pendingHubCloseIntent(j); open && !j.Reaped {
+	if _, open := pendingHubCloseIntent(j); open || hubCloseSettledNow(j) {
 		return true, nil
 	}
 	if endMark(j) != endMark(seen) {
@@ -279,9 +307,7 @@ func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended bool) {
 		case hubCloseCancelKind:
 			id := str(ev.Payload, "request_id")
 			intents = slices.DeleteFunc(intents, func(o HubCloseIntent) bool { return o.RequestID == id })
-		case "job.reaped":
-			intents = nil
-		case "job.completed", "job.completion", "job.record_settled", "job.joined", "job.revoked", "job.handed_off", "job.escalate":
+		case "job.completed", "job.reaped", "job.completion", "job.record_settled", "job.joined", "job.revoked", "job.handed_off", "job.escalate":
 			ended = ended || len(intents) > 0
 		case "job.lost":
 			switch {
@@ -305,6 +331,23 @@ func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended bool) {
 // settlement records (finishHubClose).
 func hubCloseSettledLoss(ev Event) bool {
 	return ev.Kind == "job.lost" && str(ev.Payload, "reason") == hubCloseLostReason && boolean(ev.Payload, "final", false)
+}
+
+// hubCloseSettledNow reports whether the job's current attempt, folded in
+// ledger sequence order, already ended by a settled hub close. It is
+// terminal for the watcher whatever else is active (a quota hand-off) and
+// whatever the event timestamps say (#662 review).
+func hubCloseSettledNow(j Job) bool {
+	settled := false
+	for _, ev := range ledgerOrder(j.Events) {
+		switch {
+		case ev.Kind == "job.claim" || ev.Kind == "job.claimed" || ev.Kind == "job.reclaim" || ev.Kind == "job.spawned" || ev.Kind == "job.reprompted":
+			settled = false
+		case hubCloseSettledLoss(ev):
+			settled = true
+		}
+	}
+	return settled
 }
 
 // endMark identifies, in a folded ledger, the attempt and how many hub closes
@@ -452,7 +495,7 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		if _, open := pendingHubCloseIntent(j); open && !j.Reaped {
+		if _, open := pendingHubCloseIntent(j); open {
 			out = append(out, entry.Name())
 		}
 	}
@@ -524,8 +567,11 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 	if e != nil {
 		return HubClosePending, e
 	}
+	// A reaped job's open intent is still settled (#662 review): a reaper
+	// may have run while hk was unavailable, and only settlement writes the
+	// planned record.
 	in, open, ended := hubCloseIntentState(j)
-	if !open || j.Reaped {
+	if !open {
 		return HubCloseNone, nil
 	}
 	cancel := func(reason string) (HubCloseState, error) {

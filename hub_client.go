@@ -257,13 +257,17 @@ type HubClient struct {
 	// close_ops_v1.
 	closeOpsAdvertised   atomic.Bool
 	closeOpsRecheckEvery time.Duration // fixture seam; zero is closeOpsRecheckInterval.
-	nodeGitLockWait      time.Duration // fixture seam; zero is nodeGitOpLockWait.
-	busyRelayMu          sync.Mutex
-	busyRelay            *relayBusyManager
-	relayCommand         relayCommandRunner   // fixture seam for agent get/wait.
-	relayEmitter         func(hubClientEvent) // fixture/connection-owned writer.
-	relayRecvSeqMu       sync.Mutex
-	relayRecvSeq         int64 // assigned synchronously by the hub read loop.
+	// closeFences are the watch locks the node holds for jobs with an open
+	// hub close and no watcher (takeWatcherFence).
+	closeFenceMu    sync.Mutex
+	closeFences     map[string]func()
+	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
+	busyRelayMu     sync.Mutex
+	busyRelay       *relayBusyManager
+	relayCommand    relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter    func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu  sync.Mutex
+	relayRecvSeq    int64 // assigned synchronously by the hub read loop.
 	// inboundHandled is a fixture seam the inbound dispatcher calls after
 	// each queued frame it ran; production leaves it nil.
 	inboundHandled func(hubOutboundMessage)
@@ -2312,9 +2316,11 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 		case <-closeOpsRecheck.C:
 			// Readiness for close ops changes while connected (an older
 			// watcher ends, the barrier is recorded, an older launcher
-			// starts): register again with the fresh answer. A hub that
-			// refused the capability hello keeps the capability-free one.
-			if !acked || helloRetried || client.closeOpsReady(ctx) == client.closeOpsAdvertised.Load() {
+			// starts): register again with the fresh answer. After a hello
+			// fallback the capable hello was sent again once acknowledged
+			// (capsResent), so a re-check resends it too; a hub that refuses
+			// capabilities drops it and keeps the record it has.
+			if !acked || helloRetried && !capsResent || client.closeOpsReady(ctx) == client.closeOpsAdvertised.Load() {
 				continue
 			}
 			if err := client.writeHello(ctx, peer, client.helloCapabilities(client.spawnHelloCapabilities(ctx))); err != nil {

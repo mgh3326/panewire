@@ -215,7 +215,10 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 			return nil, err
 		}
 		var event struct {
-			Kind    string `json:"kind"`
+			Kind string `json:"kind"`
+			// Type is the kind of a hub revocation record (writeHubRevocation),
+			// which carries no kind field.
+			Type    string `json:"type"`
 			Payload struct {
 				PaneID     string `json:"pane_id"`
 				Label      string `json:"label"`
@@ -232,7 +235,13 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				Attempt      string `json:"attempt"`
 			} `json:"payload"`
 		}
-		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, errors.New("unreadable job event")
+		}
+		if event.Kind == "" && event.Type == "job.revoked" {
+			event.Kind = event.Type
+		}
+		if event.Kind == "" {
 			return nil, errors.New("unreadable job event")
 		}
 		label := event.Payload.Label

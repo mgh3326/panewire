@@ -124,12 +124,20 @@ func TestConnectedNodeReRegistersWhenCloseOpsReadinessChanges_t4632(t *testing.T
 	})
 }
 
-// The CLI barrier: refused while an older launcher runs, recorded once none
+// The CLI barrier: refused while an older watcher runs, recorded once none
 // does; the record and a fresh scan make the node ready.
 func TestNodeCloseOpsEnableCLI_t4632(t *testing.T) {
 	inbox := t.TempDir()
 	jobs := filepath.Join(inbox, "jobs")
-	old := func(context.Context) ([]byte, error) { return []byte("  77 /old/bin/panewire spawn -p brief\n"), nil }
+	// An older watcher: it holds the job's watch lock but not the v2 lock.
+	release, ok, err := fleet.FenceWatchers(mkdirAll(t, filepath.Join(jobs, "job-old")))
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	t.Cleanup(release)
+	old := func(context.Context) ([]byte, error) {
+		return []byte("  77 /old/bin/panewire.prev _watch job-old\n"), nil
+	}
 	clean := func(context.Context) ([]byte, error) { return []byte("  1 /sbin/init\n"), nil }
 	var stdout, stderr bytes.Buffer
 	if rc := runNodeCloseOpsCLI([]string{"enable", "--inbox-root", inbox}, &stdout, &stderr, old); rc != ExitConditionInvalid {
@@ -148,9 +156,107 @@ func TestNodeCloseOpsEnableCLI_t4632(t *testing.T) {
 		t.Fatal("not ready after the barrier")
 	}
 	if fleet.CloseOpsReady(t.Context(), jobs, old) {
-		t.Fatal("ready while an older launcher started after the barrier")
+		t.Fatal("ready while an older watcher runs after the barrier")
 	}
 	if rc := runNodeCloseOpsCLI([]string{"disable"}, &stdout, &stderr, clean); rc != ExitUsage {
 		t.Fatalf("rc=%d for an unknown verb, want usage", rc)
+	}
+}
+
+// A close on a job no watcher runs for fences the job: the node holds its
+// watch lock, so a watcher of any binary started meanwhile exits, until the
+// close's settlement ends (#662 review: launchers of every name and kind).
+func TestCloseOpFencesAJobWithoutAWatcher_t4632(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	ledger := client.nodeHubClose.(*fakeHubClose)
+	ledger.watcher, ledger.state = fleet.HubCloseWatcherNone, fleet.HubClosePending
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
+	jobDir := filepath.Join(inbox, "jobs", closeOpJob)
+	if _, ok, err := fleet.FenceWatchers(jobDir); err != nil || ok {
+		t.Fatalf("watch lock free during an open close: ok=%v err=%v", ok, err)
+	}
+	ledger.state = fleet.HubCloseSettled
+	client.settleHubClose(t.Context(), closeOpJob)
+	release, ok, err := fleet.FenceWatchers(jobDir)
+	if err != nil || !ok {
+		t.Fatalf("watch lock still held after settlement: ok=%v err=%v", ok, err)
+	}
+	release()
+}
+
+// #662 review: a capable hub that acknowledged late (after the capability
+// -free fallback) still gets readiness re-registrations.
+func TestReadinessReRegistersAfterALateHelloAck_t4632(t *testing.T) {
+	hub := &helloFallbackHub{pongDelay: 300 * time.Millisecond}
+	server := hub.serve(t)
+	ledger := &toggledHubClose{}
+	client, err := NewHubClient(HubClientConfig{URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: time.Hour, helloAckTimeout: 100 * time.Millisecond,
+		JobsInboxRoot:       t.TempDir(),
+		sessionCollector:    func(context.Context) ([]HerdrAgentState, error) { return nil, nil },
+		hostLoadCollector:   func(context.Context) (HubHostLoad, error) { return HubHostLoad{}, nil },
+		hostMemoryCollector: func(context.Context) (*HubHostMemory, error) { return nil, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.nodeHubClose = ledger
+	client.closeOpsRecheckEvery = 20 * time.Millisecond
+	connection, _, err := websocket.Dial(t.Context(), client.endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = client.serve(ctx, connection)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	// caps hello, capability-free fallback, then the capable hello again.
+	eventually(t, 5*time.Second, "capable hello resent after the late ack", func() bool {
+		h, _ := hub.snapshot()
+		return len(h) == 3
+	})
+	ledger.ready.Store(true)
+	eventually(t, 5*time.Second, "re-registration with close_ops_v1", func() bool {
+		h, _ := hub.snapshot()
+		return len(h) >= 4 && helloAdvertisesCloseOps(h[len(h)-1])
+	})
+}
+
+func mkdirAll(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// #662 review: close_ops_not_ready is a wire error the hub accepts, so it
+// arrives as "not closed, retry later" instead of timing out.
+func TestCloseOpsNotReadyIsAWireError_t4632(t *testing.T) {
+	if !validNodeCommandError("close_ops_not_ready") {
+		t.Fatal("close_ops_not_ready rejected by the hub's result parser")
+	}
+}
+
+// The node's own ledger reader accepts a hub revocation record (type only).
+func TestNodeLedgerReadsAHubRevocationRecord_t4632(t *testing.T) {
+	inbox := t.TempDir()
+	if err := writeHubRevocation(inbox, hubJobRevokedEvent{Type: "job.revoked", JobID: "job-r", Epoch: 2}); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(filepath.Join(inbox, "jobs", "job-r"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	events, err := readNodeJobLedgerEvents(root)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events %v, err %v; want the revocation read", events, err)
 	}
 }

@@ -256,31 +256,48 @@ node whose current registration advertises it. `CloseOpsReady` has two parts:
 
 - **The migration barrier.** `panewire node close-ops enable
   [--inbox-root DIR]` is run once on the node host after its binary is
-  upgraded. It records `jobs/.close-ops-enabled` only when no panewire process
-  of an older binary remains on the host (rc 5 otherwise, and nothing is
-  recorded). An older watcher ignores a hub close, and an older launcher
-  (`panewire spawn`, `work`, `_spawn-stdin`) could still start such a watcher.
-- **A fresh process scan** (`fleet.HubCloseWatchersReady`):
-  - every live `_watch <job>` process of a job under the jobs root carries its
-    own `jobs/<job>/.watch-caps/<pid>` token (`hub_close_v1`); a watcher of this
-    binary writes it at its start, before any lock;
-  - every live launcher carries `jobs/.launcher-caps/<pid>`
-    (`hub_close_launcher_v1`); a launcher of this binary writes it before it
-    can start a watcher;
-  - any listing or token error fails closed.
+  upgraded. It records `jobs/.close-ops-enabled` only when no older watcher
+  runs on the host (rc 5 otherwise, and nothing is recorded).
+- **A fresh process scan** (`fleet.HubCloseWatchersReady`): every live
+  `_watch <job>` process of a job under the jobs root (whatever the
+  executable is named) must be the job's aware watcher.
+  - An aware watcher is one that holds
+    `jobs/<job>/.panewire-watch-hubclose-v2.lock` for its whole life.
+  - A watcher of an older binary holds only `.panewire-watch.lock`, or that
+    and the v1 lock `.panewire-watch-hubclose.lock`. A v1 watcher lacks the
+    stale-decision check below.
+  - Kernel locks live exactly as long as their process, so a stale file or
+    a reused pid certifies nothing.
+  - Any listing or lock error fails closed.
 
-The node re-checks at every hello and every 30 s while connected. When the
-answer changes, it sends a fresh hello (plus the heartbeat and relay burst a
-repeated hello needs), so the hub's registration follows readiness both ways
-without a reconnect. Each `pane.close_op` that would close re-checks it too:
-an unready node refuses `close_ops_not_ready` (journals nothing). Per close,
-the node also refuses `watcher_incompatible` when the job's watcher holds the
-watch lock but not `.panewire-watch-hubclose.lock`. Both mean "not closed,
-retry later".
+Launchers (`spawn`, `work`, `restore`, `_spawn-stdin`, a daemon re-arm, a
+renamed or retained binary) need no check of their own. **The node fences
+the job**: when a close is admitted for a job no watcher runs for, the node
+takes and holds that job's `.panewire-watch.lock` until the close's
+settlement ends (settled, cancelled, or no open close). Every watcher of
+every binary takes that lock first and exits when it is held. So a watcher
+started by any launcher after admission never runs during the close. One
+started before admission is seen by the per-job probe. After a node restart,
+the settlement pass takes the fence again for every open close with no
+watcher.
 
-Rollout order: upgrade every node's binary first, then run `panewire node
-close-ops enable` on each node. A hub of an older build ignores the
-capability, and only a hub with an issuer (hk 4745) acts on it.
+The node re-checks readiness at every hello and every 30 s while connected,
+including after a late hello acknowledgement. When the answer changes, it
+sends a fresh hello (plus the heartbeat and relay burst a repeated hello
+needs), so the hub's registration follows readiness both ways without a
+reconnect. A hub of this build keeps the node's reported active jobs across
+a hello on the same connection, so placement never sees its pools as free in
+between.
+
+Each `pane.close_op` that would close re-checks readiness too: an unready
+node refuses `close_ops_not_ready` and journals nothing. Per close, the node
+also refuses `watcher_incompatible` when the job's watch lock is held by
+anything but an aware watcher. Both mean "not closed, retry later".
+
+Rollout order: deploy the hub of this build and upgrade every node's binary,
+then run `panewire node close-ops enable` on each node. A hub of an older
+build ignores the capability, and only a hub with an issuer (hk 4745) acts
+on it.
 
 #### Hub close protocol
 
@@ -321,10 +338,11 @@ defers. Its rules, which the hub issuer (hk 4745) relies on:
 3. **What the watcher does.** An intent is open while it names the job's
    current attempt and that attempt's receipt pane and label, and no
    cancellation of its own request, settlement (the node's final `job.lost`
-   with reason `hub_close`), `job.reaped` or new attempt follows it (an
+   with reason `hub_close`) or new attempt follows it (an
    intent from an older attempt, pane or label is stale and ignored, the
    same binding the node checks). Any other local end of the attempt that
-   follows the intent (`job.revoked`, a completion, another loss) leaves it
+   follows the intent (`job.revoked`, a completion, another loss,
+   `job.reaped`) leaves it
    open (#572 r4576225999): the node may already have closed the pane, so
    settlement decides from the journal. A `closed` operation is settled as
    usual: a live hk record takes the planned record, and another terminal
@@ -334,8 +352,10 @@ defers. Its rules, which the hub issuer (hk 4745) relies on:
    report, the decision timeout, the deadline exit and the missing-pane
    fallback all wait. A decision the watcher took on a ledger snapshot is
    dropped when, under the end lock, the attempt changed or a hub close
-   settled since that snapshot (#572 r4576226003). So a re-prompt or loss
-   never follows the final `job.lost`. It never writes the hub close's record, never reads hk
+   settled since that snapshot (#572 r4576226003), or when the attempt is
+   already settled, folded in ledger order. A settled attempt also ends the
+   watch, even during a quota hand-off. So a re-prompt or loss never follows
+   the final `job.lost`. It never writes the hub close's record, never reads hk
    for it and needs no hk route of its own; a watcher that exits, or never
    ran, leaves nothing undone.
 4. **Who writes the terminal record: the node.** Settlement

@@ -411,7 +411,7 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 	case resuming:
 		// A resumed operation closes only while no older-binary watcher,
 		// which would not defer, runs for the job.
-		if code := client.admitHubCloseWatcher(ctx, jobDir); code != "" {
+		if code := client.admitHubCloseWatcher(ctx, args.Job, jobDir); code != "" {
 			return op, nil, "", code
 		}
 		return op, &target, "", ""
@@ -427,13 +427,14 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 	}
 	// A watcher of an older binary would not defer to the intent. No
 	// watcher at all is fine: the node itself settles the close.
-	if code := client.admitHubCloseWatcher(ctx, jobDir); code != "" {
+	if code := client.admitHubCloseWatcher(ctx, args.Job, jobDir); code != "" {
 		return op, nil, "", code
 	}
 	// The intent precedes the registration: a crash between the two leaves
 	// an intent with no operation, which the watcher defers to until the
 	// hub's repeat registers it or its release cancels it.
 	if client.hubCloseLedger().RecordIntent(ctx, args.Job, fleet.HubCloseIntent{RequestID: args.RequestID, Attempt: attempt, Pane: args.PaneID, Label: args.Name, EndReason: args.EndReason}) != nil {
+		client.releaseWatcherFence(args.Job)
 		return op, nil, "", "journal_failed"
 	}
 	op = fleet.CloseOp{RequestID: args.RequestID, PaneID: args.PaneID, Attempt: attempt, State: fleet.CloseOpRegistered, Created: now, Updated: now}
@@ -452,6 +453,8 @@ type nodeHubCloseLedger interface {
 	// holds the node's acting lock past its own deadline.
 	LockEnd(ctx context.Context, jobDir string) (func(), error)
 	Watcher(jobDir string) (fleet.HubCloseWatcher, error)
+	// Fence takes the job's watch lock for the node (fleet.FenceWatchers).
+	Fence(jobDir string) (release func(), ok bool, err error)
 	// CloseOpsReady is the node-wide precondition: the migration barrier
 	// was recorded and no older watcher or launcher runs (fleet.CloseOpsReady).
 	CloseOpsReady(ctx context.Context) bool
@@ -476,6 +479,10 @@ func (l nodeFleetHubClose) LockEnd(ctx context.Context, jobDir string) (func(), 
 }
 func (l nodeFleetHubClose) CloseOpsReady(ctx context.Context) bool {
 	return fleet.CloseOpsReady(ctx, l.jobs, nil)
+}
+
+func (l nodeFleetHubClose) Fence(jobDir string) (func(), bool, error) {
+	return fleet.FenceWatchers(jobDir)
 }
 
 func (l nodeFleetHubClose) Watcher(jobDir string) (fleet.HubCloseWatcher, error) {
@@ -519,12 +526,18 @@ func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
 
 // admitHubCloseWatcher refuses a close while the node is not ready for
 // close ops (close_ops_not_ready: the barrier is not recorded, or an older
-// watcher or launcher started since the hello), or while the job's watcher
-// is one that does not defer: it holds the watch lock but not the hub-close
-// lock. Both are "not closed, retry later".
-func (client *HubClient) admitHubCloseWatcher(ctx context.Context, jobDir string) string {
+// watcher runs on the host), or while the job's watcher is one that does not
+// defer (watcher_incompatible: it holds the watch lock but not the v2
+// hub-close lock). Both are "not closed, retry later". A job with no watcher
+// is fenced: the node holds its watch lock until the close's settlement
+// ends, so no watcher of any binary, from any launcher (spawn, restore, a
+// daemon re-arm, a renamed or retained binary), can start for it meanwhile.
+func (client *HubClient) admitHubCloseWatcher(ctx context.Context, job, jobDir string) string {
 	if !client.closeOpsReady(ctx) {
 		return "close_ops_not_ready"
+	}
+	if client.holdsWatcherFence(job) {
+		return ""
 	}
 	watcher, err := client.hubCloseLedger().Watcher(jobDir)
 	switch {
@@ -532,16 +545,60 @@ func (client *HubClient) admitHubCloseWatcher(ctx context.Context, jobDir string
 		return "journal_failed"
 	case watcher == fleet.HubCloseWatcherIncompatible:
 		return "watcher_incompatible"
+	case watcher == fleet.HubCloseWatcherAware:
+		return ""
 	}
+	return client.takeWatcherFence(job, jobDir)
+}
+
+// takeWatcherFence takes and keeps the job's watch lock for the node; a
+// watcher that started since the probe answers watcher_incompatible (retry).
+func (client *HubClient) takeWatcherFence(job, jobDir string) string {
+	release, ok, err := client.hubCloseLedger().Fence(jobDir)
+	switch {
+	case err != nil:
+		return "journal_failed"
+	case !ok:
+		return "watcher_incompatible"
+	}
+	client.closeFenceMu.Lock()
+	defer client.closeFenceMu.Unlock()
+	if client.closeFences == nil {
+		client.closeFences = map[string]func(){}
+	}
+	if old := client.closeFences[job]; old != nil {
+		old()
+	}
+	client.closeFences[job] = release
 	return ""
+}
+
+func (client *HubClient) holdsWatcherFence(job string) bool {
+	client.closeFenceMu.Lock()
+	defer client.closeFenceMu.Unlock()
+	return client.closeFences[job] != nil
+}
+
+func (client *HubClient) releaseWatcherFence(job string) {
+	client.closeFenceMu.Lock()
+	defer client.closeFenceMu.Unlock()
+	if release := client.closeFences[job]; release != nil {
+		release()
+		delete(client.closeFences, job)
+	}
 }
 
 // settleHubClose runs one settlement step for job after a close outcome,
 // replay, status or release, or from the daemon pass; a failure is logged and
 // left to the next step, never to the hub.
 func (client *HubClient) settleHubClose(ctx context.Context, job string) {
-	if _, err := client.hubCloseLedger().Settle(ctx, job); err != nil {
+	state, err := client.hubCloseLedger().Settle(ctx, job)
+	if err != nil {
 		slog.Warn("hub close settlement pending", "job", job, "error", err)
+	}
+	if err == nil && state != fleet.HubClosePending {
+		// Settled, cancelled or no open close: the fence has done its job.
+		client.releaseWatcherFence(job)
 	}
 }
 
@@ -564,6 +621,14 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 		// Each step is bounded and runs outside the node's acting lock: the
 		// job's end lock alone serializes it with that job's close ops.
 		for _, job := range jobs {
+			// After a node restart the fence is gone: take it again for a
+			// job no watcher runs for, before settling.
+			if !client.holdsWatcherFence(job) {
+				dir := filepath.Join(client.jobsInboxRoot, "jobs", job)
+				if watcher, err := client.hubCloseLedger().Watcher(dir); err == nil && watcher == fleet.HubCloseWatcherNone {
+					client.takeWatcherFence(job, dir)
+				}
+			}
 			step, cancel := context.WithTimeout(ctx, hubCloseSettleBudget)
 			client.settleHubClose(step, job)
 			cancel()

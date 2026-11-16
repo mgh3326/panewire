@@ -192,19 +192,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		return fail(exitUsage, "invalid watch job")
 	}
 	id := args[0]
-	// First of all, before any lock: this process understands hub-close
-	// intents (hub_close_watchers.go), so the node may advertise close ops.
-	if remove, e := a.recordWatcherCaps(id); e != nil {
-		return e
-	} else {
-		defer remove()
-	}
 	lock, e := os.OpenFile(filepath.Join(a.Jobs, id, ".panewire-watch.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if e != nil {
 		return e
 	}
 	defer lock.Close()
 	if !tryLock(lock) {
+		// Another watcher, or the node's fence for an open hub close
+		// (FenceWatchers): the node settles that close itself.
 		return nil
 	}
 	// Held for the watcher's life: it tells the node this watcher defers to
@@ -256,11 +251,17 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// timeout, the deadline exit and the missing-pane fallback all wait.
 		// The node's final job.lost closes the intent and ends this watch; a
 		// request that closed nothing hands the job back.
-		if _, ok := pendingHubCloseIntent(j); ok && !j.Reaped {
+		if _, ok := pendingHubCloseIntent(j); ok {
 			if err := a.Sleep(ctx, 5*time.Second); err != nil {
 				return err
 			}
 			continue
+		}
+		// A settled hub close ends this attempt, even during a quota
+		// hand-off that would otherwise keep the watch going: nothing may
+		// follow its final job.lost (#662 review).
+		if hubCloseSettledNow(j) {
+			return nil
 		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not
