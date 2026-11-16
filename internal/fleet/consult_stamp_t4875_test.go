@@ -96,7 +96,7 @@ func TestPlannedConsultCarriesSelectionStamp_t4875(t *testing.T) {
 // long policy family round-trip, an asker without a task grade carries an empty
 // asker_grade, and the encoder never emits a value its reader refuses.
 func TestConsultStampRoundTrip_t4875(t *testing.T) {
-	for _, family := range []string{"unknown", "acme-consult", "acme.consult.v2", strings.Repeat("family", 8)} {
+	for _, family := range []string{"unknown", "acme-consult", "acme.consult.v2", strings.Repeat("family", 8), strings.Repeat("<", 64), strings.Repeat("&", 64), strings.Repeat(`"`, 32)} {
 		stamp := map[string]string{"asker_grade": "", "asker_family": family, "grade_source": "without_task", "floor": "S+", "used_floor": "S+", "fallback": ""}
 		got, err := parseConsultStamp(consultStampValue(stamp))
 		if err != nil {
@@ -128,6 +128,8 @@ func TestConsultStampRoundTrip_t4875(t *testing.T) {
 	}
 	unencodable("empty family", func(s map[string]string) { s["asker_family"] = "" })
 	unencodable("control char", func(s map[string]string) { s["asker_family"] = "anthropic\n" })
+	unencodable("tab", func(s map[string]string) { s["asker_family"] = "anthropic\t" })
+	unencodable("c1 control", func(s map[string]string) { s["asker_family"] = "acme\u0080" })
 	unencodable("value too long", func(s map[string]string) { s["asker_family"] = strings.Repeat("f", consultStampValueMax+1) })
 	unencodable("unknown key", func(s map[string]string) { s["extra"] = "x" })
 	for name, stamp := range bad {

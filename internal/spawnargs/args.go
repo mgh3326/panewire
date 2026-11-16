@@ -108,9 +108,10 @@ func valueRefusal(flag, value string, operator bool) string {
 		maxBytes = MaxPathBytes
 	}
 	// The planned consult's stamp is a base64url JSON object: longer than an
-	// ordinary name, and a charset of its own (hk 4875).
+	// ordinary name, and a charset of its own (hk 4875). Its bound matches
+	// consultStampMaxBytes in the fleet package.
 	if operator && flag == "--consult-stamp" {
-		maxBytes = 320
+		maxBytes = 1200
 	}
 	if len(value) > maxBytes {
 		return fmt.Sprintf("%s value is longer than %d bytes", flag, maxBytes)

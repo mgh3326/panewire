@@ -101,7 +101,7 @@ func TestConsultStampArgRule(t *testing.T) {
 		"accepted":       {[]string{"--role", "consult", "-m", "codex-sol", "--consult-stamp", stamp}, true, ""},
 		"needs operator": {[]string{"--role", "implementer", "--consult-stamp", "eyJh_"}, false, "--consult-stamp is not a flag the node accepts"},
 		"shape":          {[]string{"--role", "consult", "--consult-stamp", "eyJh\"b"}, true, "--consult-stamp value must be base64url of the stamp object"},
-		"too long":       {[]string{"--role", "consult", "--consult-stamp", strings.Repeat("a", 321)}, true, "--consult-stamp value is longer than 320 bytes"},
+		"too long":       {[]string{"--role", "consult", "--consult-stamp", strings.Repeat("a", 1201)}, true, "--consult-stamp value is longer than 1200 bytes"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := Refusal(tc.args, tc.operator)
