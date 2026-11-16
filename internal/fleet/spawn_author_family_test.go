@@ -60,8 +60,10 @@ func TestTwoUnlinkedReviewerSpawnsOnOneTask(t *testing.T) {
 	}
 }
 
-func TestAuthorFamilyWithoutBuilderJobOnlyForReviewer(t *testing.T) {
-	for _, role := range []string{"implementer", "consult", "builder"} {
+// An author family alone is for a reviewer and for a consult bound to a task
+// (hk 4868). Other roles still refuse it.
+func TestAuthorFamilyWithoutBuilderJobOnlyForReviewerAndConsult(t *testing.T) {
+	for _, role := range []string{"implementer", "builder"} {
 		a, s, _, _ := cmdFixture(t)
 		s.Role, s.AuthorFamily = role, "anthropic"
 		if e := a.Spawn(context.Background(), s); code(e) != exitUsage {
@@ -70,6 +72,32 @@ func TestAuthorFamilyWithoutBuilderJobOnlyForReviewer(t *testing.T) {
 		if n := claimCalls(t); n != 0 {
 			t.Errorf("role %s claimed the task", role)
 		}
+	}
+}
+
+// A consult may name its author's family only as the hub's planner sends it:
+// no builder job, no parent job, and a task. Each other shape refuses at the
+// argument rule, before any seat is chosen or any claim is made (hk 4868).
+func TestConsultAuthorFamilyRefusesJobBinding_t4868(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shape func(*Spawn)
+	}{
+		{"builder job", func(s *Spawn) { s.BuilderJob = "job-b" }},
+		{"parent job", func(s *Spawn) { s.Task, s.ParentJob = "", "job-b" }},
+		{"no task", func(s *Spawn) { s.Task = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, s, _, _ := cmdFixture(t)
+			s.Role, s.AuthorFamily = "consult", "anthropic"
+			tc.shape(&s)
+			if e := a.Spawn(context.Background(), s); code(e) != exitUsage {
+				t.Fatalf("want exit 2, got %v", e)
+			}
+			if n := claimCalls(t); n != 0 {
+				t.Fatalf("claimed the task %d times", n)
+			}
+		})
 	}
 }
 

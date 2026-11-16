@@ -399,8 +399,13 @@ panewire:
    `--author-family` may be sent without `--builder-job` for `--role reviewer`
    only (the author's job is not bound to the task): the reviewer then runs as
    a top-level job, still excludes that family, and neither claims nor links
-   the task, so several passes on one task all spawn. Any other role keeps the
-   "go together" refusal (exit 2). A reviewer holds no task/role reservation
+   the task, so several passes on one task all spawn. `--role consult` may also
+   name the author's family alone, with `--task` and no `--builder-job` or
+   `--parent-job`: the hub's consult planner sends it that way (hk 4868). The
+   consult binds no job. Without `-m`, its seat selection excludes that family
+   and the job's consult stamp records it; a pinned `-m` seat is admitted as
+   given (the planner chose it with that exclusion). Any other role,
+   or any other shape, keeps the "go together" refusal (exit 2). A reviewer holds no task/role reservation
    (hk 4737), so any number of passes on one task spawn side by side; the hub
    still accepts `--review-pass N` (1..9, `--role reviewer` only) and records it
    on the operation ([hub-spawn-operations.md](hub-spawn-operations.md)).

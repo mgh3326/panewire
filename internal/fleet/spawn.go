@@ -330,6 +330,13 @@ func (s Spawn) consultTask() bool {
 	return s.Role == "consult"
 }
 
+// consultNamesAuthor is a consult that names its author's family and nothing
+// else: the shape the hub's planner sends (hk 4868). It is bound to a task,
+// not to the author's job, so it binds no builder job and no parent job.
+func consultNamesAuthor(s Spawn) bool {
+	return s.Role == "consult" && s.AuthorFamily != "" && s.BuilderJob == "" && s.ParentJob == "" && s.Task != ""
+}
+
 // taskPrecheck reads the task over hk HTTP (hkGetTask) and refuses a spawn
 // the task cannot take. --bypass covers an hk the precheck cannot reach or
 // that errs, never an answer it cannot read (errHKUnreadable).
@@ -874,17 +881,26 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	if s.AuthorFamily != "" || s.BuilderJob != "" {
-		// A reviewer may name only the author's family: the author's job is
-		// not bound to the task (not launched through panewire), so there is
-		// nothing to inherit, and the pass runs as a top-level job.
-		if s.AuthorFamily == "" || (s.BuilderJob == "" && s.Role != "reviewer") || (s.BuilderJob != "" && !validID(s.BuilderJob)) || s.ParentJob != "" || s.Task == "" || s.Role != "reviewer" {
-			return fail(exitUsage, "--author-family and --builder-job go together (--author-family alone only with --role reviewer), with --task and --role reviewer, not --parent-job")
+		switch {
+		case consultNamesAuthor(s):
+			// The author's family rides ParentFamily, as a --parent-job consult's
+			// does: an auto-selected seat excludes that family, and the job's
+			// consult stamp records it as asker_family. A consult inherits no job
+			// and no claim.
+			s.ParentFamily = s.AuthorFamily
+		default:
+			// A reviewer may name only the author's family: the author's job is
+			// not bound to the task (not launched through panewire), so there is
+			// nothing to inherit, and the pass runs as a top-level job.
+			if s.AuthorFamily == "" || (s.BuilderJob == "" && s.Role != "reviewer") || (s.BuilderJob != "" && !validID(s.BuilderJob)) || s.ParentJob != "" || s.Task == "" || s.Role != "reviewer" {
+				return fail(exitUsage, "--author-family and --builder-job go together (--author-family alone only with --role reviewer or consult), with --task, not --parent-job; a consult takes no --builder-job")
+			}
+			if s.BuilderJob != "" && s.Report == "" && s.ReportRelative == "" {
+				return fail(exitUsage, "--builder-job requires --report")
+			}
+			s.ParentFamily = s.AuthorFamily
+			s.Inherited = s.BuilderJob
 		}
-		if s.BuilderJob != "" && s.Report == "" && s.ReportRelative == "" {
-			return fail(exitUsage, "--builder-job requires --report")
-		}
-		s.ParentFamily = s.AuthorFamily
-		s.Inherited = s.BuilderJob
 	}
 	if s.ParentJob == "" && s.Task == "" {
 		s.ParentJob = os.Getenv("ARBITER_JOB")
