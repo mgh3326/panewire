@@ -110,7 +110,11 @@ is herdr's reported source (for example, `herdr:codex`). Other harnesses can
 also supply a reference through the same metadata. A reference is accepted only
 for the matching pane and harness. If none is available at landing, `id` is
 `unknown` and `source` is `unavailable`; the spawn still proceeds. No session
-or credential file is read to discover this value.
+or credential file is read to discover this value. A consumer that proves a
+pane is a job's own reads that pair as no recorded session rather than as an
+id: comparing it with a live row matches nothing. The task pane sweep falls
+back to the name-and-tab proof `panewire reap` uses
+([pane-sweep.md](pane-sweep.md#ownership-proof), hk 4904).
 
 ## Reap closes the hk record of a revoked job
 

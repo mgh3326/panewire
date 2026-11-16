@@ -49,11 +49,26 @@ func paneScreenUploadError(err error) error {
 	var unconfigured *hkcred.UnconfiguredError
 	switch code := client.ErrorCode(err); {
 	case code != "":
-		return fmt.Errorf("hk refused the screen document: %s", code)
+		return paneScreenRefusal{code: code}
 	case errors.As(err, &unconfigured):
 		return errors.New("hk is not configured on this node")
 	}
 	return errors.New("hk unreachable or its answer unreadable")
+}
+
+// paneScreenRefusal is hk refusing this document: the same bytes fail on every
+// pass, so a caller must not wait for a later one to succeed.
+type paneScreenRefusal struct{ code string }
+
+func (r paneScreenRefusal) Error() string { return "hk refused the screen document: " + r.code }
+
+// paneScreenRefused reports that hk refused the screen document itself — its
+// secret guard, a body it cannot store — rather than being unconfigured or
+// away. A refusal is permanent for these bytes: the sweep keeps the screen
+// locally and closes the pane (hk 4904).
+func paneScreenRefused(err error) bool {
+	var refusal paneScreenRefusal
+	return errors.As(err, &refusal)
 }
 
 // paneScreenDocBody is the screen as hk stores it: unchanged when it fits

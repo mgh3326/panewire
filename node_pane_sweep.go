@@ -25,6 +25,12 @@ const minTaskPaneSweepInterval = 10 * time.Second
 // dir past the TTL, which a 5-minute cadence does not need.
 const jobDirTTLEvery = time.Hour
 
+// hubFeatureEndedPanes is listed in hub.features by a hub that reads the
+// heartbeat's ended_panes count. The heartbeat is a closed payload, so an
+// older hub rejects a field it does not know; the node sends the count only to
+// a hub that advertised it (hk 4904).
+const hubFeatureEndedPanes = "ended_panes"
+
 func (client *HubClient) runTaskPaneSweep(ctx context.Context) {
 	if client.jobsInboxRoot == "" || client.taskPaneSweepInterval <= 0 {
 		return
@@ -90,9 +96,27 @@ func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
 				client.nodeCommandMu.Lock()
 				return client.nodeCommandMu.Unlock
 			},
+			// The hub alarms a host whose sweep leaves finished panes open
+			// (hk 4904); the count travels on the heartbeat.
+			EndedOpen: func(open int) {
+				client.endedPanesOpen.Store(int64(open))
+				client.endedPanesMeasured.Store(true)
+			},
 		}
 	})
 	return client.taskPaneSweeper
+}
+
+// endedPanesForHeartbeat is the sweep's last count of ended-job panes still
+// open past paneSweepStaleAge, nil until a pass has measured one or while the
+// hub has not advertised hubFeatureEndedPanes.
+func (client *HubClient) endedPanesForHeartbeat() *int {
+	peer := client.signalsPeer.Load()
+	if peer == nil || !peer.acceptsEndedPanes.Load() || !client.endedPanesMeasured.Load() {
+		return nil
+	}
+	open := int(client.endedPanesOpen.Load())
+	return &open
 }
 
 // sweepTaskPanes runs one local pass over this node's jobs. It builds the fleet

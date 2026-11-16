@@ -94,21 +94,31 @@ shell — has no recorded pane and is never a candidate.
 
 ## Ownership proof
 
-A pane is the job's own only when both hold at close time (operator decision
-265):
+A pane is the job's own when herdr's row with the recorded pane id proves it
+(operator decision 265). When `job.spawned` recorded a harness session id, that
+row's `agent_session.value` must equal it: a different session is another job's
+agent, and the pane is kept as `reason=session_mismatch`.
 
-- the pane id the job's `job.spawned` payload recorded equals a pane id herdr
-  lists, and
-- the harness session id `job.spawned` recorded
-  (`payload.harness_session.id`) equals that row's `agent_session.value`.
+A receipt that recorded no session proves the pane by the facts `panewire reap`
+uses, because there is no session to compare. It recorded none when it predates
+the field, or when the spawner could not read the pane's session and wrote the
+placeholder `id: "unknown"` with `source: "unavailable"`
+(`internal/fleet/harness_session.go`). The fallback needs the row to carry the
+job's name and tab (`paneSweepMatches`, a nameless row matching by the job's
+worktree instead) and to be not working — `idle` or `done`. A row that fails
+either keeps the pane as `reason=session_unrecorded`, past the deadline too: a
+renamed row is another agent's, and a working one is a pane still in use.
+
+Merging the placeholder as if it were a session is why the sweep left ended
+reviewer panes open on desktop (hk 4904): `unknown` matched no live row, so
+every pass kept the pane `session_mismatch` and no pass ever closed it.
 
 The proof runs twice: before the pane's last screen is read, and again under
 the node's command lock on a fresh agent listing immediately before
-`herdr pane close`. A row with a different session id keeps the pane as
-`reason=session_mismatch`; a receipt with no recorded session keeps it as
-`reason=session_unrecorded`; no row keeps it as `reason=pane_unlisted` — unless
-`herdr pane list` also lost the pane, in which case the job is reaped as
-`pane_gone`.
+`herdr pane close`.
+
+No row at all keeps the pane as `reason=pane_unlisted` — unless `herdr pane
+list` also lost the pane, in which case the job is reaped as `pane_gone`.
 
 ## Report republish
 
@@ -165,13 +175,21 @@ Before `herdr pane close` runs, the pane's last screen is read and uploaded
 to handoffkeep as `screens/<job>/pane-screen.txt` (the explicit pane.capture
 document contract, capped at hk's document bound). A screen hk stores only as
 a cut tail keeps its whole copy in `<job dir>/pane-screen.txt`, mode 0600.
-A read or upload that fails keeps the pane as `reason=screen_save_failed`; a
-close that fails keeps it as `reason=close_failed`. Both retry on the next
-pass.
 
-A pane re-proven is closed regardless of its status, composer contents,
-screen changes, or a question-like display: the job's end plus the session
-proof is the authority for this path. That differs from the explicit
+Only a failed pane read, or a failed local write, keeps the pane as
+`reason=screen_save_failed`; a close that fails keeps it as
+`reason=close_failed`. Both retry on the next pass. hk refusing the screen
+document itself is not a failure to retry: its secret guard answers
+`secret_like_content`, the same bytes fail on every pass, so the whole screen
+is written to the job directory and the close goes on — the rule `pane.capture`
+already applies to a failed upload (hk 4904). An hk that is unreachable or
+unconfigured may answer on the next pass, so it keeps the pane as before.
+
+A pane re-proven by a recorded session is closed regardless of its status,
+composer contents, screen changes, or a question-like display: the job's end
+plus the session proof is the authority for this path. (A pane re-proven by its
+name and tab alone needs the not-working status the ownership proof above
+requires.) That differs from the explicit
 `pane.close` node command, whose `question_job` guard (#563) keeps a pane a
 finished reviewer may have left a question on for the general case — the
 sweep's proof is stronger than what an arbitrary close request carries, so
@@ -212,6 +230,35 @@ create it. A failed publication never fails the pass and logs one warning per
 reason (`dir_missing`, `dir_unwritable`, `write_failed`) per daemon run.
 Setting the variable for Alloy does not set it for the daemon; add it to the
 daemon's service environment too (deploy/alloy/README.md).
+
+## Stale-pane alarm
+
+The textfile needs Alloy, and a host without it kept 14 finished panes with
+nothing said. Each pass therefore also counts the panes a host is collecting —
+the count the hub alarms on (hk 4904).
+
+A **stale pane** is one the pass admits as a candidate whose job's own record
+ended at least 24 hours ago and whose row herdr lists under the job's name and
+shows not working (`idle` or `done`). A day is past every close deadline a
+candidate has (an hour, or a kept pane's day), so a stale pane is one the sweep
+failed to close; a job whose end the sweep never acts on is never counted, so
+the count can reach zero. A pass that could not read herdr reports nothing and
+leaves the last count standing.
+
+The pass hands the count to the node, which publishes it on its heartbeat as
+`ended_panes` — only to a hub that advertised `hub.features` `ended_panes`,
+since the heartbeat is a closed payload and an older hub drops it. A node that
+has not run a pass reports nothing; a sweep turned off keeps reporting the last
+count it measured, which is the count the hub then cannot lower.
+
+The hub turns the count into one alarm per host: any value above zero is an
+incident, delivered through the hub's alert path with reason
+`ended_panes_open` (WARN, and INFO `recovered_ended_panes_open` when it drops),
+after the shared two-observation debounce, like a failed local check. The
+count is not placement capacity: a host is not admitted fewer jobs because it
+holds finished panes (operator decision for hk 4904).
+
+Each pass logs the count as `stale` on its `ended job panes open` line.
 
 ## Worktree
 

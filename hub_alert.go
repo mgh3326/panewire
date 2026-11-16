@@ -19,6 +19,7 @@ const (
 	hubAlertReasonNoData        = "no_data"
 	hubAlertReasonStallDegraded = "stall_degraded"
 	hubAlertReasonLaneStalled   = "lane_stalled"
+	hubAlertReasonEndedPanes    = "ended_panes_open"
 	hubAlertNoCheck             = "none"
 	hubFailoverPhaseDown        = "down"
 	hubFailoverPhaseUp          = "up"
@@ -138,6 +139,14 @@ func (h *HubServer) observeHeartbeatAlerts(machineID string, heartbeat hubHeartb
 		notifications = append(notifications, h.observeHubAlertLocked(now, key, false, time.Time{}, hubAlertReasonCheckFailed, state.check, 0)...)
 	}
 	notifications = append(notifications, h.observeStallBeatLocked(now, machineID, heartbeat.StallDetect)...)
+	// One alarm per host for a host collecting finished panes: any count above
+	// zero is the incident, and the node's next zero (two observations through
+	// the shared debounce) clears it. A heartbeat without the count says
+	// nothing — it is a node that has not measured or a hub feature the node
+	// did not see — so the last state stands.
+	if heartbeat.EndedPanes != nil {
+		notifications = append(notifications, h.observeHubAlertLocked(now, "ended-panes:"+machineID, *heartbeat.EndedPanes > 0, time.Time{}, hubAlertReasonEndedPanes, hubAlertNoCheck, 0)...)
+	}
 	h.mu.Unlock()
 	h.dispatchHubNotifications(notifications)
 }
@@ -302,6 +311,9 @@ func hubAlertMachineID(key string) string {
 	if machineID, found := strings.CutPrefix(key, "stall:"); found {
 		return machineID
 	}
+	if machineID, found := strings.CutPrefix(key, "ended-panes:"); found {
+		return machineID
+	}
 	if lane, found := strings.CutPrefix(key, "lane-stall:"); found {
 		// A lane, not a machine, is the subject of this alert; MachineID is
 		// the only identifier field HubAlert carries.
@@ -423,7 +435,7 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 }
 
 func validHubAlertReason(reason string) bool {
-	return reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale || reason == hubAlertReasonCheckFailed || reason == hubAlertReasonNoData || reason == hubAlertReasonStallDegraded || reason == hubAlertReasonLaneStalled
+	return reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale || reason == hubAlertReasonCheckFailed || reason == hubAlertReasonNoData || reason == hubAlertReasonStallDegraded || reason == hubAlertReasonLaneStalled || reason == hubAlertReasonEndedPanes
 }
 
 func formatHubAlert(alert HubAlert) string {

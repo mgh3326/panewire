@@ -88,16 +88,27 @@ func TestEndedSweepKeepsAPaneWhoseSessionDoesNotMatch(t *testing.T) {
 	}
 }
 
-// A job whose receipt recorded no harness session proves nothing: kept.
-func TestEndedSweepKeepsAPaneWithNoRecordedSession(t *testing.T) {
+// A job whose receipt recorded no harness session proves its pane by the facts
+// panewire reap uses (hk 4904): the row carries the job's own name and tab and
+// is not working. A pane another agent took over is not the job's, so the same
+// receipt keeps it as session_unrecorded.
+func TestEndedSweepProvesAReceiptWithNoSessionByTheReapFacts(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	f.job("r", "reviewer", "", map[string]any{"harness_session": map[string]any{"kind": "omp", "id": ""}})
 	putEvent(t, f.a, "r", "job.completed", map[string]any{})
-	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
-		t.Fatalf("a pane with no recorded session was closed: %+v", closes)
+	if closes := f.endedSweep(61, time.Hour); len(closes) != 1 || len(f.closed()) != 1 {
+		t.Fatalf("a finished pane with no recorded session stayed open: %+v closed=%v info=%v", closes, f.closed(), f.info)
 	}
-	if !f.infoHas("task pane kept", "job=r", "reason=session_unrecorded") {
-		t.Fatalf("info lines = %q", f.info)
+
+	g := newPaneSweepFixture(t)
+	pane := g.job("r", "reviewer", "", map[string]any{"harness_session": map[string]any{"kind": "omp", "id": ""}})
+	g.names[pane] = "agent-someone-else"
+	putEvent(t, g.a, "r", "job.completed", map[string]any{})
+	if closes := g.endedSweep(61, time.Hour); len(closes) != 0 || len(g.closed()) != 0 {
+		t.Fatalf("a pane another agent holds was closed: %+v closed=%v", closes, g.closed())
+	}
+	if !g.infoHas("task pane kept", "job=r", "reason=session_unrecorded") {
+		t.Fatalf("info lines = %q", g.info)
 	}
 }
 
