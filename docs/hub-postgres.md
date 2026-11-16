@@ -40,6 +40,37 @@ Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
 - **Kill switch.** `--delivery-policy off` still opens no database, whichever
   backend is set.
 
+## Scan cost
+
+The hub's periodic statements must read only the rows they name. On the live
+host one backend held most of a core while each batch page re-read
+`lane_inbox` once per pending batch (hk 4889); the coordinator's queues and the
+notification flush scanned their whole tables every tick. The indexes that
+serve those statements live in migration `0020_hub_scan_indexes.sql`, and the
+SQLite schema creates the same set, so a SQLite hub and the tests plan the same
+way.
+
+- A statement the hub runs on a timer or per request needs an index matching
+  its predicate and ordering, and the statement repeats a partial index's
+  predicate: the planner cannot infer `digest_batch<>''` from a bound
+  parameter. `TestLaneInboxPendingBatchesQueryUsesClaimIndexes` guards the
+  batch page's plan.
+- The batch page splits its two-column count into disjoint sums. A correlated
+  `OR` between `digest_batch` and `escalation_batch` cannot use an index on
+  either column at any table size, so it read every item once per batch.
+- `NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine)` became
+  `NOT EXISTS`: the anti-join reads the quarantine table once per page instead
+  of once per statement execution, and a null-safe `NOT IN` is a trap in any
+  case.
+- Each poll keeps its cadence. Every one of them exists to notice a
+  time-based transition (`due_at`, `digest_at`, `next_check_ms`,
+  `park_since_ms`), so "nothing changed" cannot be known without asking.
+
+The migration uses plain `CREATE INDEX`, inside the migration transaction: the
+tables hold thousands of rows, and an index build is far below the startup
+timeout. A new periodic statement that scans without an index is a bug in the
+same terms as a wrong result.
+
 ## Setup (new database)
 
 1. **Create a dedicated database and role.** The role owns the database and

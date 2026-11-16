@@ -128,6 +128,11 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		`CREATE INDEX IF NOT EXISTS lane_inbox_unread ON lane_inbox(lane) WHERE class='inbox' AND read_at=0`,
 		`CREATE INDEX IF NOT EXISTS lane_inbox_due ON lane_inbox(due_at) WHERE class='inbox' AND read_at=0 AND escalation_batch=''`,
 		`CREATE INDEX IF NOT EXISTS lane_inbox_digest ON lane_inbox(lane,digest_at) WHERE digest_at>0 AND digest_batch=''`,
+		// The batch page counts each pending batch's items through these two
+		// claim columns (hk 4889; the Postgres twin is migration 0020). Most
+		// items carry neither, so the indexes stay partial.
+		`CREATE INDEX IF NOT EXISTS lane_inbox_digest_batch ON lane_inbox(digest_batch) WHERE digest_batch<>''`,
+		`CREATE INDEX IF NOT EXISTS lane_inbox_escalation_batch ON lane_inbox(escalation_batch) WHERE escalation_batch<>''`,
 		// Pruning must not let SQLite reuse a deleted, publicly ackable ID.
 		`CREATE TABLE IF NOT EXISTS lane_inbox_id_floor (singleton INTEGER PRIMARY KEY CHECK(singleton=1), floor INTEGER NOT NULL)`,
 		`INSERT OR IGNORE INTO lane_inbox_id_floor(singleton,floor) VALUES(1,0)`,
@@ -433,7 +438,7 @@ func (s *laneInboxStore) quarantineInvalidBatches() error {
 func (s *laneInboxStore) invalidBatches() ([]laneInboxBatch, error) {
 	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT id,lane,text FROM lane_inbox_batches WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine)`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,lane,text FROM lane_inbox_batches b WHERE sent=0 AND NOT EXISTS (SELECT 1 FROM lane_inbox_batch_quarantine q WHERE q.batch_id=b.id)`)
 	if err != nil {
 		return nil, err
 	}
@@ -947,6 +952,25 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 	return tx.Commit()
 }
 
+// laneInboxPendingBatchesQuery is the batch page without its order (SQLite's
+// rowid or Postgres's seq) and LIMIT. Each count is the old OR over the two
+// claim columns split into two disjoint sums: a correlated OR cannot use an
+// index on either column, so every pending batch used to re-read the whole of
+// lane_inbox (hk 4889). A row claimed through digest_batch counts in the first
+// sum; one claimed through escalation_batch counts in the second unless
+// digest_batch names the same batch, so a row carrying both names still counts
+// once, as the OR did. The active rule is unchanged: an escalation claim is
+// active only while the item is unread; a digest claim needs no read check.
+// Both claim columns' indexes are partial on a non-empty value (migration
+// 0020, and the SQLite schema), so the statements repeat that predicate for
+// the planner.
+const laneInboxPendingBatchesQuery = `SELECT id,lane,text,
+ (SELECT count(*) FROM lane_inbox i WHERE i.digest_batch<>'' AND i.digest_batch=b.id)
+ +(SELECT count(*) FROM lane_inbox i WHERE i.escalation_batch<>'' AND i.escalation_batch=b.id AND i.digest_batch<>b.id),
+ (SELECT count(*) FROM lane_inbox i WHERE i.digest_batch<>'' AND i.digest_batch=b.id AND i.acked_at=0 AND i.superseded_at=0 AND (i.escalation_batch<>b.id OR i.read_at=0))
+ +(SELECT count(*) FROM lane_inbox i WHERE i.escalation_batch<>'' AND i.escalation_batch=b.id AND i.digest_batch<>b.id AND i.acked_at=0 AND i.superseded_at=0 AND i.read_at=0)
+ FROM lane_inbox_batches b WHERE sent=0 AND NOT EXISTS (SELECT 1 FROM lane_inbox_batch_quarantine q WHERE q.batch_id=b.id) ORDER BY `
+
 func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
 	return s.pendingBatchesForContext(s.life)
 }
@@ -954,10 +978,7 @@ func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
 func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]laneInboxBatch, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT id,lane,text,
- (SELECT count(*) FROM lane_inbox i WHERE i.digest_batch=b.id OR i.escalation_batch=b.id),
- (SELECT count(*) FROM lane_inbox i WHERE (i.digest_batch=b.id OR i.escalation_batch=b.id) AND i.acked_at=0 AND i.superseded_at=0 AND (i.escalation_batch<>b.id OR i.read_at=0))
- FROM lane_inbox_batches b WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine) ORDER BY `+s.batchOrder()+` LIMIT 100`)
+	rows, err := s.db.QueryContext(ctx, laneInboxPendingBatchesQuery+s.batchOrder()+` LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}

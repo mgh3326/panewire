@@ -168,6 +168,24 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 			return err
 		}
 	}
+	// The coordinator's periodic spawn scans, indexed the way the Postgres
+	// twin is (hk 4889, migration 0020): each statement reads one small key
+	// set, and without an index it read the whole table every tick.
+	for _, index := range []string{
+		`CREATE INDEX IF NOT EXISTS spawn_notifications_delivered ON spawn_notifications(delivered,created_ms)`,
+		`CREATE INDEX IF NOT EXISTS spawn_operations_status ON spawn_operations(status)`,
+		`CREATE INDEX IF NOT EXISTS spawn_operations_queue ON spawn_operations(last_run_ms,created_ms,request_id) WHERE status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant')`,
+		`CREATE INDEX IF NOT EXISTS spawn_operations_parked_wake ON spawn_operations(next_check_ms,request_id) WHERE status='accepted' AND node_id IS NULL`,
+		`CREATE INDEX IF NOT EXISTS spawn_operations_park_notice ON spawn_operations(park_since_ms,request_id) WHERE status='accepted' AND node_id IS NULL AND park_reason<>''`,
+		`CREATE INDEX IF NOT EXISTS spawn_operations_bound_unclaimed ON spawn_operations(placed_ms) WHERE node_id IS NOT NULL AND claimed_ms=0`,
+		`CREATE INDEX IF NOT EXISTS spawn_operations_succeeded ON spawn_operations(created_ms DESC,request_id DESC) WHERE status='succeeded'`,
+		`CREATE INDEX IF NOT EXISTS spawn_operations_succeeded_run ON spawn_operations(last_run_ms) WHERE status='succeeded'`,
+		`CREATE INDEX IF NOT EXISTS spawn_operations_job ON spawn_operations(job)`,
+	} {
+		if _, err := s.db.ExecContext(ctx, index); err != nil {
+			return err
+		}
+	}
 	// A row an older hub left executable with a start condition belongs to
 	// the queue now (hk 4736). This is only a fast path for rows written
 	// before the executeSpawnTask guard: it never takes a row the ladder owns
