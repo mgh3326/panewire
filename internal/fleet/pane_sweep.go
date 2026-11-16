@@ -669,18 +669,22 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 				continue
 			}
 		}
-		closed_, reason := s.closePane(ctx, a, j, task, end, agents, now)
-		if reason != "" {
-			s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", reason)
-			if due || (!j.Keep && paneSweepCounted(reason)) {
-				counts[reason]++
+		attempt := s.closePane(ctx, a, j, task, end, agents, now)
+		if attempt.reason != "" {
+			s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", attempt.reason)
+			if due || (!j.Keep && paneSweepCounted(attempt.reason)) {
+				counts[attempt.reason]++
 			}
-			if !paneSweepCounted(reason) {
+			// An unowned pane is the close's refusal, not a collection failure:
+			// the alarm count leaves it out even when the reason is otherwise
+			// diagnostic, and even when only the fresh pre-close listing saw the
+			// reassignment (hk 4919).
+			if !paneSweepCounted(attempt.reason) || attempt.unowned {
 				excludedPanes[j.Pane] = true
 			}
 		} else {
-			s.info("task pane closed", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", closed_.Reason)
-			swept = append(swept, closed_)
+			s.info("task pane closed", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", attempt.swept.Reason)
+			swept = append(swept, attempt.swept)
 		}
 	}
 	// The count is what the host still holds after this pass's closes: a pane
@@ -1019,20 +1023,44 @@ func agentSessionID(ag Agent) string {
 	return ""
 }
 
-// closePane closes an ended job's pane and reaps what it leaves. It returns
-// the swept pane once the pane is gone — closed here, or already absent from
-// herdr — and otherwise the reason the pane is kept. The proof is checked
-// before the screen read and again on a fresh listing under the acting lock
-// immediately before `herdr pane close`, so the screen and the close both
-// belong to the pane the job spawned (decision 265).
-func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task string, end paneSweepEnd, agents []Agent, now time.Time) (SweptPane, string) {
+// paneSweepClose is one close decision's answer: the swept pane once the pane
+// is gone (closed here, or already absent from herdr), the reason it was kept
+// otherwise, and whether herdr's rows refused to prove the pane is the job's
+// own (paneOwnershipProof, either check). The pass keeps a refused pane out of
+// the stale count: the close will not take it, so it is not a pane this host
+// failed to collect — though the per-reason textfile still names it (hk 4919).
+type paneSweepClose struct {
+	swept   SweptPane
+	reason  string
+	unowned bool
+}
+
+// paneSweepKept is one close decision that kept the pane for reason.
+func paneSweepKept(reason string) paneSweepClose {
+	return paneSweepClose{reason: reason}
+}
+
+// paneSweepUnproven is one close decision that kept the pane because
+// paneOwnershipProof refused to prove it is the job's own: the keep reason is
+// the refusal.
+func paneSweepUnproven(reason string) paneSweepClose {
+	return paneSweepClose{reason: reason, unowned: true}
+}
+
+// closePane closes an ended job's pane and reaps what it leaves. The proof is
+// checked before the screen read and again on a fresh listing under the acting
+// lock immediately before `herdr pane close`, so the screen and the close both
+// belong to the pane the job spawned (decision 265). Either refusal is reported
+// as an unowned pane: the pass then keeps it out of the stale count, whose
+// authority is that same proof (hk 4919).
+func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task string, end paneSweepEnd, agents []Agent, now time.Time) paneSweepClose {
 	swept := SweptPane{Job: j.ID, Pane: j.Pane, Role: paneSweepRole(j), Reason: end.reason}
 	key := paneSweepKey(j)
 	if reason := paneOwnershipProof(j, agents); reason != "" {
 		return s.paneUnlisted(ctx, a, j, swept, reason)
 	}
 	if err := a.savePaneScreen(ctx, j, task); err != nil {
-		return SweptPane{}, "screen_save_failed"
+		return paneSweepKept("screen_save_failed")
 	}
 	// Reading and uploading the last screen may wait on herdr or handoffkeep.
 	// Keep both outside the node-command lock; the job and the pane are
@@ -1042,18 +1070,18 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	}
 	latest, err := a.job(j.ID)
 	if err != nil {
-		return SweptPane{}, "job_unreadable"
+		return paneSweepKept("job_unreadable")
 	}
 	// A revived or kept job always wins; the close re-judges the latest
 	// record rather than the snapshot the pass took.
 	if !s.closeStillEnded(ctx, j, latest, task, end) || (paneSweepWaitsOnPR(latest) && !paneSweepWaitsOnPR(j)) {
 		delete(s.idleSince, key)
 		delete(s.endedSince, key)
-		return SweptPane{}, "job_changed"
+		return paneSweepKept("job_changed")
 	}
 	fresh, err := a.agents(ctx)
 	if err != nil {
-		return SweptPane{}, "herdr_unreadable"
+		return paneSweepKept("herdr_unreadable")
 	}
 	if reason := paneOwnershipProof(latest, fresh); reason != "" {
 		return s.paneUnlisted(ctx, a, latest, swept, reason)
@@ -1064,10 +1092,10 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	// beside an open pane.
 	session, haveSession := a.readJobSession(ctx, latest, true)
 	if err := a.must(ctx, "herdr", "pane", "close", j.Pane); err != nil {
-		return SweptPane{}, "close_failed"
+		return paneSweepKept("close_failed")
 	}
 	s.reapSweptPane(ctx, a, latest, j, task, end, session, haveSession, now)
-	return swept, ""
+	return paneSweepClose{swept: swept}
 }
 
 // closeStillEnded reports that the job's latest record still carries the end
@@ -1102,23 +1130,25 @@ func (s *TaskPaneSweeper) closeStillEnded(ctx context.Context, j, latest Job, ta
 
 // paneUnlisted answers a proof failure: a pane no agent row lists is gone for
 // real only when `herdr pane list` does not carry it either — then the job is
-// reaped as if the close ran. Anything else is the keep reason itself.
-func (s *TaskPaneSweeper) paneUnlisted(ctx context.Context, a *App, j Job, swept SweptPane, reason string) (SweptPane, string) {
+// reaped as if the close ran. Anything else is the keep reason itself, and an
+// unowned pane: the stale count must not treat it as a pane this host failed to
+// collect (hk 4919).
+func (s *TaskPaneSweeper) paneUnlisted(ctx context.Context, a *App, j Job, swept SweptPane, reason string) paneSweepClose {
 	if reason != "pane_unlisted" {
-		return SweptPane{}, reason
+		return paneSweepUnproven(reason)
 	}
 	panes, err := a.panes(ctx)
 	if err != nil {
-		return SweptPane{}, reason
+		return paneSweepUnproven(reason)
 	}
 	for _, p := range panes {
 		if p.Pane == j.Pane {
-			return SweptPane{}, reason
+			return paneSweepUnproven(reason)
 		}
 	}
 	s.reapSweptPane(ctx, a, j, j, "", paneSweepJobEnd(j, ""), jobSession{}, false, a.Now())
 	swept.Reason = SweepPaneGone
-	return swept, ""
+	return paneSweepClose{swept: swept}
 }
 
 // reapSweptPane is the tail a closed (or proven gone) pane leaves: the job's
@@ -1230,40 +1260,27 @@ const paneSweepMetricFile = "panewire_panes.prom"
 // environment sets this publishes the same body there at mode 0644.
 const paneSweepTextfileDirEnv = "FLEET_TEXTFILE_DIR"
 
-// paneOwnedIdle reports that the row herdr lists for the job's pane is the
-// job's own by the close's ownership proof and shows not working. It is the
-// stale count's test, so a pane the close refuses to own — a session that is
-// not the job's, a nameless worktree row with no recorded session — is never
-// counted: the sweep keeps such a pane on every pass, and counting it would
-// latch the hub alarm on a pane that never closes (hk 4904).
-func paneOwnedIdle(j Job, agents []Agent) bool {
-	for _, ag := range agents {
-		if ag.Pane != j.Pane {
-			continue
-		}
-		return slices.Contains(paneSweepIdleStatus, ag.Status) && paneOwnershipProof(j, []Agent{ag}) == ""
-	}
-	return false
-}
-
 // stalePanes counts the panes this node still holds for jobs whose own record
 // ended at least paneSweepStaleAge ago: the pass's own candidates — so a job
 // the sweep never closes is never counted, and the count can reach zero — that
 // this pass did not close or keep for a reason that is not a failure
 // (excludedPanes: an open PR the author is still working, a live task, another
-// agent's row), and whose pane herdr lists as the job's own and not working.
-// The job's own end is paneSweepClosed, the pass's end predicate: a terminal
-// job that does not close it (a loss with no quota hand-over, a job.joined) is
-// judged by its live task and may be kept legitimately, which must not latch
-// the alarm. It is the number the hub alarms on (hk 4904): a host collecting
-// finished panes.
+// agent's row, a pane the close saw reassigned), and whose pane herdr lists as
+// the job's own and not working. The job's own end is paneSweepClosed, the
+// pass's end predicate: a terminal job that does not close it (a loss with no
+// quota hand-over, a job.joined) is judged by its live task and may be kept
+// legitimately, which must not latch the alarm. Ownership is decided by
+// paneOwnershipProof, the one predicate closePane uses for the close, so a pane
+// the close refuses is never counted; the status rule is the alarm's own
+// (idle/done). It is the number the hub alarms on (hk 4904, hk 4919): a host
+// collecting finished panes.
 func (s *TaskPaneSweeper) stalePanes(candidates []Job, agents []Agent, now time.Time, excludedPanes map[string]bool) int {
 	count := 0
 	for _, j := range candidates {
 		if !paneSweepClosed(j) || j.At.IsZero() || now.Sub(j.At) < paneSweepStaleAge || excludedPanes[j.Pane] {
 			continue
 		}
-		if paneOwnedIdle(j, agents) {
+		if s.idle(j, agents) && paneOwnershipProof(j, agents) == "" {
 			count++
 		}
 	}
