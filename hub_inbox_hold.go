@@ -42,6 +42,7 @@ func (h *HubServer) makeHeldBatches() error {
 	if err != nil {
 		return err
 	}
+	created := false
 	for lane, items := range groups {
 		if h.receiverInboxState(lane).working && h.now().UnixMilli() < items[0].HoldUntil {
 			continue
@@ -51,6 +52,7 @@ func (h *HubServer) makeHeldBatches() error {
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`), id, lane, text); err != nil {
 			return err
 		}
+		created = true
 		ids := make([]int64, len(items))
 		for n, i := range items {
 			ids[n] = i.ID
@@ -59,7 +61,13 @@ func (h *HubServer) makeHeldBatches() error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if created {
+		s.noteBatchesChanged()
+	}
+	return nil
 }
 
 var heldNoticeKind = regexp.MustCompile(`(?i)\b(?:READY|MERGED|FINDINGS|BLOCKED)\b`)
