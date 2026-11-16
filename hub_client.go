@@ -556,7 +556,13 @@ func (client *HubClient) Run(ctx context.Context) {
 		if err == nil {
 			backoff = client.initialBackoff
 			client.endpoint = endpoint
+			started := time.Now()
 			err = client.serve(ctx, connection)
+			// Nothing else reports why a session ended, and the error itself is
+			// dropped below: the class and the peer's close code are what a
+			// reconnect storm is diagnosed from (hk 4981).
+			reason, closeCode := hubSessionEndReason(err)
+			client.warnMessage(fmt.Sprintf("hub session ended reason=%s close_code=%d uptime=%s", reason, closeCode, time.Since(started).Round(time.Millisecond)))
 			_ = connection.CloseNow()
 			// A session that was up has just ended: the hub most likely
 			// restarted, so come back on the fast schedule (hub_redial.go).
@@ -2376,6 +2382,28 @@ const hubInboundQueueDepth = 256
 // queue: losing a job.revoked or relay.persisted silently is worse than a
 // reconnect, which resyncs node state and lets the hub replay what it is owed.
 var errHubInboundQueueFull = errors.New("hub inbound work queue full")
+
+// hubSessionEndReason names the class of failure that ended a hub session and
+// the peer's close code when it sent one. Nothing else is reported: an error's
+// text can carry the endpoint, and a transport response can reflect a
+// credential through an intermediary. write_timeout is the 5 s write deadline
+// in hubClientConnection.write; inbound_full is errHubInboundQueueFull.
+func hubSessionEndReason(err error) (string, int) {
+	if code := websocket.CloseStatus(err); code != -1 {
+		return "closed_by_hub", int(code)
+	}
+	switch {
+	case errors.Is(err, errHubInboundQueueFull):
+		return "inbound_full", 0
+	case errors.Is(err, errHubRedial):
+		return "redial", 0
+	case errors.Is(err, context.DeadlineExceeded):
+		return "write_timeout", 0
+	case errors.Is(err, context.Canceled):
+		return "local_stop", 0
+	}
+	return "read", 0
+}
 
 // serveHubInbound runs the ordered half of inbound hub work. Handlers that
 // may block on a lock, the node journal or the network - failover,
