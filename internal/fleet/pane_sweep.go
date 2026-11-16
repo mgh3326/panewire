@@ -693,7 +693,7 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 	for _, pane := range swept {
 		excludedPanes[pane.Pane] = true
 	}
-	s.reportStalePanes(s.stalePanes(candidates, agents, now, excludedPanes))
+	s.reportStalePanes(s.stalePanes(candidates, agents, now, ownerAge, excludedPanes))
 	return swept, nil
 }
 
@@ -1260,27 +1260,55 @@ const paneSweepMetricFile = "panewire_panes.prom"
 // environment sets this publishes the same body there at mode 0644.
 const paneSweepTextfileDirEnv = "FLEET_TEXTFILE_DIR"
 
+// paneSweepStaleStatus reports that the row herdr lists for the job's pane
+// shows not working, the alarm's own status rule (idle or done). It decides
+// nothing else: the count's identity test is paneOwnershipProof, the close's
+// predicate, so a row the close would take — a recorded session proves the
+// pane, whatever its name or tab says — counts whenever its status is the
+// alarm's (hk 4919). paneSweepMatches is not the count's test: the close does
+// not consult it past the deadline, and using it here would hide a pane whose
+// close failed after the row's tab or name drifted.
+func paneSweepStaleStatus(j Job, agents []Agent) bool {
+	for _, ag := range agents {
+		if ag.Pane == j.Pane {
+			return slices.Contains(paneSweepIdleStatus, ag.Status)
+		}
+	}
+	return false
+}
+
 // stalePanes counts the panes this node still holds for jobs whose own record
 // ended at least paneSweepStaleAge ago: the pass's own candidates — so a job
 // the sweep never closes is never counted, and the count can reach zero — that
 // this pass did not close or keep for a reason that is not a failure
 // (excludedPanes: an open PR the author is still working, a live task, another
-// agent's row, a pane the close saw reassigned), and whose pane herdr lists as
-// the job's own and not working. The job's own end is paneSweepClosed, the
-// pass's end predicate: a terminal job that does not close it (a loss with no
-// quota hand-over, a job.joined) is judged by its live task and may be kept
-// legitimately, which must not latch the alarm. Ownership is decided by
-// paneOwnershipProof, the one predicate closePane uses for the close, so a pane
-// the close refuses is never counted; the status rule is the alarm's own
-// (idle/done). It is the number the hub alarms on (hk 4904, hk 4919): a host
-// collecting finished panes.
-func (s *TaskPaneSweeper) stalePanes(candidates []Job, agents []Agent, now time.Time, excludedPanes map[string]bool) int {
+// agent's row, a pane the close saw reassigned), whose close deadline has
+// passed, whose row herdr shows not working, and whose pane the close's
+// ownership proof accepts. The job's own end is paneSweepClosed, the pass's end
+// predicate: a terminal job that does not close it (a loss with no quota
+// hand-over, a job.joined) is judged by its live task and may be kept
+// legitimately, which must not latch the alarm. The deadline is the pass's own
+// (ownerAge, or a kept pane's day): a hub may order a longer age than the
+// alarm's day, and a pane the sweep is still correctly waiting on is not one it
+// failed to collect (hk 4919). Ownership is decided by paneOwnershipProof, the
+// one predicate closePane uses for the close, so a pane the close refuses is
+// never counted; the status rule is the alarm's own (idle/done). It is the
+// number the hub alarms on (hk 4904, hk 4919): a host collecting finished
+// panes.
+func (s *TaskPaneSweeper) stalePanes(candidates []Job, agents []Agent, now time.Time, ownerAge time.Duration, excludedPanes map[string]bool) int {
 	count := 0
 	for _, j := range candidates {
 		if !paneSweepClosed(j) || j.At.IsZero() || now.Sub(j.At) < paneSweepStaleAge || excludedPanes[j.Pane] {
 			continue
 		}
-		if s.idle(j, agents) && paneOwnershipProof(j, agents) == "" {
+		deadline := ownerAge
+		if j.Keep {
+			deadline = paneSweepKeepAge
+		}
+		if now.Sub(s.paneSweepEndAt(j, now)) < deadline {
+			continue
+		}
+		if paneSweepStaleStatus(j, agents) && paneOwnershipProof(j, agents) == "" {
 			count++
 		}
 	}
