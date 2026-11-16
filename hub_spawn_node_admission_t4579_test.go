@@ -446,7 +446,11 @@ func TestNodeSpawnAdmissionSurvivesHubReconnect_t4579(t *testing.T) {
 		// first would let a handler that has not run yet open the spawn journal
 		// - here a TempDir - after the cleanup that removes it has begun
 		// (hk 4833).
-		drainCtx, stopDrain := context.WithTimeout(ctx, 5*time.Second)
+		// t.Context() is already canceled before Cleanup runs, so a bound
+		// derived from it expires at once: Drain would return the
+		// instantaneous in-flight count instead of waiting for the spawn
+		// handler this cleanup just released (hk 4918).
+		drainCtx, stopDrain := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer stopDrain()
 		if left := client.Drain(drainCtx); left != 0 {
 			t.Errorf("node work still in flight at drain: %d", left)

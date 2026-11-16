@@ -66,6 +66,11 @@ leave the old code for a cleanup PR rather than copying its pattern.
   outcome you assert, not on an earlier step that precedes it.
 - `time.Sleep` in a test is only for simulated latency, fixture pacing, or a
   window that proves nothing *more* happens; say which in a comment.
+- A `Cleanup` function never derives its wait context from `t.Context()`: the
+  test context is already canceled when cleanups run, so the timeout expires at
+  once and a drain or shutdown returns its instantaneous count instead of
+  waiting. Bound the wait with
+  `context.WithTimeout(context.WithoutCancel(t.Context()), …)` (hk 4918).
 - A `TestMain` scopes its run's state with `teststate.StatePrefix`, sweeps
   stale dirs a killed run left behind, and pins the go toolchain env before it
   moves `HOME` or `XDG_CACHE_HOME`; otherwise every run that builds with `go`
