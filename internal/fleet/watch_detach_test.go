@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -37,14 +38,14 @@ func TestWatcherOutlivesDaemonGroupStop(t *testing.T) {
 	daemon := cmd.Process.Pid
 	t.Cleanup(func() { _ = syscall.Kill(-daemon, syscall.SIGKILL); _ = cmd.Wait() })
 	// The helper prints the pid of its plain child once the watcher is started.
-	buf := make([]byte, 64)
-	n, err := out.Read(buf)
+	// Read the whole line: one short read could carry only a prefix of the pid.
+	line, err := bufio.NewReader(out).ReadString('\n')
 	if err != nil {
 		t.Fatalf("daemon helper did not start its children: %v", err)
 	}
-	plain, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	plain, err := strconv.Atoi(strings.TrimSpace(line))
 	if err != nil {
-		t.Fatalf("helper output %q", buf[:n])
+		t.Fatalf("helper output %q", line)
 	}
 	var watcher int
 	deadline := time.Now().Add(10 * time.Second)
@@ -62,20 +63,22 @@ func TestWatcherOutlivesDaemonGroupStop(t *testing.T) {
 		t.Fatalf("watcher shares the daemon's process group %d", daemon)
 	}
 
-	// Stop the daemon the way a group-wide stop does.
+	// Stop the daemon the way a group-wide stop does: the plain child dies with
+	// the group. The observation that ends the wait is the one asserted, never a
+	// fresh read of it — a reaped task is reported as dead (state X) after it was
+	// a zombie (state Z), so a second read can disagree with the first although
+	// the child never ran again (hk 4877).
 	if err := syscall.Kill(-daemon, syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
 	_ = cmd.Wait()
-	gone := func(pid int) bool {
-		// A killed child of the helper is reparented and reaped by init; poll until it is gone or a zombie.
-		return !alive(pid)
-	}
+	stopped := !alive(plain)
 	deadline = time.Now().Add(10 * time.Second)
-	for !gone(plain) && time.Now().Before(deadline) {
+	for !stopped && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond) // the group signal is asynchronous
+		stopped = !alive(plain)
 	}
-	if !gone(plain) {
+	if !stopped {
 		t.Fatal("the harness did not stop the daemon's group: the plain child still runs")
 	}
 	if !alive(watcher) {
@@ -83,24 +86,73 @@ func TestWatcherOutlivesDaemonGroupStop(t *testing.T) {
 	}
 }
 
-// alive reports a running process; a zombie counts as gone.
+// alive reports a process that can still run. A task that has exited counts as
+// gone: /proc reports it first as a zombie (state Z) and, while it is reaped, as
+// dead (state X), before its entry disappears. Neither state can run, so reading
+// only "Z" as dead made a finished wait look unfinished (hk 4877).
 func alive(pid int) bool {
 	if syscall.Kill(pid, 0) != nil {
 		return false
 	}
 	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		// The process may have been reaped between the two calls; without
-		// /proc (macOS) the signal-0 answer stands.
-		return syscall.Kill(pid, 0) == nil && !procAvailable()
+		// The entry can go between the two calls while the pid is still found,
+		// and without /proc (macOS) the signal-0 answer is all there is. Only a
+		// failed signal comes back as gone, so a read race cannot cut a live
+		// wait short.
+		return true
 	}
-	fields := strings.Fields(string(raw[strings.LastIndex(string(raw), ")")+1:]))
-	return len(fields) == 0 || fields[0] != "Z"
+	return taskRunnable(raw)
 }
 
-func procAvailable() bool {
-	_, err := os.Stat("/proc/self/stat")
-	return err == nil
+// taskRunnable reports whether a /proc/<pid>/stat body describes a task that can
+// still run. A dead task ("X") is in the reap window that follows its zombie
+// state ("Z"). A body with no state letter is no evidence of death, so it keeps
+// counting as running.
+func taskRunnable(stat []byte) bool {
+	switch taskState(stat) {
+	case "Z", "X":
+		return false
+	}
+	return true
+}
+
+// taskState returns the state letter of a /proc/<pid>/stat body: the field after
+// the parenthesised command name. A body with no such field returns "".
+func taskState(stat []byte) string {
+	body := string(stat)
+	i := strings.LastIndex(body, ")")
+	if i < 0 {
+		return ""
+	}
+	fields := strings.Fields(body[i+1:])
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// TestTaskStateDeadIsNotRunning pins the state letters the harness reads as
+// stopped. A killed task stays a zombie (Z) until its parent or init reaps it,
+// and /proc then reports the task as dead (X) for one read before the entry
+// disappears; treating X as running made a finished wait fail (hk 4877).
+func TestTaskStateDeadIsNotRunning(t *testing.T) {
+	const tail = " 1 1234 1234 0 -1 4194560 79 0 0 0 0 0 0 0 20 0 1 0 425 4243 0"
+	for _, c := range []struct {
+		stat string
+		want bool
+	}{
+		{"1234 (sleep) S" + tail, true},
+		{"1234 (sleep) R" + tail, true},
+		{"1234 (sleep) D" + tail, true},
+		{"1234 (sleep) Z" + tail, false},
+		{"1234 (sleep) X" + tail, false},
+		{"", true},
+	} {
+		if got := taskRunnable([]byte(c.stat)); got != c.want {
+			t.Errorf("taskRunnable(%q) = %v, want %v", c.stat, got, c.want)
+		}
+	}
 }
 
 // TestWatchDetachDaemonHelper is the stand-in daemon; it does nothing in a normal run.
