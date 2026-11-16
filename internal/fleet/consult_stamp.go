@@ -50,6 +50,15 @@ func consultStampValue(stamp map[string]string) string {
 	if len(stamp) == 0 {
 		return ""
 	}
+	// Validate the input, not only the encoded output: encoding/json replaces
+	// invalid UTF-8 with U+FFFD, so a bad input would otherwise pass the reader
+	// and record a value the planner never selected.
+	for _, key := range consultStampKeys {
+		text, ok := stamp[key]
+		if !ok || len(text) > consultStampValueMax || !consultStampText(text) {
+			return ""
+		}
+	}
 	// Escape no HTML: '<' stays one byte, so the encoded bound above holds for
 	// every value the rule admits.
 	var buf bytes.Buffer

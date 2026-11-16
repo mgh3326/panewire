@@ -140,6 +140,13 @@ func TestConsultStampRoundTrip_t4875(t *testing.T) {
 			t.Fatalf("%s: reader accepted %q", name, raw(stamp))
 		}
 	}
+	// encoding/json replaces invalid UTF-8 with U+FFFD, so an encoded bad input
+	// still reads back; only the encoder can refuse it (hk 4875 review).
+	invalid := base()
+	invalid["asker_family"] = "acme\xff"
+	if value := consultStampValue(invalid); value != "" {
+		t.Fatalf("invalid UTF-8: encoder emitted %q, want no stamp", value)
+	}
 	for name, value := range map[string]string{
 		"empty value":   "",
 		"not base64url": "eyJh*b",
