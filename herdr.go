@@ -72,10 +72,21 @@ func writeRequest(w io.Writer, id, method string, params any) error {
 	return err
 }
 func readResponse(ctx context.Context, r *bufio.Reader, id string) (json.RawMessage, error) {
+	result, _, err := readResponseKeeping(ctx, r, id)
+	return result, err
+}
+
+// readResponseKeeping is readResponse for the subscription stream, where the
+// reply shares its connection with pushed events: a line that is not this
+// request's reply comes back in pending instead of being dropped. herdr fans
+// an event out as it acknowledges the subscription, so that ordering decides
+// whether the event reaches the caller or is lost.
+func readResponseKeeping(ctx context.Context, r *bufio.Reader, id string) (json.RawMessage, [][]byte, error) {
+	var pending [][]byte
 	for {
 		line, e := r.ReadBytes('\n')
 		if e != nil && len(line) == 0 {
-			return nil, e
+			return nil, pending, e
 		}
 		var msg map[string]json.RawMessage
 		if json.Unmarshal(line, &msg) != nil {
@@ -84,12 +95,13 @@ func readResponse(ctx context.Context, r *bufio.Reader, id string) (json.RawMess
 		var got string
 		_ = json.Unmarshal(msg["id"], &got)
 		if got != id {
+			pending = append(pending, line)
 			continue
 		}
 		if er := msg["error"]; len(er) > 0 {
-			return nil, &herdrReplyError{raw: er}
+			return nil, nil, &herdrReplyError{raw: er}
 		}
-		return msg["result"], nil
+		return msg["result"], pending, nil
 	}
 }
 func (c *HerdrClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
@@ -258,7 +270,8 @@ func (c *HerdrClient) openEventStream(ctx context.Context, subs []any) (<-chan H
 		return nil, err
 	}
 	reader := bufio.NewReader(conn)
-	if _, err := readResponse(ctx, reader, id); err != nil {
+	_, queued, err := readResponseKeeping(ctx, reader, id)
+	if err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -266,21 +279,34 @@ func (c *HerdrClient) openEventStream(ctx context.Context, subs []any) (<-chan H
 	c.subConn = conn
 	c.mu.Unlock()
 	out := make(chan HerdrEvent, 32)
+	send := func(line []byte) bool {
+		ev, ok := decodeHerdrEvent(line)
+		if !ok {
+			return true
+		}
+		select {
+		case out <- ev:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
 	go func() {
 		defer close(out)
 		defer conn.Close()
+		// Events herdr pushed while it was acknowledging the subscription were
+		// read by the handshake; they are the stream's first deliveries.
+		for _, line := range queued {
+			if !send(line) {
+				return
+			}
+		}
 		for {
 			line, e := reader.ReadBytes('\n')
 			if e != nil && len(line) == 0 {
 				return
 			}
-			ev, ok := decodeHerdrEvent(line)
-			if !ok {
-				continue
-			}
-			select {
-			case out <- ev:
-			case <-ctx.Done():
+			if !send(line) {
 				return
 			}
 		}
