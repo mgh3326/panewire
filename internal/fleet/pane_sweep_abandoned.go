@@ -131,7 +131,7 @@ func (s *TaskPaneSweeper) abandonedEnd(ctx context.Context, a *App, j Job, agent
 	if evidence == resultPosted && paneSweepRole(j) == "reviewer" {
 		return ""
 	}
-	if paneSessionProof(j, agents) == "pane_unlisted" {
+	if paneOwnershipProof(j, agents) == "pane_unlisted" {
 		listed, err := panes.listed(ctx, j.Pane)
 		if err == nil && !listed {
 			return SweepPaneGone

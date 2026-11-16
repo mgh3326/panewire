@@ -106,6 +106,13 @@ machine ID, reason, check name, and the operator line
 `REBOOT/UNLOCK NEEDED — fleet on <machine> is dead until a human acts`; recovery
 and check messages retain their existing fields without that line.
 
+A host that keeps finished panes also alerts, with no local check involved: a
+node running the task pane sweep publishes `ended_panes` on its heartbeat (its
+count of ended-job panes still open past a day, docs/pane-sweep.md) and the hub
+raises one `ended_panes_open` incident per host while that count is above zero,
+through the same two-observation debounce, then one recovery once it reads zero
+twice. A heartbeat without the field changes nothing.
+
 `--log-file PATH` is optional. When set, every hub log record is also
 appended to that file. The hub opens it `O_APPEND|O_CREATE` and forces mode
 `0640` at every startup — a pre-existing permissive file is tightened rather
@@ -154,8 +161,11 @@ payload, command, SSH, or credential field. `machine` is the global
 audit metadata only and never suppresses Wake-on-LAN based on event age.
 
 `panewired` sends a heartbeat event after connecting and alongside its
-periodic ping. The heartbeat accepts only `status:"alive"` and a map of local
-check names to `ok` or `fail`; argv and command output never leave the node.
+periodic ping. The heartbeat accepts only `status:"alive"`, a map of local
+check names to `ok` or `fail`, and the optional node fields the protocol
+defines (`host_load`, `host_memory`, `host_signals`, `readiness`, `sessions`,
+`stall_detect`, `ended_panes`, `checkouts`); argv and command output never
+leave the node.
 
 ## Node and operator clients
 

@@ -222,6 +222,12 @@ type HubClient struct {
 	taskPaneSweepMu     sync.Mutex
 	taskPaneSweeperOnce sync.Once
 	taskPaneSweeper     *fleet.TaskPaneSweeper
+	// endedPanesOpen is the last sweep pass's count of ended-job panes left
+	// open past a day, published on the heartbeat so the hub alarms a host
+	// collecting finished panes (hk 4904). measured stays false until a pass
+	// has reported one; a hub that has not advertised the field is never sent it.
+	endedPanesOpen     atomic.Int64
+	endedPanesMeasured atomic.Bool
 
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
 	statePublish       bool
@@ -679,9 +685,12 @@ type hubClientConnection struct {
 	// acceptsCheckoutPull is the same for hubFeatureCheckoutPull
 	// (node_checkout_pull.go).
 	acceptsCheckoutPull atomic.Bool
-	acceptsLaunchProof  atomic.Bool
-	connection          *websocket.Conn
-	writeMu             hubWriteMutex
+	// acceptsEndedPanes is the same for hubFeatureEndedPanes
+	// (node_pane_sweep.go): the heartbeat may carry the sweep's open-pane count.
+	acceptsEndedPanes  atomic.Bool
+	acceptsLaunchProof atomic.Bool
+	connection         *websocket.Conn
+	writeMu            hubWriteMutex
 	// closed is closed when the session on this connection ends; a nil
 	// channel (a test peer) never ends.
 	closed chan struct{}
@@ -2174,6 +2183,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
+				peer.acceptsEndedPanes.Store(slices.Contains(message.Features, hubFeatureEndedPanes))
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				continue
 			case "job.spawn":
@@ -2522,6 +2532,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		if beat := provider(); beat != nil {
 			heartbeat.StallDetect = beat
 		}
+	}
+	if open := client.endedPanesForHeartbeat(); open != nil {
+		heartbeat.EndedPanes = open
 	}
 	collectLoad := client.hostLoadCollector
 	if collectLoad == nil {
