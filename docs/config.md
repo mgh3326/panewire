@@ -403,8 +403,11 @@ panewire:
    name the author's family alone, with `--task` and no `--builder-job` or
    `--parent-job`: the hub's consult planner sends it that way (hk 4868). The
    consult binds no job. Without `-m`, its seat selection excludes that family
-   and the job's consult stamp records it; a pinned `-m` seat is admitted as
-   given (the planner chose it with that exclusion). Any other role,
+   and the job's consult stamp records it. A pinned `-m` seat is admitted as
+   given; the hub's planner pins the seat it selected and carries that
+   `consult` stamp on the spawn (`--consult-stamp`), so the record states the
+   same asker family, grade and floor an auto-selected consult's does
+   (hk 4875). Any other role,
    or any other shape, keeps the "go together" refusal (exit 2). A reviewer holds no task/role reservation
    (hk 4737), so any number of passes on one task spawn side by side; the hub
    still accepts `--review-pass N` (1..9, `--role reviewer` only) and records it
@@ -1536,6 +1539,14 @@ Within the floor:
 - If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. A below-floor rung on a cooling pool counts as such a rung. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
 
 The selection record carries a `consult` object with `asker_grade`, `asker_family`, `grade_source` (`flag`, `task`, or `without_task`), `floor`, `used_floor`, and `fallback`. `resolve --role consult` prints `floor=<G>` on its text line.
+
+A hub-planned consult pins the seat its planner selected, so selection never
+runs where that job's record is written. The planner sends the stamp it
+selected with as `--consult-stamp`, accepted only with a pinned `--role
+consult`; the job and the hub's placement trace state it as the same `consult`
+object an auto-selected consult records (hk 4875). A node that predates the
+flag gets the spawn without it (`consult_stamp_v1`, see
+[hub-spawn-operations.md](hub-spawn-operations.md#time-limit)).
 
 `resolve` defaults other roles to grade `C`. Other `plan` roles require a grade.
 

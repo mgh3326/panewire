@@ -174,6 +174,24 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 	return arm == "" || fleet.ValidE6Arm(arm, hubSpawnArg(args, "-m"))
 }
 
+// withoutSpawnFlag returns args without flag and the one value it takes. The
+// hub drops a flag an older node's argument rule would refuse before it binds
+// the attempt; every flag that rule admits a value for takes exactly one.
+func withoutSpawnFlag(args []string, flag string) []string {
+	for i, arg := range args {
+		if arg != flag {
+			continue
+		}
+		out := make([]string, 0, len(args))
+		out = append(out, args[:i]...)
+		if i+1 < len(args) {
+			out = append(out, args[i+2:]...)
+		}
+		return out
+	}
+	return args
+}
+
 // parseHubSpawnResult is deliberately separate from parseHubInbound: a spawn
 // result is a node-to-hub control response, not an event envelope.
 func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
@@ -296,6 +314,11 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	record := h.nodes[body.Machine]
+	// An older node's argument rule refuses --consult-stamp and drops the whole
+	// spawn; the stamp is an extra, so the spawn goes without it (hk 4875).
+	if record == nil || !record.capabilities[hubCapabilityConsultStamp] {
+		body.Args = withoutSpawnFlag(body.Args, fleet.ConsultStampArg)
+	}
 	if record != nil && record.agent != nil && record.state == "connected" && (body.Checkout != nil || body.Brief.Doc != "") && !record.capabilities["spawn_v2"] {
 		h.mu.Unlock()
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "spawn_capability_required", "capability": "spawn_v2"})

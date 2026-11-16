@@ -86,6 +86,14 @@ type Spawn struct {
 	// Grade is the task grade a caller states itself (--grade), used instead
 	// of the "(grade X, Tn" marker in the bound task's title.
 	Grade string `json:"-"`
+	// ConsultStamp is the consult stamp a planned seat carries
+	// (--consult-stamp): the selection selPlan.consultStamp wrote before the
+	// planner pinned the seat. attachSelection merges it into the record's
+	// selection, so the job's placement record states the asker's grade and
+	// family, the floor asked and used, and the fallback, exactly as an
+	// auto-selected consult's record does (hk 4875). Only the hub's consult
+	// planner writes it.
+	ConsultStamp map[string]string `json:"-"`
 	// E6Arm is the resolved experiment marker (<canon>@<effort>): the value a
 	// hub submission carried, else this process's environment. It travels to
 	// the node as --e6-arm and is recorded on the job.
@@ -194,6 +202,7 @@ func parseSpawn(args []string) (Spawn, error) {
 // the grammar starts one — not where it is another flag's value.
 func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	s := Spawn{Role: "implementer", Host: "auto"}
+	var consultStamp string
 	f := flags("spawn")
 	f.Var((*repeatedStringFlag)(&s.After), "after", "start condition (repeatable)")
 	for _, p := range []struct {
@@ -204,6 +213,7 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (implementer or consult)")
 	f.StringVar(&s.ReviewPass, "review-pass", "", "review pass 1..9 (reviewer only)")
+	f.StringVar(&consultStamp, "consult-stamp", "", "planned consult selection stamp (hub planner only)")
 	f.StringVar(&s.Workspace, "workspace", "", "local herdr workspace")
 	f.BoolVar(&s.Keep, "keep", false, "")
 	f.BoolVar(&s.DupOK, "job-dup-ok", false, "")
@@ -230,6 +240,19 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	}
 	if flagPassed(f, "review-pass") && (s.Role != "reviewer" || !reviewPassPattern.MatchString(s.ReviewPass)) {
 		return s, fail(exitUsage, "--review-pass N (1..9) is accepted only with --role reviewer")
+	}
+	if flagPassed(f, "consult-stamp") {
+		// The planner pins the seat it selected, so the stamp belongs to a
+		// pinned consult only; an auto-selected consult's own record already
+		// carries it (hk 4875).
+		if s.Role != "consult" || s.Profile == "" || s.Profile == "auto" {
+			return s, fail(exitUsage, "--consult-stamp goes with a pinned --role consult")
+		}
+		stamp, err := parseConsultStamp(consultStamp)
+		if err != nil {
+			return s, fail(exitUsage, "--consult-stamp: %v", err)
+		}
+		s.ConsultStamp = stamp
 	}
 	if _, err := ParseStartConditions(s.After, s.Task); err != nil {
 		return s, fail(exitUsage, "%v", err)
@@ -1600,6 +1623,17 @@ func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEf
 	return launch, gate, nil
 }
 func (a *App) attachSelection(rec map[string]any, s Spawn) {
+	if s.ConsultStamp != nil {
+		// A planned consult's seat was pinned by the planner, so selection never
+		// ran here; its carried stamp is the consult half of the record selection
+		// would have written (hk 4875).
+		if s.Sel == nil {
+			s.Sel = map[string]any{}
+		}
+		if _, ok := s.Sel["consult"]; !ok {
+			s.Sel["consult"] = consultStampRecord(s.ConsultStamp)
+		}
+	}
 	state := a.fleetStateRecord()
 	if s.Sel != nil {
 		if state != nil {

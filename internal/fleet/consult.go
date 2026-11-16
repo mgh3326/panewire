@@ -134,6 +134,12 @@ func (a *App) PlanConsult(ctx context.Context, in ConsultPlanInput) (ConsultPlan
 	if err != nil {
 		return ConsultPlan{}, err
 	}
+	// The seat is pinned below, so selection never runs where the job's record
+	// is written. Carry the stamp the planner selected with (hk 4875).
+	stamp, ok := consultStampFromRecord(seat.Consult)
+	if !ok {
+		return ConsultPlan{}, fail(exitConfig, "consult seat selection wrote no consult stamp")
+	}
 
 	head, fetch, err := consultCheckoutRef(in)
 	if err != nil {
@@ -174,6 +180,7 @@ func (a *App) PlanConsult(ctx context.Context, in ConsultPlanInput) (ConsultPlan
 		Containment:    "hk:" + in.Task,
 		ReportRelative: job + "/report.md",
 		Grade:          askerGrade,
+		ConsultStamp:   stamp,
 	}
 	requestID, err := newRequestID()
 	if err != nil {

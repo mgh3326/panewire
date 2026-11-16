@@ -1960,10 +1960,17 @@ const hubCapabilityCloseQuestion = "pane_close_question_v1"
 // node's strict decoder refuses the whole frame for the extra field.
 const hubCapabilitySpawnExpires = "spawn_expires_v1"
 
+// hubCapabilityConsultStamp is advertised by a node whose spawn argument rule
+// accepts --consult-stamp, the planned consult's selection stamp (hk 4875).
+// The hub drops the flag for any other node: though it travels in the args
+// rather than the frame, an older node's argument rule refuses the unknown
+// flag and would drop the whole spawn.
+const hubCapabilityConsultStamp = "consult_stamp_v1"
+
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
 // close_ops_v1 (hubCapabilityCloseOps) is deliberately not advertised: no
 // hub may issue close ops until hk 4632 adds the migration barrier.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilitySpawnExpires, hubCapabilityApplied}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilitySpawnExpires, hubCapabilityConsultStamp, hubCapabilityApplied}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {

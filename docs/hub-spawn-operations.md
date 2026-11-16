@@ -138,6 +138,12 @@ writes it into the `job.spawned` receipt as `expires_at`, which the node's pane
 sweep reads to end a reviewer or consult that never posted a result
 ([pane-sweep.md](pane-sweep.md#reviewer-and-consult-ends), hk 4747).
 
+A planned consult's selection stamp rides the `job.spawn` args as
+`--consult-stamp` (hk 4875). The hub drops that flag for a node that does not
+advertise `consult_stamp_v1` in its hello: an older node's argument rule
+refuses an unknown flag and would drop the whole spawn. Such a node records the
+consult without the stamp; its seat and the job are unaffected.
+
 The 600 s landing wait (`deadline_seconds`) is now one attempt's bound, or the
 limit when that comes first. A staged author-replacement successor
 (`activateStagedSpawn`) is capped the same way; one activated at or past the

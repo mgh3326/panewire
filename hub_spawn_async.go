@@ -1132,6 +1132,11 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	if oldNode {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_capability_required"}
 	}
+	// The planned consult's stamp is an extra: a node that predates it refuses
+	// the unknown flag and drops the whole spawn, so it goes without (hk 4875).
+	if record == nil || !record.capabilities[hubCapabilityConsultStamp] {
+		req.Args = withoutSpawnFlag(req.Args, fleet.ConsultStampArg)
+	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return fleet.HubSpawnReply{}, err
