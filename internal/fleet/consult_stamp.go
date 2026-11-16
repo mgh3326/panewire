@@ -1,10 +1,11 @@
 package fleet
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -21,9 +22,11 @@ import (
 // keys selPlan.consultStamp writes; see consultStampValue.
 const ConsultStampArg = "--consult-stamp"
 
-// consultStampMaxBytes bounds the encoded argument value. A family of
-// consultStampValueMax bytes still encodes well inside it.
-const consultStampMaxBytes = 320
+// consultStampMaxBytes bounds the encoded argument value. It is sized for the
+// worst case the value rule admits: six consultStampValueMax-byte values, each
+// JSON-escaped to two bytes at most (a quote or backslash), so the raw object
+// stays under 900 bytes and its base64url under 1200.
+const consultStampMaxBytes = 1200
 
 // consultStampKeys is the stamp contract: the asker's grade and family ("unknown"
 // when the spawn named none), where the grade came from, the floor asked and
@@ -38,16 +41,37 @@ var consultStampKeys = []string{"asker_grade", "asker_family", "grade_source", "
 const consultStampValueMax = 64
 
 // consultStampValue encodes a stamp for the spawn args. The empty string means
-// no stamp, which every arg writer skips.
+// no stamp, which every arg writer skips. The encoder applies the reader's rule
+// to its own output, so a value this host cannot encode (an over-long or
+// control-character-bearing family) never becomes a spawn the node refuses: the
+// record then lacks the stamp, and the consult still runs. PlanConsult warns
+// once when that happens.
 func consultStampValue(stamp map[string]string) string {
 	if len(stamp) == 0 {
 		return ""
 	}
-	raw, err := json.Marshal(stamp)
-	if err != nil {
+	// Validate the input, not only the encoded output: encoding/json replaces
+	// invalid UTF-8 with U+FFFD, so a bad input would otherwise pass the reader
+	// and record a value the planner never selected.
+	for _, key := range consultStampKeys {
+		text, ok := stamp[key]
+		if !ok || len(text) > consultStampValueMax || !consultStampText(text) {
+			return ""
+		}
+	}
+	// Escape no HTML: '<' stays one byte, so the encoded bound above holds for
+	// every value the rule admits.
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(stamp); err != nil {
 		return ""
 	}
-	return base64.RawURLEncoding.EncodeToString(raw)
+	value := base64.RawURLEncoding.EncodeToString(bytes.TrimSuffix(buf.Bytes(), []byte("\n")))
+	if _, err := parseConsultStamp(value); err != nil {
+		return ""
+	}
+	return value
 }
 
 // parseConsultStamp reads the value consultStampValue wrote. The value arrives
@@ -74,7 +98,7 @@ func parseConsultStamp(value string) (map[string]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("stamp has no %s", key)
 		}
-		if len(text) > consultStampValueMax || !utf8.ValidString(text) || strings.ContainsAny(text, "\x00\r\n") {
+		if len(text) > consultStampValueMax || !consultStampText(text) {
 			return nil, fmt.Errorf("stamp %s is not a bounded text value", key)
 		}
 		// A consult asked without a task grade has no asker grade, and a
@@ -84,6 +108,21 @@ func parseConsultStamp(value string) (map[string]string, error) {
 		}
 	}
 	return stamp, nil
+}
+
+// consultStampText reports whether a stamp value can be carried: valid UTF-8
+// with no control character (C0, DEL and the C1 range), because the record
+// states it as a plain JSON string.
+func consultStampText(text string) bool {
+	if !utf8.ValidString(text) {
+		return false
+	}
+	for _, r := range text {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // consultStampRecord renders a stamp as the selection record's consult object.

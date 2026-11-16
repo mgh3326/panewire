@@ -2,6 +2,8 @@ package fleet
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -90,11 +92,11 @@ func TestPlannedConsultCarriesSelectionStamp_t4875(t *testing.T) {
 	}
 }
 
-// TestConsultStampRoundTrip_t4875: the argument value is bounded and exact, a
-// consult request's hyphenated family and a long policy family round-trip, and
-// an asker without a task grade still carries an empty asker_grade.
+// TestConsultStampRoundTrip_t4875: a consult request's hyphenated family and a
+// long policy family round-trip, an asker without a task grade carries an empty
+// asker_grade, and the encoder never emits a value its reader refuses.
 func TestConsultStampRoundTrip_t4875(t *testing.T) {
-	for _, family := range []string{"unknown", "acme-consult", "acme.consult.v2", strings.Repeat("family", 8)} {
+	for _, family := range []string{"unknown", "acme-consult", "acme.consult.v2", strings.Repeat("family", 8), strings.Repeat("<", 64), strings.Repeat("&", 64), strings.Repeat(`"`, 32)} {
 		stamp := map[string]string{"asker_grade": "", "asker_family": family, "grade_source": "without_task", "floor": "S+", "used_floor": "S+", "fallback": ""}
 		got, err := parseConsultStamp(consultStampValue(stamp))
 		if err != nil {
@@ -106,18 +108,53 @@ func TestConsultStampRoundTrip_t4875(t *testing.T) {
 			}
 		}
 	}
-	for name, bad := range map[string]string{
-		"empty value":    "",
-		"not base64url":  "eyJh*b",
-		"not an object":  "W10",
-		"missing key":    consultStampValue(map[string]string{"asker_grade": "A"}),
-		"empty family":   consultStampValue(map[string]string{"asker_grade": "A", "asker_family": "", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": ""}),
-		"unknown keys":   consultStampValue(map[string]string{"asker_grade": "A", "asker_family": "anthropic", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": "", "extra": "x"}),
-		"control char":   consultStampValue(map[string]string{"asker_grade": "A", "asker_family": "anthropic\n", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": ""}),
-		"value too long": consultStampValue(map[string]string{"asker_grade": "A", "asker_family": strings.Repeat("f", consultStampValueMax+1), "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": ""}),
+	// raw encodes without the encoder's own check, so the reader's rule is
+	// tested on values it must refuse even though no writer would make them.
+	raw := func(stamp map[string]string) string {
+		encoded, err := json.Marshal(stamp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	base := func() map[string]string {
+		return map[string]string{"asker_grade": "A", "asker_family": "anthropic", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": ""}
+	}
+	bad := map[string]map[string]string{}
+	unencodable := func(name string, edit func(map[string]string)) {
+		stamp := base()
+		edit(stamp)
+		bad[name] = stamp
+	}
+	unencodable("empty family", func(s map[string]string) { s["asker_family"] = "" })
+	unencodable("control char", func(s map[string]string) { s["asker_family"] = "anthropic\n" })
+	unencodable("tab", func(s map[string]string) { s["asker_family"] = "anthropic\t" })
+	unencodable("c1 control", func(s map[string]string) { s["asker_family"] = "acme\u0080" })
+	unencodable("value too long", func(s map[string]string) { s["asker_family"] = strings.Repeat("f", consultStampValueMax+1) })
+	unencodable("unknown key", func(s map[string]string) { s["extra"] = "x" })
+	for name, stamp := range bad {
+		if value := consultStampValue(stamp); value != "" {
+			t.Fatalf("%s: encoder emitted %q, want no stamp", name, value)
+		}
+		if _, err := parseConsultStamp(raw(stamp)); err == nil {
+			t.Fatalf("%s: reader accepted %q", name, raw(stamp))
+		}
+	}
+	// encoding/json replaces invalid UTF-8 with U+FFFD, so an encoded bad input
+	// still reads back; only the encoder can refuse it (hk 4875 review).
+	invalid := base()
+	invalid["asker_family"] = "acme\xff"
+	if value := consultStampValue(invalid); value != "" {
+		t.Fatalf("invalid UTF-8: encoder emitted %q, want no stamp", value)
+	}
+	for name, value := range map[string]string{
+		"empty value":   "",
+		"not base64url": "eyJh*b",
+		"not an object": "W10",
+		"missing key":   raw(map[string]string{"asker_grade": "A"}),
 	} {
-		if _, err := parseConsultStamp(bad); err == nil {
-			t.Fatalf("%s: parse accepted %q", name, bad)
+		if _, err := parseConsultStamp(value); err == nil {
+			t.Fatalf("%s: reader accepted %q", name, value)
 		}
 	}
 }

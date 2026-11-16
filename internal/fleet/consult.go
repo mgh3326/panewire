@@ -140,6 +140,11 @@ func (a *App) PlanConsult(ctx context.Context, in ConsultPlanInput) (ConsultPlan
 	if !ok {
 		return ConsultPlan{}, fail(exitConfig, "consult seat selection wrote no consult stamp")
 	}
+	if consultStampValue(stamp) == "" {
+		// The wire rule cannot carry this asker's family (over-long or a control
+		// character); the consult still runs, and its record lacks the stamp.
+		a.warn("consult stamp for task %s cannot be carried (author family %q); the record will lack it", in.Task, stamp["asker_family"])
+	}
 
 	head, fetch, err := consultCheckoutRef(in)
 	if err != nil {
