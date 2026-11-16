@@ -4,7 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"strings"
+	"unicode/utf8"
 )
 
 // A planned consult's seat is pinned by the planner, so selection never runs on
@@ -20,8 +21,8 @@ import (
 // keys selPlan.consultStamp writes; see consultStampValue.
 const ConsultStampArg = "--consult-stamp"
 
-// consultStampMaxBytes bounds the encoded argument value: the JSON object is
-// under 200 bytes and its base64url encoding stays well inside this.
+// consultStampMaxBytes bounds the encoded argument value. A family of
+// consultStampValueMax bytes still encodes well inside it.
 const consultStampMaxBytes = 320
 
 // consultStampKeys is the stamp contract: the asker's grade and family ("unknown"
@@ -29,9 +30,12 @@ const consultStampMaxBytes = 320
 // the floor used, and the fallback taken, if any.
 var consultStampKeys = []string{"asker_grade", "asker_family", "grade_source", "floor", "used_floor", "fallback"}
 
-// consultStampValueChars is what a stamp value may hold: one grade, family,
-// grade source or fallback name. The empty fallback is allowed.
-var consultStampValueChars = regexp.MustCompile(`^[A-Za-z0-9_+]*$`)
+// consultStampValueMax bounds one stamp value. The asker's family is a consult
+// request's author_family (up to 32 bytes, hyphens and dots allowed) or a policy
+// seat's free-form Family, so the rule must not be narrower than either; the
+// grade, source and fallback names are far shorter. The encoded argument keeps
+// its own bound (consultStampMaxBytes).
+const consultStampValueMax = 64
 
 // consultStampValue encodes a stamp for the spawn args. The empty string means
 // no stamp, which every arg writer skips.
@@ -47,8 +51,9 @@ func consultStampValue(stamp map[string]string) string {
 }
 
 // parseConsultStamp reads the value consultStampValue wrote. The value arrives
-// from another host, so the keys and every value are bounded here rather than
-// trusted.
+// from another host, so the keys, the length and the characters are bounded
+// here rather than trusted; a value is any UTF-8 text without a control
+// character, because the record stores it as a JSON string.
 func parseConsultStamp(value string) (map[string]string, error) {
 	if len(value) == 0 || len(value) > consultStampMaxBytes {
 		return nil, fmt.Errorf("stamp must be 1-%d bytes", consultStampMaxBytes)
@@ -69,8 +74,8 @@ func parseConsultStamp(value string) (map[string]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("stamp has no %s", key)
 		}
-		if len(text) > 32 || !consultStampValueChars.MatchString(text) {
-			return nil, fmt.Errorf("stamp %s is not a short name", key)
+		if len(text) > consultStampValueMax || !utf8.ValidString(text) || strings.ContainsAny(text, "\x00\r\n") {
+			return nil, fmt.Errorf("stamp %s is not a bounded text value", key)
 		}
 		// A consult asked without a task grade has no asker grade, and a
 		// selection that met the floor leaves no fallback; nothing else is empty.

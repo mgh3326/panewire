@@ -90,27 +90,31 @@ func TestPlannedConsultCarriesSelectionStamp_t4875(t *testing.T) {
 	}
 }
 
-// TestConsultStampRoundTrip_t4875: the argument value is bounded and exact, and
-// an asker without a task grade still round-trips (its asker_grade is empty).
+// TestConsultStampRoundTrip_t4875: the argument value is bounded and exact, a
+// consult request's hyphenated family and a long policy family round-trip, and
+// an asker without a task grade still carries an empty asker_grade.
 func TestConsultStampRoundTrip_t4875(t *testing.T) {
-	noGrade := map[string]string{"asker_grade": "", "asker_family": "unknown", "grade_source": "without_task", "floor": "S+", "used_floor": "S+", "fallback": ""}
-	value := consultStampValue(noGrade)
-	stamp, err := parseConsultStamp(value)
-	if err != nil {
-		t.Fatalf("no-grade stamp: %v", err)
-	}
-	for key, want := range noGrade {
-		if stamp[key] != want {
-			t.Fatalf("%s = %q, want %q", key, stamp[key], want)
+	for _, family := range []string{"unknown", "acme-consult", "acme.consult.v2", strings.Repeat("family", 8)} {
+		stamp := map[string]string{"asker_grade": "", "asker_family": family, "grade_source": "without_task", "floor": "S+", "used_floor": "S+", "fallback": ""}
+		got, err := parseConsultStamp(consultStampValue(stamp))
+		if err != nil {
+			t.Fatalf("family %q: %v", family, err)
+		}
+		for key, want := range stamp {
+			if got[key] != want {
+				t.Fatalf("family %q: %s = %q, want %q", family, key, got[key], want)
+			}
 		}
 	}
 	for name, bad := range map[string]string{
-		"empty value":   "",
-		"not base64url": "eyJh*b",
-		"not an object": "W10",
-		"missing key":   consultStampValue(map[string]string{"asker_grade": "A"}),
-		"empty family":  consultStampValue(map[string]string{"asker_grade": "A", "asker_family": "", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": ""}),
-		"unknown keys":  consultStampValue(map[string]string{"asker_grade": "A", "asker_family": "anthropic", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": "", "extra": "x"}),
+		"empty value":    "",
+		"not base64url":  "eyJh*b",
+		"not an object":  "W10",
+		"missing key":    consultStampValue(map[string]string{"asker_grade": "A"}),
+		"empty family":   consultStampValue(map[string]string{"asker_grade": "A", "asker_family": "", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": ""}),
+		"unknown keys":   consultStampValue(map[string]string{"asker_grade": "A", "asker_family": "anthropic", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": "", "extra": "x"}),
+		"control char":   consultStampValue(map[string]string{"asker_grade": "A", "asker_family": "anthropic\n", "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": ""}),
+		"value too long": consultStampValue(map[string]string{"asker_grade": "A", "asker_family": strings.Repeat("f", consultStampValueMax+1), "grade_source": "flag", "floor": "A+", "used_floor": "A+", "fallback": ""}),
 	} {
 		if _, err := parseConsultStamp(bad); err == nil {
 			t.Fatalf("%s: parse accepted %q", name, bad)
