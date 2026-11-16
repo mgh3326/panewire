@@ -693,7 +693,7 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 	for _, pane := range swept {
 		excludedPanes[pane.Pane] = true
 	}
-	s.reportStalePanes(s.stalePanes(candidates, agents, now, excludedPanes))
+	s.reportStalePanes(s.stalePanes(candidates, agents, now, ownerAge, excludedPanes))
 	return swept, nil
 }
 
@@ -1282,19 +1282,30 @@ func paneSweepStaleStatus(j Job, agents []Agent) bool {
 // the sweep never closes is never counted, and the count can reach zero — that
 // this pass did not close or keep for a reason that is not a failure
 // (excludedPanes: an open PR the author is still working, a live task, another
-// agent's row, a pane the close saw reassigned), whose row herdr shows not
-// working, and whose pane the close's ownership proof accepts. The job's own
-// end is paneSweepClosed, the pass's end predicate: a terminal job that does
-// not close it (a loss with no quota hand-over, a job.joined) is judged by its
-// live task and may be kept legitimately, which must not latch the alarm.
-// Ownership is decided by paneOwnershipProof, the one predicate closePane uses
-// for the close, so a pane the close refuses is never counted; the status rule
-// is the alarm's own (idle/done). It is the number the hub alarms on (hk 4904,
-// hk 4919): a host collecting finished panes.
-func (s *TaskPaneSweeper) stalePanes(candidates []Job, agents []Agent, now time.Time, excludedPanes map[string]bool) int {
+// agent's row, a pane the close saw reassigned), whose close deadline has
+// passed, whose row herdr shows not working, and whose pane the close's
+// ownership proof accepts. The job's own end is paneSweepClosed, the pass's end
+// predicate: a terminal job that does not close it (a loss with no quota
+// hand-over, a job.joined) is judged by its live task and may be kept
+// legitimately, which must not latch the alarm. The deadline is the pass's own
+// (ownerAge, or a kept pane's day): a hub may order a longer age than the
+// alarm's day, and a pane the sweep is still correctly waiting on is not one it
+// failed to collect (hk 4919). Ownership is decided by paneOwnershipProof, the
+// one predicate closePane uses for the close, so a pane the close refuses is
+// never counted; the status rule is the alarm's own (idle/done). It is the
+// number the hub alarms on (hk 4904, hk 4919): a host collecting finished
+// panes.
+func (s *TaskPaneSweeper) stalePanes(candidates []Job, agents []Agent, now time.Time, ownerAge time.Duration, excludedPanes map[string]bool) int {
 	count := 0
 	for _, j := range candidates {
 		if !paneSweepClosed(j) || j.At.IsZero() || now.Sub(j.At) < paneSweepStaleAge || excludedPanes[j.Pane] {
+			continue
+		}
+		deadline := ownerAge
+		if j.Keep {
+			deadline = paneSweepKeepAge
+		}
+		if now.Sub(s.paneSweepEndAt(j, now)) < deadline {
 			continue
 		}
 		if paneSweepStaleStatus(j, agents) && paneOwnershipProof(j, agents) == "" {

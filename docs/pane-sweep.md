@@ -261,9 +261,12 @@ applies: the grace's name/tab match (`paneSweepMatches`) is not, because the
 close past the deadline does not consult it, so a row whose tab or name drifted
 while the proof still owns it counts when its close failed. Per-reason counts in
 `panewire_panes.prom` still name those refusals; they are the diagnostic gauge,
-not the alarm. A day is past every close deadline a candidate has (an hour, or a
-kept pane's day), so a stale pane is one the sweep failed to close. The job's
-own end is the predicate, not any terminal event: a job whose terminal record
+not the alarm. The count also requires the candidate's own close deadline to
+have passed — the pass's age (an hour locally, or the hub's `--pane-sweep-age`,
+up to 365 days) or a kept pane's day — so a sweep age longer than the alarm's
+day never makes the alarm fire on a pane the sweep is still waiting on. A stale
+pane is therefore one the sweep should already have closed. The job's own end
+is the predicate, not any terminal event: a job whose terminal record
 does not end it — an implementer loss with no quota hand-over, a `job.joined` —
 is judged by its live task and may be kept legitimately, which must never latch
 the alarm. So is a pane the pass kept for a reason that is not a failure: a
