@@ -55,6 +55,22 @@ func TestEndedSweepKeepsAWorkingPaneWithNoRecordedSession(t *testing.T) {
 	}
 }
 
+// `panewire reap` closes a row that is blocked or unknown, not only idle/done,
+// and it keeps only a working one. The no-session fallback follows it, or such
+// a pane would be kept as session_unrecorded for as long as the job is gone.
+func TestEndedSweepClosesABlockedPaneWithNoRecordedSession(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("r", "reviewer", "", map[string]any{
+		"harness_session": map[string]any{"kind": "cmd", "id": "unknown", "source": "unavailable"},
+	})
+	f.status[pane] = "blocked"
+	putEvent(t, f.a, "r", "job.completed", map[string]any{})
+	closes := f.endedSweep(61, time.Hour)
+	if len(closes) != 1 || len(f.closed()) != 1 {
+		t.Fatalf("a blocked pane with no recorded session stayed open: %+v closed=%v info=%v", closes, f.closed(), f.info)
+	}
+}
+
 // hk's secret guard refuses a reviewer's screen for good: the same bytes fail
 // on every pass. The whole screen is kept in the job directory and the pane
 // closes, instead of holding the finished pane on the host for days.
@@ -135,6 +151,26 @@ func TestEndedSweepReportsItsStaleOpenPanes(t *testing.T) {
 	h.endedSweep(1441, time.Hour)
 	if len(waiting) != 1 || waiting[0] != 0 {
 		t.Fatalf("a job the sweep does not end was reported stale: %v info=%v", waiting, h.info)
+	}
+
+	// A completed author kept for its open PR is the other deliberate, unbounded
+	// keep: the pass keeps that pane every time until the PR merges, so counting
+	// it would latch the alarm on a host the sweep is handling correctly.
+	p := newPaneSweepFixture(t)
+	git := newSweepGitFake(t)
+	p.withGit(git)
+	var openPR []int
+	p.sweeper.EndedOpen = func(open int) { openPR = append(openPR, open) }
+	cwd := git.worktree(t, "w")
+	p.job("w", "implementer", "42", map[string]any{"cwd": cwd})
+	putEvent(t, p.a, "w", "job.completed", map[string]any{})
+	p.prChanges["42"] = []PRChange{{Number: 9, State: "open", Head: paneSweepTestHead, Repo: "mgh3326/panewire"}}
+	p.endedSweep(1441, time.Hour)
+	if len(p.closed()) != 0 {
+		t.Fatalf("a completed author on an open PR was closed: %v info=%v", p.closed(), p.info)
+	}
+	if len(openPR) != 1 || openPR[0] != 0 {
+		t.Fatalf("a pane kept for its open PR was reported stale: %v info=%v", openPR, p.info)
 	}
 }
 

@@ -104,12 +104,13 @@ uses, because there is no session to compare. It recorded none when it predates
 the field, or when the spawner could not read the pane's session and wrote the
 placeholder `id: "unknown"` with `source: "unavailable"`
 (`internal/fleet/harness_session.go`). The fallback needs the row to carry the
-job's exact name and tab and to be not working — `idle` or `done`. A row that
-fails either keeps the pane as `reason=session_unrecorded`, past the deadline
-too: a renamed row is another agent's, and a working one is a pane still in use.
-Unlike `paneSweepMatches`, an unnamed row that merely sits in the job's worktree
-does not satisfy it: with no session, the name is the only identity the close
-has.
+job's exact name and tab and not to be working — every status but `working`, as
+`panewire reap` decides, so a `blocked` or `unknown` row closes and only a
+`working` one keeps the pane. A row that fails any of the three keeps the pane
+as `reason=session_unrecorded`, past the deadline too: a renamed row is another
+agent's, and a working one is a pane still in use. Unlike `paneSweepMatches`, an
+unnamed row that merely sits in the job's worktree does not satisfy it: with no
+session, the name is the only identity the close has.
 
 Merging the placeholder as if it were a session is why the sweep left ended
 reviewer panes open on desktop (hk 4904): `unknown` matched no live row, so
@@ -243,15 +244,20 @@ the count the hub alarms on (hk 4904).
 
 A **stale pane** is one the pass admits as a candidate whose job its own record
 ends (`paneSweepClosed`) at least 24 hours back, whose row herdr lists under the
-job's name and shows not working (`idle` or `done`), and which this pass did not
-close. A day is past every close deadline a candidate has (an hour, or a kept
-pane's day), so a stale pane is one the sweep failed to close. The job's own end
-is the predicate, not any terminal event: a job whose terminal record does not
-end it — an implementer loss with no quota hand-over, a `job.joined` — is judged
-by its live task and may be kept legitimately, which must never latch the alarm.
-The count is taken after the pass's closes, so a pane closed in the pass is not
-reported and the hub is not alarmed over a pane that is already gone. A pass
-that could not read herdr reports nothing and leaves the last count standing.
+job's name and shows not working (`idle` or `done`), and which this pass neither
+closed nor kept for a reason that is not a failure. A day is past every close
+deadline a candidate has (an hour, or a kept pane's day), so a stale pane is one
+the sweep failed to close. The job's own end is the predicate, not any terminal
+event: a job whose terminal record does not end it — an implementer loss with no
+quota hand-over, a `job.joined` — is judged by its live task and may be kept
+legitimately, which must never latch the alarm. So is a pane the pass kept for
+a reason that is not a failure: a completed author waiting on its open PR
+(`open_pr`), an implementer with no task (`no_task`), a pane inside its grace.
+Those are deliberate keeps that hold for as long as their reason does, and
+counting them would keep the alarm raised on a host the sweep is handling
+correctly. The count is taken after the pass's closes, so a pane closed in the
+pass is not reported either. A pass that could not read herdr reports nothing
+and leaves the last count standing.
 
 The pass hands the count to the node, which publishes it on its heartbeat as
 `ended_panes` — only to a hub that advertised `hub.features` `ended_panes`,
