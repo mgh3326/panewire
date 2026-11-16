@@ -76,7 +76,9 @@ func validLegacyJobID(id string) bool {
 // settles the name (a case-sensitive volume may hold both spellings). The
 // legacy CLI writes events into that directory, so a different spelling would
 // append one job's completion, escalation or join to another job's events
-// (hk 4824).
+// (hk 4824). A symlink entry counts as a candidate even though it does not
+// report IsDir: a case-insensitive lookup follows it into the link target's
+// events, so refusing it matches the stall and reap paths (hk 4834).
 func jobDirCaseVariant(jobsRoot, job string) string {
 	entries, err := os.ReadDir(jobsRoot)
 	if err != nil {
@@ -84,7 +86,7 @@ func jobDirCaseVariant(jobsRoot, job string) string {
 	}
 	variant := ""
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
 			continue
 		}
 		name := entry.Name()

@@ -202,7 +202,8 @@ func caseInsensitiveVolume(t *testing.T, dir string) bool {
 	return err == nil
 }
 
-// The legacy guard only considers directories, and an exact directory settles
+// The legacy guard considers directories and symlinks (which may link to one)
+// but not regular files, and an exact directory settles
 // the name: a file must not block its case variant, and on a case-sensitive
 // volume coexisting spellings keep their own directories (hk 4824 review).
 func TestJobDirCaseVariantRules(t *testing.T) {
@@ -224,6 +225,15 @@ func TestJobDirCaseVariantRules(t *testing.T) {
 	if got := jobDirCaseVariant(root, "build"); got != "" {
 		t.Fatalf("an exact directory did not settle the name: variant %q", got)
 	}
+	// A symlink reports its own type, so it must still count as a candidate:
+	// a case-insensitive lookup follows it into the link target's events.
+	linkRoot := t.TempDir()
+	if err := os.Symlink(root, filepath.Join(linkRoot, "build")); err != nil {
+		t.Fatal(err)
+	}
+	if got := jobDirCaseVariant(linkRoot, "Build"); got != "build" {
+		t.Fatalf("a symlink named as a case variant was skipped: variant %q, want build", got)
+	}
 	if caseInsensitiveVolume(t, root) {
 		return
 	}
@@ -232,5 +242,71 @@ func TestJobDirCaseVariantRules(t *testing.T) {
 	}
 	if got := jobDirCaseVariant(root, "build"); got != "" {
 		t.Fatalf("coexisting exact directory was overridden by its variant: %q", got)
+	}
+}
+
+// hk 4834: a symlink entry reports its own type, so a link named as a case
+// variant of the job must refuse like a directory. On a case-insensitive
+// volume the legacy verbs would otherwise resolve the spelling through the
+// link and append the record to the link target's events, which may belong to
+// another job.
+func TestJobCLIRefusesCaseVariantSymlinkOfJobDir(t *testing.T) {
+	root := t.TempDir()
+	jobs := filepath.Join(root, "jobs")
+	target := filepath.Join(root, "other-job")
+	events := filepath.Join(target, "events")
+	if err := os.MkdirAll(events, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Seed the other job's metadata so an unrefused verb would append.
+	for name, body := range map[string]string{
+		"00001-job.claim.json":   `{"kind":"job.claim","payload":{"agent_label":"other-label","owner_lane":"owner-lane","parent_lane":"parent-lane","pane_id":"w3:p9","role":"builder"}}`,
+		"00002-job.spawned.json": `{"kind":"job.spawned","payload":{"label":"other","owner_lane":"owner-lane","pane_id":"w3:p9"}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(jobs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(jobs, "build")); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(root, "report.md")
+	if err := os.WriteFile(report, []byte("done\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARBITER_INBOX_ROOT", jobs)
+	t.Setenv("HOSTNAME", "fixture-host")
+	t.Setenv("HANDOFFKEEP_BIN", filepath.Join(root, "absent"))
+	t.Setenv("HANDOFFKEEP_URL", "")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(root, "absent-hk.env"))
+	t.Setenv("PANEWIRE_SOCKET", filepath.Join(root, "absent.sock"))
+
+	before, _ := os.ReadDir(events)
+	refusals := [][]string{
+		{"done", "Build", "--report", report},
+		{"escalate", "Build", "--question", "q"},
+		{"joined", "Build", "--pr", "https://example/pull/1", "--head", "abc1234", "--report", report},
+	}
+	// As in TestJobCLIRefusesCaseVariantOfExistingJobDir, close is checked only
+	// where the spelling would resolve to a local events dir.
+	if caseInsensitiveVolume(t, jobs) {
+		refusals = append(refusals, []string{"close", "Build", "--lane", "lane-a", "--outcome", "completed", "--reason", "done"})
+	}
+	for _, args := range refusals {
+		var stdout, stderr bytes.Buffer
+		if rc := runJobCLI(args, &stdout, &stderr, CLIConfig{}); rc != ExitUsage {
+			t.Fatalf("%v rc=%d want %d stderr=%q", args, rc, ExitUsage, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "differs only in letter case") {
+			t.Fatalf("%v was not refused by the case guard: %q", args, stderr.String())
+		}
+	}
+	after, _ := os.ReadDir(events)
+	if len(after) != len(before) {
+		t.Fatalf("a refused spelling wrote through the symlink into the target's events: before=%d after=%d", len(before), len(after))
 	}
 }
