@@ -196,20 +196,26 @@ func TestEndedSweepKeepsAPaneWhenHkFailsTheScreenUpload(t *testing.T) {
 
 // With no recorded session the row's name is the only identity the close has: an
 // unnamed pane that sits in the job's worktree is not the job's agent, so the
-// fallback refuses it, as panewire reap does.
+// fallback refuses it, as panewire reap does. The stale count uses that same
+// proof, or a pane the sweep will keep for good would latch the hub's alarm.
 func TestEndedSweepKeepsANamelessPaneInTheJobsWorktree(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	cwd := t.TempDir()
+	var reported []int
+	f.sweeper.EndedOpen = func(open int) { reported = append(reported, open) }
 	pane := f.job("r", "reviewer", "", map[string]any{
 		"cwd":             cwd,
 		"harness_session": map[string]any{"kind": "cmd", "id": "unknown", "source": "unavailable"},
 	})
 	f.names[pane], f.cwds[pane] = "", cwd
 	putEvent(t, f.a, "r", "job.completed", map[string]any{})
-	if closes := f.endedSweep(61, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
+	if closes := f.endedSweep(1441, time.Hour); len(closes) != 0 || len(f.closed()) != 0 {
 		t.Fatalf("a nameless pane in the job's worktree was closed: %+v closed=%v", closes, f.closed())
 	}
 	if !f.infoHas("task pane kept", "job=r", "reason=session_unrecorded") {
 		t.Fatalf("info lines = %q", f.info)
+	}
+	if len(reported) != 1 || reported[0] != 0 {
+		t.Fatalf("a pane the close refuses to own was reported stale: %v info=%v", reported, f.info)
 	}
 }

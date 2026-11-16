@@ -1230,24 +1230,40 @@ const paneSweepMetricFile = "panewire_panes.prom"
 // environment sets this publishes the same body there at mode 0644.
 const paneSweepTextfileDirEnv = "FLEET_TEXTFILE_DIR"
 
+// paneOwnedIdle reports that the row herdr lists for the job's pane is the
+// job's own by the close's ownership proof and shows not working. It is the
+// stale count's test, so a pane the close refuses to own — a session that is
+// not the job's, a nameless worktree row with no recorded session — is never
+// counted: the sweep keeps such a pane on every pass, and counting it would
+// latch the hub alarm on a pane that never closes (hk 4904).
+func paneOwnedIdle(j Job, agents []Agent) bool {
+	for _, ag := range agents {
+		if ag.Pane != j.Pane {
+			continue
+		}
+		return slices.Contains(paneSweepIdleStatus, ag.Status) && paneOwnershipProof(j, []Agent{ag}) == ""
+	}
+	return false
+}
+
 // stalePanes counts the panes this node still holds for jobs whose own record
 // ended at least paneSweepStaleAge ago: the pass's own candidates — so a job
 // the sweep never closes is never counted, and the count can reach zero — that
 // this pass did not close or keep for a reason that is not a failure
 // (excludedPanes: an open PR the author is still working, a live task, another
-// agent's row), and whose pane herdr lists under the job's name and shows not
-// working. The job's own end is paneSweepClosed, the pass's end predicate: a
-// terminal job that does not close it (a loss with no quota hand-over, a
-// job.joined) is judged by its live task and may be kept legitimately, which
-// must not latch the alarm. It is the number the hub alarms on (hk 4904): a
-// host collecting finished panes.
+// agent's row), and whose pane herdr lists as the job's own and not working.
+// The job's own end is paneSweepClosed, the pass's end predicate: a terminal
+// job that does not close it (a loss with no quota hand-over, a job.joined) is
+// judged by its live task and may be kept legitimately, which must not latch
+// the alarm. It is the number the hub alarms on (hk 4904): a host collecting
+// finished panes.
 func (s *TaskPaneSweeper) stalePanes(candidates []Job, agents []Agent, now time.Time, excludedPanes map[string]bool) int {
 	count := 0
 	for _, j := range candidates {
 		if !paneSweepClosed(j) || j.At.IsZero() || now.Sub(j.At) < paneSweepStaleAge || excludedPanes[j.Pane] {
 			continue
 		}
-		if s.idle(j, agents) {
+		if paneOwnedIdle(j, agents) {
 			count++
 		}
 	}

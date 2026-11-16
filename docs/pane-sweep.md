@@ -243,21 +243,24 @@ nothing said. Each pass therefore also counts the panes a host is collecting —
 the count the hub alarms on (hk 4904).
 
 A **stale pane** is one the pass admits as a candidate whose job its own record
-ends (`paneSweepClosed`) at least 24 hours back, whose row herdr lists under the
-job's name and shows not working (`idle` or `done`), and which this pass neither
-closed nor kept for a reason that is not a failure. A day is past every close
-deadline a candidate has (an hour, or a kept pane's day), so a stale pane is one
-the sweep failed to close. The job's own end is the predicate, not any terminal
-event: a job whose terminal record does not end it — an implementer loss with no
-quota hand-over, a `job.joined` — is judged by its live task and may be kept
-legitimately, which must never latch the alarm. So is a pane the pass kept for
-a reason that is not a failure: a completed author waiting on its open PR
-(`open_pr`), an implementer with no task (`no_task`), a pane inside its grace.
-Those are deliberate keeps that hold for as long as their reason does, and
-counting them would keep the alarm raised on a host the sweep is handling
-correctly. The count is taken after the pass's closes, so a pane closed in the
-pass is not reported either. A pass that could not read herdr reports nothing
-and leaves the last count standing.
+ends (`paneSweepClosed`) at least 24 hours back, whose row herdr lists as the
+job's own by the same ownership proof the close uses and shows not working
+(`idle` or `done`), and which this pass neither closed nor kept for a reason that
+is not a failure. Using the close's proof matters: a pane the close refuses to
+own — another session, or a nameless worktree row with no recorded session —
+would otherwise be counted on every pass while the sweep keeps it for good. A
+day is past every close deadline a candidate has (an hour, or a kept pane's
+day), so a stale pane is one the sweep failed to close. The job's own end is the
+predicate, not any terminal event: a job whose terminal record does not end it —
+an implementer loss with no quota hand-over, a `job.joined` — is judged by its
+live task and may be kept legitimately, which must never latch the alarm. So is a
+pane the pass kept for a reason that is not a failure: a completed author
+waiting on its open PR (`open_pr`), an implementer with no task (`no_task`), a
+pane inside its grace. Those are deliberate keeps that hold for as long as their
+reason does, and counting them would keep the alarm raised on a host the sweep
+is handling correctly. The count is taken after the pass's closes, so a pane
+closed in the pass is not reported either. A pass that could not read herdr
+reports nothing and leaves the last count standing.
 
 The pass hands the count to the node, which publishes it on its heartbeat as
 `ended_panes` — only to a hub that advertised `hub.features` `ended_panes`,
