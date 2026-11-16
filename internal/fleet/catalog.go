@@ -396,7 +396,12 @@ func decodeCatalogRows(raw []json.RawMessage) ([]CatalogEntry, []string, []int, 
 			continue
 		}
 		if !catalogPool(row.Pool) {
-			warnings = append(warnings, fmt.Sprintf("unknown pool [%s] ignored", row.Pool))
+			// A retired row of a pool that is no longer configured is the
+			// expected end state (the catalog has no delete), so it is
+			// dropped without a warning; only a live row is worth one.
+			if row.RetiredAt == nil {
+				warnings = append(warnings, fmt.Sprintf("unknown pool [%s] ignored", row.Pool))
+			}
 			continue
 		}
 		key := row.Profile + "@" + row.Effort
