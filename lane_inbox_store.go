@@ -1001,6 +1001,12 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 
 // laneInboxPendingBatchesQuery is the batch page without its order (SQLite's
 // rowid or Postgres's seq) and LIMIT. Each count is the old OR over the two
+// laneInboxBatchPageLimit is how many pending batches one page read returns.
+// A full page notes a change of its own (see pendingBatchesForContext): the
+// rows it sent or retired are gone from the page, so a backlog must drain one
+// page per tick, not one page per fallback (hk 4910).
+const laneInboxBatchPageLimit = 100
+
 // claim columns split into two disjoint sums: a correlated OR cannot use an
 // index on either column, so every pending batch used to re-read the whole of
 // lane_inbox (hk 4889). A row claimed through digest_batch counts in the first
@@ -1025,13 +1031,15 @@ func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
 func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]laneInboxBatch, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, laneInboxPendingBatchesQuery+s.batchOrder()+` LIMIT 100`)
+	rows, err := s.db.QueryContext(ctx, laneInboxPendingBatchesQuery+s.batchOrder()+` LIMIT `+strconv.Itoa(laneInboxBatchPageLimit))
 	if err != nil {
 		return nil, err
 	}
 	batches := []laneInboxBatch{}
 	var retired []string
+	scanned := 0
 	for rows.Next() {
+		scanned++
 		var b laneInboxBatch
 		var total, active int
 		if err := rows.Scan(&b.ID, &b.Lane, &b.Text, &total, &active); err != nil {
@@ -1060,6 +1068,13 @@ func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]lan
 		if err := s.markBatchSent(id); err != nil {
 			return nil, err
 		}
+	}
+	if scanned == laneInboxBatchPageLimit {
+		// A full page may leave more pending, and this pass removed the rows it
+		// took (sent, or retired above). Note the change so the next pass reads
+		// at once instead of waiting for the fallback: otherwise a backlog of
+		// more than one page would drain one page a second (hk 4910 review).
+		s.noteBatchesChanged()
 	}
 	return batches, nil
 }

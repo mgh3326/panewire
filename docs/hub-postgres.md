@@ -68,7 +68,10 @@ way.
   of them (hk 4910): it names rows no clock creates or retires, so the flush
   reads it only after a write notes a change — a batch or quarantine row, or a
   claim, ack, read or supersede on an item it counts — plus a 1 s fallback for
-  a writer the gate does not know about. Read every 100 ms tick it cost eleven
+  a writer the gate does not know about. A page that comes back full (100
+  batches) notes a change of its own, because the pass removed what it took;
+  a backlog therefore drains one page per 100 ms tick, not one per second.
+  Read every 100 ms tick it cost eleven
   full scans a second of both batch tables; on live that was 441 scans of each
   in 40 s, 93,492 rows of `lane_inbox_batch_quarantine` and 281,358 of
   `lane_inbox_batches`.
