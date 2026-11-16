@@ -172,6 +172,23 @@ func TestEndedSweepReportsItsStaleOpenPanes(t *testing.T) {
 	if len(openPR) != 1 || openPR[0] != 0 {
 		t.Fatalf("a pane kept for its open PR was reported stale: %v info=%v", openPR, p.info)
 	}
+
+	// A row that carries another session is the close's to keep and the
+	// count's to leave alone: the sweep will never take that pane, so counting
+	// it would hold the alarm up for as long as the other agent sits there.
+	m := newPaneSweepFixture(t)
+	var foreign []int
+	m.sweeper.EndedOpen = func(open int) { foreign = append(foreign, open) }
+	fp := m.job("r", "reviewer", "")
+	m.sessions[fp] = `{"value":"sess-someone-else"}`
+	putEvent(t, m.a, "r", "job.completed", map[string]any{})
+	m.endedSweep(1441, time.Hour)
+	if !m.infoHas("task pane kept", "job=r", "reason=session_mismatch") {
+		t.Fatalf("info lines = %q", m.info)
+	}
+	if len(foreign) != 1 || foreign[0] != 0 {
+		t.Fatalf("a pane another session holds was reported stale: %v info=%v", foreign, m.info)
+	}
 }
 
 // hk answering an error about the moment — here a 500 — may succeed on the next
