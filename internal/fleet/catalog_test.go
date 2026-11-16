@@ -161,6 +161,23 @@ func TestCatalogDecodeDropsUnknownPool(t *testing.T) {
 	}
 }
 
+// A retired row of an unknown pool is dropped like a live one, but silently:
+// restoring the warning for retired rows fails this test.
+func TestCatalogDecodeDropsRetiredUnknownPoolSilently(t *testing.T) {
+	raw := []json.RawMessage{
+		json.RawMessage(`{"profile":"opus","effort":"high","model_id":"m","pool":"claude","grade":"A","gate":"default"}`),
+		json.RawMessage(`{"profile":"gone","effort":"","model_id":"m","pool":"upstage","grade":"A","gate":"default","retired_at":"2026-11-16T00:00:00Z"}`),
+		json.RawMessage(`{"profile":"mystery","effort":"high","model_id":"m","pool":"omniroute","grade":"C","gate":"default"}`),
+	}
+	rows, warnings, keep, err := decodeCatalogRows(raw)
+	if err != nil || len(rows) != 1 || len(keep) != 1 || rows[0].Profile != "opus" {
+		t.Fatalf("unknown pool kept: rows=%+v keep=%v err=%v", rows, keep, err)
+	}
+	if len(warnings) != 1 || warnings[0] != "unknown pool [omniroute] ignored" {
+		t.Fatalf("warnings = %v", warnings)
+	}
+}
+
 func TestCatalogDecodeSkipsMalformedRows(t *testing.T) {
 	raw := []json.RawMessage{
 		json.RawMessage(`{"profile":"opus","effort":"high","model_id":"m","pool":"claude","grade":"A","gate":"default"}`),
