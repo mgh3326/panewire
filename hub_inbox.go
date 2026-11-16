@@ -279,6 +279,8 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		h.logger.Error("inbox persistence failed; event remains unacknowledged", "kind", kind, "lane", lane)
 		return relayLaneEventResult{PersistFailed: true}, true
 	}
+	// The inbox row holds the whole event; the typed head points at it.
+	event.inboxID = item.ID
 	// The durable decision wins over changed config or a changed retry body.
 	event.DeliveryClass = item.Class
 	if wake && item.Fresh && item.Class == "inbox" {

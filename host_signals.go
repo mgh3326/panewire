@@ -139,17 +139,23 @@ func (h *HubServer) observeHostSignalsLocked(record *hubNodeRecord, signals *Hub
 	record.powerSource, record.powerAt = signals.PowerSource, received
 }
 
-// queueFeatures tells a node once per connection what this hub understands. A
-// dropped event stays unsent, so the next heartbeat retries it.
+// queueFeatures tells a node once per connection what this hub understands. It
+// writes the frame at once, through the connection's writer lock, so a frame
+// the caller writes next (the pong to a ping) cannot overtake it. A failed write
+// leaves the frame unsent, and the next heartbeat or ping retries it.
 func (agent *hubAgent) queueFeatures() {
-	if agent == nil || agent.features == nil || agent.featuresSent.Load() {
+	// A fixture agent has no connection to write to.
+	if agent == nil || agent.conn == nil || agent.featuresSent.Load() {
 		return
 	}
-	select {
-	case agent.features <- hubFeaturesEvent{Type: "hub.features", Features: []string{hubFeatureHostSignals, hubFeatureReadiness, hubFeatureLaneEventPane, hubFeaturePaneCaptureDoc, hubFeatureHostActivity, hubFeatureCheckoutPull, hubFeatureLaunchProof}}:
+	if err := agent.writeJSON(hubFeaturesFrame()); err == nil {
 		agent.featuresSent.Store(true)
-	default:
 	}
+}
+
+// hubFeaturesFrame is the hub.features frame this hub sends.
+func hubFeaturesFrame() hubFeaturesEvent {
+	return hubFeaturesEvent{Type: "hub.features", Features: []string{hubFeatureHostSignals, hubFeatureReadiness, hubFeatureLaneEventPane, hubFeatureLaneEventLong, hubFeaturePaneCaptureDoc, hubFeatureHostActivity, hubFeatureCheckoutPull, hubFeatureLaunchProof}}
 }
 
 // hostSignalsForHeartbeat collects the signals when this connection's hub

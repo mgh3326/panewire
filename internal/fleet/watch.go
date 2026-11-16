@@ -15,8 +15,10 @@ import (
 	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
-// laneEventMaxBytes bounds one events-lane record, as the relay scanner does.
-const laneEventMaxBytes = 16 << 10
+// LaneEventMaxBytes bounds one events-lane record file, as the relay scanner
+// does. It is panewire's laneEventFrameMax (text_bounds.go): 16 KiB of lane.event
+// text, six-fold for JSON escapes, plus the envelope. A root test pins the two.
+const LaneEventMaxBytes = 6*(16<<10) + 8<<10
 
 // laneTerminalMarker is the head of a lane event that ends a job. The optional
 // [label] prefix is the form most workers use; a marker later in the text, such
@@ -604,6 +606,29 @@ func (a *App) workerSignalledEnd(j Job) bool {
 // or after since. Lane events carry no job id, so the pane that `panewire emit`
 // stamps is what ties an event to a job. An unreadable record is not a signal.
 func (a *App) paneEmittedMarker(pane string, since time.Time) bool {
+	return a.paneEmittedMatching(pane, since, laneTerminalMarker)
+}
+
+// StallAttemptState identifies the current attempt and reports its completion
+// or escalation using the watcher's lane-event rules.
+func (a *App) StallAttemptState(job string) (string, bool, error) {
+	j, err := a.job(job)
+	if err != nil {
+		return "", false, err
+	}
+	var since time.Time
+	var attempt string
+	for _, ev := range j.Events {
+		switch ev.Kind {
+		case "job.spawned", "job.reclaim", "job.reprompted", "job.decision_resumed":
+			since = ev.when
+			attempt = ev.name
+		}
+	}
+	return attempt, workerEscalated(j) || a.paneEmittedMatching(j.Pane, since, laneTerminalMarker) || a.paneEmittedMatching(j.Pane, since, laneDecisionMarker), nil
+}
+
+func (a *App) paneEmittedMatching(pane string, since time.Time, marker *regexp.Regexp) bool {
 	if pane == "" {
 		return false
 	}
@@ -616,7 +641,7 @@ func (a *App) paneEmittedMarker(pane string, since time.Time) bool {
 	since = since.Truncate(time.Second)
 	for _, entry := range entries {
 		info, e := entry.Info()
-		if e != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".json" || info.Size() > laneEventMaxBytes || info.ModTime().Before(since) {
+		if e != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".json" || info.Size() > LaneEventMaxBytes || info.ModTime().Before(since) {
 			continue
 		}
 		body, e := os.ReadFile(filepath.Join(dir, entry.Name()))
@@ -628,7 +653,7 @@ func (a *App) paneEmittedMarker(pane string, since time.Time) bool {
 			Pane string `json:"pane_id"`
 			Text string `json:"text"`
 		}
-		if json.Unmarshal(body, &record) == nil && record.Kind == "lane.event" && record.Pane == pane && laneTerminalMarker.MatchString(record.Text) {
+		if json.Unmarshal(body, &record) == nil && record.Kind == "lane.event" && record.Pane == pane && marker.MatchString(record.Text) {
 			return true
 		}
 	}
@@ -668,7 +693,7 @@ func (a *App) updateDecision(ctx context.Context, j Job) (*decisionWait, error) 
 	entries, _ := os.ReadDir(dir)
 	for _, entry := range entries {
 		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".json" || info.Size() > laneEventMaxBytes || info.ModTime().Before(since.Truncate(time.Second)) {
+		if err != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".json" || info.Size() > LaneEventMaxBytes || info.ModTime().Before(since.Truncate(time.Second)) {
 			continue
 		}
 		body, err := os.ReadFile(filepath.Join(dir, entry.Name()))

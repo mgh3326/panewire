@@ -44,7 +44,7 @@ const (
 	// hubIndexMaxLaneFiles bounds the lane-event directory listing kept.
 	hubIndexMaxLaneFiles = 200_000
 	// hubIndexMaxEventBytes is the largest event file the scanners read.
-	hubIndexMaxEventBytes = 16 << 10
+	hubIndexMaxEventBytes = laneEventFrameMax
 
 	hubIndexJobOverhead   = 512
 	hubIndexEventOverhead = 1024
@@ -68,6 +68,23 @@ type hubPaneBindingFact struct {
 	session   string
 	createdAt string
 	seq       int64
+}
+
+// paneBindingCandidate is one job's binding of a pane, with the facts that
+// decide between competing bindings of the same pane.
+type paneBindingCandidate struct {
+	jobID     string
+	session   string
+	live      bool
+	createdAt string
+	seq       int64
+}
+
+// betterPaneBinding reports whether cand beats best for its pane: a live
+// (un-ended) job over an ended one, otherwise the newer binding event.
+func betterPaneBinding(cand, best paneBindingCandidate) bool {
+	return (!best.live && cand.live) ||
+		(best.live == cand.live && (cand.createdAt > best.createdAt || (cand.createdAt == best.createdAt && cand.seq > best.seq)))
 }
 
 // hubJobReduction is the time-independent result of folding a job's events in
@@ -337,6 +354,20 @@ func (r hubJobReduction) scanned(activeCutoff, staleCutoff time.Time) (hubScanne
 	if r.paneID == "" && !r.lastEvent.IsZero() && r.lastEvent.Before(staleCutoff) {
 		return hubScannedJob{}, false
 	}
+	active, ok := r.activeJob()
+	if !ok {
+		return hubScannedJob{}, false
+	}
+	return hubScannedJob{job: active, lastEvent: r.lastEvent, paneID: r.paneID}, true
+}
+
+// activeJob is the reduction as the active job its claim names, without the
+// active-window gate: the caller holds another proof that the job still runs
+// (hk, hk 4836).
+func (r hubJobReduction) activeJob() (HubActiveJob, bool) {
+	if !validHubActiveJob(r.active) {
+		return HubActiveJob{}, false
+	}
 	active := r.active
 	active.Pane = r.paneID
 	active.Profile = r.profile
@@ -345,7 +376,7 @@ func (r hubJobReduction) scanned(activeCutoff, staleCutoff time.Time) (hubScanne
 		active.LastEventAt = r.lastEvent.UTC().Format(time.RFC3339)
 	}
 	normalizeHubActiveJobMetadata(&active)
-	return hubScannedJob{job: active, lastEvent: r.lastEvent, paneID: r.paneID}, true
+	return active, true
 }
 
 func newHubIndexedJob(id string, dir os.FileInfo, settled bool, load hubJobEventsLoad) *hubIndexedJob {
@@ -516,6 +547,66 @@ func (ix *hubInboxIndex) visitJobs(ctx context.Context, includeDormant bool, fn 
 	return nil
 }
 
+// oldJobsByPane returns, per pane, the job that pane's newest live binding
+// names, but only for panes whose job started before activeCutoff. It is the
+// stall safety net's candidate lookup past the active window (hk 4836).
+//
+// A job is returned with its events loaded even when it is dormant, because
+// the caller reads the claim and the spawn receipt; compaction keeps only a
+// dormant job's bindings. A job inside the window is the normal active-job
+// lookup's, and an ended job no longer holds its pane, so neither is returned.
+func (ix *hubInboxIndex) oldJobsByPane(ctx context.Context, activeCutoff time.Time) map[string]HubActiveJob {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	names, err := ix.jobNamesLocked()
+	if err != nil {
+		return nil
+	}
+	ix.gen++
+	best := make(map[string]paneBindingCandidate)
+	for _, id := range names {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return nil
+			}
+		}
+		job := ix.refreshJobLocked(id, false)
+		if job == nil {
+			continue
+		}
+		if job.dormant(activeCutoff) {
+			if !job.compact {
+				job = ix.compactJobLocked(job)
+			}
+		} else if job.compact {
+			if job = ix.refreshJobLocked(id, true); job == nil {
+				continue
+			}
+		}
+		for i := range job.bindings {
+			fact := job.bindings[i]
+			cand := paneBindingCandidate{jobID: job.id, session: fact.session, live: !job.ended, createdAt: fact.createdAt, seq: fact.seq}
+			if prev, ok := best[fact.pane]; ok && !betterPaneBinding(cand, prev) {
+				continue
+			}
+			best[fact.pane] = cand
+		}
+	}
+	out := make(map[string]HubActiveJob, len(best))
+	for pane, cand := range best {
+		job := ix.refreshJobLocked(cand.jobID, true)
+		if job == nil || job.ended || !job.reduction.claimTime.Before(activeCutoff) {
+			continue
+		}
+		active, ok := job.reduction.activeJob()
+		if !ok || active.Pane != pane {
+			continue
+		}
+		out[pane] = active
+	}
+	return out
+}
+
 // laneEvents is the lane-event scan over the index: the same files, filters and
 // order as reading events-lane afresh, with files parsed once.
 func (ix *hubInboxIndex) laneEvents(maxAge time.Duration) []hubScannedRelayEvent {
@@ -649,12 +740,12 @@ func readLaneEventFile(path string) (hubScannedRelayEvent, bool, int64, bool) {
 		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead, false
 	}
 	lane, eventID, text := event.ownerLane(), event.eventID(), event.text()
-	if !validInboxCause(event.Cause) || !validLaneReference(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimitSink {
+	if !validInboxCause(event.Cause) || !validLaneReference(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || (!event.Ceiling && len(text) > laneEventTextLimitSink) {
 		return hubScannedRelayEvent{}, false, hubIndexLaneOverhead, false
 	}
 	epoch := event.Epoch
 	if epoch == 0 {
 		epoch = 1
 	}
-	return hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Cause: event.Cause, Head: event.head(), PR: event.pr(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()}, true, hubIndexLaneOverhead + int64(len(contents)) + hubIndexEventOverhead, false
+	return hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Cause: event.Cause, Head: event.head(), PR: event.pr(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated(), Sink: !event.Ceiling}, true, hubIndexLaneOverhead + int64(len(contents)) + hubIndexEventOverhead, false
 }

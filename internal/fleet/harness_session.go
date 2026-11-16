@@ -40,6 +40,14 @@ func FindHarnessSession(agents []Agent, pane, kind string) HarnessSession {
 	return result
 }
 
+// LiveHarnessSession is the harness session herdr reports for pane and kind
+// now; Source is "unavailable" when it reports none. A caller that must prove
+// a pane still hosts the conversation a job spawned compares it with that
+// job's job.spawned harness_session (hk 4836).
+func (a *App) LiveHarnessSession(ctx context.Context, pane, kind string) HarnessSession {
+	return a.harnessSession(ctx, pane, kind)
+}
+
 func (a *App) harnessSession(ctx context.Context, pane, kind string) HarnessSession {
 	agents, _ := a.agents(ctx)
 	return FindHarnessSession(agents, pane, kind)

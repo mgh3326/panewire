@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -183,7 +184,8 @@ func TestDrainWakeOneLinePerIntervalAfterDrain(t *testing.T) {
 		{ID: 1, Project: "handoffkeep", State: "backlog"},
 		{ID: 2, Project: "handoffkeep", State: "unstarted"},
 		{ID: 3, Project: "other", State: "backlog"},
-		{ID: 4, Project: "handoffkeep", State: "developing"},
+		// Not in work (hk 4631 counts developing as in work): this test pins the interval.
+		{ID: 4, Project: "handoffkeep", State: "deployed"},
 	})
 	t4473SetInFlight(rig, t4473Lane, 1)
 	t4473Sweep(rig)
@@ -500,6 +502,58 @@ func TestDrainWakeFailedSaveIsRetried(t *testing.T) {
 	t4473Sweep(rig)
 	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
 		t.Fatalf("after a failed save and a restart, drain lines=%q, want exactly [%q]", got, t4473Line)
+	}
+}
+
+// hk 4631: the in-work count includes the hk tasks of the lane's project that
+// are developing or reviewing, not only the heartbeat's active jobs. The
+// heartbeat drops live jobs (its 32-entry cap, its idle retirement), so it can
+// read zero while hk still shows claimed work. The line waits until hk shows
+// none, then goes out.
+func TestDrainWakeWaitsForHkInWork(t *testing.T) {
+	busy := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+		{ID: 3, Project: "handoffkeep", State: "developing"},
+		{ID: 4, Project: "handoffkeep", State: "developing"},
+		{ID: 5, Project: "handoffkeep", State: "reviewing"},
+		// Awaiting an operator decision: blocked, so not in work.
+		{ID: 6, Project: "handoffkeep", State: "reviewing", AwaitingDecision: true},
+		{ID: 7, Project: "other", State: "developing"},
+	}
+	drainedView := []t4473Task{
+		{ID: 1, Project: "handoffkeep", State: "backlog"},
+		{ID: 2, Project: "handoffkeep", State: "unstarted"},
+		{ID: 3, Project: "handoffkeep", State: "deployed"},
+		{ID: 4, Project: "handoffkeep", State: "deployed"},
+		{ID: 5, Project: "handoffkeep", State: "deployed"},
+		{ID: 6, Project: "handoffkeep", State: "reviewing", AwaitingDecision: true},
+		{ID: 7, Project: "other", State: "developing"},
+	}
+	var drained atomic.Bool
+	// Before drained is set the hk fake answers from busy; after, from drainedView.
+	wrap := func(next http.Handler) http.Handler {
+		after := t4473Handler(next, drainedView)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if drained.Load() {
+				after.ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	rig, _ := t4473RigWith(t, busy, wrap)
+	t4473SetInFlight(rig, t4473Lane, 1)
+	t4473Sweep(rig)
+	t4473SetInFlight(rig, t4473Lane, 0)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 0 {
+		t.Fatalf("a drain line went out while hk shows three tasks in work: %q", got)
+	}
+	drained.Store(true)
+	t4473Sweep(rig)
+	if got := t4473Lines(rig); len(got) != 1 || got[0] != t4473Line {
+		t.Fatalf("after hk's work finished, drain lines=%q, want exactly [%q]", got, t4473Line)
 	}
 }
 

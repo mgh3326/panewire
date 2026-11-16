@@ -590,9 +590,10 @@ binary rejects a `placement.json` that sets `bridge_cost` or `free_floor`
 window of the release that reads these keys; until then leave the defaults
 (unset) in place. A config that still sets `claim_cost` or `all_loaded_below`
 loads on both sides. The fleet's `[placement.shadow]` keys `free_floor` and
-`bridge_cost` in `hosts.toml` are refused the same way by an older binary
-(the fleet commands and the spawn app then fail to start): set them only after
-every reader of that file has this release and delete them before a rollback
+`bridge_cost` and `claim_share` (hk 4841) in `hosts.toml` are refused the same
+way by an older binary (the fleet commands and the spawn app then fail to
+start): set them only after every reader of that file has this release and
+delete them before a rollback
 ([Fleet config](config.md#placement)).
 
 ### Telemetry
@@ -650,8 +651,8 @@ signal.
 hk 3650. The static `power` is not re-tuned by hand
 (`decision/2026-11-09/placement-measurement-direction` §1, §3). Instead, each
 time the spawn engine has ranked the hosts for a job (spawn selection
-ranks in `admitHostFirst`), it ranks the same hosts again under two
-alternative rules and writes one fleet event, `kind=placement_shadow`
+ranks in `admitHostFirst`), it ranks the same hosts again under the
+alternative rules in the arms table below and writes one fleet event, `kind=placement_shadow`
 ([observability](observability.md#fleet-events)). The arms are pure functions of
 the readings the live ranking already had: no extra call, the App's clock, and
 nothing they compute is read by the live path. A dry run records nothing. A
@@ -677,6 +678,7 @@ panic in an arm is caught and recorded as `shadow_error`; the spawn goes on.
 | `fixed` | Defect A: one load measure for every host, never mixed: the hub's CPU-busy fraction when any candidate has one (`load_measure=cpu_busy`, threshold `shadow.cpu_busy_over`, default `load_threshold`), else load5 per core for every host alike (`load5_per_core`; a host without a reading ranks as unknown). The local `max_load_ratio` guard keeps its own unit. Defect B: a host the hub marks unusable leaves the order, a slot-full host included (the fleet-state host list omits it, so the spawn engine keeps its name for the shadow only); the hub's decision (policy order = configuration order, local first; `shadow.hysteresis`, `shadow.free_floor`, the same rules as the hub's decision above; none for a tagged request) is applied when the hub did not already send one. The score is the hub's. |
 | `waste_first` | Not a host order, so it is not a key of `arms`: the account a pool-first order would have spent, recorded beside the host arms (hk 3651, [below](#the-waste_first-account-arm-hk-3651)). It does not enter the event `outcome`. |
 | `measured` | `fixed`, plus: one memory signal for admission and rank, the capability map, and each of CPU busy and load per core used once. Memory signal: the pressure level (normal, warn, critical) of a host that declares the `macos` capability when it sent one (the wire does not say which OS a pressure value is from, so any other host's pressure is ignored), else available memory (Linux `MemAvailable`/`MemTotal`; macOS Prometheus available); with the swap-in rate (node `swap_in_per_s`, else the Linux `pswpin` rate). Critical pressure, or available memory under `shadow.mem_refuse_below_pct`, refuses the host; a host the hub dropped only for its own memory floor is judged again by this signal when it is known; a host with no memory reading stays dropped. The score is rebuilt as `mem * swap * load * jobs * capability - bridged * bridge_cost * 100 / capability` (the `cpu` term is dropped: CPU busy already decides the bucket), without the hub's hold and burst bonuses; a host with no score signals keeps the hub's score. |
+| `claim` | `fixed`, with the claim term replaced (hk 4841): each host's score is its `free * power` (the `fixed` free, cpu term included) times `(1 - shadow.claim_share)` for each claim in the bridge window, in place of the live `bridge_cost * 100 / power` points per claim. The decision rules (free floor, hysteresis, all-loaded) are applied again to those scores. A claim removes the same share of a host's own headroom whatever its power: the live charge is a fixed number of points, which on power 12 is 83, against a `free * power` of at most 12. It enters the event `outcome` like the other host arms; live placement does not read it. |
 
 `capability` is `placement.capability.light.<host>` or
 `placement.capability.heavy.<host>`; a host with no entry for the class falls

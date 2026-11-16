@@ -200,6 +200,9 @@ func quotaStopHKFixture(policyAnswer, taskAnswer string, notes *int) quotaStopHK
 			return answer.Tasks[0], nil
 		},
 		tasks: func(context.Context, int64) ([]byte, error) { return []byte(taskAnswer), nil },
+		// No hk job record: as an unreachable or absent record, it vouches
+		// for no job older than the active window.
+		job: func(context.Context, string) (map[string]any, error) { return nil, os.ErrNotExist },
 		note: func(context.Context, string, string, string) error {
 			if notes != nil {
 				*notes++
@@ -221,6 +224,7 @@ func quotaStopHKDown(calls *int) quotaStopHK {
 		policy: func(context.Context) ([]byte, error) { return nil, down() },
 		task:   func(context.Context, string) ([]byte, error) { return nil, down() },
 		tasks:  func(context.Context, int64) ([]byte, error) { return nil, down() },
+		job:    func(context.Context, string) (map[string]any, error) { return nil, down() },
 		note:   func(context.Context, string, string, string) error { return down() },
 	}
 }

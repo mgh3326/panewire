@@ -173,7 +173,7 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	if !decodeDeliveryClass(fields, &event) || !decodeNotifyType(fields, &event) {
 		return hubJobEventPayload{}, false
 	}
-	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !validLaneReference(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) || len(event.Text) > laneEventTextLimitSink {
+	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !validLaneReference(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) {
 		return hubJobEventPayload{}, false
 	}
 	if raw, present := fields["epoch"]; present && (json.Unmarshal(raw, &event.Epoch) != nil || event.Epoch == 0) {

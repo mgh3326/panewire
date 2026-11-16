@@ -99,6 +99,19 @@ the job-completion wait again. A request still in flight at the bound exits 85,
 and one still `parked` exits 91 (see [exit codes](config.md)); the request stays
 queued on the hub either way. The bound uses the wall clock.
 
+Observe an accepted request with `panewire spawn status <request_id>` (`--json`
+for the record), never by rerunning `spawn`: a replay of a `retryable` request
+starts a new attempt and restarts its time limit
+([Time limit](#time-limit)). The command makes one read of
+`GET /v1/spawns/<request_id>`, writes no saved submission and does not wait.
+It prints one line — `request=`, `state=` and,
+when the answer carries them, `reason=`, `next_check_at=`, `expires_at=`,
+`rc=`, `stage=` and `job=` — and exits by the same mapping as `spawn --wait`:
+0 for `succeeded`/`landed`, the hub's `result.rc` (81 when none) for `failed`,
+`retryable` and `refused`, 84 for `cancelled`/`given_up`, 75 for
+`deadline_exceeded`, 91 for `parked`, and 85 for any other in-flight or unknown
+state.
+
 A submitter-side job directory the hub never held a record for may be removed
 once its request is `failed`, `refused`, `given_up` or `cancelled`.
 

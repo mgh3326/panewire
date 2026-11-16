@@ -32,15 +32,44 @@ func utf8PrefixWithin(value string, limit int) string { return textbound.PrefixW
 
 func utf8SuffixWithin(value string, limit int) string { return textbound.SuffixWithin(value, limit) }
 
+// stallExaminationExcerpt bounds persisted evidence and retains its last lines.
+func stallExaminationExcerpt(value string) string { return utf8SuffixWithin(value, 4096) }
+
+// stallNotificationText keeps the job, pane, and end of the visible screen.
+func stallNotificationText(job, pane, screen string) string {
+	prefix := "[stall] job " + job + " pane " + pane + ": "
+	screen = strings.Map(func(r rune) rune {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return ' '
+		}
+		return r
+	}, screen)
+	return prefix + utf8SuffixWithin(screen, laneEventTextLimit-len(prefix))
+}
+
 // truncateRelayText is the plain byte bound for relay note text: no marker.
 func truncateRelayText(value string, limit int) string {
 	return utf8PrefixWithin(value, limit)
 }
 
-// truncateLaneEventText is the only truncation point for lane.event text.
-// It runs on the producer node before the file, outbox key, and wire payload
-// are made; the hub only validates this final form so acknowledgements cannot
-// name a different record after a restart.
+// laneEventTextCeiling is the hard bound on lane.event text in every record and
+// frame (hk 4835). Text above it is refused with a message naming the bound.
+// Text between laneEventTextLimit and this bound is kept whole in the lane inbox
+// and typed as a head plus a pointer (lane_event_long.go,
+// docs/lane-event-long.md). It is 16 KiB, not larger, because every record and
+// frame that carries it must fit laneEventFrameMax.
+const laneEventTextCeiling = 16 << 10
+
+// laneEventFrameMax bounds one encoded lane.event record or websocket frame.
+// encoding/json writes <, > and & as six-byte escapes, so the ceiling of text
+// can encode to six times its size, plus the envelope. The hub's websocket read
+// limit and the node's event-file cap both take this value.
+const laneEventFrameMax = 6*laneEventTextCeiling + 8<<10
+
+// truncateLaneEventText is the typed-line cut: the bound a hub without
+// lane_event_long accepts for a non-sink event. A node applies it only to the
+// wire form for such a hub (laneEventPayloadForOldHub); the event file keeps the
+// whole text (docs/lane-event-long.md).
 func truncateLaneEventText(value string) (string, bool) {
 	return truncateLaneEventTextAtLimit(value, laneEventTextLimit)
 }

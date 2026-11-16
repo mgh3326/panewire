@@ -95,6 +95,9 @@ type hubClientEvent struct {
 	// senderPane is a lane.event's emitting pane, added to the payload only on
 	// a connection whose hub accepts it (relayWire).
 	senderPane string
+	// sinkRecord is a lane.event whose producer named a sink (emit --sink). Its
+	// text bound is the sink bound, not the typed-line one (relayWire).
+	sinkRecord bool
 }
 
 type quotaPoolReconcileHooks struct {
@@ -205,9 +208,13 @@ type HubClient struct {
 	taskPaneSweepGrace    time.Duration
 	taskPaneSweepTicks    <-chan time.Time      // fixture seam; nil uses a ticker.
 	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
-	quotaReconcile        quotaPoolReconcileHooks
-	nodeTaskState         fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
-	nodePR                fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
+	// Job dir TTL loop (node_pane_sweep.go): hourly and independent of the
+	// pane sweep interval, so a node without a sweep still expires dirs.
+	jobDirTTLTicks <-chan time.Time      // fixture seam; nil uses a ticker.
+	jobDirTTLPass  func(context.Context) // fixture seam; nil runs the real pass.
+	quotaReconcile quotaPoolReconcileHooks
+	nodeTaskState  fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
+	nodePR         fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
 
 	// taskPaneSweepMu serializes the node's sweeps over one shared sweeper: the
 	// local pass and the hub's pane.sweep command (node_pane_sweep_ended.go).
@@ -517,6 +524,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
+	go client.runJobDirTTL(ctx)
 	go client.runQuotaPoolReconcile(ctx)
 	go client.runHubCloseSettle(ctx)
 	if client.statePublish {
@@ -656,6 +664,12 @@ type hubClientConnection struct {
 	// acceptsLaneEventPane is the same for hubFeatureLaneEventPane
 	// (lane_event_sender.go).
 	acceptsLaneEventPane atomic.Bool
+	// acceptsLaneEventLong is the same for hubFeatureLaneEventLong
+	// (lane_event_long.go).
+	acceptsLaneEventLong atomic.Bool
+	// featuresKnown is set once this connection's hub.features arrived. Until
+	// then, or until the hub answers, a lane.event is held (laneEventsKnown).
+	featuresKnown atomic.Bool
 	// acceptsPaneCaptureDoc is the same for hubFeaturePaneCaptureDoc
 	// (node_command.go).
 	acceptsPaneCaptureDoc atomic.Bool
@@ -2058,7 +2072,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 		return nil, err
 	}
-	if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+	if err := client.writeRelayBurst(ctx, peer, false); err != nil {
 		return nil, err
 	}
 	readErrors := make(chan error, 1)
@@ -2148,6 +2162,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
 				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
+				peer.acceptsLaneEventLong.Store(slices.Contains(message.Features, hubFeatureLaneEventLong))
+				peer.featuresKnown.Store(true)
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
@@ -2178,7 +2194,19 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	serveDone := make(chan struct{})
 	defer close(serveDone)
 	preferenceProbing := false
+	// heldLane are lane.event records taken from client.events before the hub's
+	// feature state was known; they are written once it is (laneEventsKnown).
+	var heldLane []hubClientEvent
+	defer func() { client.releaseRelayEvents(heldLane...) }()
 	for {
+		for len(heldLane) > 0 && peer.laneEventsKnown(acked) {
+			event := heldLane[0]
+			if err := peer.write(ctx, peer.relayWire(event)); err != nil {
+				return nil, err
+			}
+			client.commitRelaySent(event)
+			heldLane = heldLane[1:]
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -2188,6 +2216,11 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			// Any pong proves the hub registered this node; stop waiting.
 			acked = true
 			helloAck.Stop()
+			// The hub answered after its features (it queues them at connect), so
+			// the lane.event records the handshake held are written now.
+			if err := client.writeRelayBurst(ctx, peer, peer.laneEventsKnown(acked)); err != nil {
+				return nil, err
+			}
 			if helloRetried && !capsResent {
 				// The pong may answer the first hello, merely late: the
 				// capability-free hello then replaced a capable record. Send
@@ -2202,7 +2235,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 					return nil, err
 				}
-				if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+				if err := client.writeRelayBurst(ctx, peer, peer.laneEventsKnown(acked)); err != nil {
 					return nil, err
 				}
 			}
@@ -2228,11 +2261,15 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 				return nil, err
 			}
-			if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+			if err := client.writeRelayBurst(ctx, peer, peer.laneEventsKnown(acked)); err != nil {
 				return nil, err
 			}
 			helloAck.Reset(client.helloAckTimeoutOrDefault())
 		case event := <-client.events:
+			if event.Kind == "lane.event" && !peer.laneEventsKnown(acked) {
+				heldLane = append(heldLane, event)
+				continue
+			}
 			if err := peer.write(ctx, peer.relayWire(event)); err != nil {
 				client.releaseRelayEvents(event)
 				return nil, err
@@ -2245,7 +2282,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 				return nil, err
 			}
-			if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+			if err := client.writeRelayBurst(ctx, peer, peer.laneEventsKnown(acked)); err != nil {
 				return nil, err
 			}
 		case result := <-preferenceResults:
@@ -2581,8 +2618,9 @@ func normalizeRelayEventText(value string) string {
 // `panewire emit` path, and the restart replay path alike.
 func relayEventWireForm(job hubScannedRelayEvent) hubScannedRelayEvent {
 	if job.Kind == "lane.event" {
-		// lane.event text was validated and, if necessary, byte-truncated only
-		// by emit before its file was written. Do not apply the job.* 240-rune
+		// lane.event text was validated by emit before its file was written. A
+		// cut for an older hub is made only on the wire (lane_event_long.go), so
+		// the outbox key stays text-free. Do not apply the job.* 240-rune
 		// normalizer here: a second shape would strand its persisted cursor.
 		return job
 	}
@@ -2689,7 +2727,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay, job.Cause, job.Head, job.PR})
 		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		payload = relayPayloadNotifyType(payload, job.NotifyType)
-		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, senderPane: laneEventSenderPane(job)}, true
+		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, senderPane: laneEventSenderPane(job), sinkRecord: job.Sink}, true
 	}
 	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventID, replay)
 	if job.Kind == "job.escalate" || job.Kind == "job.joined" || relayTerminalSignalKinds[job.Kind] {

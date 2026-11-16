@@ -223,14 +223,7 @@ func ptrInt64(value int64) *int64 { return &value }
 // (f) The hub advertises host_activity in its features event, which is what lets
 // a node send the object at all.
 func TestHubAdvertisesHostActivityFeature(t *testing.T) {
-	agent := &hubAgent{features: make(chan hubFeaturesEvent, 1)}
-	agent.queueFeatures()
-	select {
-	case event := <-agent.features:
-		if !hasName(event.Features, hubFeatureHostActivity) {
-			t.Fatalf("hub features=%v; host_activity missing", event.Features)
-		}
-	default:
-		t.Fatal("the hub queued no features event")
+	if event := hubFeaturesFrame(); !hasName(event.Features, hubFeatureHostActivity) {
+		t.Fatalf("hub features=%v; host_activity missing", event.Features)
 	}
 }

@@ -362,6 +362,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	hubJobsRoot := fs.String("hub-jobs-root", "", "local inbox root containing jobs/*/events for metadata-only heartbeats")
 	quotaStopAct := fs.Bool("quota-stop-act", false, "enable quota-stop actions (default shadow)")
 	idleWakeSettle := fs.Duration("idle-wake-settle", defaultIdleWakeSettle, "stable idle/done interval before owner notification")
+	stallSafetyLimit := fs.Duration("stall-safety-limit", 30*time.Minute, "inactive time before examining an active job")
 	failoverWakeOn := fs.String("failover-wake-on", "", "fixed failover machine ID that may receive one Wake-on-LAN packet")
 	failoverWakeMAC := fs.String("failover-wake-mac", "", "fixed Wake-on-LAN MAC address for --failover-wake-on")
 	statePublish := fs.Bool("state-publish", false, "publish this host's fleet state (quota for --state-quota-pools) to the hub; see docs/fleet-state.md")
@@ -377,6 +378,9 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
 	}
+	if *stallSafetyLimit <= 0 {
+		return nil, ExitConditionInvalid, fmt.Errorf("stall safety limit must be positive")
+	}
 	wakeOnSet, wakeMACSet := false, false
 	fs.Visit(func(item *flag.Flag) {
 		switch item.Name {
@@ -390,16 +394,17 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		return nil, ExitConditionInvalid, fmt.Errorf("failover wake requires both --failover-wake-on and --failover-wake-mac")
 	}
 	cfg := Config{
-		SocketPath:      *socket,
-		HerdrSocket:     *herdr,
-		DBPath:          *db,
-		InboxRoot:       *inbox,
-		StorePromptBody: *storeBody,
-		IdleWakeSettle:  *idleWakeSettle,
-		QuotaStopAct:    *quotaStopAct,
-		Logging:         LoggingConfig{StorePromptBody: *storeBody},
-		SchemaCommand:   deps.SchemaCommand,
-		Logger:          deps.Logger,
+		SocketPath:       *socket,
+		HerdrSocket:      *herdr,
+		DBPath:           *db,
+		InboxRoot:        *inbox,
+		StorePromptBody:  *storeBody,
+		IdleWakeSettle:   *idleWakeSettle,
+		StallSafetyLimit: *stallSafetyLimit,
+		QuotaStopAct:     *quotaStopAct,
+		Logging:          LoggingConfig{StorePromptBody: *storeBody},
+		SchemaCommand:    deps.SchemaCommand,
+		Logger:           deps.Logger,
 	}
 	if *stallDetect {
 		var harnesses []string

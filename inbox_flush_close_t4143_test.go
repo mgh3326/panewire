@@ -3,6 +3,10 @@ package panewire
 // hk 4143: Close aborts the inbox store under an in-flight flush. The store
 // error that follows is the shutdown, so the flush logs no Error line and
 // counts no failure.
+//
+// hk 4449: only a cancellation is the shutdown. A real listing failure is
+// logged and counted even while Close is landing, and the listing runs on the
+// close context so a stop cuts it.
 
 import (
 	"bytes"
@@ -43,6 +47,24 @@ func (c *cancelOnDoneContext) Done() <-chan struct{} {
 	ch := make(chan struct{})
 	close(ch)
 	return ch
+}
+
+// shutdownAfterEntryContext reports live at flushInbox's entry check and
+// canceled at the listing's error branch, the state a Close landing between
+// them leaves. Its Done channel never closes, so the listing itself still
+// fails with the store's real error: the shutdown is visible only to the
+// branch that decides whether to log it.
+type shutdownAfterEntryContext struct {
+	context.Context
+	calls int
+}
+
+func (c *shutdownAfterEntryContext) Err() error {
+	c.calls++
+	if c.calls > 1 {
+		return context.Canceled
+	}
+	return nil
 }
 
 func (c *closeAfterChecks) Err() error {
@@ -97,6 +119,10 @@ func TestInboxFlushListingErrorDistinguishesClose(t *testing.T) {
 	t.Run("close cancellation", func(t *testing.T) {
 		h, logs, closeServer := setup(t, false)
 		defer closeServer()
+		// A pending batch is what the cut listing would have returned.
+		if _, err := h.inbox.store.db.Exec(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES('b1','lane-a','digest')`); err != nil {
+			t.Fatal(err)
+		}
 		h.closeCtx = &cancelOnDoneContext{Context: context.Background()}
 		h.flushInbox()
 		if strings.Contains(logs.String(), "level=ERROR") {
@@ -106,15 +132,20 @@ func TestInboxFlushListingErrorDistinguishesClose(t *testing.T) {
 			t.Fatalf("listing cut by Close counted %d failures, want 0", n)
 		}
 	})
-	t.Run("real store error", func(t *testing.T) {
+
+	// A real listing error is a flush failure even while Close is landing; only
+	// a cancellation is the shutdown. The parent's close guard swallowed every
+	// listing error, so this case logged nothing and counted nothing there.
+	t.Run("real store error during shutdown", func(t *testing.T) {
 		h, logs, closeServer := setup(t, true)
 		defer closeServer()
+		h.closeCtx = &shutdownAfterEntryContext{Context: context.Background()}
 		h.flushInbox()
 		if !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "inbox batch listing failed") {
-			t.Fatalf("real listing failure did not log an error:\n%s", logs.String())
+			t.Fatalf("a real listing failure during shutdown did not log an error:\n%s", logs.String())
 		}
 		if n := h.InboxFlushFailureCount(); n != 1 {
-			t.Fatalf("real listing failure counted %d failures, want 1", n)
+			t.Fatalf("a real listing failure during shutdown counted %d failures, want 1", n)
 		}
 	})
 }

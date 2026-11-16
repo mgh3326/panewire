@@ -399,8 +399,13 @@ panewire:
    `--author-family` may be sent without `--builder-job` for `--role reviewer`
    only (the author's job is not bound to the task): the reviewer then runs as
    a top-level job, still excludes that family, and neither claims nor links
-   the task, so several passes on one task all spawn. Any other role keeps the
-   "go together" refusal (exit 2). A reviewer holds no task/role reservation
+   the task, so several passes on one task all spawn. `--role consult` may also
+   name the author's family alone, with `--task` and no `--builder-job` or
+   `--parent-job`: the hub's consult planner sends it that way (hk 4868). The
+   consult binds no job. Without `-m`, its seat selection excludes that family
+   and the job's consult stamp records it; a pinned `-m` seat is admitted as
+   given (the planner chose it with that exclusion). Any other role,
+   or any other shape, keeps the "go together" refusal (exit 2). A reviewer holds no task/role reservation
    (hk 4737), so any number of passes on one task spawn side by side; the hub
    still accepts `--review-pass N` (1..9, `--role reviewer` only) and records it
    on the operation ([hub-spawn-operations.md](hub-spawn-operations.md)).
@@ -510,6 +515,23 @@ restated here. `docs/quota-stop.md` has the mechanics.
 The owner gets one info lane event for either action. `--quota-stop-act` still
 gates every other role.
 
+The node also examines an active job after its pane has stayed outside the
+working state for `--stall-safety-limit` (default `30m`). A foreground
+command other than the agent or shell resets that interval. A READY or ESC
+suppresses the examination for the current attempt. Each examination records
+bounded, redacted screen and herdr state excerpts in hk. A recognised quota stop uses
+the role's quota-stop path; otherwise the owner receives one blocked event
+with the last screen lines. A later return to work starts a new interval.
+A job whose claim is older than the active-job window
+(`PANEWIRE_JOB_ACTIVE_MAX_AGE`, default `72h`) is examined only after hk
+confirms it is still the job on that pane: the hk job record is not terminal,
+its task (if any) is developing or reviewing, and the record and the pane's
+live harness session match the job's own `job.spawned` receipt. A mismatch, an
+unreadable hk, or a job whose receipt records no usable harness session leaves
+the pane unexamined, with one warning per job, so a stale local journal on a
+reused pane is never revived. hk job reads are capped per scan pass and a
+verdict is cached per job for the examination interval.
+
 Automatic selection measures an account the same way with or without
 `--host NAME` or `--exclude-host`: a stale shared reading is refreshed on any
 holder of that account, the local machine first, and a host those flags keep
@@ -598,14 +620,15 @@ default.
 | `shadow.swap_in_half_per_s` | `5000` | Swap-ins per second (pages) that halve the swap term. |
 | `shadow.load_knee`, `shadow.load_cap` | `0.75`, `4` | Load per core below the knee costs nothing; a higher reading stops costing more at the cap. |
 | `shadow.jobs_half`, `shadow.bridge_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs a power-100 host (a host of capability `c` pays `bridge_cost * 100 / c`). `shadow.claim_cost` is retired: it still loads and is ignored. |
+| `shadow.claim_share` | `0.5` | Share of its own `free * power` (0..1, below 1) that one claim in the spawn bridge removes from a host in the `claim` arm (hk 4841). Every host loses the same fraction per claim, whatever its power. |
 | `capability.light.<host>`, `capability.heavy.<host>` | none | The host's capability for light and heavy work, in the unit of the hub's `power`. A host with no entry keeps its `power`. |
 
-**Rollout and rollback of `shadow.free_floor` and `shadow.bridge_cost`.** A
-binary from before hk 4465 validates `[placement.shadow]` strictly and refuses
-these two keys as unknown, and the fleet commands and the spawn app do not
-start on a config it refuses. Set either key in `hosts.toml` only once every
-binary that reads that file has the release that knows them, and delete both
-keys before rolling a host back. The retired `shadow.all_loaded_below` and
+**Rollout and rollback of `shadow.free_floor`, `shadow.bridge_cost` and `shadow.claim_share`.** A
+binary from before hk 4465 (`free_floor`, `bridge_cost`) or hk 4841 (`claim_share`) validates `[placement.shadow]` strictly and refuses
+these keys as unknown, and the fleet commands and the spawn app do not
+start on a config it refuses. Set any of these keys in `hosts.toml` only once every
+binary that reads that file has the release that knows them, and delete all
+of them before rolling a host back. The retired `shadow.all_loaded_below` and
 `shadow.claim_cost` load on both sides. The same ordering holds for the hub's
 `placement.json` keys of the same names
 ([Constants](placement.md#constants)).
@@ -663,11 +686,11 @@ The job dir TTL (see [job-dir-ttl.md](job-dir-ttl.md)).
 Set `[reap] job_dir_ttl` only after every host that reads this hosts config
 runs a binary that knows the `[reap]` table. An older binary refuses an
 unknown table: the whole config fails to load there, and that node's sweep
-loop stops.
+and TTL loops stop.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `job_dir_ttl` | unset | The node's opt-in to deleting job directories: when set (`"72h"`, `"3d"`; at least `24h`), the node sweep loop runs the job dir TTL with this age, at most once an hour, and deletes each directory its gate lets go. Unset, the node deletes nothing. `panewire reap --expire-job-dirs` uses it as its TTL, else 72 h. A value under 24 h or one that does not parse is a config error. |
+| `job_dir_ttl` | unset | The node's opt-in to deleting job directories: when set (`"72h"`, `"3d"`; at least `24h`), the node runs the job dir TTL with this age on its own hourly loop — whether or not the pane sweep runs — and deletes each directory its gate lets go. Unset, the node deletes nothing. `panewire reap --expire-job-dirs` uses it as its TTL, else 72 h. A value under 24 h or one that does not parse is a config error. |
 
 ## handoffkeep service credential
 
@@ -2163,7 +2186,7 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 5 / 6 | Hub quota denial / authentication refusal. |
 | 70 | Configuration or trust refusal, including `POLICY_UNAVAILABLE`. |
 | 74 | Active job duplicate, including an hk `job_id_taken` claim refusal. |
-| 75 | Unreadable duplicate state (the ledger's record of a duplicate job has no state or an unreadable `job.spawned` receipt; a released job has no receipt and is reclaimed), changed artifact, or a `--parent-job` that resolves neither locally nor in hk within the bound. |
+| 75 | Unreadable duplicate state (the ledger's record of a duplicate job has no state or an unreadable `job.spawned` receipt; a released job has no receipt and is reclaimed), changed artifact, or a `--parent-job` that resolves neither locally nor in hk within the bound. Also a hub request in `deadline_exceeded`: its ownership is unresolved. |
 | 76 | `BRIEF_SUBMISSION_UNCONFIRMED`: no working transition or submitted brief turn on the launch session and pane. Codex retries a submit key once only for composer residue; other harnesses retain one submit-key retry when submission remains unconfirmed. |
 | 77 | `NO_ROLE_CANDIDATE` or seat, grade, family, or E6 refusal; quota gate exit 5 is remapped here. `role_restricted:` preserves the gate reason and names the rule that refused. 역할 제한 이유가 표시되면 그 사유가 가리키는 역할 또는 프로필을 선택하세요. |
 | 78 | `preflight`: at least one checked remote host failed a check; the reasons are on stdout and in the error. |
@@ -2172,14 +2195,14 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 81 | `NO_ELIGIBLE_HOST`, wake/capacity placement failure, the remote worktree for a linked-worktree job could not be prepared (also a `via = "hub"` checkout refusal), or the hub is unavailable for a forced `via = "hub"` host. |
 | 82 | Pane committed but lane unregistered under strict lane reporting (`PANEWIRE_LANE_STRICT=1`). |
 | 83 | `spawn --wait`: the job escalated. |
-| 84 | `spawn --wait`: the job was lost or revoked, or its hub request ended before it landed (`cancelled`, `given_up`; nothing was spawned). |
-| 85 | `spawn --wait`: the wait deadline expired; the job, or a hub request still queued, is retained. |
+| 84 | `spawn --wait`: the job was lost or revoked, or its hub request ended before it landed (`cancelled`, `given_up`; nothing was spawned). `spawn status` reports the same states. |
+| 85 | `spawn --wait`: the wait deadline expired; the job, or a hub request still queued, is retained. `spawn status` uses it for a request still in flight or in a state this client does not know. |
 | 86 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role waits, including an exhausted downgrade retry. |
 | 87 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role escalates to the parent lane. |
 | 88 | `AUTH_UNAVAILABLE`: no usable current account binding on eligible hosts. |
 | 89 | `QUOTA_UNKNOWN`: quota remains unknown after one bounded account refresh. |
 | 90 | `WORKSPACE_TRUST_REQUIRED`: Codex is waiting at its directory trust prompt; initial brief is withheld. Or `HOOKS_REVIEW_REQUIRED`: Codex is waiting at its "Hooks need review" screen; initial brief is withheld. |
-| 91 | `spawn --wait`: the hub request is `parked` (no host can take it now) and the wait deadline expired; the request stays queued on the hub. |
+| 91 | `spawn --wait`: the hub request is `parked` (no host can take it now) and the wait deadline expired; the request stays queued on the hub. `spawn status` reports it for a `parked` request. |
 | 124 | A time-bounded CLI call reached its context deadline. |
 | 255 | SSH could not reach a remote host (repository check, clone or spawn leg). Never returned for a `via = "hub"` host. |
 

@@ -321,10 +321,12 @@ func TestT12SinkRelayAndLaneTextLimits(t *testing.T) {
 		t.Fatalf("delivered sink replay injected=%d", injected)
 	}
 
-	tooLong := hubJobEventPayload{OwnerLane: "lane-a", EventID: "normal-too-long", Text: strings.Repeat("x", laneEventTextLimit+1), Epoch: 1}
+	// Text over the typed-line limit is kept whole for a node sender (hk 4835),
+	// so only text over the ceiling is refused here.
+	tooLong := hubJobEventPayload{OwnerLane: "lane-a", EventID: "normal-too-long", Text: strings.Repeat("x", laneEventTextCeiling+1), Epoch: 1}
 	hub.relayLaneEvent(tooLong, source)
 	if fake.rowCount() != 1 || len(seen("relay.rejected")) != 1 || !bytes.Contains(seen("relay.rejected")[0], []byte(`"reason":"text_too_long"`)) {
-		t.Fatalf("non-sink long text persisted/rejection rows=%d rejected=%s", fake.rowCount(), seen("relay.rejected"))
+		t.Fatalf("above-ceiling text persisted/rejection rows=%d rejected=%s", fake.rowCount(), seen("relay.rejected"))
 	}
 }
 
