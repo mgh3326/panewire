@@ -38,7 +38,11 @@ var consultStampKeys = []string{"asker_grade", "asker_family", "grade_source", "
 const consultStampValueMax = 64
 
 // consultStampValue encodes a stamp for the spawn args. The empty string means
-// no stamp, which every arg writer skips.
+// no stamp, which every arg writer skips. The encoder applies the reader's rule
+// to its own output, so a value this host cannot encode (an over-long or
+// control-character-bearing family) never becomes a spawn the node refuses: the
+// record then lacks the stamp, and the consult still runs. PlanConsult warns
+// once when that happens.
 func consultStampValue(stamp map[string]string) string {
 	if len(stamp) == 0 {
 		return ""
@@ -47,7 +51,11 @@ func consultStampValue(stamp map[string]string) string {
 	if err != nil {
 		return ""
 	}
-	return base64.RawURLEncoding.EncodeToString(raw)
+	value := base64.RawURLEncoding.EncodeToString(raw)
+	if _, err := parseConsultStamp(value); err != nil {
+		return ""
+	}
+	return value
 }
 
 // parseConsultStamp reads the value consultStampValue wrote. The value arrives
