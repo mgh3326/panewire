@@ -46,11 +46,17 @@ var (
 	// statusBlock joins the continuation.
 	devinRequest = regexp.MustCompile(`(?i)reached request rate limit(?:\s|[·.…:]|$)`)
 	claude       = regexp.MustCompile(`(?i)^you've hit your (?:(?:weekly|session) )?limit(?:\s|[·.:]|$)`)
-	codexSignal  = regexp.MustCompile(`(?i)^you've hit your usage limit[.·:].*try again at`)
-	codex        = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	atClock      = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
-	relative     = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)(?:\s*(?:and\s+|,\s*)?(\d+)\s*(seconds?|minutes?))?`)
-	dateReset    = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
+	// codexSignal is codex's usage-limit sentence. The CLI renders the provider's
+	// own message, which spells the apostrophe U+2019 ("You’ve"; hk 4982, the
+	// 2026-11-16 codex stop), so both apostrophes are accepted.
+	codexSignal = regexp.MustCompile(`(?i)^you[’']ve hit your usage limit[.·:].*try again at`)
+	codex       = regexp.MustCompile(`(?i)try again at\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	// codexDate is codex's calendar reset ("try again at Nov 17th, 2026 12:02 AM",
+	// hk 4982), which the CLI shows in local time.
+	codexDate = regexp.MustCompile(`(?i)try again at\s+([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th),?\s+(\d{4})\s+(\d{1,2}:\d{2})\s*(AM|PM)`)
+	atClock   = regexp.MustCompile(`(?i)\bat\s+([0-9]{1,2}:[0-9]{2}\s*(?:AM|PM)?)(?:\s+(UTC|GMT|Z))?`)
+	relative  = regexp.MustCompile(`(?i)reset(?:s)? in\s+(\d+)\s*(seconds?|minutes?|hours?)(?:\s*(?:and\s+|,\s*)?(\d+)\s*(seconds?|minutes?))?`)
+	dateReset = regexp.MustCompile(`(?i)resets?\s+([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s+(UTC|GMT|Z)|\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?`)
 	// The provider's own credit-exhausted rejection: Anthropic's "Your credit
 	// balance is too low to access the Anthropic API" and OpenAI's
 	// insufficient_quota / "You exceeded your current quota" (the errors
@@ -108,6 +114,13 @@ func classifyStatus(screen string, now time.Time, local *time.Location) (Stop, b
 		out.Pool = "codex"
 	case claude.MatchString(screen):
 		out.Pool = "claude"
+	case creditAnthropic.MatchString(screen):
+		// The provider's own rejection is a stop on the pool it names (hk 4982).
+		out.Pool = "anthropic-api"
+		out.CreditExhaustedAt = now.UTC()
+	case creditOpenAI.MatchString(screen):
+		out.Pool = "openai-api"
+		out.CreditExhaustedAt = now.UTC()
 	default:
 		return out, false
 	}
@@ -155,6 +168,17 @@ func classifyStatus(screen string, now time.Time, local *time.Location) (Stop, b
 			if parsed.Before(now) {
 				parsed = parsed.AddDate(1, 0, 0)
 			}
+			out.Reset = parsed.UTC()
+		}
+		return out, true
+	}
+	if m := codexDate.FindStringSubmatch(screen); m != nil {
+		month := m[1]
+		if len(month) > 3 {
+			month = month[:3]
+		}
+		value := month + " " + m[2] + " " + m[3] + " " + strings.ToUpper(m[4]) + m[5]
+		if parsed, err := time.ParseInLocation("Jan 2 2006 3:04PM", value, local); err == nil {
 			out.Reset = parsed.UTC()
 		}
 		return out, true
@@ -294,6 +318,11 @@ func statusBlockOf(screen string, isStatus func(string) bool) (string, string, b
 			if isStatus(line) {
 				status, tail, found, later, open = line, nil, true, false, false
 				limitOpen, limitIndent = (devin.MatchString(line) || devinRequest.MatchString(line)) && !requestLimitComplete(line), indent
+			} else if found && creditRow(status) && creditDiagnosticRow(line) {
+				// omp writes its own diagnostic path under the rejection
+				// ("raw-http-request=<file>", hk 4982). It is the harness's
+				// chrome, not output: the rejection stays the last activity.
+				tail = append(tail, line)
 			} else {
 				later = true
 				limitOpen = false
@@ -313,10 +342,11 @@ func requestLimitComplete(text string) bool {
 	return strings.Contains(strings.ToLower(text), "send a message to retry")
 }
 
-// limitRow reports a row that is a CLI limit line.
+// limitRow reports a row that is a CLI limit line or a provider
+// credit-exhausted rejection: both are a stop on the pool they name.
 func limitRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
-	return devin.MatchString(line) || devinPaid.MatchString(line) || devinRequest.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line)
+	return devin.MatchString(line) || devinPaid.MatchString(line) || devinRequest.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) || creditRow(line)
 }
 
 // CreditExhausted reports the pool named by a provider credit-exhausted line
@@ -344,6 +374,14 @@ func CreditExhausted(screen string) (string, bool) {
 func creditRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
 	return creditAnthropic.MatchString(line) || creditOpenAI.MatchString(line)
+}
+
+// creditDiagnosticRow reports omp's diagnostic line under a provider
+// rejection: the exact prefix it writes for the request it saved. Only a row
+// after a credit status row is read as chrome (hk 4982).
+func creditDiagnosticRow(line string) bool {
+	_, ok := strings.CutPrefix(line, "raw-http-request=")
+	return ok
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,

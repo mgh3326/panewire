@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,44 @@ func TestPoolExhaustedCreditScreenNamesOpenAIPool(t *testing.T) {
 	}
 	if counts["sweep-2"] != 0 {
 		t.Fatalf("anthropic-api job was notified: %+v", events)
+	}
+}
+
+// hk 4982: the live omp pane ends with the harness's own diagnostic line under
+// the rejection ("raw-http-request=…"). It is chrome, so the hub's trigger
+// still fires on the rejection above it.
+func TestPoolExhaustedOMPCreditReplayNotifiesOwnerT4982(t *testing.T) {
+	f := newSweepFixture(t)
+	f.addNamedJob(t, "omp-luna", "implementer", "anthropic-api", poolTriggerJobAccount, "idle", "sweep-1", 1)
+	screen, err := os.ReadFile("testdata/quota-stop/omp-anthropic-credit-2026-11-17.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setScreen(t, "sweep-1", string(screen))
+
+	f.hub.checkPoolTriggers(t.Context())
+	eventually(t, 5*time.Second, "the credit-exhausted pool's sweep", func() bool { return f.sweeps() == 1 })
+	if counts := noticeJobs(spawnFailedInjections(f.destination)); counts["sweep-1"] != 1 {
+		t.Fatalf("job notices=%+v, want one: %+v", counts, spawnFailedInjections(f.destination))
+	}
+}
+
+// An answer after the diagnostic line is still later agent output: the
+// allowance is only the diagnostic row, not anything that follows it.
+func TestPoolExhaustedOMPCreditAnswerAfterDiagnosticDoesNotFireT4982(t *testing.T) {
+	f := newSweepFixture(t)
+	f.addNamedJob(t, "omp-luna", "implementer", "anthropic-api", poolTriggerJobAccount, "idle", "sweep-1", 1)
+	screen, err := os.ReadFile("testdata/quota-stop/omp-anthropic-credit-2026-11-17.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setScreen(t, "sweep-1", string(screen)+"I will retry the request with a smaller prompt.\n")
+
+	f.hub.checkPoolTriggers(t.Context())
+	// The window proves nothing more happens; the passes above are synchronous.
+	time.Sleep(200 * time.Millisecond)
+	if events := spawnFailedInjections(f.destination); len(events) != 0 {
+		t.Fatalf("an answered rejection was taken for a stop: %+v", events)
 	}
 }
 

@@ -488,6 +488,13 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	if !ok {
 		return
 	}
+	// A provider credit rejection is recognised, then left alone: the job
+	// watcher publishes it and the hub's credit trigger sweeps the pool
+	// (hk 4625). Resuming or handing over here would race that path with a
+	// second decision on the same stop (hk 4982).
+	if !stop.CreditExhaustedAt.IsZero() {
+		return
+	}
 	// A devin free-tier limit is a fact about the host, not the pane: record
 	// it even when this stop is only observed, so the next devin measurement
 	// publishes it and later selections skip the free rung until its reset.
