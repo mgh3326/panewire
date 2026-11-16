@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,6 +37,13 @@ type laneInboxStore struct {
 	// inbox-class item or a must-ack one), waking every long-poll waiter so
 	// they re-check for unread work.
 	notify chan struct{}
+	// batchesGen counts the writes that can change the pending batch page:
+	// a lane_inbox_batches or lane_inbox_batch_quarantine row, or a claim,
+	// ack, read or supersede on the lane_inbox rows the page counts and
+	// retires by. The flush re-reads the page only when this moves or its
+	// fallback lapses, so an idle hub does not scan either table every tick
+	// (hk 4910).
+	batchesGen atomic.Uint64
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration
@@ -301,13 +309,24 @@ func (s *laneInboxStore) loggable(step string, err error) error {
 	return err
 }
 
-// markBatchSent records that handoffkeep now owns a batch's identity.
+// markBatchSent records that handoffkeep now owns a batch's identity. Only
+// the batch page decides this, so it does not note a change: the page must not
+// invalidate itself and cost a second read (hk 4910).
 func (s *laneInboxStore) markBatchSent(id string) error {
 	ctx, done := s.op(s.life)
 	defer done()
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox_batches SET sent=1 WHERE id=?`), id)
 	return err
 }
+
+// noteBatchesChanged marks the pending batch page stale: the flush owes it a
+// read on its next pass. Every writer that can change which batches are
+// pending, what they count, or whether they are retired calls it.
+func (s *laneInboxStore) noteBatchesChanged() { s.batchesGen.Add(1) }
+
+// batchesVersion is the pending batch page's change counter. The flush keeps
+// the value it last read at and compares.
+func (s *laneInboxStore) batchesVersion() uint64 { return s.batchesGen.Load() }
 
 // addLaneInboxColumn adds a state column to pre-feature SQLite stores. added
 // is true only when this call created it, so a caller can backfill once.
@@ -419,6 +438,9 @@ func (s *laneInboxStore) quarantineBatch(id, reason string) error {
 	ctx, done := s.op(s.life)
 	defer done()
 	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_batch_quarantine(batch_id,reason) VALUES(?,?) ON CONFLICT(batch_id) DO NOTHING`), id, reason)
+	if err == nil {
+		s.noteBatchesChanged()
+	}
 	return err
 }
 
@@ -623,13 +645,19 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	if err != nil {
 		return item, err
 	}
+	var superseded int
 	if item.Fresh && e.Cause != "" {
-		if err := s.supersede(ctx, tx, item, now); err != nil {
+		if superseded, err = s.supersede(ctx, tx, item, now); err != nil {
 			return laneInboxItem{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return laneInboxItem{}, err
+	}
+	if superseded > 0 {
+		// A superseded item leaves its batch's active count, which can retire
+		// that batch; note it only after the commit the page can see.
+		s.noteBatchesChanged()
 	}
 	if n == 1 && (class == "inbox" || mustAck) {
 		close(s.notify)
@@ -798,8 +826,12 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxItem, error) {
 	ctx, done := s.op(s.life)
 	defer done()
-	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE id=? AND (?='' OR lane=?)`), now.UnixMilli(), id, lane, lane); err != nil {
+	updated, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE id=? AND (?='' OR lane=?)`), now.UnixMilli(), id, lane, lane)
+	if err != nil {
 		return laneInboxItem{}, err
+	}
+	if n, _ := updated.RowsAffected(); n > 0 {
+		s.noteBatchesChanged()
 	}
 	return scanLaneInbox(s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE id=? AND (?='' OR lane=?)`), id, lane, lane))
 }
@@ -820,7 +852,14 @@ func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (in
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	acked, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if acked > 0 {
+		s.noteBatchesChanged()
+	}
+	return acked, nil
 }
 
 // laneNames lists the lanes with stored items so a policy sweep can cover a
@@ -880,6 +919,7 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 		return err
 	}
 	defer tx.Rollback()
+	created := false
 	for _, escalation := range []bool{false, true} {
 		filter := `class='interrupt' AND acked_at=0 AND superseded_at=0 AND digest_at>0 AND digest_batch='' AND hold_until=0`
 		if escalation {
@@ -940,6 +980,7 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`), id, lane, text); err != nil {
 				return err
 			}
+			created = true
 			ids := make([]int64, len(items))
 			for n, i := range items {
 				ids[n] = i.ID
@@ -949,7 +990,13 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if created {
+		s.noteBatchesChanged()
+	}
+	return nil
 }
 
 // laneInboxPendingBatchesQuery is the batch page without its order (SQLite's

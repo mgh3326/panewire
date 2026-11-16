@@ -52,17 +52,17 @@ var supersedeRules = []struct {
 
 func supersedePRType(t string) bool { return t == "ready" || t == "blocked" || t == "findings" }
 
-func (s *laneInboxStore) supersede(ctx context.Context, tx *sql.Tx, next laneInboxItem, now time.Time) error {
+func (s *laneInboxStore) supersede(ctx context.Context, tx *sql.Tx, next laneInboxItem, now time.Time) (int, error) {
 	rows, err := tx.QueryContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND cause=? AND id<? AND acked_at=0 AND superseded_at=0`), next.Lane, next.Event.Cause, next.ID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var ids []int64
 	for rows.Next() {
 		old, err := scanLaneInbox(rows)
 		if err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
 		for _, rule := range supersedeRules {
 			if strings.HasPrefix(next.Event.Cause, rule.prefix) && rule.matches(next) && rule.replaces(old, next) {
@@ -74,7 +74,10 @@ func (s *laneInboxStore) supersede(ctx context.Context, tx *sql.Tx, next laneInb
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return s.updateIDs(ctx, tx, `UPDATE lane_inbox SET superseded_at=?,superseded_by=?`, []any{now.UnixMilli(), next.ID}, ids)
+	if err := s.updateIDs(ctx, tx, `UPDATE lane_inbox SET superseded_at=?,superseded_by=?`, []any{now.UnixMilli(), next.ID}, ids); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
 }

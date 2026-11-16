@@ -62,9 +62,16 @@ way.
   `NOT EXISTS`: the anti-join reads the quarantine table once per page instead
   of once per statement execution, and a null-safe `NOT IN` is a trap in any
   case.
-- Each poll keeps its cadence. Every one of them exists to notice a
-  time-based transition (`due_at`, `digest_at`, `next_check_ms`,
-  `park_since_ms`), so "nothing changed" cannot be known without asking.
+- The polls that exist to notice a time-based transition (`due_at`,
+  `digest_at`, `next_check_ms`, `park_since_ms`) keep their cadence: "nothing
+  changed" cannot be known without asking. The pending batch page is not one
+  of them (hk 4910): it names rows no clock creates or retires, so the flush
+  reads it only after a write notes a change — a batch or quarantine row, or a
+  claim, ack, read or supersede on an item it counts — plus a 1 s fallback for
+  a writer the gate does not know about. Read every 100 ms tick it cost eleven
+  full scans a second of both batch tables; on live that was 441 scans of each
+  in 40 s, 93,492 rows of `lane_inbox_batch_quarantine` and 281,358 of
+  `lane_inbox_batches`.
 
 The migration uses plain `CREATE INDEX`, inside the migration transaction: the
 tables hold thousands of rows, and an index build is far below the startup

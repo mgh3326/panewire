@@ -40,6 +40,11 @@ type hubInbox struct {
 	nextPrune       time.Time
 	// flushFailures counts failed flush passes for monitoring and tests.
 	flushFailures uint64
+	// batchesSeen is the store's batch change counter at the last pending
+	// batch page read, and batchesAt when that read ran. The page is re-read
+	// only when the counter moves or the fallback lapses (hk 4910).
+	batchesSeen uint64
+	batchesAt   time.Time
 	// wakes holds each inbox-only lane's coalescing window (inbox_wake.go).
 	wakes inboxWakes
 }
@@ -50,6 +55,14 @@ const (
 	// sink costs one attempt per minute, not several per second.
 	inboxFlushBackoffBase = time.Second
 	inboxFlushBackoffMax  = time.Minute
+
+	// inboxBatchPageFallback bounds how long the pending batch page can go
+	// unread with nothing to read. Every writer that can change the page
+	// notes the change, so batching and quarantine work reach it in the same
+	// pass; this interval only heals a writer the gate does not know about and
+	// is not the page's cadence (hk 4910). Before it, the page was read on
+	// every 100 ms tick — eleven full scans a second of both batch tables.
+	inboxBatchPageFallback = time.Second
 
 	// hubInboxWaitMaxWait bounds one /v1/inbox/wait long-poll; the CLI
 	// re-issues the request for longer --timeout values. hubInboxWaitMaxWaiters
@@ -556,6 +569,19 @@ func (h *HubServer) inboxDigestDisabled() bool {
 	return h.inbox.persistDisabled
 }
 
+// batchPageDue reports whether the pending batch page must be read now: a
+// write that can change it was noted since the last read, or the fallback
+// lapsed. The caller holds flushMu.
+func (in *hubInbox) batchPageDue(now time.Time) bool {
+	seen := in.store.batchesVersion()
+	if seen == in.batchesSeen && now.Sub(in.batchesAt) < inboxBatchPageFallback {
+		return false
+	}
+	in.batchesSeen = seen
+	in.batchesAt = now
+	return true
+}
+
 func (h *HubServer) flushInbox() {
 	if h.inbox == nil || !h.inbox.flushMu.TryLock() {
 		return
@@ -581,6 +607,14 @@ func (h *HubServer) flushInbox() {
 		}
 		h.logger.Error("inbox batching failed")
 		failed = true
+		return
+	}
+	// The batch page names rows no time-based rule creates or retires: a
+	// batch lands by batching, leaves by relay, retire or quarantine, and its
+	// counts move on ack, read or supersede. Each of those notes the change,
+	// so a read is owed only then (or at the fallback), not ten times a
+	// second (hk 4910).
+	if !h.inbox.batchPageDue(h.now()) {
 		return
 	}
 	batches, err := h.inbox.store.pendingBatchesForContext(h.closeCtx)
