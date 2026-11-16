@@ -400,10 +400,17 @@ func TestAppliedReportClosureSettlesInboxItemAndAckWindow(t *testing.T) {
 		items, err := rig.hub.inbox.store.list(t989Lane, false)
 		return err == nil && len(items) == 1 && items[0].DeliveredAt > 0
 	})
-	rig.hub.mu.Lock()
-	pending := len(rig.hub.relayControl.relayPending)
-	rig.hub.mu.Unlock()
-	if pending != 0 {
+	// settleNodeApplied writes delivered_at before it drops the ack window, so
+	// the row and its inbox item can read as delivered a moment before the
+	// window is gone. Wait on the window itself; a window that never drops still
+	// fails, and reports how many were left.
+	pending := 0
+	if !waitUntil(5*time.Second, func() bool {
+		rig.hub.mu.Lock()
+		defer rig.hub.mu.Unlock()
+		pending = len(rig.hub.relayControl.relayPending)
+		return pending == 0
+	}) {
 		t.Fatalf("%d ack windows left open for a closed row", pending)
 	}
 	// The window would have expired by now (a fixed wait proves nothing more
