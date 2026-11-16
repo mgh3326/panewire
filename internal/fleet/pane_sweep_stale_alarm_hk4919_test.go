@@ -63,3 +63,33 @@ func TestEndedSweepDoesNotCountAPaneReassignedWhileItsScreenIsRead(t *testing.T)
 		t.Fatalf("metric = %q", metric)
 	}
 }
+
+// The count's identity test is the close's proof, not paneSweepMatches: past
+// the deadline the close takes a pane on its recorded session alone, whatever
+// the row's name or tab says. A close that fails then leaves a pane the sweep
+// failed to collect, and the alarm must count it even though the grace's
+// name/tab match would not (review finding on #657).
+func TestEndedSweepCountsAProofOwnedPaneWhoseCloseFails(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	var reported []int
+	f.sweeper.EndedOpen = func(open int) { reported = append(reported, open) }
+	pane := f.job("r", "reviewer", "", map[string]any{"tab_id": "t-moved"})
+	f.status[pane] = "done"
+	putEvent(t, f.a, "r", "job.completed", map[string]any{})
+	base := f.runner.Do
+	f.runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && len(c.Args) == 3 && c.Args[1] == "close" {
+			return Result{Code: 1, Err: "pane busy"}
+		}
+		return base(c)
+	}
+	if closes := f.endedSweep(1501, time.Hour); len(closes) != 0 || f.reaped("r") != nil {
+		t.Fatalf("a close herdr refused reported a swept pane: %+v reaped=%v", closes, f.reaped("r"))
+	}
+	if !f.infoHas("task pane kept", "job=r", "reason=close_failed") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+	if len(reported) != 1 || reported[0] != 1 {
+		t.Fatalf("a proof-owned pane whose close failed was not counted stale: %v info=%v", reported, f.info)
+	}
+}

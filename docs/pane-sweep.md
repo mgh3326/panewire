@@ -255,7 +255,11 @@ keeps it for good. The close proves the pane twice, on the pass's listing and
 again on a fresh listing under the acting lock after the screen is read, and a
 refusal seen by either check also keeps the pane out of the count: a session
 reassigned while the screen was read is another agent's pane now, and the pass's
-older snapshot must not report it as a failure. Per-reason counts in
+older snapshot must not report it as a failure. The `idle`/`done` rule is read
+on the row carrying the job's pane id, and it is the only extra test the count
+applies: the grace's name/tab match (`paneSweepMatches`) is not, because the
+close past the deadline does not consult it, so a row whose tab or name drifted
+while the proof still owns it counts when its close failed. Per-reason counts in
 `panewire_panes.prom` still name those refusals; they are the diagnostic gauge,
 not the alarm. A day is past every close deadline a candidate has (an hour, or a
 kept pane's day), so a stale pane is one the sweep failed to close. The job's
