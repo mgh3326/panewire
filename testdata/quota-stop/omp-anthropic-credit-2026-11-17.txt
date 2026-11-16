@@ -1,0 +1,3 @@
+Working...
+400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."},"request_id":"req_011Ch7Q5oNeumV3UUcAiWPTq"}
+raw-http-request=/home/mgh3326/.omp/logs/http-400-requests/1794868236852-1nbu7zu0d8bmf.json
