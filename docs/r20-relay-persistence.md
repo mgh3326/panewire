@@ -91,6 +91,18 @@ already read (hk 3435).
   node never saw may sit below one it did, so a max-id cursor would drop it
   silently. A node that dies before it sends the report replays at its next hello;
   a node without the capability replays at registration as before.
+- **The settlement does not hold the replay lock** (hk 4981). The hub takes
+  `replayMu` only to claim the report, to refuse one that
+  `expireAppliedReport` already released, and to release the deferred replay;
+  the handoffkeep listings run under a per-report budget
+  (`hubAppliedSettleBudget`, 30 s). A report held across those listings in
+  earlier builds delayed every other node's `connect()`, and the waiting nodes
+  lost their sessions. The ordering survives through the registration's
+  `appliedPending` flag, not the lock: it stays set until the last row the
+  report names is closed, so a replay that runs while the report settles still
+  skips every row routed to that node. A report that arrives after expiry is
+  refused and its rows stay open for the next registration's report; the
+  per-report expiry is suspended while a claimed report settles.
 - **A gap is one line.** The hello replay and the startup replay hold every
   `lane.event` row that passed the replay gates until the walk has counted its
   lane. A lane owed more than `relayReplayGapThreshold` (20) rows gets one

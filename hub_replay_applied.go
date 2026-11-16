@@ -24,6 +24,12 @@ const hubCapabilityApplied = "applied_v1"
 // A missing or invalid report must not hold a node's replay indefinitely.
 const hubAppliedReportTimeout = 5 * time.Second
 
+// hubAppliedSettleBudget bounds the handoffkeep work one report may cause.
+// Settlement runs outside replayMu (hk 4981), so a slow store delays only this
+// node's replay trigger; the budget keeps the rows it names skipped by replay
+// for a bounded time even when handoffkeep stops answering.
+const hubAppliedSettleBudget = 30 * time.Second
+
 // relayAppliedReportPane is the delivered_to pane of a row a node's hello
 // closed, so the durable record shows why no ack named it.
 const relayAppliedReportPane = "applied-report"
@@ -56,23 +62,47 @@ func decodeHubAppliedReport(raw json.RawMessage) (map[string][]int64, bool) {
 
 // handleAppliedReport is the registration's second half: it closes what the
 // node reports, then runs the replay the hello deferred.
+//
+// The handoffkeep calls that close the rows run outside replayMu (hk 4981):
+// holding it across them made every other node's connect() — and so its hello
+// — wait out the whole settlement. The ordering contract is kept by the
+// pending flag, not the lock: replayAwaitsAppliedReport skips a lane.event row
+// whose route is a registration with appliedPending set, and settlement leaves
+// appliedPending set until the last row it names is closed. A replay that runs
+// while this one settles therefore still counts only rows the report does not
+// close, and the lock is taken only to claim the report, to refuse a report
+// expireAppliedReport already released, and to release the replay afterwards.
 func (h *HubServer) handleAppliedReport(machine string, registration *hubNodeRecord, applied map[string][]int64) {
 	h.replayMu.Lock()
 	h.mu.Lock()
-	current := registration != nil && h.nodes[machine] == registration && registration.agent != nil
-	h.mu.Unlock()
-	if !current {
-		h.replayMu.Unlock()
-		return
-	}
-	h.settleNodeApplied(context.Background(), machine, applied)
-	h.mu.Lock()
-	// A disconnect can happen while the report is being settled.
-	if h.nodes[machine] == registration && registration.agent != nil {
-		registration.appliedPending = false
+	// appliedExpired is the report's refusal: expireAppliedReport has already
+	// released a replay that re-offers these rows, and settling on top of that
+	// would close rows a replay was told to send.
+	settling := registration != nil && h.nodes[machine] == registration && registration.agent != nil &&
+		!registration.appliedExpired && !registration.appliedSettling
+	if settling {
+		// The report holds the registration pending for the whole settlement,
+		// so a replay that runs meanwhile still skips the rows it closes.
+		registration.appliedSettling = true
+		registration.appliedPending = true
 		if registration.appliedTimer != nil {
 			registration.appliedTimer.Stop()
 		}
+	}
+	h.mu.Unlock()
+	h.replayMu.Unlock()
+	if !settling {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hubAppliedSettleBudget)
+	h.settleNodeApplied(ctx, machine, applied)
+	cancel()
+	h.replayMu.Lock()
+	h.mu.Lock()
+	// A disconnect can happen while the report is being settled.
+	if h.nodes[machine] == registration {
+		registration.appliedSettling = false
+		registration.appliedPending = false
 	}
 	h.mu.Unlock()
 	h.replayMu.Unlock()
@@ -84,9 +114,13 @@ func (h *HubServer) handleAppliedReport(machine string, registration *hubNodeRec
 func (h *HubServer) expireAppliedReport(machine string, registration *hubNodeRecord) {
 	h.replayMu.Lock()
 	h.mu.Lock()
-	pending := h.nodes[machine] == registration && registration.agent != nil && registration.appliedPending
+	// A report that is already settling owns the release: it clears the flag
+	// itself once its rows are closed, and expiring mid-settlement would let a
+	// replay re-offer the rows it is about to close.
+	pending := h.nodes[machine] == registration && registration.agent != nil && registration.appliedPending && !registration.appliedSettling
 	if pending {
 		registration.appliedPending = false
+		registration.appliedExpired = true
 	}
 	h.mu.Unlock()
 	h.replayMu.Unlock()

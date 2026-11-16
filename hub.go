@@ -205,7 +205,19 @@ type HubLastNote struct {
 
 type hubNodeRecord struct {
 	// appliedPending belongs to this registration and is guarded by HubServer.mu.
-	appliedPending    bool
+	// It is set from a capable hello until the applied report is settled, and
+	// again while a report that arrived without one is being settled: a replay
+	// walk skips the rows of a node whose appliedPending is set.
+	appliedPending bool
+	// appliedSettling is true from the moment a report claims this
+	// registration until its rows are closed. It keeps expireAppliedReport
+	// from releasing the registration mid-settlement.
+	appliedSettling bool
+	// appliedExpired is set by expireAppliedReport when it released the
+	// registration. A report that arrives afterwards is refused (hk 4981): the
+	// replay has already been told to re-offer those rows, and the next
+	// registration's report closes what the node still lists.
+	appliedExpired    bool
 	appliedTimer      *time.Timer
 	machineID         string
 	accepting         bool
@@ -1303,6 +1315,11 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
+			// Nothing else says why a node session ended (hk 4981). The class
+			// and the node's close code are enough; the remote address and the
+			// error text are not logged.
+			reason, closeCode := hubNodeSessionEndReason(err)
+			h.logger.Warn("node session ended", "machine", machineID, "reason", reason, "close_code", closeCode)
 			h.disconnect(machineID, agent)
 			return
 		}
@@ -2094,6 +2111,11 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	// A node registration is the safe no-restart retry trigger for durable
 	// lane.event rows whose route was absent or disconnected when produced.
 	var reportsApplied bool
+	// sameAgent marks a capability-free re-hello on the registration the same
+	// session already holds: the node's fallback when a pong is late. It must
+	// not start a second full replay (hk 4981); the capable re-hello that
+	// follows the pong carries the applied report and releases that replay.
+	var sameAgent bool
 	if len(capabilityLists) > 0 {
 		reportsApplied = slices.Contains(capabilityLists[0], hubCapabilityApplied)
 	}
@@ -2105,7 +2127,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 			// A node that advertises the applied report sends it right behind
 			// its hello; the replay waits for it (handleAppliedReport), so the
 			// replay and its gap summary count only rows the node has not shown.
-			if !reportsApplied {
+			if !reportsApplied && !sameAgent {
 				h.replayUndeliveredLaneEvents(context.Background())
 			}
 		}()
@@ -2122,6 +2144,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		}
 		previous, previousReadiness, previousReadinessAt = existing.agent, existing.readiness, existing.readinessAt
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
+		sameAgent = previous == agent && existing.state == "connected"
 	}
 	var capabilities []string
 	if len(capabilityLists) > 0 {
@@ -2177,6 +2200,25 @@ func (h *HubServer) recordNote(machineID, text string, received time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.lastNotes[machineID] = &HubLastNote{Text: text, ReceivedAt: received}
+}
+
+// hubNodeSessionEndReason names the class of failure that ended a node session
+// and the node's close code when it sent one. close_code is 0 when the read
+// failed without a close frame (a broken socket). The error's text and the
+// node's address stay out of the log.
+func hubNodeSessionEndReason(err error) (string, int) {
+	if code := websocket.CloseStatus(err); code != -1 {
+		return "closed_by_node", int(code)
+	}
+	switch {
+	case errors.Is(err, net.ErrClosed):
+		return "closed_locally", 0
+	case errors.Is(err, context.DeadlineExceeded):
+		return "read_timeout", 0
+	case errors.Is(err, context.Canceled):
+		return "shutdown", 0
+	}
+	return "read", 0
 }
 
 // disconnect marks the record disconnected and fails the agent's pending
