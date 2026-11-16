@@ -1549,7 +1549,10 @@ selected with as `--consult-stamp`, accepted only with a pinned `--role
 consult`; the job and the hub's placement trace state it as the same `consult`
 object an auto-selected consult records (hk 4875). A node that predates the
 flag gets the spawn without it (`consult_stamp_v1`, see
-[hub-spawn-operations.md](hub-spawn-operations.md#time-limit)).
+[hub-spawn-operations.md](hub-spawn-operations.md#time-limit)). A stamp value
+the wire rule cannot carry (an asker family longer than 64 bytes or one with a
+control character) is not sent: the consult still runs and its record lacks the
+stamp.
 
 `resolve` defaults other roles to grade `C`. Other `plan` roles require a grade.
 
