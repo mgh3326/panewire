@@ -559,10 +559,15 @@ func (a *App) lanesMissing(ctx context.Context) error {
 // job.completed or job.joined follows its last claim. Without it the record
 // stays claimed or spawned and holds the task's role for every later spawn. A
 // record that is already completed or lost, or that hk does not hold, is left
-// alone. A failed read or write is a warning plus job.record_failed; reap
-// goes on.
+// alone, as is the record of a job the hub reassigned (Job.Reassigned): the
+// new owner's record is not this node's to end. A failed read or write is a
+// warning plus job.record_failed; reap goes on.
 func (a *App) markEndedJobLost(ctx context.Context, j Job) {
 	if j.Ended != "job.revoked" && j.Ended != "job.lost" {
+		return
+	}
+	if j.Reassigned {
+		a.warn("job %s reaped: the hub reassigned the job; its hk record is left to the new owner", j.ID)
 		return
 	}
 	readFailed := func(e error) {

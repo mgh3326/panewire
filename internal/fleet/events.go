@@ -32,6 +32,11 @@ type Job struct {
 	ID                                                                                                string
 	Owner, Parent, Role, Label, Pane, Tab, Task, Family, Profile, Effort, Report, HubLane, Machine, T string
 	Keep, Terminal, Reaped                                                                            bool
+	// Reassigned is whether a hub revocation record (hubRevocation) stands in
+	// the job's current attempt: the hub gave the job to another node, so the
+	// shared hk record is that node's. It outlives a later local end or
+	// reprompt of this node's pane and is cleared only by a new claim or spawn.
+	Reassigned bool
 	// SpawnRole is the role the job.spawned receipt names (reviewer, consult, ...).
 	// The claim records only implementer or builder, so the role a quota stop is
 	// handled by comes from here (QuotaRole).
@@ -52,6 +57,14 @@ type Job struct {
 // Ended and At then describe the job's current run only: At is the time of the
 // newest terminal event that still stands, never one a revived job left behind.
 func (j *Job) revive() { j.Terminal, j.Ended, j.Outcome, j.At = false, "", "", time.Time{} }
+
+// hubRevocation reports whether ev is a hub revocation record: the type-only
+// job.revoked that writeHubRevocation stores with the hub's ownership epoch,
+// which no local end carries. The hub gave the job to another node, so this
+// node must not write the shared hk record (#662 review, hk 5062).
+func hubRevocation(ev Event) bool {
+	return ev.Kind == "job.revoked" && ev.Kind == ev.Type && ev.Epoch > 0
+}
 
 func (a *App) events(id string) ([]Event, error) {
 	if !validID(id) {
@@ -143,6 +156,7 @@ func foldJob(id string, evs []Event) (Job, error) {
 			j.Inherited = str(p, "task_inherited_from")
 			j.T = str(p, "t_level")
 			j.revive()
+			j.Reassigned = false
 			j.Reaped = false
 		case "job.spawned":
 			j.Receipt = p
@@ -160,6 +174,7 @@ func foldJob(id string, evs []Event) (Job, error) {
 			j.HubLane = str(p, "hub_lane")
 			j.Machine = str(p, "hub_lane_machine")
 			j.revive()
+			j.Reassigned = false
 			j.Reaped = false
 			if j.Task == "" {
 				j.Task = scalar(p["task_id"])
@@ -178,6 +193,7 @@ func foldJob(id string, evs []Event) (Job, error) {
 			j.revive()
 		case "job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
 			j.Terminal, j.Ended = true, ev.Kind
+			j.Reassigned = j.Reassigned || hubRevocation(ev)
 			j.Outcome = firstNonempty(ev.Outcome, str(p, "outcome"))
 			j.At = ev.when
 		case "job.reaped":
