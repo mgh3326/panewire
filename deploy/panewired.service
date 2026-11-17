@@ -8,6 +8,10 @@
 # does not help: it SIGKILLs whatever is left in the cgroup once the main
 # process exits. See docs/runbooks/node-restart.md.
 #
+# OOMPolicy=continue: when the kernel OOM-kills one process in this cgroup (a
+# _watch, an agent helper, git), systemd's default (stop) stops the whole unit
+# and every watcher with it. Only the daemon's own death should restart it.
+#
 # TimeoutStopSec must exceed the daemon's stop drain (30 s: a spawn launch, a
 # brief injection or a result upload in flight finishes before it exits).
 [Unit]
@@ -21,6 +25,7 @@ RestartSec=2
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=60
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target
