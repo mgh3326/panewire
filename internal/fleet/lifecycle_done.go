@@ -206,7 +206,14 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 
 	resultSHA := resultDigest(in.result)
 	if _, ok := receipts.settledWith(resultSHA); !ok {
+		// The report upload above and the session read below can take time: a
+		// revocation that lands meanwhile (written without this job's locks)
+		// stops the write, so ownership is read again after them, and
+		// strictCompletedPutUntil reads it before every PUT it makes.
 		a.recordJobUsage(ctx, j, false)
+		if e := a.refuseReassigned(j); e != nil {
+			return e
+		}
 		completing := receipts.completing(in.digest)
 		fields := map[string]any{"state": "completed", "at": a.Now().UTC()}
 		pin := doc != "" && completing == in.digest
@@ -233,6 +240,8 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 			}
 			receipts.settled = append(receipts.settled, settledReceipt{sha: completing, resultSHA: resultSHA, pinned: pin && holds})
 			ran = append(ran, "settled")
+		case isDoneResultFailure(e, "job_reassigned"):
+			return e
 		case in.strict:
 			if isDoneResultFailure(e, "result_conflict") {
 				a.recordDoneResultConflict(id)
@@ -260,8 +269,15 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	pinPending, refused := false, doc != "" && receipts.held(in.digest)
 	pinned := doc != "" && receipts.holds(in.digest)
 	if doc != "" && len(receipts.settled) > 0 && receipts.completing(in.digest) == in.digest && !receipts.pinSettled(in.digest) {
+		// A retry whose settlement is already receipted skips step 2, so the
+		// upload above is rechecked here, just before the pin write.
+		if e := a.refuseReassigned(j); e != nil {
+			return e
+		}
 		res, e := a.pinReport(ctx, id, doc, in.digest)
 		switch {
+		case isDoneResultFailure(e, "job_reassigned"):
+			return e
 		case e != nil:
 			pinPending = true
 			a.warn("report pin failed: reason=%s", doneResultReason(e))
@@ -403,6 +419,11 @@ func (a *App) pinReport(ctx context.Context, id, doc, digest string) (pinResult,
 		a.warn("report pin kept: job %s record already names another report", id)
 		return pinResult{outcome: pinHeld, document: doc}, nil
 	}
+	// The read above can block: ownership is read again just before the pin
+	// write, and a revocation that landed meanwhile stops it.
+	if a.hubReassigned(Job{ID: id}) {
+		return pinResult{}, &doneResultFailure{code: exitStateConflict, reason: "job_reassigned"}
+	}
 	switch e = a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest}); {
 	case e == nil:
 		return pinResult{outcome: pinPinned, document: doc, wrote: true}, nil
@@ -500,6 +521,9 @@ func (a *App) escalateReport(ctx context.Context, j Job, report, question string
 		}
 	}
 	a.recordJobUsage(ctx, j, false)
+	if e := a.refuseReassigned(j); e != nil {
+		return e
+	}
 	rec := map[string]any{"state": "escalated", "at": a.Now().UTC()}
 	if doc != "" {
 		rec["report_doc"] = doc

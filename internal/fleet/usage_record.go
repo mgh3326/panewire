@@ -23,7 +23,7 @@ func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 	if !ok {
 		return
 	}
-	a.writeJobSession(ctx, j.ID, session)
+	a.writeJobSession(ctx, j, session)
 	if atReap || j.Terminal || session.usage.Model == "" {
 		return
 	}
@@ -37,6 +37,10 @@ func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 		}
 		switch str(rec, "state") {
 		case "completed", "escalated", "lost":
+			return
+		}
+		if a.hubReassigned(j) {
+			// The model is this node's session; the record is the new owner's.
 			return
 		}
 		e = store.Put(ctx, j.ID, map[string]any{"model": session.usage.Model})
@@ -74,7 +78,12 @@ func (a *App) readJobSession(ctx context.Context, j Job, atReap bool) (jobSessio
 // writeJobSession writes usage and skills in one PUT, the only update hk
 // accepts after a job is terminal. A refusal is a warning: job end is never
 // failed by a record write.
-func (a *App) writeJobSession(ctx context.Context, id string, session jobSession) {
+func (a *App) writeJobSession(ctx context.Context, j Job, session jobSession) {
+	if a.hubReassigned(j) {
+		// The usage is this node's session; the record is the new owner's.
+		return
+	}
+	id := j.ID
 	fields := map[string]any{"skills_supported": session.skills.Supported}
 	if session.haveUsage {
 		fields["usage"] = session.usage.Wire()

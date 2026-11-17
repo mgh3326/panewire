@@ -1201,7 +1201,7 @@ func (s *TaskPaneSweeper) reapSweptPaneHeld(ctx context.Context, a *App, latest,
 	delete(s.endedSince, key)
 	a.markSweptJob(ctx, latest, end.state)
 	if haveSession {
-		a.writeJobSession(ctx, latest.ID, session)
+		a.writeJobSession(ctx, latest, session)
 	}
 	if err := a.releaseQuota(ctx, j); err != nil {
 		a.warn("quota retained: %v", err)
@@ -1256,8 +1256,9 @@ func (a *App) savePaneScreen(ctx context.Context, j Job, task string) error {
 
 // markSweptJob writes the end state to the hk record of a job that never
 // reported done: completed for a completed task, lost for a canceled one.
-// A record that is already completed, escalated or lost, or that hk does not
-// hold, is left alone; a failed read or write is a warning plus
+// A record that is already completed, escalated or lost, that hk does not
+// hold, or whose job the hub reassigned (hubReassigned, checked just before
+// the write) is left alone; a failed read or write is a warning plus
 // job.record_failed, and the sweep goes on.
 func (a *App) markSweptJob(ctx context.Context, j Job, endState string) {
 	store, err := a.jobStore()
@@ -1274,6 +1275,10 @@ func (a *App) markSweptJob(ctx context.Context, j Job, endState string) {
 		return
 	}
 	if state := str(rec, "state"); state != "claimed" && state != "spawned" {
+		return
+	}
+	if a.hubReassigned(j) {
+		a.warn("job %s swept: the hub reassigned the job; its hk record is left to the new owner", j.ID)
 		return
 	}
 	if err := a.putJobRecord(ctx, j.ID, map[string]any{"state": endState, "at": a.Now().UTC()}); err != nil {

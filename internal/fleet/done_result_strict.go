@@ -104,6 +104,12 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 		if ctx.Err() != nil {
 			return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(ctx.Err())}
 		}
+		// Every PUT of an attempt, retries included, is preceded by an
+		// ownership read: the hub's revocation is written without this job's
+		// locks and can land at any point of the retry budget.
+		if a.hubReassigned(Job{ID: id}) {
+			return false, &doneResultFailure{code: exitStateConflict, reason: "job_reassigned"}
+		}
 		callCtx, cancel := context.WithTimeout(ctx, left)
 		attempts++
 		last = store.Put(callCtx, id, fields)
@@ -149,6 +155,9 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 			left = time.Until(deadline)
 			if left <= 0 {
 				return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(last)}
+			}
+			if a.hubReassigned(Job{ID: id}) {
+				return false, &doneResultFailure{code: exitStateConflict, reason: "job_reassigned"}
 			}
 			callCtx, cancel = context.WithTimeout(ctx, left)
 			repairErr := store.Put(callCtx, id, spawned)
