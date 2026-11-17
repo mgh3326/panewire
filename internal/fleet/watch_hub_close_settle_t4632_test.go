@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -351,5 +352,39 @@ func TestJobDirTTLKeepsAnOpenHubClose_t4632(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "reason=hub-close-open") {
 		t.Fatalf("ttl output %q, want the dir kept as hub-close-open", out.String())
+	}
+}
+
+// #662 round 8 (r4597976581): the hub's revocation writer allocates its
+// sequence without the ledger lock, so a revocation can land at a sequence
+// before a concurrent close intent. It is on disk when settlement rereads
+// the ledger, so settlement must still leave the shared hk record to the new
+// owner and write no hk lost.
+func TestSettlementHonorsARevocationSequencedBeforeTheIntent_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	dir := filepath.Join(a.Jobs, "j", "events")
+	files, e := os.ReadDir(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	name := fmt.Sprintf("%05d-job.revoked.json", len(files)+1)
+	if e := os.WriteFile(filepath.Join(dir, name), []byte(`{"type":"job.revoked","job_id":"j","epoch":2}`), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	evs, _ := os.ReadDir(dir)
+	if last := evs[len(evs)-1].Name(); last <= name {
+		t.Fatalf("intent %s does not sort after the revocation %s", last, name)
+	}
+	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
+		t.Fatalf("settle %v, %v; want settled", state, e)
+	}
+	if st := str(h.record(t, "j"), "state"); st != "spawned" {
+		t.Fatalf("hk state %s, want the new owner's record untouched", st)
+	}
+	if lost := lostEvents(t, a); len(lost) != 1 || !boolean(lost[0], "superseded", false) {
+		t.Fatalf("job.lost %v, want one superseded settlement", lost)
 	}
 }
