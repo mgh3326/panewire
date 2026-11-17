@@ -4,8 +4,9 @@ package panewire
 
 import (
 	"errors"
-	"golang.org/x/sys/unix"
 	"net"
+
+	"golang.org/x/sys/unix"
 )
 
 func localPeerPID(c net.Conn) (int, error) {
