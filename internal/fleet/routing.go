@@ -517,7 +517,7 @@ func (a *App) roleExhausted(ctx context.Context, s Spawn, req selReq, p *selPlan
 	}
 	if rt.downgradedFrom != "" {
 		p.routeRefusal = reasonRoleExhaustWait
-		return p, fail(exitRoleWait, "%s: QUOTA_EXHAUSTED: role %s and its downgrade_to profiles (%s) are exhausted; earliest reset %s%s", reasonRoleExhaustWait, rt.downgradedFrom, allowed, reset, hostScope(s))
+		return p, fail(exitRoleWait, "%s: QUOTA_EXHAUSTED: role %s and its downgrade_to profiles (%s) are exhausted; earliest reset %s%s%s", reasonRoleExhaustWait, rt.downgradedFrom, allowed, reset, hostScope(s), p.excludedBindingNote())
 	}
 	switch rt.rule.OnExhaustion {
 	case exhaustDowngrade:
@@ -532,9 +532,9 @@ func (a *App) roleExhausted(ctx context.Context, s Spawn, req selReq, p *selPlan
 		return q, e
 	case exhaustEscalate:
 		p.routeRefusal = reasonRoleExhaustEscal
-		return p, fail(exitRoleEscalate, "%s: QUOTA_EXHAUSTED: every eligible %s account (%s) is measured exhausted; ask the parent lane%s", reasonRoleExhaustEscal, rt.role, allowed, hostScope(s))
+		return p, fail(exitRoleEscalate, "%s: QUOTA_EXHAUSTED: every eligible %s account (%s) is measured exhausted; ask the parent lane%s%s", reasonRoleExhaustEscal, rt.role, allowed, hostScope(s), p.excludedBindingNote())
 	default:
 		p.routeRefusal = reasonRoleExhaustWait
-		return p, fail(exitRoleWait, "%s: QUOTA_EXHAUSTED: every eligible %s account (%s) is measured exhausted; earliest reset %s%s", reasonRoleExhaustWait, rt.role, allowed, reset, hostScope(s))
+		return p, fail(exitRoleWait, "%s: QUOTA_EXHAUSTED: every eligible %s account (%s) is measured exhausted; earliest reset %s%s%s", reasonRoleExhaustWait, rt.role, allowed, reset, hostScope(s), p.excludedBindingNote())
 	}
 }

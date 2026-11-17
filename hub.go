@@ -2137,6 +2137,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	var previousSnapshot *hubSessionSnapshotRecord
 	var previousReadiness *fleet.Readiness
 	var previousReadinessAt time.Time
+	var previousCapabilities map[string]bool
 	h.mu.Lock()
 	if existing := h.nodes[machineID]; existing != nil {
 		if existing.appliedTimer != nil {
@@ -2144,6 +2145,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		}
 		previous, previousReadiness, previousReadinessAt = existing.agent, existing.readiness, existing.readinessAt
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
+		previousCapabilities = existing.capabilities
 		sameAgent = previous == agent && existing.state == "connected"
 	}
 	var capabilities []string
@@ -2153,6 +2155,15 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	capabilitySet := make(map[string]bool, len(capabilities))
 	for _, capability := range capabilities {
 		if capability != "" && len(capability) <= 64 {
+			capabilitySet[capability] = true
+		}
+	}
+	if sameAgent && len(capabilitySet) == 0 {
+		// The capability-free hello is a compatibility retry for a hub that
+		// did not acknowledge the capable hello. On this live session it must
+		// retain the registration's features while still resetting its job
+		// state; a first hello without features remains an old-node record.
+		for capability := range previousCapabilities {
 			capabilitySet[capability] = true
 		}
 	}

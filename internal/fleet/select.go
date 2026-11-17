@@ -317,7 +317,10 @@ type selPlan struct {
 	// poolCaps is [quota].pool_max_concurrent as this selection read it; the
 	// refusal names the caps that dropped candidates.
 	poolCaps map[string]int
-	at       time.Time
+	// excludedBindings retains account holders whose otherwise eligible host
+	// was removed only by --exclude-host or the hub's not-accepting verdict.
+	excludedBindings map[string]map[string]map[string]bool
+	at               time.Time
 	// routeRefusal names the role refusal (role_no_candidate,
 	// role_exhausted_wait, role_exhausted_escalate) when routing ended the
 	// selection; before is the role's own exhausted attempt when this plan
@@ -678,6 +681,9 @@ type selHost struct {
 	wakeable bool
 	eligible bool
 	excluded bool
+	// excludedByFlag is the explicit --exclude-host filter; host pins and
+	// static host exclusions have their own refusal semantics.
+	excludedByFlag bool
 	// restricted marks a host excluded only by --host or --exclude-host.
 	// It is never placed or gated, but it may still measure an account it
 	// holds: the reading belongs to the account, so a restricted spawn
@@ -797,7 +803,8 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 				h.awake = !h.wakeable || sp.hub == nil
 			}
 		}
-		if slices.Contains(excluded, name) || s.Host != "" && s.Host != "auto" && s.Host != name && !(local && s.Host == "local") {
+		h.excludedByFlag = slices.Contains(excluded, name)
+		if h.excludedByFlag || s.Host != "" && s.Host != "auto" && s.Host != name && !(local && s.Host == "local") {
 			h.restricted = !h.excluded
 			h.excluded = true
 			h.memExcluded = false
@@ -1016,6 +1023,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		}
 		// A candidate is a profile/rung/account, never a provider-level pool.
 		bindings := pres.bindings(c.seat, row.Pool)
+		p.addExcludedBindings(row.Pool, pres.excludedOnlyBindings(c.seat, row.Pool, bindings))
 		if len(bindings) == 0 {
 			c.reason, c.code = "no_presence", outcomeAuthUnavailable
 			if drop := pres.firstDrop(c.seat); drop != "" {

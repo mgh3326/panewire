@@ -15,6 +15,8 @@ import (
 // role's routing — the policy/model-routing filter, then the pool order and
 // the quota gates — and prints the choice. It places no host, spawns
 // nothing and writes no job record. The answer is the last thing printed.
+// Reviewer and judge callers must provide the task grade: resolve's caller
+// owns the subagent call and has the work context needed to choose that grade.
 //
 // --t takes the same values as plan's (T0..T3) and defaults to T0, so the
 // bare `resolve --role R --grade G` form keeps working. The seat role is implementer, or reviewer for the reviewer and judge routing
@@ -68,6 +70,9 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		return fail(exitUsage, "resolve needs --role %s", strings.Join(routingRoles, "|"))
 	}
 	grade = strings.ToUpper(grade)
+	if (role == "reviewer" || role == "judge") && (!flagPassed(f, "grade") || grade == "") {
+		return fail(exitUsage, "resolve --role %s needs --grade C|B|A|A+|S|S+|SS", role)
+	}
 	if topRoutingRole(role) {
 		// A consult asker's grade is optional; a grade that is passed must be one.
 		if _, ok := gradeOrder[grade]; !ok && flagPassed(f, "grade") {
@@ -118,8 +123,13 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	cwd, _ := os.Getwd()
 	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: seatRole, T: t, ParentFamily: authorFamily, RoutingRole: role, AllowEscalation: allowEscalation, DryRun: true}
 	gradeSource := "without_task"
+	gradeSourceText := "default"
+	if topRoutingRole(role) && !flagPassed(f, "grade") {
+		gradeSourceText = "without_task"
+	}
 	if flagPassed(f, "grade") {
 		gradeSource = "flag"
+		gradeSourceText = "flag"
 	}
 	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: allowEscalation, authorFamily: authorFamily, harness: harness, urgency: urgencyNormal, urgencySource: "default", route: route}
 	sel, selErr := a.selectFor(ctx, s, req)
@@ -152,7 +162,11 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.Out, string(b))
 		return selErr
 	}
-	fmt.Fprintf(a.Out, "resolve role=%s seat_role=%s grade=%s t=%s routing_version=%d policy_source=%s", r.RoutingRole, r.SeatRole, r.Grade, r.T, r.RoutingVersion, r.PolicySource)
+	tSourceText := "default"
+	if flagPassed(f, "t") {
+		tSourceText = "flag"
+	}
+	fmt.Fprintf(a.Out, "resolve role=%s seat_role=%s grade=%s grade_source=%s t=%s t_source=%s routing_version=%d policy_source=%s", r.RoutingRole, r.SeatRole, r.Grade, gradeSourceText, r.T, tSourceText, r.RoutingVersion, r.PolicySource)
 	if topRoutingRole(role) {
 		fmt.Fprintf(a.Out, " floor=%s", consultFloorFor(r.Grade, lane))
 	}
