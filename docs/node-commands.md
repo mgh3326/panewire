@@ -248,11 +248,17 @@ was registered for, then resumes the guarded close or settles `preempted`. A
 a new id. Reusing an id for another pane is `invalid_args`.
 
 `pane.close_status` (`request_id`, `job`) answers
-`{"state":"none"|<state>,"released":<bool>,"settled":<bool>,"attempt":"<token>"}`, where
+`{"state":"none"|"superseded"|<state>,"released":<bool>,"settled":<bool>,"attempt":"<token>"}`, where
 `attempt` is the job's current attempt token (empty when its ledger cannot be
 read). `settled` proves a synced final `job.lost` closed this request's
 intent; it also covers an older unknown intent closed by a later request on
 the same attempt. A visible hk `lost` record alone does not prove settlement.
+For an unknown operation, `superseded` proves that a different attempt is
+current. The node checks it under the job end lock and syncs the events
+directory before answering. The unknown journal stays intact: this proof says
+no later hk write belongs to the old intent, not whether its pane was closed.
+It relies on the #662 `endMark` rule: a stale attempt's watcher decision is
+dropped when rechecked under that lock (see the stale-decision rule below).
 `pane.close_release` takes the
 same arguments, marks a final operation released (a `registered` one becomes
 `cancelled`) and answers the same shape; an operation left `closing` stays
@@ -522,8 +528,9 @@ before advertising close support, the node recovers unfinished pre-epoch
 journals under the close-admission lock: an unstarted operation is cancelled,
 and a possibly executed close becomes unknown for normal settlement. A
 timeout, unknown, or hk record read is not a final answer. Refused, preempted,
-cancelled and released, or settled answers are final. A mismatch or `not-a-job`
-stays pending until release
+cancelled and released, settled, or superseded answers are final. Superseded
+ends the old action without a notice and permits a later sweep of the new
+attempt. A mismatch or `not-a-job` stays pending until release
 provides a durable tombstone. `reassignJob` refuses while any action for the
 job remains non-final; it also fails closed if its store is unavailable. A
 settled action permits reassignment even before its notice is delivered. If the

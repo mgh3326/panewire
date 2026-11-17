@@ -537,6 +537,9 @@ func (client *HubClient) Run(ctx context.Context) {
 		return
 	}
 	client.rearmWatchers()
+	if ctx.Err() != nil {
+		return
+	}
 	go client.runSpawnSettle(ctx)
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)

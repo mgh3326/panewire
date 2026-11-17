@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -74,6 +75,9 @@ const (
 	// to this pane and label, or the attempt has ended; no operation was
 	// opened and nothing closed.
 	nodeCloseOpMismatch = "mismatch"
+	// nodeCloseOpSuperseded is a durable proof that an unknown operation's
+	// attempt is no longer current; its journal retains the unknown outcome.
+	nodeCloseOpSuperseded = "superseded"
 )
 
 type nodePaneCloseOpArgs struct {
@@ -158,6 +162,8 @@ func validNodeCloseOpStatusResult(result nodeCloseOpStatusResult) bool {
 		return !result.Released
 	case fleet.CloseOpCancelled:
 		return result.Released
+	case nodeCloseOpSuperseded:
+		return result.Attempt != ""
 	case fleet.CloseOpClosed, fleet.CloseOpRefused, fleet.CloseOpGone, fleet.CloseOpUnknown, fleet.CloseOpPreempted:
 		return true
 	}
@@ -543,6 +549,8 @@ type nodeHubCloseLedger interface {
 	// CloseOpsReady is the node-wide precondition: the migration barrier
 	// was recorded and no older watcher or launcher runs (fleet.CloseOpsReady).
 	CloseOpsReady(ctx context.Context) bool
+	// SyncEvents makes the ledger's observed event names durable.
+	SyncEvents(job *os.Root) error
 	RecordIntent(ctx context.Context, job string, in fleet.HubCloseIntent) error
 	// CancelIntent closes the intent of a request the hub released before
 	// the node registered it.
@@ -564,6 +572,19 @@ func (l nodeFleetHubClose) LockEnd(ctx context.Context, jobDir string) (func(), 
 }
 func (l nodeFleetHubClose) CloseOpsReady(ctx context.Context) bool {
 	return fleet.CloseOpsReady(ctx, l.jobs, nil)
+}
+
+func syncNodeCloseEvents(job *os.Root) error {
+	dir, err := job.Open("events")
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func (l nodeFleetHubClose) SyncEvents(job *os.Root) error {
+	return syncNodeCloseEvents(job)
 }
 
 func (l nodeFleetHubClose) Fence(jobDir string) (func(), bool, error) {
@@ -792,30 +813,45 @@ func (client *HubClient) fencedJobs() []string {
 // settlements; the first pass runs at node start.
 const hubCloseSettleInterval = 30 * time.Second
 
+// Bound concurrent job steps so one held job lock cannot stall other jobs.
+const hubCloseSettleConcurrency = 4
+
 // runHubCloseSettle settles, at node start and then on every interval, every
 // job whose ledger holds an open hub-close intent: an accepted close is
 // finished by the node even when no hub command and no watcher come back.
 func (client *HubClient) runHubCloseSettle(ctx context.Context) {
-	if client.jobsInboxRoot == "" {
+	if client.jobsInboxRoot == "" || ctx.Err() != nil {
 		return
 	}
+	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
+	recoveryCtx, stopRecovery := context.WithCancel(ctx)
+	recoveryDone := make(chan struct{})
+	go func() {
+		defer close(recoveryDone)
+		for !client.closeOpsRecovered.Load() {
+			err := fleet.RecoverLegacyCloseOps(recoveryCtx, jobsRoot, client.nowUTC())
+			if err == nil {
+				client.closeOpsRecovered.Store(true)
+				return
+			}
+			if recoveryCtx.Err() != nil {
+				return
+			}
+			slog.Warn("hub close legacy recovery waits", "error", err)
+			select {
+			case <-recoveryCtx.Done():
+				return
+			case <-time.After(hubCloseSettleInterval):
+			}
+		}
+	}()
+	defer func() { stopRecovery(); <-recoveryDone }()
 	// open is the jobs the last full pass found with an open intent; the
 	// fence is reconciled for them, and for every fenced job, on every
 	// short tick, so an aware watcher that exits mid-close is replaced by
 	// the fence within hubCloseFenceInterval.
 	var open []string
 	pass := func() {
-		jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
-		if !client.closeOpsRecovered.Load() {
-			step, cancel := context.WithTimeout(ctx, hubCloseSettleBudget)
-			err := fleet.RecoverLegacyCloseOps(step, jobsRoot, client.nowUTC())
-			cancel()
-			if err != nil {
-				slog.Warn("hub close legacy recovery waits", "error", err)
-				return
-			}
-			client.closeOpsRecovered.Store(true)
-		}
 		jobs, err := fleet.PendingHubCloseJobs(jobsRoot)
 		if err != nil {
 			return
@@ -824,10 +860,23 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 		// Each step is bounded and runs outside the node's acting lock: the
 		// job's end lock alone serializes it with that job's close ops. A
 		// fenced job whose intent went stale is visited too, to release it.
+		var running sync.WaitGroup
+		defer running.Wait()
+		slots := make(chan struct{}, hubCloseSettleConcurrency)
 		for _, job := range unionJobs(jobs, client.fencedJobs()) {
-			step, cancel := context.WithTimeout(ctx, hubCloseSettleBudget)
-			client.settleHubClose(step, job)
-			cancel()
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			running.Add(1)
+			go func(job string) {
+				defer running.Done()
+				defer func() { <-slots }()
+				step, cancel := context.WithTimeout(ctx, hubCloseSettleBudget)
+				defer cancel()
+				client.settleHubClose(step, job)
+			}(job)
 		}
 	}
 	fence := func() {
@@ -948,6 +997,28 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 			return nil, "journal_failed"
 		}
 	}
+	if op.State == fleet.CloseOpUnknown {
+		ctx, cancel := context.WithTimeout(context.Background(), hubCloseLockBudget)
+		unlock, err := client.hubCloseLedger().LockEnd(ctx, jobDir)
+		cancel()
+		if err != nil {
+			return nil, "journal_failed"
+		}
+		target, err := readNodeCloseTarget(job)
+		if err != nil {
+			unlock()
+			return nil, "journal_failed"
+		}
+		if target.attempt != "" && target.attempt != op.Attempt {
+			err := client.hubCloseLedger().SyncEvents(job)
+			unlock()
+			if err != nil {
+				return nil, "journal_failed"
+			}
+			return nodeCloseOpStatusResult{State: nodeCloseOpSuperseded, Released: op.Released != nil, Attempt: target.attempt}, ""
+		}
+		unlock()
+	}
 	settled := false
 	if op.State == fleet.CloseOpClosed || op.State == fleet.CloseOpGone || op.State == fleet.CloseOpUnknown {
 		events, err := readNodeJobLedgerEvents(job)
@@ -980,13 +1051,7 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 			}
 		}
 		if settled {
-			dir, err := job.Open("events")
-			if err != nil {
-				return nil, "journal_failed"
-			}
-			err = dir.Sync()
-			dir.Close()
-			if err != nil {
+			if err := client.hubCloseLedger().SyncEvents(job); err != nil {
 				return nil, "journal_failed"
 			}
 		}

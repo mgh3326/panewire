@@ -3,10 +3,13 @@ package fleet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 )
+
+const legacyCloseRecoveryJobBudget = 2 * time.Second
 
 // RecoverLegacyCloseOps makes pre-epoch operations final without starting a
 // close. The exclusive admission lock waits for any old command to finish;
@@ -23,12 +26,19 @@ func RecoverLegacyCloseOps(ctx context.Context, jobs string, now time.Time) erro
 		return err
 	}
 	a := &App{Jobs: jobs}
+	var failures error
 	for _, id := range ids {
-		if err := a.recoverLegacyJobClose(ctx, id, now); err != nil {
-			return err
+		step, cancel := context.WithTimeout(ctx, legacyCloseRecoveryJobBudget)
+		err := a.recoverLegacyJobClose(step, id, now)
+		cancel()
+		if err != nil {
+			failures = errors.Join(failures, fmt.Errorf("job %s: %w", id, err))
+		}
+		if ctx.Err() != nil {
+			return errors.Join(failures, ctx.Err())
 		}
 	}
-	return nil
+	return failures
 }
 
 func (a *App) recoverLegacyJobClose(ctx context.Context, id string, now time.Time) error {

@@ -142,6 +142,11 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	switch status.State {
 	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
 		return h.refusePoolAction(ctx, action)
+	case nodeCloseOpSuperseded:
+		if action.Data.Args == nil || status.Attempt == action.Data.Args.Attempt {
+			return errors.New("invalid superseded close proof")
+		}
+		return h.refusePoolAction(ctx, action)
 	case fleet.CloseOpCancelled:
 		if status.Released {
 			return h.refusePoolAction(ctx, action)

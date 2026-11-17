@@ -68,6 +68,7 @@ func (f *fakeHubClose) LockEnd(ctx context.Context, dir string) (func(), error) 
 	return fleet.LockJobEndContext(ctx, dir)
 }
 func (f *fakeHubClose) CloseOpsReady(context.Context) bool     { return !f.notReady }
+func (f *fakeHubClose) SyncEvents(job *os.Root) error          { return syncNodeCloseEvents(job) }
 func (f *fakeHubClose) Fence(dir string) (func(), bool, error) { return fleet.FenceWatchers(dir) }
 func (f *fakeHubClose) Watcher(string) (fleet.HubCloseWatcher, error) {
 	return f.watcher, nil
