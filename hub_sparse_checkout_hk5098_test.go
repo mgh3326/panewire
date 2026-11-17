@@ -208,12 +208,15 @@ func TestSpawnAnswerCarriesCheckoutMode(t *testing.T) {
 	if !strings.Contains(string(extended), `"checkout_mode":"sparse"`) {
 		t.Fatalf("extended answer=%s", extended)
 	}
-	legacy, err := json.Marshal(spawnResultWire(hubSpawnResult{RequestID: t14RequestID(952), CheckoutMode: nodeCheckoutSparse}, false))
+	// A direct /v1/spawn never sets operator_authorized, so its answer uses the
+	// legacy receipt shape; the hub-feature gate, not that shape, decides
+	// whether checkout_mode travels (hk 5098 review).
+	legacy, err := json.Marshal(spawnResultWire(spawnResultForHub(hubSpawnResult{RequestID: t14RequestID(952), CheckoutMode: nodeCheckoutSparse}, true, true), false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(legacy), "checkout_mode") {
-		t.Fatalf("legacy answer carries an unknown field: %s", legacy)
+	if !strings.Contains(string(legacy), `"checkout_mode":"sparse"`) {
+		t.Fatalf("a capable hub's legacy-shaped answer lost checkout_mode: %s", legacy)
 	}
 }
 

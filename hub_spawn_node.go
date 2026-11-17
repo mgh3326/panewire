@@ -469,8 +469,12 @@ func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof, acceptsCheckou
 	return result
 }
 func spawnResultWire(result hubSpawnResult, extended bool) any {
+	// checkout_mode is not part of the extended receipt shape: whether the hub
+	// reads it is decided by hub.features (spawnResultForHub), not by
+	// operator_authorized, which a direct /v1/spawn never sets (hk 5098
+	// review).
 	if !extended {
-		result.Receipt, result.Stage, result.StageMS, result.Retryable, result.CheckoutMode = nil, "", nil, false, ""
+		result.Receipt, result.Stage, result.StageMS, result.Retryable = nil, "", nil, false
 		switch result.Error {
 		case "reconciling", "unknown", "journal_unavailable", "journal_conflict":
 			result.Error = "timeout" // Legacy hubs understand uncertainty as timeout.
