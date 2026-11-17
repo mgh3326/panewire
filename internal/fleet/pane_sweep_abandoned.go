@@ -107,8 +107,36 @@ func (s *TaskPaneSweeper) endAbandonedReviews(ctx context.Context, a *App, jobs 
 		if err != nil {
 			continue
 		}
-		s.reapSweptPane(ctx, a, latest, j, "", paneSweepEnd{state: "lost", reason: SweepPaneGone, byJob: true}, jobSession{}, false, now)
-		swept = append(swept, SweptPane{Job: j.ID, Pane: j.Pane, Role: paneSweepRole(j), Reason: SweepPaneGone})
+		// endAbandonedJob appended exactly one loss to j. If an attempt or
+		// any other ledger event intervened before this snapshot, the reap
+		// must not carry the old decision into that new state.
+		events := ledgerOrder(latest.Events)
+		if len(events) != len(j.Events)+1 {
+			continue
+		}
+		last := events[len(events)-1]
+		before := latest
+		before.Events = events[:len(events)-1]
+		if !sameJobLedger(j, before) || last.Kind != "job.lost" || str(last.Payload, "reason") != SweepPaneGone || str(last.Payload, "pane_id") != j.Pane {
+			continue
+		}
+		current, unlock, refusal := a.lockUnchangedEnd(ctx, latest)
+		if refusal != "" {
+			continue
+		}
+		agents, agentErr := a.agents(ctx)
+		panes, paneErr := a.panes(ctx)
+		gone := agentErr == nil && paneErr == nil && paneOwnershipProof(current, agents) == "pane_unlisted"
+		for _, pane := range panes {
+			if pane.Pane == current.Pane {
+				gone = false
+			}
+		}
+		if gone {
+			s.reapSweptPaneHeld(ctx, a, current, current, "", paneSweepEnd{state: "lost", reason: SweepPaneGone, byJob: true}, jobSession{}, false, now)
+			swept = append(swept, SweptPane{Job: current.ID, Pane: current.Pane, Role: paneSweepRole(current), Reason: SweepPaneGone})
+		}
+		unlock()
 	}
 	return swept
 }
@@ -167,6 +195,14 @@ var paneSweepResultReadHook func(job string)
 // re-proves the policy under the job's operation lock, which `panewire done` and
 // the quota-stop record take: none of them lands between.
 func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, reason string, now time.Time) (string, error) {
+	// The end lock first, as the watcher and settlement take it before the
+	// operation lock: a job whose hub close is open is left to settlement,
+	// and none is admitted while this end runs (#662 review).
+	current, endUnlock, refusal := a.lockUnchangedEnd(ctx, j)
+	if refusal != "" {
+		return "", errJobAlreadyEnded
+	}
+	defer endUnlock()
 	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
 	if err != nil {
 		return "", err
@@ -176,7 +212,7 @@ func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, re
 	if err != nil {
 		return "", err
 	}
-	if !paneSweepAbandoned(latest) || latest.Pane != j.Pane || latest.Label != j.Label {
+	if !sameJobLedger(current, latest) || !paneSweepAbandoned(latest) || latest.Pane != j.Pane || latest.Label != j.Label {
 		return "", errJobAlreadyEnded
 	}
 	store, err := a.jobStore()

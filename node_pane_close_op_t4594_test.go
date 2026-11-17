@@ -55,17 +55,20 @@ func closeOpNode(t *testing.T, inbox string, fake *nodeFakeHerdr) *HubClient {
 // reaches the developer's arbiter state or starts a process. The end lock is
 // the real one.
 type fakeHubClose struct {
-	watcher fleet.HubCloseWatcher
-	intents []fleet.HubCloseIntent
-	cancels []string
-	settled []string
-	state   fleet.HubCloseState
-	record  func(job string, in fleet.HubCloseIntent) error
+	watcher  fleet.HubCloseWatcher
+	notReady bool
+	intents  []fleet.HubCloseIntent
+	cancels  []string
+	settled  []string
+	state    fleet.HubCloseState
+	record   func(job string, in fleet.HubCloseIntent) error
 }
 
 func (f *fakeHubClose) LockEnd(ctx context.Context, dir string) (func(), error) {
 	return fleet.LockJobEndContext(ctx, dir)
 }
+func (f *fakeHubClose) CloseOpsReady(context.Context) bool     { return !f.notReady }
+func (f *fakeHubClose) Fence(dir string) (func(), bool, error) { return fleet.FenceWatchers(dir) }
 func (f *fakeHubClose) Watcher(string) (fleet.HubCloseWatcher, error) {
 	return f.watcher, nil
 }
@@ -897,9 +900,9 @@ func TestCloseOpReleaseFencesAnUnregisteredRequest_t4652(t *testing.T) {
 	}
 }
 
-// No hello advertises close_ops_v1: no hub may issue a close op to any node
-// until the activation prerequisite (an owned launch boundary) lands.
-func TestNoHelloAdvertisesCloseOps_t4652(t *testing.T) {
+// close_ops_v1 is not one of the capabilities every hello carries: it is
+// added only while the node is ready (node_close_ops_t4632_test.go).
+func TestBaseHelloOmitsCloseOps_t4652(t *testing.T) {
 	if slices.Contains(hubSpawnCapabilities, hubCapabilityCloseOps) {
 		t.Fatalf("hello capabilities %v advertise %s", hubSpawnCapabilities, hubCapabilityCloseOps)
 	}
@@ -927,4 +930,22 @@ func TestCloseOpEndLockWaitIsBounded_t4652(t *testing.T) {
 	if code != "journal_failed" || time.Since(start) > 5*time.Second {
 		t.Fatalf("code=%q after %v, want journal_failed within the deadline", code, time.Since(start))
 	}
+}
+
+// FenceState: an intent stays open while the fake's settlement is pending.
+func (f *fakeHubClose) FenceState(string) (bool, bool, error) {
+	return f.state == fleet.HubClosePending && len(f.intents) > 0, true, nil
+}
+
+// Borrow lends the fake's job a fence of the node's own (no watcher process
+// runs in these fixtures).
+func (f *fakeHubClose) Borrow(_ context.Context, dir string) (func(), error) {
+	release, ok, err := fleet.FenceWatchers(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return func() {}, nil
+	}
+	return release, nil
 }

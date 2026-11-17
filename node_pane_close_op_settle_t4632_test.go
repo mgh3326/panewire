@@ -19,7 +19,6 @@ func TestFailedReleaseSettlesNothingInline_t4632(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unlock()
 	start := time.Now()
 	var args nodeCloseOpRefArgs
 	args.RequestID, args.Job = "op-9", closeOpJob
@@ -32,7 +31,9 @@ func TestFailedReleaseSettlesNothingInline_t4632(t *testing.T) {
 	if len(ledger.settled) != 0 {
 		t.Fatalf("settled inline after a failed release: %v", ledger.settled)
 	}
-	// A successful status still settles inline.
+	// A successful status still settles inline, once the end lock is free
+	// (the step reconciles the fence under it, as the real settlement does).
+	unlock()
 	if _, code := client.nodePaneCloseStatus(args); code != "" {
 		t.Fatalf("status code=%q", code)
 	}

@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -2139,7 +2140,8 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	var previousReadinessAt time.Time
 	var previousCapabilities map[string]bool
 	h.mu.Lock()
-	if existing := h.nodes[machineID]; existing != nil {
+	var existing *hubNodeRecord
+	if existing = h.nodes[machineID]; existing != nil {
 		if existing.appliedTimer != nil {
 			existing.appliedTimer.Stop()
 		}
@@ -2167,13 +2169,31 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 			capabilitySet[capability] = true
 		}
 	}
-	h.nodes[machineID] = &hubNodeRecord{
+	record := &hubNodeRecord{
 		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now, appliedPending: reportsApplied,
 		capabilities: capabilitySet,
 		remoteMeta:   map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 		readiness: previousReadiness, readinessAt: previousReadinessAt,
 	}
+	if existing != nil && existing.agent == agent {
+		// A repeated hello on the same connection (a node re-registering a
+		// changed capability, hk 4632) is a new registration (its applied
+		// report is keyed on the record), but keeps what the connection
+		// already reported: the active jobs, load, memory, power and checkout
+		// reports and their timestamps. A woken placement then never sees the
+		// node's pools as free or its last refusal as unknown.
+		record.connectedSince, record.lastHeartbeat = existing.connectedSince, existing.lastHeartbeat
+		if existing.state == "connected" {
+			record.stateSince = existing.stateSince
+		}
+		maps.Copy(record.activeJobs, existing.activeJobs)
+		record.activeReported = existing.activeReported
+		record.hostLoad, record.hostMemory, record.hostActivity = existing.hostLoad, existing.hostMemory, existing.hostActivity
+		record.checkouts = existing.checkouts
+		record.powerSource, record.powerAt = existing.powerSource, existing.powerAt
+	}
+	h.nodes[machineID] = record
 	if reportsApplied {
 		registration := h.nodes[machineID]
 		registration.appliedTimer = time.AfterFunc(hubAppliedReportTimeout, func() {

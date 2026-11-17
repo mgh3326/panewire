@@ -282,6 +282,12 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	if a.watchActive(id) {
 		return keep("watcher-active")
 	}
+	// A retained hub-close intent still needs settlement (lease, final
+	// job.lost), even with the node and watcher down (#662 review).
+	// An unreadable ledger is left to the gates below.
+	if open, _ := hubCloseOpenRead(a, id); open {
+		return keep("hub-close-open")
+	}
 	if a.Now().Sub(newest) < p.TTL {
 		return keep("too-young")
 	}
