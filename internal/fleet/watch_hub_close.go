@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -536,6 +537,31 @@ func (a *App) lockUnlessHubCloseOwnsEnd(ctx context.Context, id string) (owned b
 	return false, release
 }
 
+// lockUnchangedEnd protects an end decided from seen. The ledger is append
+// ordered; checking the complete event sequence also covers a new attempt,
+// claim, spawn, terminal event, or a changed receipt while the lock waited.
+// A failed or changed read cannot authorize an end.
+func (a *App) lockUnchangedEnd(ctx context.Context, seen Job) (Job, func(), string) {
+	owned, unlock := a.lockUnlessHubCloseOwnsEnd(ctx, seen.ID)
+	if owned {
+		return Job{}, nil, "hub_close_owns_end"
+	}
+	current, err := a.job(seen.ID)
+	if err != nil {
+		unlock()
+		return Job{}, nil, "job_unreadable"
+	}
+	if !sameJobLedger(seen, current) {
+		unlock()
+		return Job{}, nil, "job_changed"
+	}
+	return current, unlock, ""
+}
+
+func sameJobLedger(a, b Job) bool {
+	return reflect.DeepEqual(ledgerOrder(a.Events), ledgerOrder(b.Events))
+}
+
 // hubCloseOpenNow reads whether any hub-close intent of the job is open. A
 // job with no events directory has none; any other unreadable ledger answers
 // unreadable, which a caller decides on (a generic end fails closed).
@@ -574,22 +600,12 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 		if !entry.IsDir() || !validID(entry.Name()) {
 			continue
 		}
-		// The intent is recorded before the journal directory exists, so
-		// the ledger's file names, which carry the event kind, decide.
-		// A job whose ledger cannot be read is listed, not skipped: the
-		// rollback drain and the settlement pass fail closed on it (#662).
-		names, err := os.ReadDir(filepath.Join(jobs, entry.Name(), "events"))
+		// An unreadable ledger blocks the rollback even if no readable file
+		// happens to name an intent.
+		evs, err := a.events(entry.Name())
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if err != nil {
-			out = append(out, entry.Name())
-			continue
-		}
-		if !slices.ContainsFunc(names, func(n os.DirEntry) bool { return strings.HasSuffix(n.Name(), "-"+hubCloseIntentKind+".json") }) {
-			continue
-		}
-		evs, err := a.events(entry.Name())
 		if err != nil {
 			out = append(out, entry.Name())
 			continue
@@ -607,26 +623,23 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 	return out, nil
 }
 
-// paneProvenGone reports whether a successful read of the full herdr pane
-// inventory, in the herdr session of the job's receipt, shows the job's pane
-// absent. The agent list is not enough: a pane whose agent exited stays as a
-// plain shell. An unreadable inventory proves nothing.
-func (a *App) paneProvenGone(ctx context.Context, j Job, listed func(ctx context.Context, session, pane string) (bool, error)) bool {
+// hubClosePanePresent reads the full pane inventory in the receipt's herdr
+// session. The agent list alone cannot prove a pane is gone.
+func (a *App) hubClosePanePresent(ctx context.Context, j Job, listed func(ctx context.Context, session, pane string) (bool, error)) (bool, error) {
 	route := a.laneRoute(j)
 	if listed != nil {
-		present, err := listed(ctx, route.herdrSession(), j.Pane)
-		return err == nil && !present
+		return listed(ctx, route.herdrSession(), j.Pane)
 	}
 	panes, e := route.panes(ctx)
 	if e != nil {
-		return false
+		return false, e
 	}
 	for _, p := range panes {
 		if p.Pane == j.Pane {
-			return false
+			return true, nil
 		}
 	}
-	return true
+	return false, nil
 }
 
 // PaneListedIn reports whether a herdr pane list answer names pane; the
@@ -705,10 +718,50 @@ func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent
 		return HubCloseCancelled, a.eventSynced(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": reason})
 	}
 	op, found, err := a.readJobCloseOp(j.ID, in.RequestID)
+	draining, drainErr := closeOpsDraining(a.Jobs)
+	if drainErr != nil {
+		return HubClosePending, drainErr
+	}
 	switch {
 	case err != nil:
 		a.warn("hub close of job %s waits: close operation unreadable: %v", j.ID, err)
 		return HubClosePending, nil
+	case found && op.Attempt != in.Attempt:
+		return cancel("stale")
+	case draining && (!found || op.State == CloseOpRegistered):
+		// Withdrawal waited for the entire admission/close transaction and
+		// refuses new retries. No close can still use this registration.
+		// Persist a tombstone before cancelling the intent, so a later replay
+		// cannot register it after readiness is enabled again.
+		root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
+		if err != nil {
+			return HubClosePending, err
+		}
+		now := a.Now().UTC()
+		if !found {
+			op = CloseOp{RequestID: in.RequestID, PaneID: in.Pane, Attempt: in.Attempt, Created: now}
+		}
+		op.State, op.Updated, op.Released = CloseOpCancelled, now, &now
+		err = WriteCloseOp(root, op)
+		root.Close()
+		if err != nil {
+			return HubClosePending, err
+		}
+		return cancel("rollback")
+	case draining && op.State == CloseOpClosing:
+		// The old operation is no longer running. Its outcome is unknown,
+		// exactly as a replay after interruption would report.
+		root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
+		if err != nil {
+			return HubClosePending, err
+		}
+		now := a.Now().UTC()
+		op.State, op.Updated, op.Released = CloseOpUnknown, now, &now
+		err = WriteCloseOp(root, op)
+		root.Close()
+		if err != nil {
+			return HubClosePending, err
+		}
 	case !found && ended:
 		// The job ended locally before the operation was registered: no
 		// close ran, and a repeat could no longer bind it.
@@ -730,8 +783,6 @@ func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent
 		// Still registered or closing: the hub repeats the request until it
 		// is final (docs/node-commands.md).
 		return HubClosePending, nil
-	case op.Attempt != in.Attempt:
-		return cancel("stale")
 	}
 	switch op.State {
 	case CloseOpClosed:
@@ -739,7 +790,26 @@ func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent
 		// gone came from the node's agent list, and unknown may not have
 		// closed anything: both wait for the pane inventory to show the
 		// pane absent.
-		if !a.paneProvenGone(ctx, j, listed) {
+		present, err := a.hubClosePanePresent(ctx, j, listed)
+		if err != nil {
+			return HubClosePending, nil
+		}
+		if present {
+			if draining {
+				if op.State == CloseOpUnknown {
+					// An unknown close may have stopped the original pane, and
+					// its id may have been reused. Only hand it back to the
+					// watcher if a fresh agent row proves this attempt owns it.
+					route := a.laneRoute(j)
+					agents, err := route.agents(ctx)
+					if err != nil || paneRecordedSession(j) == "" || paneOwnershipProof(j, agents) != "" {
+						return HubClosePending, nil
+					}
+				}
+				// No close was proven to have stopped the original pane.
+				// Hand it back to its watcher without writing an hk loss.
+				return cancel("rollback_unproven")
+			}
 			return HubClosePending, nil
 		}
 	default:
@@ -764,6 +834,24 @@ func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent
 		a.warn("hub close of job %s: hk holds another terminal record (%s); kept", j.ID, state)
 		return a.finishHubClose(ctx, j, in, true), nil
 	default:
+		// Re-read immediately before the shared write too. The hub's local
+		// revocation writer holds the end lock; this also fails closed if an
+		// independent ledger writer changed ownership since the first fold.
+		events, err := a.events(j.ID)
+		if err != nil {
+			return HubClosePending, err
+		}
+		current, err := foldJob(j.ID, ledgerOrder(events))
+		if err != nil {
+			return HubClosePending, err
+		}
+		intents, _, revoked := openHubCloseIntents(current)
+		if !slices.ContainsFunc(intents, func(open HubCloseIntent) bool { return open == in }) {
+			return HubClosePending, nil
+		}
+		if revoked {
+			return a.finishHubClose(ctx, current, in, true), nil
+		}
 		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.EndReason, "at": a.Now().UTC()}); e != nil {
 			a.warn("hub close lost record not written, retrying: %v", e)
 			return HubClosePending, nil

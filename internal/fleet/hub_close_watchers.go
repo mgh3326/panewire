@@ -104,6 +104,14 @@ var ErrCloseOpsNoBarrier = errors.New("close ops not advertised: run `panewire n
 // both files withdraws it (docs/node-commands.md, "Enabling close
 // operations").
 func AdvertiseCloseOps(jobs string, now time.Time) error {
+	unlock, err := closeOpsLock(context.Background(), jobs, true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if draining, err := closeOpsDraining(jobs); err != nil || draining {
+		return ErrCloseOpsDraining
+	}
 	if info, err := os.Stat(filepath.Join(jobs, closeOpsEnabledFile)); err != nil || !info.Mode().IsRegular() {
 		return ErrCloseOpsNoBarrier
 	}
@@ -120,6 +128,23 @@ var ErrCloseOpsNotReady = errors.New("close ops not enabled: an older panewire w
 // hello and re-check, HubCloseWatchersReady still holds. It is idempotent.
 // list nil runs ps.
 func EnableCloseOps(ctx context.Context, jobs string, list ProcessLister, now time.Time) error {
+	unlock, err := closeOpsLock(ctx, jobs, true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if draining, err := closeOpsDraining(jobs); err != nil {
+		return err
+	} else if draining {
+		pending, err := PendingHubCloseJobs(jobs)
+		if err != nil || len(pending) != 0 {
+			return errors.Join(ErrCloseOpsNotReady, err)
+		}
+		if err := os.Remove(filepath.Join(jobs, closeOpsDrainingFile)); err != nil {
+			return err
+		}
+		durable.SyncDirectoryBestEffort(jobs)
+	}
 	ready, err := HubCloseWatchersReady(ctx, jobs, list)
 	if err != nil {
 		return errors.Join(ErrCloseOpsNotReady, err)
@@ -137,6 +162,9 @@ func EnableCloseOps(ctx context.Context, jobs string, list ProcessLister, now ti
 // admit new closes now: the barrier and the advertise step were recorded,
 // and every live watcher is aware.
 func CloseOpsReady(ctx context.Context, jobs string, list ProcessLister) bool {
+	if draining, err := closeOpsDraining(jobs); err != nil || draining {
+		return false
+	}
 	for _, name := range []string{closeOpsEnabledFile, closeOpsAdvertiseFile} {
 		if info, err := os.Stat(filepath.Join(jobs, name)); err != nil || !info.Mode().IsRegular() {
 			return false

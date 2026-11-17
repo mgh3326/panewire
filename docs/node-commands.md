@@ -321,7 +321,8 @@ between.
 
 Each new `pane.close_op` re-checks readiness too: an unready node refuses
 `close_ops_not_ready` and journals nothing. An operation already accepted
-still resumes and settles after readiness is withdrawn. Per close, the node
+still resumes and settles after a temporary readiness failure; the explicit
+rollback drain below stops retries as well. Per close, the node
 also refuses `watcher_incompatible` when the job's watch lock is held by
 anything but an aware watcher. Both mean "not closed, retry later".
 
@@ -332,18 +333,41 @@ The exclusion above covers watchers that are already running or that start
 while a close is fenced. It cannot cover an old binary that starts while no
 process holds the watch lock: during a node restart (until the restart pass
 takes or borrows the fence again), or when every holder died while the node
-was down.
-**A rollback must first withdraw close ops**:
+was down. Do not intentionally restart the node while a close is open. If it
+crashes, recover with this binary and keep older binaries excluded until the
+open closes have drained.
+**A rollback must first withdraw and drain close ops**, keeping the node on
+the new binary running throughout the drain. Do not restart it for rollback
+while any close is open: its process-held watcher fence must remain held.
 
-1. Remove `jobs/.close-ops-advertise` and `jobs/.close-ops-enabled`, then
-   restart the node on the same (new) binary. The restart ends every
-   `pane.close_op` that passed the readiness check before the markers went,
-   and the restarted node reads no markers, so it admits no new close.
-2. Drain the open closes: wait until `fleet.PendingHubCloseJobs` is empty.
-   It lists a job whose ledger cannot be read as pending too, so an empty
-   result means a complete scan; the restarted node's settlement pass
-   settles the rest.
-3. Only then replace the binary.
+1. Run `panewire node close-ops drain [--inbox-root DIR]` on the node host.
+   Its admission barrier waits for closes already in flight to finish, then
+   records withdrawal and removes both readiness markers. New closes and
+   retries of registered closes are refused while the drain is active.
+2. Repeat the same command until it prints `close ops drained; no pending
+   jobs` and exits 0. Exit 5 lists pending jobs; the running node's settlement
+   pass retries them. An unreadable ledger is pending, so repair storage and
+   retry rather than treating an incomplete scan as an empty drain.
+3. Only then stop the node and replace the binary.
+
+After withdrawal has quiesced admissions, settlement durably cancels an
+unregistered intent or a registered operation, leaving a released journal
+tombstone so a delayed retry cannot start it later. An interrupted `closing`
+operation becomes `unknown`. If a `gone` operation's full pane inventory
+shows the pane present, it can be cancelled: no close started. An `unknown`
+operation can be cancelled only when its recorded harness session matches a
+fresh agent row for the present pane. In either case the attempt returns to its
+watcher without an hk lost write. If the pane is absent, settlement writes the
+planned record. An unknown pane whose ownership cannot be proved stays pending:
+inspect `jobs/<job>/events/*-job.hub_close_intent.json` and its
+`jobs/<job>/close-ops/<request_id>.json`, then use the recorded herdr session
+to inspect the pane. Wait for the original pane to disappear or, if its
+identity is verified and it is safe to stop, close it before retrying; never
+close a pane that belongs to another job. An
+unreadable inventory or hk record, a failed journal write, or a failed
+settlement also keeps the job pending until the service or storage is
+available. A completed drain can be re-enabled by running `close-ops enable`
+and then `advertise` again.
 
 Rollout order: deploy the hub of this build and upgrade every node's
 binary, then run `panewire node close-ops enable` on each node. Advertising
@@ -464,7 +488,8 @@ defers. Its rules, which the hub issuer (hk 4745) relies on:
    and durably cancels its intent (`job.hub_close_cancelled`, `released`),
    and answers `cancelled`: a delayed duplicate `pane.close_op` with that id
    replays `cancelled` (or is `invalid_args` when no intent named its pane)
-   and touches no pane.
+   and touches no pane. During an operator rollback drain, the node resolves
+   interrupted operations as described under "Enabling close operations".
 
 What the hub issuer can rely on from a node that advertises `close_ops_v1`:
 the node writes the planned record (or keeps

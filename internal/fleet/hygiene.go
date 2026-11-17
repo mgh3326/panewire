@@ -150,25 +150,31 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		if reason == "stale-pane-absent" && present {
 			continue
 		}
-		owned, endUnlock := a.lockUnlessHubCloseOwnsEnd(ctx, j.ID)
-		if owned {
-			a.warn("job %s not reaped: a hub close owns its end; the node settles it", j.ID)
+		current, endUnlock, refusal := a.lockUnchangedEnd(ctx, j)
+		if refusal != "" {
+			a.warn("job %s not reaped: %s", j.ID, refusal)
 			continue
 		}
 		e = func() error {
 			defer endUnlock()
-			// The lock can wait: re-read the ledger under it, and keep a job
-			// whose ledger moved since the snapshot (a restore, a new end).
-			// #662.
-			again, err := a.job(j.ID)
+			// The herdr proof, too, must follow the lock wait.
+			again, err := a.agents(ctx)
 			if err != nil {
 				return err
 			}
-			if len(again.Events) != len(latest.Events) || again.Reaped || again.Pane != latest.Pane {
-				a.warn("job %s not reaped: its ledger changed while the reap waited", j.ID)
+			present = false
+			for _, ag := range again {
+				if ag.Pane == current.Pane {
+					if ag.Status == "working" || ag.Name != current.Label || current.Tab != "" && ag.Tab != current.Tab {
+						return fail(exitStateConflict, "pane changed during reap")
+					}
+					present = true
+				}
+			}
+			if reason == "stale-pane-absent" && present {
 				return nil
 			}
-			return a.reapEnded(ctx, j, latest, present, reason, *worktrees)
+			return a.reapEnded(ctx, current, current, present, reason, *worktrees)
 		}()
 		if e != nil {
 			return e
@@ -196,6 +202,24 @@ func (a *App) reapEnded(ctx context.Context, j, latest Job, present bool, reason
 	a.recordJobUsage(ctx, latest, true)
 	a.markEndedJobLost(ctx, latest)
 	if present {
+		// Usage and hk can take time; check the pane again immediately before
+		// the physical close, still under the job's end lock.
+		agents, err := a.agents(ctx)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, ag := range agents {
+			if ag.Pane == j.Pane {
+				if ag.Status == "working" || ag.Name != j.Label || j.Tab != "" && ag.Tab != j.Tab {
+					return fail(exitStateConflict, "pane changed during reap")
+				}
+				found = true
+			}
+		}
+		if !found {
+			return fail(exitStateConflict, "pane changed during reap")
+		}
 		if e = a.must(ctx, "herdr", "pane", "close", j.Pane); e != nil {
 			return e
 		}

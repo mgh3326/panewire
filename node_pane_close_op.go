@@ -181,6 +181,16 @@ func (client *HubClient) openCloseOpJobDir(job string) (*os.Root, string, bool, 
 // touching herdr: its close may have run, and a pane under the same id now may
 // be another one.
 func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneCloseOpArgs) (any, string) {
+	if client.jobsInboxRoot != "" {
+		unlock, err := fleet.LockCloseOpsAdmission(ctx, filepath.Join(client.jobsInboxRoot, "jobs"))
+		if err != nil {
+			if errors.Is(err, fleet.ErrCloseOpsDraining) {
+				return nil, "close_ops_not_ready"
+			}
+			return nil, "journal_failed"
+		}
+		defer unlock()
+	}
 	result, code := client.runPaneCloseOp(ctx, args)
 	// A close that is now final (or was already, on a replay) is settled by
 	// the node at once, inside the command's own deadline; a failed command or

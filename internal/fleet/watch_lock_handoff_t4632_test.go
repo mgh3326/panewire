@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,26 +74,47 @@ func TestRunningWatcherLendsItsLock_t4632(t *testing.T) {
 // enter, made before the socket binds; a pre-existing directory open to
 // others is refused, not used.
 func TestWatchLockSocketDirIsPrivate_t4632(t *testing.T) {
-	job := t.TempDir()
-	dir, err := watchLockSocketDir(job)
+	// t.TempDir can already exceed sockaddr_un's limit on macOS. Start under
+	// the short /tmp spelling so both path-selection branches are exercised.
+	base, err := os.MkdirTemp("/tmp", "pw-sock-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(dir)
-	if err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("socket dir %s mode %v err %v; want 0700", dir, info.Mode().Perm(), err)
-	}
-	// The directory made insecure is the one the function returned, so the
-	// long-path branch (a long TMPDIR on macOS) is exercised as well.
-	open := t.TempDir()
-	used, err := watchLockSocketDir(open)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(used, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := watchLockSocketDir(open); err == nil {
-		t.Fatal("used a socket directory open to others")
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	for _, tc := range []struct {
+		name string
+		job  string
+		long bool
+	}{
+		{"short", filepath.Join(base, "job"), false},
+		{"long", filepath.Join(base, strings.Repeat("j", 100)), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Mkdir(tc.job, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			dir, err := watchLockSocketDir(tc.job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The fallback is outside base and must be removed separately.
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o700); _ = os.RemoveAll(dir) })
+			if gotLong := dir != filepath.Join(tc.job, ".panewire-watch-sock"); gotLong != tc.long {
+				t.Fatalf("socket dir %s: long-path branch=%v, want %v", dir, gotLong, tc.long)
+			}
+			info, err := os.Stat(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o700 {
+				t.Fatalf("socket dir %s mode %v; want 0700", dir, info.Mode().Perm())
+			}
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := watchLockSocketDir(tc.job); err == nil {
+				t.Fatal("used a socket directory open to others")
+			}
+		})
 	}
 }

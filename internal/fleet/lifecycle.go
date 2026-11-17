@@ -293,6 +293,16 @@ func (a *App) releaseQuota(ctx context.Context, j Job) error {
 	return nil
 }
 func (a *App) restore(ctx context.Context, j Job) error {
+	unlock, e := LockJobEndContext(ctx, filepath.Join(a.Jobs, j.ID))
+	if e != nil {
+		return e
+	}
+	defer unlock()
+	// Re-read after waiting: the reap may already have ended this attempt.
+	j, e = a.job(j.ID)
+	if e != nil {
+		return e
+	}
 	d, e := a.durable(ctx, j.ID)
 	if e != nil {
 		return e
