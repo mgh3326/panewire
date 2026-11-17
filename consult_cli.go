@@ -1,12 +1,14 @@
 package panewire
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,9 +25,9 @@ const consultUsage = `Usage:
 Asks the hub for a consult on a task. The hub picks the seat (one grade above
 the task, another family than the author's), runs the consult and stores the
 answer. The same (task, repo#pr, head) returns the existing consult.
---hub-url, --hub-token-env and --hub-cf-env default to PANEWIRE_HUB_URL,
-PANEWIRE_HUB_TOKEN_ENV and PANEWIRE_HUB_CF_ENV. A node credential is admitted;
---requester defaults to PANEWIRE_LANE, else the credential's machine id.
+By default the local node identifies the calling pane and its design lane.
+For direct hub access provide --hub-url and --hub-token-env (or their
+PANEWIRE_HUB_URL and PANEWIRE_HUB_TOKEN_ENV defaults).
 See docs/consult-on-request.md.`
 
 type hubConsultCLIResponse struct {
@@ -71,6 +73,10 @@ func runConsultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int
 	if *task == "" || *question == "" {
 		return writeHubCLIUsage(stderr, "consult request: --task and --question are required", consultUsage)
 	}
+	body := hubConsultRequest{Task: *task, QuestionDoc: *question, Requester: *requester, AuthorJob: *authorJob, AuthorFamily: *authorFamily, PR: *pr, Head: *head}
+	if *hubURL == "" && *tokenEnvPath == "" {
+		return runConsultLocal(body, *asJSON, stdout, stderr, deps.SocketPath)
+	}
 	if *hubURL == "" || *tokenEnvPath == "" {
 		return writeHubCLIUsage(stderr, "consult request: --hub-url and --hub-token-env are required", consultUsage)
 	}
@@ -93,17 +99,7 @@ func runConsultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int
 	if asker == "" {
 		asker = env.MachineID
 	}
-	body := map[string]string{
-		"task_id": *task, "question_doc": *question, "requester": asker,
-	}
-	for key, value := range map[string]string{
-		"author_job": *authorJob, "author_family": *authorFamily, "pr": *pr, "head": *head,
-	} {
-		if value != "" {
-			body[key] = value
-		}
-	}
-	encoded, _ := json.Marshal(body)
+	body.Requester = asker
 	client, err := newHubOperatorClient(*hubURL, env.Token, cfAccess, deps, 30*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "consult request rejected: invalid hub URL")
@@ -114,6 +110,11 @@ func runConsultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	return executeConsult(ctx, client, body, *asJSON, stdout, stderr)
+}
+
+func executeConsult(ctx context.Context, client inboxHTTPClient, body hubConsultRequest, asJSON bool, stdout, stderr io.Writer) int {
+	encoded, _ := json.Marshal(body)
 	response, err := client.do(ctx, http.MethodPost, "/v1/consults", url.Values(nil), bytes.NewReader(encoded))
 	if err != nil {
 		fmt.Fprintln(stderr, "consult request unavailable")
@@ -131,6 +132,10 @@ func runConsultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int
 			fmt.Fprintf(stderr, "consult request refused: %s\n", firstNonEmptyString(refusal["reason"], refusal["error"]))
 			return ExitUsage
 		case http.StatusUnauthorized, http.StatusForbidden:
+			if refusal["reason"] == "multiple lanes name this pane; specify --requester" {
+				fmt.Fprintln(stderr, "consult request refused:", refusal["reason"])
+				return ExitConditionInvalid
+			}
 			fmt.Fprintln(stderr, "consult request refused: hub credential is not admitted for consults; ask your design lane by ESC with an hk packet")
 			return ExitConditionInvalid
 		case http.StatusServiceUnavailable:
@@ -140,7 +145,7 @@ func runConsultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int
 		fmt.Fprintf(stderr, "consult request unavailable: http %d\n", response.StatusCode)
 		return ExitInternal
 	}
-	if *asJSON {
+	if asJSON {
 		_, _ = stdout.Write(append(bytes.TrimSpace(raw), '\n'))
 		return ExitOK
 	}
@@ -165,4 +170,44 @@ func runConsultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int
 	}
 	fmt.Fprintln(stdout, line)
 	return ExitOK
+}
+
+func runConsultLocal(req hubConsultRequest, asJSON bool, stdout, stderr io.Writer, socket string) int {
+	if socket == "" {
+		socket = socketPathFromEnv()
+	}
+	conn, err := net.DialTimeout("unix", socket, 5*time.Second)
+	if err != nil {
+		fmt.Fprintln(stderr, "consult request: daemon unavailable")
+		return ExitDaemonUnavailable
+	}
+	defer conn.Close()
+	timer := time.AfterFunc(35*time.Second, func() { _ = conn.Close() })
+	defer timer.Stop()
+	if json.NewEncoder(conn).Encode(localRequest{Op: "consult.request", Consult: &localConsultRequest{Request: req, JSON: asJSON, Session: os.Getenv("HERDR_SESSION")}, TimeoutMS: 30000}) != nil {
+		fmt.Fprintln(stderr, "consult request: daemon unavailable")
+		return ExitDaemonUnavailable
+	}
+	scan := bufio.NewScanner(conn)
+	if !scan.Scan() {
+		fmt.Fprintln(stderr, "consult request: daemon unavailable")
+		return ExitDaemonUnavailable
+	}
+	var resp struct {
+		OK     bool            `json:"ok"`
+		Code   int             `json:"code"`
+		Error  string          `json:"error"`
+		Result localTextResult `json:"result"`
+	}
+	if json.Unmarshal(scan.Bytes(), &resp) != nil {
+		fmt.Fprintln(stderr, "consult request: invalid daemon response")
+		return ExitInternal
+	}
+	if !resp.OK {
+		fmt.Fprintln(stderr, resp.Error)
+		return resp.Code
+	}
+	io.WriteString(stdout, resp.Result.Stdout)
+	io.WriteString(stderr, resp.Result.Stderr)
+	return resp.Result.Code
 }

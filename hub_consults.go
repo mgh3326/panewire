@@ -47,6 +47,7 @@ var (
 )
 
 type hubConsultRequest struct {
+	CallerPane     string `json:"caller_pane,omitempty"`
 	Task           string `json:"task_id"`
 	Requester      string `json:"requester"`
 	QuestionDoc    string `json:"question_doc"`
@@ -104,11 +105,18 @@ func (h *HubServer) consultAccess(request *http.Request) hubAccess {
 }
 
 func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request) {
-	if access := h.consultAccess(r); access != hubAccessGranted {
-		writeHubAccessDenied(w, access)
-		return
+	caller := h.authenticate(r)
+	if caller.kind != hubCallerNode || caller.id == h.prStatusHost {
+		if access := h.consultAccess(r); access != hubAccessGranted {
+			writeHubAccessDenied(w, access)
+			return
+		}
 	}
 	if h.inbox == nil {
+		if caller.kind == hubCallerNode && caller.id != h.prStatusHost {
+			writeHubAccessDenied(w, hubAccessForbidden)
+			return
+		}
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "durable_store_required", "fix": "configure the hub inbox database before accepting consults"})
 		return
 	}
@@ -122,6 +130,12 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 	if !decodeHubJSON(w, r, hubSpawnMaxBodyBytes, &request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "reason": "request body is invalid"})
 		return
+	}
+	if caller.kind == hubCallerNode && caller.id != h.prStatusHost {
+		if reason := h.authorizeDesignConsult(caller.id, &request); reason != "" {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden", "reason": reason})
+			return
+		}
 	}
 	if reason := request.refusal(); reason != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request", "reason": reason})
@@ -151,6 +165,7 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 		// (quota, hk outage, a lost job) has a way back.
 		c = existing
 		c.Requester, c.QuestionDoc, c.AuthorJob, c.AuthorFamily = request.Requester, request.QuestionDoc, request.AuthorJob, request.AuthorFamily
+		c.Machine, c.CallerPane = caller.id, request.CallerPane
 		c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade = consultQueued, "", "", ""
 		c.Job, c.RequestID, c.Reason, c.AnswerDoc = "", "", "", ""
 		c.Answered, c.Notified, c.Respawns = time.Time{}, false, 0
@@ -159,7 +174,7 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 	} else {
 		c = hubConsult{
 			ID: uuid.NewString(), IdemKey: key, Task: request.Task, PR: request.PR, Head: request.Head,
-			Requester: request.Requester, QuestionDoc: request.QuestionDoc, AuthorJob: request.AuthorJob,
+			Requester: request.Requester, Machine: caller.id, CallerPane: request.CallerPane, QuestionDoc: request.QuestionDoc, AuthorJob: request.AuthorJob,
 			AuthorFamily: request.AuthorFamily, State: consultQueued, Created: now, Deadline: now.Add(h.consultTimeout),
 		}
 	}
@@ -198,6 +213,41 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 	default:
 	}
 	writeJSON(w, http.StatusCreated, consultView(c))
+}
+
+// authorizeDesignConsult binds the node-reported pane to a design route and
+// rejects job panes, including a worker naming another lane as requester.
+func (h *HubServer) authorizeDesignConsult(machine string, request *hubConsultRequest) string {
+	if request.CallerPane == "" {
+		return consultWorkerRefusal
+	}
+	h.mu.Lock()
+	for _, job := range h.jobs {
+		if !job.Completed && !job.Orphaned && job.Node == machine && job.Pane == request.CallerPane {
+			h.mu.Unlock()
+			return consultWorkerRefusal
+		}
+	}
+	h.mu.Unlock()
+	routes, err := loadReportRelayRoutesResult(h.reportRelayPath)
+	if err != nil {
+		return consultWorkerRefusal
+	}
+	if request.Requester == "" {
+		for lane, route := range routes {
+			if route.Machine == machine && route.Pane == request.CallerPane {
+				if request.Requester != "" {
+					return "multiple lanes name this pane; specify --requester"
+				}
+				request.Requester = lane
+			}
+		}
+	}
+	route, ok := routes[request.Requester]
+	if !ok || !h.inbox.policy.designLane(request.Requester) || route.Machine != machine || route.Pane != request.CallerPane {
+		return consultWorkerRefusal
+	}
+	return ""
 }
 
 func (h *HubServer) handleConsultGet(w http.ResponseWriter, r *http.Request) {
