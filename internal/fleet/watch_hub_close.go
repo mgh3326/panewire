@@ -270,7 +270,7 @@ func (a *App) endUnlessHubClose(id string, seen Job, end func(j Job) error) (def
 // closeTargetBound). A newer request that closed nothing hands the job back
 // to an older one still unresolved (an unknown close whose pane is listed).
 func pendingHubCloseIntent(j Job) (HubCloseIntent, bool) {
-	in, open, _ := hubCloseIntentState(j)
+	in, open, _, _ := hubCloseIntentState(j)
 	return in, open
 }
 
@@ -280,7 +280,11 @@ func pendingHubCloseIntent(j Job) (HubCloseIntent, bool) {
 // (#572 r4576225999): the node may already have closed the pane, and only
 // settlement, which reads the close journal, decides whether the intent is
 // settled (a closed operation) or cancelled (nothing registered or closed).
-func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended bool) {
+//
+// reassigned is whether a hub revocation record (a job.revoked carrying the
+// hub's ownership epoch) followed the intent: the hub gave the job to another
+// node, so this node must not write the shared hk record (#662 review).
+func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended, reassigned bool) {
 	var intents []HubCloseIntent
 	var attempt, pane, label string
 	// The protocol is folded in ledger sequence (file-name) order, as the
@@ -289,14 +293,14 @@ func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended bool) {
 	for _, ev := range ledgerOrder(j.Events) {
 		switch ev.Kind {
 		case "job.claim", "job.claimed", "job.reclaim":
-			attempt, pane, label, intents, ended = ev.name, "", "", nil, false
+			attempt, pane, label, intents, ended, reassigned = ev.name, "", "", nil, false, false
 		case "job.spawned":
-			attempt, pane, label, intents, ended = ev.name, str(ev.Payload, "pane_id"), str(ev.Payload, "label"), nil, false
+			attempt, pane, label, intents, ended, reassigned = ev.name, str(ev.Payload, "pane_id"), str(ev.Payload, "label"), nil, false, false
 			if label == "" {
 				label = str(ev.Payload, "agent_label")
 			}
 		case "job.reprompted":
-			attempt, intents, ended = ev.name, nil, false
+			attempt, intents, ended, reassigned = ev.name, nil, false, false
 		case hubCloseIntentKind:
 			in := HubCloseIntent{RequestID: str(ev.Payload, "request_id"), Attempt: str(ev.Payload, "attempt"), Pane: str(ev.Payload, "pane_id"), Label: str(ev.Payload, "label"), EndReason: str(ev.Payload, "end_reason")}
 			if ValidCloseOpID(in.RequestID) && in.EndReason != "" && in.Attempt == attempt && in.Pane == pane && in.Pane != "" && in.Label == label {
@@ -307,7 +311,12 @@ func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended bool) {
 		case hubCloseCancelKind:
 			id := str(ev.Payload, "request_id")
 			intents = slices.DeleteFunc(intents, func(o HubCloseIntent) bool { return o.RequestID == id })
-		case "job.completed", "job.reaped", "job.completion", "job.record_settled", "job.joined", "job.revoked", "job.handed_off", "job.escalate":
+		case "job.revoked":
+			ended = ended || len(intents) > 0
+			if ev.Kind == ev.Type && ev.Epoch > 0 {
+				reassigned = reassigned || len(intents) > 0
+			}
+		case "job.completed", "job.reaped", "job.completion", "job.record_settled", "job.joined", "job.handed_off", "job.escalate":
 			ended = ended || len(intents) > 0
 		case "job.lost":
 			switch {
@@ -322,9 +331,9 @@ func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended bool) {
 		}
 	}
 	if len(intents) == 0 {
-		return HubCloseIntent{}, false, false
+		return HubCloseIntent{}, false, false, false
 	}
-	return intents[len(intents)-1], true, ended
+	return intents[len(intents)-1], true, ended, reassigned
 }
 
 // hubCloseSettledLoss reports whether ev is the final job.lost the node's
@@ -467,6 +476,24 @@ func (s HubCloseSettlement) Settle(ctx context.Context, job string) (HubCloseSta
 	return s.App.settleHubClose(ctx, job, s.PaneListed, needHK)
 }
 
+// HubCloseFenceState reads, from the job's ledger in sequence order, whether
+// any hub-close intent is still open (open), and whether the job's attempt is
+// still live (live: not ended, not reaped), so a watcher should run once no
+// close owns it. The caller holds the job's end lock (hk 4632).
+func HubCloseFenceState(jobs, job string) (open, live bool, err error) {
+	a := &App{Jobs: jobs}
+	evs, err := a.events(job)
+	if err != nil {
+		return false, false, err
+	}
+	j, err := foldJob(job, ledgerOrder(evs))
+	if err != nil {
+		return false, false, err
+	}
+	_, open = pendingHubCloseIntent(j)
+	return open, !j.Terminal && !j.Reaped && !hubCloseSettledNow(j), nil
+}
+
 // PendingHubCloseJobs lists the jobs under the jobs root whose ledger holds an
 // open hub-close intent: the node's startup and retry pass settles them.
 func PendingHubCloseJobs(jobs string) ([]string, error) {
@@ -570,7 +597,7 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 	// A reaped job's open intent is still settled (#662 review): a reaper
 	// may have run while hk was unavailable, and only settlement writes the
 	// planned record.
-	in, open, ended := hubCloseIntentState(j)
+	in, open, ended, reassigned := hubCloseIntentState(j)
 	if !open {
 		return HubCloseNone, nil
 	}
@@ -617,6 +644,13 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 		}
 	default:
 		return cancel("not_closed")
+	}
+	if reassigned {
+		// The pane is proven stopped, but the hub reassigned the job: its
+		// shared record belongs to the new owner. Release this node's lease
+		// and close the intent without touching hk.
+		a.warn("hub close of job %s: the hub reassigned the job; its hk record is left to the new owner", j.ID)
+		return a.finishHubClose(ctx, j, in, true), nil
 	}
 	if e := needHK(); e != nil {
 		return HubClosePending, e

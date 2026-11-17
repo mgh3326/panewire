@@ -18,6 +18,9 @@ func TestSameConnectionHelloKeepsActiveJobs_t4632(t *testing.T) {
 	h.connect("machine-a", "v", "addr", agent, true, hubSpawnCapabilities)
 	h.mu.Lock()
 	h.nodes["machine-a"].activeJobs["job-1"] = HubActiveJob{JobID: "job-1", AgentLabel: "job-1", Epoch: 1}
+	h.nodes["machine-a"].hostMemory = &HubHostMemory{}
+	h.nodes["machine-a"].powerSource = "battery"
+	since := h.nodes["machine-a"].connectedSince
 	h.mu.Unlock()
 	h.connect("machine-a", "v", "addr", agent, true, append(append([]string(nil), hubSpawnCapabilities...), hubCapabilityCloseOps))
 	h.mu.Lock()
@@ -25,6 +28,9 @@ func TestSameConnectionHelloKeepsActiveJobs_t4632(t *testing.T) {
 	record := h.nodes["machine-a"]
 	if _, ok := record.activeJobs["job-1"]; !ok {
 		t.Fatalf("active jobs %v lost across a same-connection hello", record.activeJobs)
+	}
+	if record.hostMemory == nil || record.powerSource != "battery" || !record.connectedSince.Equal(since) {
+		t.Fatalf("admission telemetry reset by a same-connection hello: memory=%v power=%q since=%v", record.hostMemory, record.powerSource, record.connectedSince)
 	}
 	if !record.capabilities[hubCapabilityCloseOps] {
 		t.Fatal("re-registration did not record close_ops_v1")

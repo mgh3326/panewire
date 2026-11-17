@@ -198,9 +198,10 @@ func TestWatcherHonorsASettlementWithABackwardsClock_t4632(t *testing.T) {
 }
 
 // #662 review: a hub revocation the node records with no kind field (only
-// "type") after the intent keeps the ledger readable, and settlement still
-// finishes the closed operation.
-func TestSettlementReadsAHubRevocationRecord_t4632(t *testing.T) {
+// "type", with the hub's epoch) after the intent keeps the ledger readable.
+// It means the hub reassigned the job, so settlement finishes locally (lease,
+// final job.lost) and leaves the shared hk record to the new owner.
+func TestSettlementLeavesHKToANewOwnerAfterAHubRevocation_t4632(t *testing.T) {
 	a, h := hubCloseFixture(t)
 	in := liveIntent(t, a)
 	recordHubClose(t, a, in)
@@ -214,5 +215,40 @@ func TestSettlementReadsAHubRevocationRecord_t4632(t *testing.T) {
 	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
 		t.Fatalf("settle %v, %v; want settled", state, e)
 	}
+	if st := str(h.record(t, "j"), "state"); st != "spawned" {
+		t.Fatalf("hk state %s, want the new owner's record untouched", st)
+	}
+	if lost := lostEvents(t, a); len(lost) != 1 || !boolean(lost[0], "superseded", false) {
+		t.Fatalf("job.lost %v, want one superseded settlement", lost)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released", st)
+	}
+}
+
+// A type-only revocation without an epoch (a legacy prune record) is a local
+// end: settlement still writes the planned record.
+func TestSettlementAfterALegacyTypeOnlyRevocation_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	if e := os.WriteFile(filepath.Join(a.Jobs, "j", "events", "99999-job.revoked.json"), []byte(`{"type":"job.revoked","job_id":"j","source":"legacy prune"}`), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
+		t.Fatalf("settle %v, %v; want settled", state, e)
+	}
 	wantHubCloseFinished(t, a, h)
+}
+
+// A hand-off read on one attempt never ends a later one (#662 review): the
+// stop is dropped once the attempt mark changes.
+func TestHandOffBelongsToItsAttempt_t4632(t *testing.T) {
+	j := Job{Events: []Event{{Kind: "job.spawned", name: "00001-job.spawned.json"}}}
+	h := quotaHandOff{active: true, attempt: endMark(j)[0]}
+	j.Events = append(j.Events, Event{Kind: "job.reprompted", name: "00002-job.reprompted.json"})
+	if h.attempt == endMark(j)[0] {
+		t.Fatal("attempt mark did not change on a re-prompt")
+	}
 }

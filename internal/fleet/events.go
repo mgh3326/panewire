@@ -14,7 +14,10 @@ type Event struct {
 	Kind string `json:"kind"`
 	// Type is the kind of a hub revocation record, which the node writes
 	// with no kind field (writeHubRevocation); events reads it as the kind.
-	Type      string         `json:"type"`
+	Type string `json:"type"`
+	// Epoch is a hub revocation record's ownership epoch: the hub reassigned
+	// the job, so this node no longer owns its shared terminal record.
+	Epoch     uint64         `json:"epoch"`
 	CreatedAt string         `json:"created_at"`
 	TS        string         `json:"ts"`
 	Payload   map[string]any `json:"payload"`

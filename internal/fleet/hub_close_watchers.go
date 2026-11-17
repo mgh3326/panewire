@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,8 +60,12 @@ func HubCloseWatchersReady(ctx context.Context, jobs string, list ProcessLister)
 				continue
 			}
 			dir := filepath.Join(jobs, fields[i+1])
-			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			if info, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 				break // another jobs root's watcher
+			} else if err != nil {
+				return false, err
+			} else if !info.IsDir() {
+				return false, nil
 			}
 			watcher, err := ProbeHubCloseWatcher(dir)
 			if err != nil {

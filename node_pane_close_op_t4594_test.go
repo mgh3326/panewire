@@ -931,3 +931,8 @@ func TestCloseOpEndLockWaitIsBounded_t4652(t *testing.T) {
 		t.Fatalf("code=%q after %v, want journal_failed within the deadline", code, time.Since(start))
 	}
 }
+
+// FenceState: an intent stays open while the fake's settlement is pending.
+func (f *fakeHubClose) FenceState(string) (bool, bool, error) {
+	return f.state == fleet.HubClosePending && len(f.intents) > 0, true, nil
+}

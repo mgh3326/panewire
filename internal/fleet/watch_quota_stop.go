@@ -263,6 +263,9 @@ type quotaHandOff struct {
 	until  time.Time
 	seq    *int64
 	active bool
+	// attempt is the ledger name of the attempt the stop was read on
+	// (endMark).
+	attempt string
 }
 
 // unchanged reports whether the pane is still in the state the stop was read

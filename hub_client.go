@@ -261,7 +261,8 @@ type HubClient struct {
 	// hub close and no watcher (takeWatcherFence).
 	closeFenceMu    sync.Mutex
 	closeFences     map[string]func()
-	nodeGitLockWait time.Duration // fixture seam; zero is nodeGitOpLockWait.
+	fenceRearm      func(job string) // fixture seam; nil re-arms the node's watchers.
+	nodeGitLockWait time.Duration    // fixture seam; zero is nodeGitOpLockWait.
 	busyRelayMu     sync.Mutex
 	busyRelay       *relayBusyManager
 	relayCommand    relayCommandRunner   // fixture seam for agent get/wait.

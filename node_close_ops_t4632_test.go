@@ -260,3 +260,95 @@ func TestNodeLedgerReadsAHubRevocationRecord_t4632(t *testing.T) {
 		t.Fatalf("events %v, err %v; want the revocation read", events, err)
 	}
 }
+
+// fenceLedger is a fakeHubClose whose open-intent answer a test sets, and
+// whose settlement result is independent of it (a cancelled newer intent
+// with an older one still open).
+type fenceLedger struct {
+	fakeHubClose
+	open bool
+}
+
+func (f *fenceLedger) FenceState(string) (bool, bool, error) { return f.open, true, nil }
+
+func fenceNode(t *testing.T) (*HubClient, *fenceLedger, string, *[]string) {
+	t.Helper()
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	ledger := &fenceLedger{fakeHubClose: fakeHubClose{watcher: fleet.HubCloseWatcherNone}}
+	client.nodeHubClose = ledger
+	var rearmed []string
+	client.fenceRearm = func(job string) { rearmed = append(rearmed, job) }
+	return client, ledger, filepath.Join(inbox, "jobs", closeOpJob), &rearmed
+}
+
+func watchLockHeld(t *testing.T, dir string) bool {
+	t.Helper()
+	release, ok, err := fleet.FenceWatchers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		release()
+	}
+	return !ok
+}
+
+// #662 review round 2: the fence follows the ledger under the end lock.
+// A step that cancels a newer intent while an older one is still open keeps
+// it; once no intent is open it is released and the live job's watcher is
+// re-armed (one that met the fence exited).
+func TestFenceFollowsOpenIntents_t4632(t *testing.T) {
+	client, ledger, dir, rearmed := fenceNode(t)
+	ledger.open, ledger.state = true, fleet.HubCloseCancelled
+	client.settleHubClose(t.Context(), closeOpJob)
+	if !watchLockHeld(t, dir) || len(ledger.settled) != 1 {
+		t.Fatalf("fence held=%v settled=%v; want the fence taken and one step", watchLockHeld(t, dir), ledger.settled)
+	}
+	client.settleHubClose(t.Context(), closeOpJob)
+	if !watchLockHeld(t, dir) {
+		t.Fatal("fence dropped while an older intent is open")
+	}
+	ledger.open = false
+	client.settleHubClose(t.Context(), closeOpJob)
+	if watchLockHeld(t, dir) {
+		t.Fatal("fence kept with no intent open")
+	}
+	if !slices.Equal(*rearmed, []string{closeOpJob}) {
+		t.Fatalf("rearmed %v, want the job", *rearmed)
+	}
+}
+
+// After a node restart, settlement waits while a watcher that ignores hub
+// closes holds the job's watch lock, and takes the fence once it is free.
+func TestSettlementWaitsForAnIncompatibleWatcher_t4632(t *testing.T) {
+	client, ledger, dir, _ := fenceNode(t)
+	ledger.open, ledger.watcher = true, fleet.HubCloseWatcherIncompatible
+	release, ok, err := fleet.FenceWatchers(dir) // the old watcher's lock
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	client.settleHubClose(t.Context(), closeOpJob)
+	if len(ledger.settled) != 0 {
+		t.Fatalf("settled %v while an incompatible watcher runs", ledger.settled)
+	}
+	release()
+	ledger.watcher = fleet.HubCloseWatcherNone
+	client.settleHubClose(t.Context(), closeOpJob)
+	if len(ledger.settled) != 1 || !watchLockHeld(t, dir) {
+		t.Fatalf("settled %v fenced %v after the watcher ended", ledger.settled, watchLockHeld(t, dir))
+	}
+}
+
+// An accepted operation still resumes once readiness is withdrawn: only new
+// closes are held to it.
+func TestAcceptedCloseResumesWithoutReadiness_t4632(t *testing.T) {
+	inbox := t.TempDir()
+	seedNodeCloseOp(t, inbox, "op-1", fleet.CloseOpRegistered)
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	client.nodeHubClose.(*fakeHubClose).notReady = true
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-2")); code != "close_ops_not_ready" && code != "close_in_progress" {
+		t.Fatalf("a new close while unready: code=%q", code)
+	}
+}

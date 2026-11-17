@@ -272,14 +272,23 @@ node whose current registration advertises it. `CloseOpsReady` has two parts:
 
 Launchers (`spawn`, `work`, `restore`, `_spawn-stdin`, a daemon re-arm, a
 renamed or retained binary) need no check of their own. **The node fences
-the job**: when a close is admitted for a job no watcher runs for, the node
-takes and holds that job's `.panewire-watch.lock` until the close's
-settlement ends (settled, cancelled, or no open close). Every watcher of
-every binary takes that lock first and exits when it is held. So a watcher
-started by any launcher after admission never runs during the close. One
-started before admission is seen by the per-job probe. After a node restart,
-the settlement pass takes the fence again for every open close with no
-watcher.
+the job**: while any hub-close intent of a job is open, the node holds that
+job's `.panewire-watch.lock`, unless an aware watcher holds it. Every watcher
+of every binary takes that lock first and exits when it is held.
+
+- The fence is reconciled under the job's end lock, which admission also
+  holds. So a release can never drop the fence of a close admitted
+  meanwhile, and a fence taken for an older, still-open intent survives a
+  newer one that is cancelled.
+- Reconciliation runs at admission, before and after every settlement
+  step, and every 2 s for jobs with an open intent or a held fence. So the
+  fence replaces an aware watcher that exits mid-close, and is taken again
+  after a node restart.
+- A settlement step runs only while the fence or an aware watcher holds the
+  lock. It waits while a watcher that ignores hub closes holds it.
+- When no intent is open any more (settled, cancelled, or made stale by a
+  new attempt), the fence is released and the node re-arms the watchers of
+  live jobs, since a watcher that met the fence exited.
 
 The node re-checks readiness at every hello and every 30 s while connected,
 including after a late hello acknowledgement. When the answer changes, it
@@ -289,8 +298,9 @@ reconnect. A hub of this build keeps the node's reported active jobs across
 a hello on the same connection, so placement never sees its pools as free in
 between.
 
-Each `pane.close_op` that would close re-checks readiness too: an unready
-node refuses `close_ops_not_ready` and journals nothing. Per close, the node
+Each new `pane.close_op` re-checks readiness too: an unready node refuses
+`close_ops_not_ready` and journals nothing. An operation already accepted
+still resumes and settles after readiness is withdrawn. Per close, the node
 also refuses `watcher_incompatible` when the job's watch lock is held by
 anything but an aware watcher. Both mean "not closed, retry later".
 
@@ -347,7 +357,11 @@ defers. Its rules, which the hub issuer (hk 4745) relies on:
    settlement decides from the journal. A `closed` operation is settled as
    usual: a live hk record takes the planned record, and another terminal
    record is kept. An operation never registered is cancelled (`ended`),
-   since a repeat could no longer bind. While an intent is open the watcher
+   since a repeat could no longer bind. A hub revocation record (a
+   type-only `job.revoked` carrying the hub's `epoch`) means the hub
+   reassigned the job: settlement releases this node's lease and records the
+   final `job.lost` (`superseded`), but leaves the shared hk record to the
+   new owner. While an intent is open the watcher
    writes no terminal record and releases nothing: completion from a
    report, the decision timeout, the deadline exit and the missing-pane
    fallback all wait. A decision the watcher took on a ledger snapshot is

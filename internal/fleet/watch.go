@@ -260,15 +260,37 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// A settled hub close ends this attempt, even during a quota
 		// hand-off that would otherwise keep the watch going: nothing may
 		// follow its final job.lost (#662 review).
+		// A credit rejection recorded before the close is still published:
+		// other hosts must stop choosing that account (#662 review).
 		if hubCloseSettledNow(j) {
-			return nil
+			credit, creditPending := pendingCreditRejection(j)
+			if !creditPending {
+				return nil
+			}
+			if err := a.publishCreditRejection(ctx, j, credit); err != nil {
+				creditAttempts++
+				a.warn("credit rejection publication failed (attempt %d): %v", creditAttempts, err)
+				if errors.Is(err, errCreditAccountMismatch) || errors.Is(err, errCreditAccountUnidentifiable) || creditAttempts >= 3 {
+					return a.pauseCreditPublication(ctx, j, credit, err)
+				}
+				if err := a.Sleep(ctx, 5*time.Second); err != nil {
+					return err
+				}
+				continue
+			}
+			return a.event(ctx, id, "job.credit_published", map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)})
+		}
+		// A hand-off belongs to the attempt it was read on: a re-prompt,
+		// reclaim or respawn since then ends it (#662 review).
+		if handOff.active && handOff.attempt != endMark(j)[0] {
+			handOff = quotaHandOff{}
 		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.
 		if !handOff.active {
 			if stop, ok := announcedQuotaStop(j); ok && !j.Reaped {
-				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
+				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true, attempt: endMark(j)[0]}
 			}
 		}
 		credit, creditPending := pendingCreditRejection(j)
@@ -387,7 +409,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						if seq == nil {
 							seq, _ = creditRejectionStateChangeSeq(j, credit)
 						}
-						handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: seq, active: true}
+						handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: seq, active: true, attempt: endMark(j)[0]}
 					}
 				}
 			}
