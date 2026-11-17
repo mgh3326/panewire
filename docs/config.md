@@ -1554,7 +1554,8 @@ the wire rule cannot carry (an asker family longer than 64 bytes or one with a
 control character) is not sent: the consult still runs and its record lacks the
 stamp.
 
-`resolve` defaults other roles to grade `C`. Other `plan` roles require a grade.
+`resolve` defaults non-consult roles other than reviewer and judge to grade `C`.
+Reviewer and judge require an explicit grade. Other `plan` roles require a grade.
 
 ### Role effort for consult
 
@@ -1804,6 +1805,11 @@ unchanged.
 [--grade G] [--t T0..T3] [--author-family F] [--harness KIND] [--allow-escalation] [--json]` runs the same
 selection core without a launch or job write. `--t` defaults to `T0`.
 Reviewer and judge require `--author-family` to exclude that family.
+Reviewer and judge also require `--grade`: resolve is called by the session
+that makes the subagent call, so that caller supplies the work's grade instead
+of silently selecting a reviewer at the generic `C` default. Text output names
+`grade_source` and `t_source` as `default` or `flag`; a consult without a task
+grade reports `grade_source=without_task`.
 The result names the account and host selected now; it is not a reservation.
 The text answer ends with `profile=<profile> effort=<effort>`.
 `effort` is the role's starting effort, or the selected rung's when absent.

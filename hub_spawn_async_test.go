@@ -105,6 +105,52 @@ func TestAsyncSpawnWithoutDurableStoreRefuses(t *testing.T) {
 		t.Fatalf("accept without durable store=%d", w.Code)
 	}
 }
+
+func TestCapabilityFreeReHelloKeepsImmediateSpawnPlacementCapability(t *testing.T) {
+	h := asyncSpawnHub(t)
+	agent := &hubAgent{}
+	h.connect("machine-a", "test", "fixture", agent, true, []string{"spawn_ops_v1"})
+	h.connect("machine-a", "test", "fixture", agent, true)
+
+	h.mu.Lock()
+	capable := h.nodes["machine-a"].capabilities["spawn_ops_v1"]
+	h.mu.Unlock()
+	if !capable {
+		t.Fatal("capability-free re-hello erased spawn_ops_v1 on the live registration")
+	}
+
+	request := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", h.now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&directSpawnTransport{h: h, task: task}).Spawn(t.Context(), fleet.HubSpawnRequest{
+		RequestID: request.RequestID, Machine: "machine-a", CWDKey: "project",
+		Brief: fleet.HubBrief{Doc: "brief/test"}, Args: request.Args, WaitSeconds: 600,
+	})
+	if !errors.Is(err, fleet.ErrHubPlacementBound) {
+		var hubErr *fleet.HubError
+		if errors.As(err, &hubErr) && hubErr.Kind == "hub_spawn_capability_required" {
+			t.Fatalf("immediate placement saw the erased capability and refused rc 81: %v", err)
+		}
+		t.Fatalf("placement should bind to the live node, got %v", err)
+	}
+	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil || saved.Node == nil || saved.Node.Machine != "machine-a" {
+		t.Fatalf("placement did not bind to machine-a: node=%+v err=%v", saved.Node, err)
+	}
+}
+
+func TestCapabilityFreeFirstHelloRemainsOldNode(t *testing.T) {
+	h := asyncSpawnHub(t)
+	h.connect("machine-a", "test", "fixture", &hubAgent{}, true)
+	h.mu.Lock()
+	capabilities := h.nodes["machine-a"].capabilities
+	h.mu.Unlock()
+	if len(capabilities) != 0 {
+		t.Fatalf("first capability-free hello must remain an old-node registration: %v", capabilities)
+	}
+}
 func TestSpawnOutboxFailureRollsBackResult(t *testing.T) {
 	ctx := t.Context()
 	s := openSpawnStore(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
