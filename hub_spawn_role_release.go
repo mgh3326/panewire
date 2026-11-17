@@ -179,9 +179,15 @@ func (h *HubServer) markHolderJobLost(ctx context.Context, app *fleet.App, holde
 	return h.markHolderJobLostBecause(ctx, app, holder, label, "")
 }
 
+type hubLostJobApp interface {
+	NodeID() (string, bool)
+	MarkJobLostBecause(context.Context, string, string) error
+	ExistingJob(context.Context, string) (map[string]any, bool, error)
+}
+
 // markHolderJobLostBecause is markHolderJobLost with the hk end_reason the
 // lost record takes ("" writes none).
-func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app *fleet.App, holder hubSpawnTask, label, endReason string) (bool, string) {
+func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app hubLostJobApp, holder hubSpawnTask, label, endReason string) (bool, string) {
 	host, pane := spawnHolderHost(holder), holder.Outcome.Pane
 	if host == "" {
 		return false, "no_host"
@@ -195,7 +201,7 @@ func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app *fleet.App
 			return true, "hk_lost"
 		}
 		if hkTerminalState(state) {
-			return true, state
+			return true, nodeJobMarkLostCompleted
 		}
 		return false, reason
 	}
@@ -245,7 +251,7 @@ func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app *fleet.App
 // writeJobLost is the hub-local fallback. hk never rewrites a terminal record
 // (409), so a refused write re-reads it: a record now completed or lost
 // releases the role as the terminal path does; anything else keeps the hold.
-func (h *HubServer) writeJobLost(ctx context.Context, app *fleet.App, job, endReason string) (state, reason string) {
+func (h *HubServer) writeJobLost(ctx context.Context, app hubLostJobApp, job, endReason string) (state, reason string) {
 	if err := app.MarkJobLostBecause(ctx, job, endReason); err != nil {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		record, exists, readErr := app.ExistingJob(readCtx, job)
@@ -275,6 +281,13 @@ func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App
 		return false, heldProbe{reason: "pool_action_pending"}
 	}
 	defer unlock()
+	h.mu.Lock()
+	job := h.jobs[holder.Job]
+	moved := job != nil && (job.Node != spawnHolderHost(holder) || job.Epoch > 1)
+	h.mu.Unlock()
+	if moved {
+		return false, heldProbe{reason: "job_owner_changed"}
+	}
 	label := heldAgentName(holder, record)
 	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, label)
 	if probe.state != heldPaneAbsent {

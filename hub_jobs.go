@@ -551,6 +551,13 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, error) {
 	if !hubJobIDPattern.MatchString(jobID) || !machineIDPattern.MatchString(to) || to == hubOperatorMachineID {
 		return hubJobEventPayload{}, errors.New("job reassignment rejected")
 	}
+	ctx, cancel := context.WithTimeout(h.closeCtx, laneInboxOpTimeout)
+	defer cancel()
+	unlock, err := h.poolActionLocks.lock(ctx, jobID)
+	if err != nil {
+		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
+	}
+	defer unlock()
 	h.mu.Lock()
 	job := h.jobs[jobID]
 	if job == nil || !job.Orphaned || job.Completed || job.Node == to {
@@ -561,20 +568,29 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, error) {
 		h.mu.Unlock()
 		return hubJobEventPayload{}, errors.New("job reassignment rejected")
 	}
-	// The action is inserted under this same lock before any close is sent.
+	h.mu.Unlock()
+	// Intent creation and reassignment share the per-job lock. The database
+	// check must not hold mu while it waits for a connection or query.
 	// Fail closed on a store error: a restart must not erase the fence.
 	if h.inbox == nil {
-		h.mu.Unlock()
 		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
 	}
-	id, err := h.inbox.store.pendingPoolAction(context.Background(), jobID)
+	id, err := h.inbox.store.pendingPoolAction(ctx, jobID)
 	if err != nil {
-		h.mu.Unlock()
 		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
 	}
 	if id != "" {
-		h.mu.Unlock()
 		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action %s is pending", jobID, id)
+	}
+	h.mu.Lock()
+	job = h.jobs[jobID]
+	if job == nil || !job.Orphaned || job.Completed || job.Node == to {
+		h.mu.Unlock()
+		return hubJobEventPayload{}, errors.New("job reassignment rejected")
+	}
+	if _, knownNode := h.auth.Load().tokens[to]; !knownNode {
+		h.mu.Unlock()
+		return hubJobEventPayload{}, errors.New("job reassignment rejected")
 	}
 	from := job.Node
 	job.Epoch++

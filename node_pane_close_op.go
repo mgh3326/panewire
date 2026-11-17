@@ -31,6 +31,9 @@ func (client *HubClient) closeOpsReady(ctx context.Context) bool {
 	if client.nodeHubClose == nil && client.jobsInboxRoot == "" {
 		return false
 	}
+	if client.nodeHubClose == nil && !client.closeOpsRecovered.Load() {
+		return false
+	}
 	return client.hubCloseLedger().CloseOpsReady(ctx)
 }
 
@@ -802,7 +805,18 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 	// the fence within hubCloseFenceInterval.
 	var open []string
 	pass := func() {
-		jobs, err := fleet.PendingHubCloseJobs(filepath.Join(client.jobsInboxRoot, "jobs"))
+		jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
+		if !client.closeOpsRecovered.Load() {
+			step, cancel := context.WithTimeout(ctx, hubCloseSettleBudget)
+			err := fleet.RecoverLegacyCloseOps(step, jobsRoot, client.nowUTC())
+			cancel()
+			if err != nil {
+				slog.Warn("hub close legacy recovery waits", "error", err)
+				return
+			}
+			client.closeOpsRecovered.Store(true)
+		}
+		jobs, err := fleet.PendingHubCloseJobs(jobsRoot)
 		if err != nil {
 			return
 		}

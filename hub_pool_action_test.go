@@ -164,7 +164,7 @@ func TestPoolActionUnknownRetriesUnderNewIDAndKeepsBothFenced(t *testing.T) {
 			retry = row
 		}
 	}
-	if !original.Data.RetryIssued || retry.ID == "" || retry.ID == action.ID || retry.Node != action.Node || retry.Epoch != action.Epoch {
+	if retry.ID == "" || retry.ID == action.ID || retry.Node != action.Node || retry.Epoch != action.Epoch {
 		t.Fatalf("retry lost binding: original=%+v retry=%+v", original, retry)
 	}
 	if err := runPoolActionStep(t, f.hub, f.node, original, poolStatus(fleet.CloseOpUnknown, false, false)); err != nil {

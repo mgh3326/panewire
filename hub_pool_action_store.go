@@ -33,8 +33,9 @@ type poolAction struct {
 type poolActionData struct {
 	Owner, Text, SpawnRequest string
 	Pane, Label, EndReason    string
+	TargetAttempt             string
 	Args                      *nodePaneCloseOpArgs
-	RetryIssued               bool
+	RetryID                   string
 }
 
 // retryPoolAction atomically keeps the uncertain request fenced and records
@@ -42,10 +43,6 @@ type poolActionData struct {
 func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry poolAction) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	data, err := json.Marshal(action.Data)
-	if err != nil {
-		return err
-	}
 	retryData, err := json.Marshal(retry.Data)
 	if err != nil {
 		return err
@@ -63,15 +60,19 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	if err := json.Unmarshal([]byte(currentData), &current); err != nil {
 		return err
 	}
-	if current.RetryIssued {
-		return nil
+	if current.RetryID != "" {
+		var phase string
+		if err := tx.QueryRowContext(ctx, s.q(`SELECT phase FROM pool_actions WHERE id=? AND job=?`), current.RetryID, action.Job).Scan(&phase); err != nil {
+			return err
+		}
+		if phase != poolActionRefused {
+			return nil
+		}
 	}
-	var other int
-	if err := tx.QueryRowContext(ctx, s.q(`SELECT count(*) FROM pool_actions WHERE job=? AND phase=? AND id<>?`), action.Job, poolActionPending, action.ID).Scan(&other); err != nil {
+	current.RetryID = retry.ID
+	data, err := json.Marshal(current)
+	if err != nil {
 		return err
-	}
-	if other != 0 {
-		return nil
 	}
 	result, err := tx.ExecContext(ctx, s.q(`UPDATE pool_actions SET data=? WHERE id=? AND phase=?`), string(data), action.ID, poolActionPending)
 	if err != nil {
@@ -84,6 +85,17 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *laneInboxStore) poolRetryReady(parent context.Context, action poolAction) (bool, error) {
+	if action.Data.RetryID == "" {
+		return true, nil
+	}
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	var phase string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT phase FROM pool_actions WHERE id=? AND job=?`), action.Data.RetryID, action.Job).Scan(&phase)
+	return phase == poolActionRefused, err
 }
 
 func (s *laneInboxStore) insertPoolAction(parent context.Context, action poolAction) error {

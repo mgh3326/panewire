@@ -46,19 +46,21 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 		Owner: owner, Text: fmt.Sprintf("Pool %s is exhausted; job %s ended. Respawn it on another pool.", exhaustion.Pool, task.Job),
 		SpawnRequest: task.Request.RequestID, Pane: task.Outcome.Pane, Label: label, EndReason: endReason,
 	}}
-	// Holding mu across the insert makes the durable intent and the decision to
-	// reassign mutually exclusive. It is also the only source of node and epoch.
+	// The per-job lock also guards reassignment; mu is needed only to take the
+	// ownership snapshot, not while waiting for the durable store.
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	job := h.jobs[task.Job]
 	if job == nil || job.Completed || job.Orphaned || job.Node != spawnHolderHost(task) || job.Epoch == 0 {
+		h.mu.Unlock()
 		return errors.New("job ownership unavailable")
 	}
 	node := h.nodes[job.Node]
 	if node == nil || node.agent == nil || !node.capabilities[hubCapabilityCloseOps] {
+		h.mu.Unlock()
 		return errors.New("close ops unavailable")
 	}
 	action.Node, action.Epoch = job.Node, job.Epoch
+	h.mu.Unlock()
 	if pending, err := h.inbox.store.pendingPoolAction(ctx, task.Job); err != nil || pending != "" {
 		return errors.New("job already has a pending close action")
 	}
@@ -146,6 +148,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		}
 		return nil
 	case fleet.CloseOpUnknown:
+		if action.Data.Args == nil || status.Attempt == "" || status.Attempt != action.Data.Args.Attempt {
+			return nil
+		}
 		return h.retryUnknownPoolAction(ctx, action)
 	case fleet.CloseOpClosed, fleet.CloseOpGone:
 		// An hk lost read is not settlement: the node may still retry the write.
@@ -153,6 +158,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	case nodeCloseOpNone:
 		if action.Data.Args == nil {
 			if status.Attempt == "" {
+				return h.releasePoolAction(ctx, action)
+			}
+			if action.Data.TargetAttempt != "" && status.Attempt != action.Data.TargetAttempt {
 				return h.releasePoolAction(ctx, action)
 			}
 			probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
@@ -206,8 +214,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 }
 
 func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolAction) error {
-	if action.Data.RetryIssued {
-		return nil
+	ready, err := h.inbox.store.poolRetryReady(ctx, action)
+	if err != nil || !ready {
+		return err
 	}
 	probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
 	if probe.state != heldPanePresent || probe.row.PaneID != action.Data.Pane {
@@ -224,9 +233,9 @@ func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolActio
 	}
 	retry := action
 	retry.ID = id
+	retry.Data.TargetAttempt = action.Data.Args.Attempt
 	retry.Data.Args = nil
-	retry.Data.RetryIssued = false
-	action.Data.RetryIssued = true
+	retry.Data.RetryID = ""
 	return h.inbox.store.retryPoolAction(ctx, action, retry)
 }
 
@@ -256,6 +265,16 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		return errors.New("another close action is pending")
 	}
 	defer unlock()
+	h.mu.Lock()
+	job := h.jobs[action.Job]
+	moved := job != nil && (job.Node != action.Node || job.Epoch != action.Epoch)
+	h.mu.Unlock()
+	if moved {
+		// Settlement permits reassignment. Once another owner has the job,
+		// this old action must not release its role or announce its end.
+		action.Phase = poolActionDone
+		return h.inbox.store.savePoolAction(ctx, action)
+	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
 		return err

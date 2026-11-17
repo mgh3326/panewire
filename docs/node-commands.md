@@ -517,12 +517,19 @@ it returns. The hub issuer in [hub_pool_action.go](../hub_pool_action.go)
 persists each action before issuing it to `job.Node` at `job.Epoch`, and only
 while that node advertises `close_ops_v1`. It reads the attempt from status,
 sends the planned `end_reason`, and retries an unknown close under a new id
-while retaining the original fence. A timeout, unknown, or hk record read is
-not a final answer. Refused, preempted, cancelled and released, or settled
-answers are final. A mismatch or `not-a-job` stays pending until release
+for the same attempt while retaining the original fence. At node startup,
+before advertising close support, the node recovers unfinished pre-epoch
+journals under the close-admission lock: an unstarted operation is cancelled,
+and a possibly executed close becomes unknown for normal settlement. A
+timeout, unknown, or hk record read is not a final answer. Refused, preempted,
+cancelled and released, or settled answers are final. A mismatch or `not-a-job`
+stays pending until release
 provides a durable tombstone. `reassignJob` refuses while any action for the
-job remains non-final; it also fails closed if its store is unavailable. The
-store and reconciler resume after a hub restart without a heartbeat. Tests in
+job remains non-final; it also fails closed if its store is unavailable. A
+settled action permits reassignment even before its notice is delivered. If the
+hub's current ownership record has changed, that action releases no role and
+sends no old notice. The store and reconciler resume after a hub restart
+without a heartbeat. Tests in
 [hub_pool_action_test.go](../hub_pool_action_test.go) and
 [node_pane_close_epoch_test.go](../node_pane_close_epoch_test.go) exercise the
 fence, terminal races, epoch, and restart rules.
