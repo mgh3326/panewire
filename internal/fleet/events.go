@@ -66,6 +66,25 @@ func hubRevocation(ev Event) bool {
 	return ev.Kind == "job.revoked" && ev.Kind == ev.Type && ev.Epoch > 0
 }
 
+// hubReassigned reports whether the hub reassigned the job, by the caller's
+// snapshot or by the ledger as it is now. A hub revocation is written without
+// the job end lock (the dispatcher must not stall behind it), so a snapshot
+// taken before a slow read can predate it: a writer of the shared hk record
+// calls this immediately before the write. A ledger that cannot be read fails
+// closed. The recheck narrows the window; the hub's own refusal to reassign a
+// job with a non-final close action is the other fence (hk 4745).
+func (a *App) hubReassigned(j Job) bool {
+	if j.Reassigned {
+		return true
+	}
+	current, err := a.job(j.ID)
+	if err != nil {
+		a.warn("job %s: ledger unreadable before a shared hk write; the write is skipped: %v", j.ID, err)
+		return true
+	}
+	return current.Reassigned
+}
+
 func (a *App) events(id string) ([]Event, error) {
 	if !validID(id) {
 		return nil, fail(exitUsage, "invalid job id")

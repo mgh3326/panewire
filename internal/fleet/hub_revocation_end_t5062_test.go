@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -255,4 +256,100 @@ func TestJobReassignedFollowsHubRevocation_t5062(t *testing.T) {
 	if reassigned("j") {
 		t.Fatal("a new spawn kept the reassignment")
 	}
+}
+
+// The hub writes a revocation without the job end lock, so the Job a writer
+// holds can predate it. Each shared write re-reads the ledger just before it
+// (hubReassigned): these writers get a snapshot taken before the revocation.
+func TestSharedWritersRecheckLedgerAfterStaleSnapshot_t5062(t *testing.T) {
+	stale := func(t *testing.T) (*App, *fakeJobStore, Job) {
+		t.Helper()
+		a := testApp(t)
+		ledgerRunner(t, a)
+		store := a.JobStore.(*fakeJobStore)
+		if err := store.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
+			t.Fatal(err)
+		}
+		seedJob(t, a, "j", "implementer")
+		putEvent(t, a, "j", "job.lost", map[string]any{})
+		j, err := a.job("j")
+		if err != nil || j.Reassigned {
+			t.Fatalf("snapshot err=%v reassigned=%v", err, j.Reassigned)
+		}
+		writeHubRevocationRecord(t, a, "j")
+		store.mu.Lock()
+		store.calls = nil
+		store.mu.Unlock()
+		return a, store, j
+	}
+	untouched := func(t *testing.T, store *fakeJobStore) {
+		t.Helper()
+		if got := store.record(t, "j")["state"]; got != "spawned" || putsOf(store) != 0 {
+			t.Fatalf("hk state=%v puts=%d, want the new owner's record untouched", got, putsOf(store))
+		}
+	}
+	t.Run("reap", func(t *testing.T) {
+		a, store, j := stale(t)
+		a.markEndedJobLost(t.Context(), j)
+		untouched(t, store)
+	})
+	t.Run("sweep", func(t *testing.T) {
+		a, store, j := stale(t)
+		a.markSweptJob(t.Context(), j, "lost")
+		untouched(t, store)
+	})
+	t.Run("usage", func(t *testing.T) {
+		a, store, j := stale(t)
+		a.writeJobSession(t.Context(), j, jobSession{})
+		untouched(t, store)
+	})
+	t.Run("quota stop", func(t *testing.T) {
+		a, store, j := stale(t)
+		if err := a.quotaStopLost(t.Context(), j, quotastop.Stop{Pool: "example"}, false); err != nil {
+			t.Fatal(err)
+		}
+		untouched(t, store)
+	})
+}
+
+// A revocation that lands while reap reads hk (after the job was folded) still
+// stops the write: the hk read is where the window is widest.
+func TestReapRevocationDuringHKReadLeavesHKRecord_t5062(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	base := a.JobStore.(*fakeJobStore)
+	store := &revokeOnGetStore{fakeJobStore: base, revoke: func() { writeHubRevocationRecord(t, a, "j") }}
+	a.JobStore = store
+	if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
+		t.Fatal(err)
+	}
+	seedJob(t, a, "j", "implementer")
+	putEvent(t, a, "j", "job.lost", map[string]any{})
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.mu.Lock()
+	base.calls = nil
+	base.mu.Unlock()
+	a.markEndedJobLost(t.Context(), j)
+	if !store.revoked || base.record(t, "j")["state"] != "spawned" || putsOf(base) != 0 {
+		t.Fatalf("revoked=%v hk state=%v puts=%d, want the new owner's record untouched", store.revoked, base.record(t, "j")["state"], putsOf(base))
+	}
+}
+
+// revokeOnGetStore lands the hub revocation during the first hk read.
+type revokeOnGetStore struct {
+	*fakeJobStore
+	revoke  func()
+	revoked bool
+}
+
+func (s *revokeOnGetStore) Get(ctx context.Context, id string) (map[string]any, error) {
+	rec, err := s.fakeJobStore.Get(ctx, id)
+	if !s.revoked {
+		s.revoked = true
+		s.revoke()
+	}
+	return rec, err
 }

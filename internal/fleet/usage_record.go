@@ -75,7 +75,7 @@ func (a *App) readJobSession(ctx context.Context, j Job, atReap bool) (jobSessio
 // accepts after a job is terminal. A refusal is a warning: job end is never
 // failed by a record write.
 func (a *App) writeJobSession(ctx context.Context, j Job, session jobSession) {
-	if j.Reassigned {
+	if a.hubReassigned(j) {
 		// The usage is this node's session; the record is the new owner's.
 		return
 	}
