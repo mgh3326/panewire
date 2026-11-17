@@ -100,3 +100,43 @@ func TestPoolActionGuardReleasedByNodeSettlement(t *testing.T) {
 		t.Fatalf("settled node did not release the guard: %v", err)
 	}
 }
+
+func TestPoolActionFinalizationLogsNodeAndAction(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, outcome string
+		settled              bool
+	}{
+		{"refused", "preempted", "refused", false},
+		{"settled", "closed", "settled", true},
+		{"guarded", "intent_cancelled", "guarded", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, action := poolActionFixture(t)
+			logs := captureHubLog(f.hub)
+			response := poolActionReply{op: nodeCommandPaneCloseStatus, result: map[string]any{"state": tc.state, "settled": tc.settled, "attempt": action.Data.Args.Attempt}}
+			if err := runPoolActionStep(t, f.hub, f.node, action, response); err != nil {
+				t.Fatal(err)
+			}
+			text := logs.String()
+			for _, part := range []string{"pool close action finalized", action.ID, action.Node, action.Job, tc.outcome} {
+				if !strings.Contains(text, part) {
+					t.Fatalf("finalization log lacks %q: %s", part, text)
+				}
+			}
+		})
+	}
+}
+
+func TestPoolActionFinalizationDoesNotLogFailedSave(t *testing.T) {
+	f, action := poolActionFixture(t)
+	logs := captureHubLog(f.hub)
+	if err := f.hub.inbox.store.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.hub.refusePoolAction(t.Context(), action); err == nil {
+		t.Fatal("finalization succeeded after the store closed")
+	}
+	if strings.Contains(logs.String(), "pool close action finalized") {
+		t.Fatalf("failed save logged a final action: %s", logs.String())
+	}
+}

@@ -135,7 +135,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	}
 	if status.Settled {
 		action.Phase = poolActionSettled
-		return h.inbox.store.savePoolAction(ctx, action)
+		return h.saveFinalPoolAction(ctx, action, "settled")
 	}
 	if (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) && !h.nodeHasCapability(action.Node, hubCapabilityCloseOps) {
 		// Withdrawal can precede a binary rollback. Fence a request that has
@@ -152,7 +152,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		return h.refusePoolAction(ctx, action)
 	case nodeCloseIntentCancelled:
 		action.Phase = poolActionGuarded
-		return h.inbox.store.savePoolAction(ctx, action)
+		return h.saveFinalPoolAction(ctx, action, "guarded")
 	case fleet.CloseOpCancelled:
 		if status.Released {
 			return h.refusePoolAction(ctx, action)
@@ -302,10 +302,18 @@ func (h *HubServer) releasePoolAction(ctx context.Context, action poolAction) er
 
 func (h *HubServer) refusePoolAction(ctx context.Context, action poolAction) error {
 	action.Phase = poolActionRefused
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+	if err := h.saveFinalPoolAction(ctx, action, "refused"); err != nil {
 		return err
 	}
 	h.poolSweep.release(action.Job)
+	return nil
+}
+
+func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, outcome string) error {
+	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		return err
+	}
+	h.logger.Info("pool close action finalized", "node", action.Node, "job", action.Job, "action", action.ID, "outcome", outcome)
 	return nil
 }
 
