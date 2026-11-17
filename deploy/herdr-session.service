@@ -1,0 +1,25 @@
+# Template for a headless herdr session server on a Linux host (the session a
+# node daemon's --herdr-socket points at, e.g. `worker`). Copy it to
+# ~/.config/systemd/user/herdr-<session>.service, replace SESSION, then
+# `systemctl --user daemon-reload && systemctl --user enable --now herdr-<session>`.
+#
+# OOMPolicy=continue: every pane runs in this unit's cgroup. With systemd's
+# default (stop), one pane process that the kernel OOM-kills stops the unit and
+# so every pane on the host; on 2026-11-17 one runaway test did that three
+# times in an hour. herdr restores the panes on restart, but restored agents
+# lose their launch flags and spawns landing in the gap fail
+# workspace_unresolved. Needs systemd 243 or later; older systemd never
+# stopped a unit for an OOM kill.
+[Unit]
+Description=herdr headless session server (SESSION)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/herdr --session SESSION server
+Restart=always
+RestartSec=5
+OOMPolicy=continue
+
+[Install]
+WantedBy=default.target
