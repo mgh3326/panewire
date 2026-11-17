@@ -175,6 +175,13 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	// The existing quota replacement also closes and writes this job. Order
+	// it with pool-action admission so neither can overwrite the other's end.
+	unlock, free := h.lockWithoutPoolAction(ctx, event.JobID)
+	if !free {
+		return skip("pool_action_pending")
+	}
+	defer unlock()
 	store := h.inbox.store
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
 	if err != nil {
@@ -444,42 +451,54 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 			continue
 		}
 		old := m[1]
-		holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
-		if err != nil || holder.Status != "succeeded" {
-			continue
-		}
-		prior, err := fleet.ValidateSubmission(holder.Request)
-		if err != nil || prior.Role != "reviewer" {
-			continue
-		}
-		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		record, exists, err := app.ExistingJob(readCtx, old)
-		cancel()
-		state, _ := record["state"].(string)
-		pool, _ := record["pool"].(string)
-		if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
-			continue
-		}
-		endReason := fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", successor.Job)
-		if !validNodeEndReason(endReason) {
-			continue
-		}
-		name := heldAgentName(holder, record)
-		probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
-		switch {
-		case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
-			if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, old); !closed {
-				continue
-			}
-		case probe.state != heldPaneAbsent:
-			continue
-		}
-		if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); lost {
+		if h.reconcileQuotaReplacement(ctx, app, successor, old) {
 			written++
-			h.logger.Info("quota-stop replacement reconciled", "job", old, "replacement", successor.Job)
 		}
 	}
 	return written
+}
+
+func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string) bool {
+	unlock, free := h.lockWithoutPoolAction(ctx, old)
+	if !free {
+		return false
+	}
+	defer unlock()
+	holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
+	if err != nil || holder.Status != "succeeded" {
+		return false
+	}
+	prior, err := fleet.ValidateSubmission(holder.Request)
+	if err != nil || prior.Role != "reviewer" {
+		return false
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	record, exists, err := app.ExistingJob(readCtx, old)
+	cancel()
+	state, _ := record["state"].(string)
+	pool, _ := record["pool"].(string)
+	if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
+		return false
+	}
+	endReason := fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", successor.Job)
+	if !validNodeEndReason(endReason) {
+		return false
+	}
+	name := heldAgentName(holder, record)
+	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
+	switch {
+	case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
+		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, old); !closed {
+			return false
+		}
+	case probe.state != heldPaneAbsent:
+		return false
+	}
+	if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); lost {
+		h.logger.Info("quota-stop replacement reconciled", "job", old, "replacement", successor.Job)
+		return true
+	}
+	return false
 }
 
 // runQuotaReconcile runs reconcileQuotaReplacements shortly after start (nodes

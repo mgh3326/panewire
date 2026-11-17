@@ -457,6 +457,8 @@ type HubServer struct {
 	spawnTraceOnce       sync.Once
 	spawnSentry          *sentry.Client
 	spawnCoordinatorOnce sync.Once
+	poolActionOnce       sync.Once
+	poolStoreWarningOnce sync.Once
 	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
 	// consultPlan resolves a consult seat and its spawn submission. Nil uses
 	// the hub's own fleet App (fleet.App.PlanConsult); tests inject one.
@@ -507,6 +509,8 @@ type HubServer struct {
 	quotaRefresh            hubQuotaRefreshScheduler
 	spawnActions            hubSpawnActions
 	spawnAdmissions         hubKeyedLocks
+	poolActionLocks         hubKeyedLocks
+	poolActionMu            sync.Mutex
 	placementTraces         hubKeyedLocks
 	// placementStalls holds the reason last logged for each attempt whose
 	// record is still undelivered (hub_placement_stall.go).
@@ -1209,9 +1213,9 @@ func (h *HubServer) handleReassignJob(writer http.ResponseWriter, request *http.
 		http.Error(writer, "invalid job reassignment", http.StatusBadRequest)
 		return
 	}
-	result, ok := h.reassignJob(requestBody.JobID, requestBody.To)
-	if !ok {
-		http.Error(writer, "job reassignment rejected", http.StatusConflict)
+	result, err := h.reassignJob(requestBody.JobID, requestBody.To)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusConflict)
 		return
 	}
 	writeJSON(writer, http.StatusOK, result)
@@ -2639,6 +2643,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runPaneSweep(ctx)
 	go h.runReviewerEnd(ctx)
 	go h.runPoolTriggers(ctx)
+	h.startPoolActions(ctx)
 	go h.runFleetStatus(ctx)
 	h.startSpawnCoordinator(ctx)
 	h.startConsultCoordinator(ctx)

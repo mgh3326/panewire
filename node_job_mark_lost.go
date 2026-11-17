@@ -120,6 +120,8 @@ type nodeJobLedgerEvent struct {
 	final        bool
 	// request and attempt are a hub-close intent's request id and attempt.
 	request, attempt string
+	hubRevokedEpoch  uint64
+	closeIntentEpoch uint64
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -218,7 +220,8 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 			Kind string `json:"kind"`
 			// Type is the kind of a hub revocation record (writeHubRevocation),
 			// which carries no kind field.
-			Type    string `json:"type"`
+			Type    string          `json:"type"`
+			Epoch   json.RawMessage `json:"epoch"`
 			Payload struct {
 				PaneID     string `json:"pane_id"`
 				Label      string `json:"label"`
@@ -227,12 +230,13 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				OwnerLane  string `json:"owner_lane"`
 				Keep       bool   `json:"keep"`
 				// TaskID is a string or a number in the ledger.
-				TaskID       any    `json:"task_id"`
-				HerdrSession string `json:"herdr_session"`
-				Reason       string `json:"reason"`
-				Final        bool   `json:"final"`
-				RequestID    string `json:"request_id"`
-				Attempt      string `json:"attempt"`
+				TaskID       any             `json:"task_id"`
+				HerdrSession string          `json:"herdr_session"`
+				Reason       string          `json:"reason"`
+				Final        bool            `json:"final"`
+				RequestID    string          `json:"request_id"`
+				Attempt      string          `json:"attempt"`
+				Epoch        json.RawMessage `json:"epoch"`
 			} `json:"payload"`
 		}
 		if err := json.Unmarshal(data, &event); err != nil {
@@ -255,8 +259,24 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		case float64:
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
+		var revokedEpoch uint64
+		if event.Kind == "job.revoked" && event.Type == event.Kind && len(event.Epoch) != 0 {
+			if err := json.Unmarshal(event.Epoch, &revokedEpoch); err != nil {
+				return nil, errors.New("unreadable job event")
+			}
+		}
+		var intentEpoch uint64
+		if event.Kind == "job.hub_close_intent" && len(event.Payload.Epoch) != 0 {
+			var epoch string
+			if json.Unmarshal(event.Payload.Epoch, &epoch) != nil {
+				return nil, errors.New("unreadable job event")
+			}
+			if intentEpoch, err = strconv.ParseUint(epoch, 10, 64); err != nil {
+				return nil, errors.New("unreadable job event")
+			}
+		}
 		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession,
-			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID, attempt: event.Payload.Attempt})
+			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID, attempt: event.Payload.Attempt, hubRevokedEpoch: revokedEpoch, closeIntentEpoch: intentEpoch})
 	}
 	return events, nil
 }

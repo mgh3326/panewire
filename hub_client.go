@@ -256,6 +256,7 @@ type HubClient struct {
 	// closeOpsAdvertised is whether the newest capability hello carried
 	// close_ops_v1.
 	closeOpsAdvertised   atomic.Bool
+	closeOpsRecovered    atomic.Bool
 	closeOpsRecheckEvery time.Duration // fixture seam; zero is closeOpsRecheckInterval.
 	// closeFences are the watch locks the node holds for jobs with an open
 	// hub close and no watcher (takeWatcherFence).
@@ -536,6 +537,9 @@ func (client *HubClient) Run(ctx context.Context) {
 		return
 	}
 	client.rearmWatchers()
+	if ctx.Err() != nil {
+		return
+	}
 	go client.runSpawnSettle(ctx)
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)

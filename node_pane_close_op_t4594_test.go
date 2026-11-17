@@ -68,6 +68,7 @@ func (f *fakeHubClose) LockEnd(ctx context.Context, dir string) (func(), error) 
 	return fleet.LockJobEndContext(ctx, dir)
 }
 func (f *fakeHubClose) CloseOpsReady(context.Context) bool     { return !f.notReady }
+func (f *fakeHubClose) SyncEvents(job *os.Root) error          { return syncNodeCloseEvents(job) }
 func (f *fakeHubClose) Fence(dir string) (func(), bool, error) { return fleet.FenceWatchers(dir) }
 func (f *fakeHubClose) Watcher(string) (fleet.HubCloseWatcher, error) {
 	return f.watcher, nil
@@ -93,7 +94,7 @@ func (f *fakeHubClose) CancelIntent(_ context.Context, job, id string) error {
 var noHubCloseIntent = &fakeHubClose{watcher: fleet.HubCloseWatcherAware}
 
 func closeOpArgs(id string) map[string]any {
-	return map[string]any{"request_id": id, "job": closeOpJob, "attempt": closeOpAttempt, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"}
+	return map[string]any{"request_id": id, "job": closeOpJob, "epoch": 1, "attempt": closeOpAttempt, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"}
 }
 
 func closeOpRef(id string) map[string]any { return map[string]any{"request_id": id, "job": closeOpJob} }
@@ -119,7 +120,7 @@ func seedNodeCloseOp(t *testing.T, inbox, id, state string) {
 	}
 	attempt := target.attempt
 	now := time.Now().UTC()
-	if err := fleet.WriteCloseOp(root, fleet.CloseOp{RequestID: id, PaneID: "w1:p1", Attempt: attempt, State: state, Created: now, Updated: now}); err != nil {
+	if err := fleet.WriteCloseOp(root, fleet.CloseOp{RequestID: id, PaneID: "w1:p1", Epoch: 1, Attempt: attempt, State: state, Created: now, Updated: now}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -342,7 +343,7 @@ func TestCloseOpOverHubConnection_t4594(t *testing.T) {
 		record := hub.nodes["machine-a"]
 		return record != nil && record.agent != nil && record.state == "connected"
 	})
-	args := nodePaneCloseOpArgs{RequestID: "op-1", Job: closeOpJob, Attempt: closeOpAttempt, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a", EndReason: "quota_stop pool=devin-free"}
+	args := nodePaneCloseOpArgs{RequestID: "op-1", Job: closeOpJob, Epoch: 1, Attempt: closeOpAttempt, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a", EndReason: "quota_stop pool=devin-free"}
 	var closed nodePaneCloseOpResult
 	if !hub.nodeCall(t.Context(), "machine-a", nodeCommandPaneCloseOp, args, 5*time.Second, &closed) || closed.Outcome != fleet.CloseOpClosed || closed.Replayed {
 		t.Fatalf("close_op=%+v", closed)
@@ -581,7 +582,7 @@ func TestCloseOpUsesItsJobsSession_t4594(t *testing.T) {
 		}
 	}
 	client := &HubClient{nodeCloseSettle: time.Millisecond, jobsInboxRoot: inbox, nodeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}
-	args := map[string]any{"request_id": "op-1", "job": closeOpJob, "attempt": closeOpAttempt, "pane_id": "w1:pW", "name": t3276Worker, "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"}
+	args := map[string]any{"request_id": "op-1", "job": closeOpJob, "epoch": 1, "attempt": closeOpAttempt, "pane_id": "w1:pW", "name": t3276Worker, "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false, "end_reason": "quota_stop pool=devin-free replaced_by=job-c"}
 	result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
 	if errs, _ := os.ReadFile(filepath.Join(fakeDir, "errors")); len(errs) != 0 {
 		t.Fatalf("herdr called in another job's session: %s", errs)
@@ -787,7 +788,7 @@ func TestCloseOpRecordsTheHubCloseIntentFirst_t4652(t *testing.T) {
 	client.nodeHubClose = ledger
 	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
 	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, true)
-	want := fleet.HubCloseIntent{RequestID: "op-1", Attempt: closeOpAttempt, Pane: "w1:p1", Label: "job-a", EndReason: "quota_stop pool=devin-free replaced_by=job-c"}
+	want := fleet.HubCloseIntent{RequestID: "op-1", Attempt: closeOpAttempt, Epoch: 1, Pane: "w1:p1", Label: "job-a", EndReason: "quota_stop pool=devin-free replaced_by=job-c"}
 	if len(ledger.intents) != 1 || ledger.intents[0] != want {
 		t.Fatalf("intents %+v, want exactly %+v", ledger.intents, want)
 	}

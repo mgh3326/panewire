@@ -140,7 +140,17 @@ func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (p
 // sendNodeCommandWithContext includes writer admission and the socket write in
 // ctx. A nil context retains the existing node-command writer behavior.
 func (h *HubServer) sendNodeCommandWithContext(ctx context.Context, machine, op string, args json.RawMessage) (pending *hubNodeCommandPending, requestID, state string, sent bool) {
+	return h.sendNodeCommandWhere(ctx, machine, op, args, nil)
+}
+
+// sendNodeCommandWhere evaluates an optional ownership predicate under the
+// same lock that selects the connection and registers the pending command.
+func (h *HubServer) sendNodeCommandWhere(ctx context.Context, machine, op string, args json.RawMessage, allowed func() bool) (pending *hubNodeCommandPending, requestID, state string, sent bool) {
 	h.mu.Lock()
+	if allowed != nil && !allowed() {
+		h.mu.Unlock()
+		return nil, "", "ownership_unavailable", false
+	}
 	agent, state := h.nodeCommandTargetLocked(machine)
 	if agent == nil {
 		h.mu.Unlock()

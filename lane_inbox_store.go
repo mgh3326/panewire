@@ -147,6 +147,9 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batches (id TEXT PRIMARY KEY, lane TEXT NOT NULL, text TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batch_quarantine (batch_id TEXT PRIMARY KEY, reason TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS drain_wake_lanes (lane TEXT PRIMARY KEY, pending INTEGER NOT NULL DEFAULT 0, last_sent INTEGER NOT NULL DEFAULT 0)`,
+		poolActionSchema,
+		`CREATE INDEX IF NOT EXISTS pool_actions_job ON pool_actions(job, phase)`,
+		`CREATE INDEX IF NOT EXISTS pool_actions_phase ON pool_actions(phase, id)`,
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			db.Close()

@@ -40,17 +40,21 @@ func failedBeforeBrief(holder hubSpawnTask) bool {
 // false for an unreachable node, a node error, a late reply or an unreadable
 // result, so every caller reads "could not tell" as "keep the reservation".
 func (h *HubServer) nodeCall(ctx context.Context, machine, op string, args any, wait time.Duration, out any) bool {
+	return h.nodeCallWhere(ctx, machine, op, args, wait, out, nil)
+}
+
+func (h *HubServer) nodeCallWhere(ctx context.Context, machine, op string, args any, wait time.Duration, out any, allowed func() bool) bool {
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return false
 	}
-	pending, id, _, sent := h.sendNodeCommand(machine, op, raw)
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	pending, id, _, sent := h.sendNodeCommandWhere(ctx, machine, op, raw, allowed)
 	if !sent {
 		return false
 	}
 	defer h.forgetNodeCommand(id)
-	ctx, cancel := context.WithTimeout(ctx, wait)
-	defer cancel()
 	select {
 	case reply := <-pending.done:
 		return reply.Error == "" && json.Unmarshal(reply.Result, out) == nil

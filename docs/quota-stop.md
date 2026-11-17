@@ -97,27 +97,22 @@ cause is held until the pool comes back — a catalog row un-retired — after
 which both of the pool's triggers re-arm and a repeat is logged as new. While a
 cause is held, later passes still notify jobs that were placed after it fired.
 
-For each implementer, reviewer, or consult the hub records one `lane.event`
-asking the owner to hand the job over or end it and respawn it on another pool.
-A job whose id starts `mwr-` is reported to the `mergewake` lane. The event has
-a fixed producer id per job, so repeat observations and hub restarts use the
-same durable relay record. A failed persistence attempt leaves the job eligible
-for a later observed exhaustion. The sweep does not close panes, change job
-records, release roles, or claim successors; the owner decides how to act.
-Automatic action and its recovery are follow-up hk 4594, in steps: the node's
-pane-close operation journal, which a crash cannot confuse with a refused
-close or a pane that vanished on its own ([node-commands.md](node-commands.md),
-"Close operations"; shipped); the job watcher deferring to an open operation
-(hk 4652); the hub's durable end of reviewers and consults through it
-(hk 4632); and the crash-safe hand-over of implementers (hk 4633). The existing
-screen-triggered quota-stop handover is unchanged.
+For an implementer, or a reviewer or consult on a node that does not advertise
+close operations, the hub records a `lane.event` asking the owner to hand the
+job over or end it and respawn it on another pool. On a capable node, the hub
+instead stores a close intent for a reviewer or consult, closes and settles it
+through the node, confirms the planned hk `lost` record, then notifies the
+owner to respawn it. A refused or unconfirmed close holds the notice. A job
+whose id starts `mwr-` is reported to the `mergewake` lane. Both notice kinds
+have fixed producer ids per job, so a restart cannot publish another copy.
+The action reconciler runs independently of pane liveness and heartbeats.
+The node and ownership contracts are in [node-commands.md](node-commands.md),
+"Hub close protocol". Crash-safe implementer hand-over is hk 4633.
 
 ## Hub close (hk 4652)
 
-When the hub ends a job by closing its pane with `pane.close_op` (the
-replacement and hand-over paths of hk 4632/4633 will), the **node** writes
-the job's terminal hk record, with the planned `end_reason` carrying
-`replaced_by=` or `handed_over_to=`, releases the quota lease and records
+When the hub ends a job by closing its pane with `pane.close_op`, the **node**
+writes the planned terminal hk record, releases the quota lease and records
 the final `job.lost` (`reason: "hub_close"`). The job's watcher only
 defers while the close is open, including during a quota hand-off grace:
 it writes neither the grace-expiry `quota_stop` record nor the

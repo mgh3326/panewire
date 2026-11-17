@@ -226,6 +226,7 @@ func (s *poolSweepState) release(job string) {
 
 const (
 	poolJobNotified = "notified"
+	poolJobQueued   = "queued"
 	poolJobSkipped  = "skipped"
 )
 
@@ -237,7 +238,7 @@ type poolJobResult struct {
 }
 
 func (r poolJobResult) acted() bool {
-	return r.action == poolJobNotified
+	return r.action == poolJobNotified || r.action == poolJobQueued
 }
 
 func poolJobSkip(role, why string) poolJobResult {
@@ -313,6 +314,11 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 			if results[i].acted() {
 				h.logger.Info("pool exhausted job", "job", task.Job, "role", results[i].role, "pool", exhaustion.Pool, "account", exhaustion.Account, "cause", exhaustion.Cause,
 					"action", results[i].action, "reason", results[i].why)
+				// A legacy node receives the existing hand-over notice. Revisit
+				// its job when close operations are later enabled.
+				if results[i].action == poolJobNotified && (results[i].role == "reviewer" || results[i].role == "consult") {
+					h.poolSweep.release(task.Job)
+				}
 			} else {
 				h.poolSweep.release(task.Job)
 			}
@@ -323,7 +329,7 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 	notified, skipped := 0, map[string]int{}
 	for _, result := range results {
 		switch result.action {
-		case poolJobNotified:
+		case poolJobNotified, poolJobQueued:
 			notified++
 		default:
 			skipped[result.why]++
@@ -401,6 +407,19 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 		}
 		if h.poolEventGone(exhaustion, h.now()) {
 			return poolJobSkip(role, "superseded")
+		}
+		if role == "reviewer" || role == "consult" {
+			if h.nodeHasCapability(spawnHolderHost(task), hubCapabilityCloseOps) {
+				if err := h.createPoolAction(ctx, exhaustion, task, app); err != nil {
+					return poolJobSkip(role, "close_not_queued")
+				}
+				return poolJobResult{action: poolJobQueued, role: role}
+			}
+			// Do not publish a hand-over notice in place of an existing action's
+			// held notice if the node temporarily withdraws its capability.
+			if exists, err := h.inbox.store.hasPoolAction(ctx, task.Job); err != nil || exists {
+				return poolJobSkip(role, "close_action_exists")
+			}
 		}
 		owner := task.Owner
 		if strings.HasPrefix(task.Job, "mwr-") {

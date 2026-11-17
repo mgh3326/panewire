@@ -173,9 +173,17 @@ A failed close answers `close_failed`. Acting ops run one at a time per node.
 
 `pane.close_op` (hk 4594) is `pane.close` under a hub-chosen `request_id`
 (`^[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}$`, never a leading dot), a `job` and an
-`attempt`: every argument of `pane.close` plus `request_id`, `job`,
+`attempt`: every argument of `pane.close` plus `request_id`, `job`, `epoch`,
 `attempt` and `end_reason` (see "Hub close protocol"), all required
 (`allow_unnamed` included).
+
+`epoch` is the hub's ownership epoch for the job. The node refuses
+`epoch_mismatch` before acting if it differs from its latest assigned epoch
+(initially 1). After a node restart a new request at an epoch later than 1
+waits for the assignment to be redelivered; an existing request recovers its
+epoch from the synced intent or close journal. A durable hub revocation also
+rejects that epoch and every older one after a restart. A registered request
+records its epoch, which a replay must match.
 
 **The attempt is the hub's decision.** `attempt` is an opaque token naming the
 job attempt the hub decided to close. The hub reads it from `pane.close_status`
@@ -240,9 +248,22 @@ was registered for, then resumes the guarded close or settles `preempted`. A
 a new id. Reusing an id for another pane is `invalid_args`.
 
 `pane.close_status` (`request_id`, `job`) answers
-`{"state":"none"|<state>,"released":<bool>,"attempt":"<token>"}`, where
+`{"state":"none"|"superseded"|"intent_cancelled"|<state>,"released":<bool>,"settled":<bool>,"attempt":"<token>"}`, where
 `attempt` is the job's current attempt token (empty when its ledger cannot be
-read). `pane.close_release` takes the
+read). `settled` proves a synced final `job.lost` closed this request's
+intent; it also covers an older unknown intent closed by a later request on
+the same attempt. A visible hk `lost` record alone does not prove settlement.
+For an unknown, gone, or closed operation, `superseded` proves that a different
+attempt is current. The node checks it under the job end lock and syncs the
+events directory before answering. The operation journal stays intact: this
+proof says no later hk write belongs to the old intent, not whether its pane
+was closed.
+It relies on the #662 `endMark` rule: a stale attempt's watcher decision is
+dropped when rechecked under that lock (see the stale-decision rule below).
+`intent_cancelled` proves under the same lock and sync that this request's
+intent was cancelled. The operation journal remains unchanged. A cancelled
+intent alone does not prove that its pane or watcher has stopped writing hk.
+`pane.close_release` takes the
 same arguments, marks a final operation released (a `registered` one becomes
 `cancelled`) and answers the same shape; an operation left `closing` stays
 unreleased until a repeated `pane.close_op` settles it. All three ops take the
@@ -502,18 +523,42 @@ lock) end with a 5 s context; one that fails (for example an end-lock wait
 that expired) runs none and leaves it to the daemon pass. The bound covers
 waits on locks, not the filesystem: an fsync of the job's journal or events
 directory that stalls is not cancellable and can hold the acting lock until
-it returns. What the hub issuer
-(hk 4745) must do: issue close ops only to a node whose current registration
-advertises `close_ops_v1`; send `end_reason` on every `pane.close_op`; treat
-`close_in_progress`, `watcher_incompatible` and `close_ops_not_ready` as "not
-closed, retry later";
-after `unknown`, retry under a new request id while the pane is still
-there; read `attempt` from `pane.close_status` when it decides; drive every
-operation it opens to a final state or release it; and not write a
-terminal hk record other than the planned one for a job whose close it
-opened. The hub issuer's ownership and finalization obligations are
-specified and tested in hk 4745, and `close_ops_v1` is not advertised before
-that guard is deployed.
+it returns. The hub issuer in [hub_pool_action.go](../hub_pool_action.go)
+persists each action before issuing it to `job.Node` at `job.Epoch`, and only
+while that node advertises `close_ops_v1`. It reads the attempt from status,
+sends the planned `end_reason`, and retries an unknown close under a new id
+for the same attempt while retaining the original fence. A retry requires an
+advertised node and a closable pane; retries after an uncertain or refused
+successor back off from ten seconds to at most ten minutes. At node startup,
+before advertising close support, the node recovers unfinished pre-epoch
+journals under the close-admission lock: an unstarted operation is cancelled,
+and a possibly executed close becomes unknown for normal settlement. A
+timeout, unknown, or hk record read is not a final answer. Refused, preempted,
+cancelled and released, settled, or superseded answers are final. Superseded
+ends the old action without a notice and permits a later sweep of the new
+attempt. `intent_cancelled` stops the close action without a notice or role
+release but keeps its reassignment fence until hk is terminal or the node
+reports synced settlement. A mismatch or `not-a-job` stays pending until release
+provides a durable tombstone. `reassignJob` refuses while any action for the
+job remains pending or guarded; a configured store error fails closed. An
+inbox-less hub allows reassignment and logs that it cannot check close-action
+finality. Do not remove an inbox store with unresolved actions: disabling it
+discards visibility of their fences along with the other inbox state. A
+settled action permits reassignment even before its notice is delivered. If the
+hub's current ownership record has changed, that action releases no role and
+sends no old notice. The store and reconciler resume after a hub restart
+without a heartbeat. Tests in
+[hub_pool_action_test.go](../hub_pool_action_test.go) and
+[node_pane_close_epoch_test.go](../node_pane_close_epoch_test.go) exercise the
+fence, terminal races, epoch, and restart rules.
+
+Rollout order: deploy the hub with this guard, upgrade the node binaries,
+run `panewire node close-ops enable` on each node, then run
+`panewire node close-ops advertise` on each. Before any binary rollback, run
+`panewire node close-ops drain` on every node and wait for it to report no
+pending jobs; drain removes the advertisement and barrier markers. Keep the
+new binary running during the drain, and remove any remaining barrier marker
+before rolling back. Do not advertise on a hub without the guard.
 
 ### `pane.capture`
 

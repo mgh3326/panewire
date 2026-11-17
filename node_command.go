@@ -245,7 +245,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandQuotaRefresh:     {"pool"},
 	nodeCommandPRStatus:         {"repo", "pr", "fresh"},
 	nodeCommandCheckoutPull:     {"checkout", "rev"},
-	nodeCommandPaneCloseOp:      {"request_id", "job", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed", "end_reason"},
+	nodeCommandPaneCloseOp:      {"request_id", "job", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed", "end_reason"},
 	nodeCommandPaneCloseStatus:  {"request_id", "job"},
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
 }
