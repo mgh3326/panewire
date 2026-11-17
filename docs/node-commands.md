@@ -369,11 +369,16 @@ while any close is open: its process-held watcher fence must remain held.
    jobs` and exits 0. Exit 5 lists pending jobs; the running node's settlement
    pass retries them. An unreadable ledger is pending, so repair storage and
    retry rather than treating an incomplete scan as an empty drain.
-3. Keep the new node binary running for at least 30 seconds. A hub configured
-   with neither an inbox store nor a database URL creates no pool actions and
-   emits no inventory; this assumes no store was removed with unresolved
-   actions. Otherwise, there is no command to list pending pool actions by
-   node. In the hub log, find a
+3. Keep the new node binary running for at least 30 seconds. If the inbox kill
+   switch (`--delivery-policy off`) is active with a configured store, the
+   hub does not open that store or emit inventory logs. Restore a non-off
+   delivery policy using the same store and complete the checks below before
+   rollback; missing inventory is not evidence that the store is empty.
+
+   A hub configured with neither an inbox store nor a database URL creates no
+   pool actions and emits no inventory; this assumes no store was removed with
+   unresolved actions. Otherwise, there is no command to list pending pool
+   actions by node. In the hub log, find a
    `pool close action inventory complete` line whose `started_at` is after the
    drain succeeded. For that line's `inventory` ID, verify that the number of
    distinct `pool close action inventory entry` lines matches its `count`;
