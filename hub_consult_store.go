@@ -22,6 +22,7 @@ const (
 
 type hubConsult struct {
 	ID, IdemKey, Task, PR, Head, Requester, QuestionDoc, AuthorJob, AuthorFamily string
+	Machine, CallerPane                                                          string
 	State, SeatProfile, SeatFamily, SeatGrade, Job, RequestID, Reason, AnswerDoc string
 	Created, Updated, Answered, Deadline                                         time.Time
 	ClaimUntil                                                                   time.Time
@@ -77,6 +78,8 @@ func (s *laneInboxStore) ensureConsults() error {
 		`updated_ms BIGINT NOT NULL DEFAULT 0`,
 		`claim_until_ms BIGINT NOT NULL DEFAULT 0`,
 		`exclude_profiles TEXT NOT NULL DEFAULT ''`,
+		`machine TEXT NOT NULL DEFAULT ''`,
+		`caller_pane TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE consult_requests ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
@@ -93,9 +96,9 @@ func (s *laneInboxStore) insertConsult(parent context.Context, c hubConsult) (hu
 	ctx, done := s.op(parent)
 	defer done()
 	result, err := s.db.ExecContext(ctx, s.q(`INSERT INTO consult_requests
-		(id,idem_key,task,pr,head,requester,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,updated_ms,claim_until_ms,exclude_profiles,answered_ms,deadline_ms,respawns,notified)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`),
-		c.ID, c.IdemKey, c.Task, c.PR, c.Head, c.Requester, c.QuestionDoc, c.AuthorJob, c.AuthorFamily, c.State,
+		(id,idem_key,task,pr,head,requester,machine,caller_pane,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,updated_ms,claim_until_ms,exclude_profiles,answered_ms,deadline_ms,respawns,notified)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`),
+		c.ID, c.IdemKey, c.Task, c.PR, c.Head, c.Requester, c.Machine, c.CallerPane, c.QuestionDoc, c.AuthorJob, c.AuthorFamily, c.State,
 		c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc,
 		c.Created.UnixMilli(), consultUpdatedMillis(c), consultMs(c.ClaimUntil), strings.Join(c.ExcludeProfiles, ","), c.Answered.UnixMilli(), c.Deadline.UnixMilli(), c.Respawns, consultBoolInt(c.Notified))
 	if err != nil {
@@ -117,7 +120,7 @@ func (s *laneInboxStore) consultByID(parent context.Context, id string) (hubCons
 	return s.scanConsult(parent, `SELECT `+consultColumns+` FROM consult_requests WHERE id=?`, id)
 }
 
-const consultColumns = `id,idem_key,task,pr,head,requester,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,updated_ms,claim_until_ms,exclude_profiles,answered_ms,deadline_ms,respawns,notified`
+const consultColumns = `id,idem_key,task,pr,head,requester,machine,caller_pane,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,updated_ms,claim_until_ms,exclude_profiles,answered_ms,deadline_ms,respawns,notified`
 
 func (s *laneInboxStore) scanConsult(parent context.Context, query string, args ...any) (hubConsult, error) {
 	ctx, done := s.op(parent)
@@ -126,7 +129,7 @@ func (s *laneInboxStore) scanConsult(parent context.Context, query string, args 
 	var created, updated, claimUntil, answered, deadline int64
 	var notified int
 	var exclude string
-	err := s.db.QueryRowContext(ctx, s.q(query), args...).Scan(&c.ID, &c.IdemKey, &c.Task, &c.PR, &c.Head, &c.Requester, &c.QuestionDoc, &c.AuthorJob, &c.AuthorFamily, &c.State, &c.SeatProfile, &c.SeatFamily, &c.SeatGrade, &c.Job, &c.RequestID, &c.Reason, &c.AnswerDoc, &created, &updated, &claimUntil, &exclude, &answered, &deadline, &c.Respawns, &notified)
+	err := s.db.QueryRowContext(ctx, s.q(query), args...).Scan(&c.ID, &c.IdemKey, &c.Task, &c.PR, &c.Head, &c.Requester, &c.Machine, &c.CallerPane, &c.QuestionDoc, &c.AuthorJob, &c.AuthorFamily, &c.State, &c.SeatProfile, &c.SeatFamily, &c.SeatGrade, &c.Job, &c.RequestID, &c.Reason, &c.AnswerDoc, &created, &updated, &claimUntil, &exclude, &answered, &deadline, &c.Respawns, &notified)
 	if err != nil {
 		return hubConsult{}, err
 	}
@@ -161,7 +164,7 @@ func (s *laneInboxStore) activeConsults(parent context.Context) ([]hubConsult, e
 		var created, updated, claimUntil, answered, deadline int64
 		var notified int
 		var exclude string
-		if err := rows.Scan(&c.ID, &c.IdemKey, &c.Task, &c.PR, &c.Head, &c.Requester, &c.QuestionDoc, &c.AuthorJob, &c.AuthorFamily, &c.State, &c.SeatProfile, &c.SeatFamily, &c.SeatGrade, &c.Job, &c.RequestID, &c.Reason, &c.AnswerDoc, &created, &updated, &claimUntil, &exclude, &answered, &deadline, &c.Respawns, &notified); err != nil {
+		if err := rows.Scan(&c.ID, &c.IdemKey, &c.Task, &c.PR, &c.Head, &c.Requester, &c.Machine, &c.CallerPane, &c.QuestionDoc, &c.AuthorJob, &c.AuthorFamily, &c.State, &c.SeatProfile, &c.SeatFamily, &c.SeatGrade, &c.Job, &c.RequestID, &c.Reason, &c.AnswerDoc, &created, &updated, &claimUntil, &exclude, &answered, &deadline, &c.Respawns, &notified); err != nil {
 			return nil, err
 		}
 		c.Created = time.UnixMilli(created).UTC()
@@ -199,8 +202,8 @@ func (s *laneInboxStore) replaceConsult(parent context.Context, c hubConsult) (b
 func (s *laneInboxStore) updateConsult(parent context.Context, c hubConsult, guard string) (int64, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE consult_requests SET requester=?,question_doc=?,author_job=?,author_family=?,state=?,seat_profile=?,seat_family=?,seat_grade=?,job=?,request_id=?,reason=?,answer_doc=?,answered_ms=?,deadline_ms=?,updated_ms=?,claim_until_ms=?,exclude_profiles=?,respawns=?,notified=? WHERE id=?`+guard),
-		c.Requester, c.QuestionDoc, c.AuthorJob, c.AuthorFamily, c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc, c.Answered.UnixMilli(), c.Deadline.UnixMilli(), consultUpdatedMillis(c), consultMs(c.ClaimUntil), strings.Join(c.ExcludeProfiles, ","), c.Respawns, consultBoolInt(c.Notified), c.ID)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE consult_requests SET requester=?,machine=?,caller_pane=?,question_doc=?,author_job=?,author_family=?,state=?,seat_profile=?,seat_family=?,seat_grade=?,job=?,request_id=?,reason=?,answer_doc=?,answered_ms=?,deadline_ms=?,updated_ms=?,claim_until_ms=?,exclude_profiles=?,respawns=?,notified=? WHERE id=?`+guard),
+		c.Requester, c.Machine, c.CallerPane, c.QuestionDoc, c.AuthorJob, c.AuthorFamily, c.State, c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc, c.Answered.UnixMilli(), c.Deadline.UnixMilli(), consultUpdatedMillis(c), consultMs(c.ClaimUntil), strings.Join(c.ExcludeProfiles, ","), c.Respawns, consultBoolInt(c.Notified), c.ID)
 	if err != nil {
 		return 0, err
 	}
