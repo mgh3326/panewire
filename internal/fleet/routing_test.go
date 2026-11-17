@@ -160,13 +160,23 @@ func TestResolveReportsDefaultGradeAndTier(t *testing.T) {
 
 func TestResolveReviewerAndJudgeRequireGrade(t *testing.T) {
 	for _, role := range []string{"reviewer", "judge"} {
-		t.Run(role, func(t *testing.T) {
-			a, _, _ := consultFixture(t)
-			err := a.resolveCmd(context.Background(), []string{"--role", role, "--author-family", "anthropic"})
-			if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "needs --grade") {
-				t.Fatalf("resolve %s without a grade: got %v, want usage refusal", role, err)
+		for _, explicitEmpty := range []bool{false, true} {
+			name := "omitted"
+			if explicitEmpty {
+				name = "explicitly empty"
 			}
-		})
+			t.Run(role+"/"+name, func(t *testing.T) {
+				a, _, _ := consultFixture(t)
+				args := []string{"--role", role, "--author-family", "anthropic"}
+				if explicitEmpty {
+					args = append(args, "--grade=")
+				}
+				err := a.resolveCmd(context.Background(), args)
+				if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "needs --grade") {
+					t.Fatalf("resolve %s with grade %s: got %v, want usage refusal", role, name, err)
+				}
+			})
+		}
 	}
 }
 

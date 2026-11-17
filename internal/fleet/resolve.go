@@ -70,7 +70,7 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		return fail(exitUsage, "resolve needs --role %s", strings.Join(routingRoles, "|"))
 	}
 	grade = strings.ToUpper(grade)
-	if (role == "reviewer" || role == "judge") && !flagPassed(f, "grade") {
+	if (role == "reviewer" || role == "judge") && (!flagPassed(f, "grade") || grade == "") {
 		return fail(exitUsage, "resolve --role %s needs --grade C|B|A|A+|S|S+|SS", role)
 	}
 	if topRoutingRole(role) {

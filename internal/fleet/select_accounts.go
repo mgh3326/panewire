@@ -32,7 +32,7 @@ type accountBinding struct {
 	holders []selHost
 }
 
-func (sp *selPresence) excludedOnlyBindings(pool string, eligible []accountBinding) map[string][]string {
+func (sp *selPresence) excludedOnlyBindings(seat *Seat, pool string, eligible []accountBinding) map[string][]string {
 	eligibleKeys := make(map[string]bool, len(eligible))
 	for _, binding := range eligible {
 		eligibleKeys[binding.key] = true
@@ -41,6 +41,11 @@ func (sp *selPresence) excludedOnlyBindings(pool string, eligible []accountBindi
 	for _, host := range sp.hosts {
 		notAccepting := host.view != nil && strings.Contains(host.view.Reason, "not_accepting")
 		if !host.eligible || !host.excluded || !host.excludedByFlag && !notAccepting || !host.awake && !host.wakeable {
+			continue
+		}
+		placeable := host
+		placeable.excluded, placeable.restricted = false, false
+		if !sp.canMeasure(placeable, seat) || sp.ready.drop(host.name, host.cfg, seat.Kind) != "" {
 			continue
 		}
 		for _, key := range hostAccounts(sp.presence, pool, host.presence, sp.now, sp.presTTL) {

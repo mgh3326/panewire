@@ -1023,7 +1023,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		}
 		// A candidate is a profile/rung/account, never a provider-level pool.
 		bindings := pres.bindings(c.seat, row.Pool)
-		p.addExcludedBindings(row.Pool, pres.excludedOnlyBindings(row.Pool, bindings))
+		p.addExcludedBindings(row.Pool, pres.excludedOnlyBindings(c.seat, row.Pool, bindings))
 		if len(bindings) == 0 {
 			c.reason, c.code = "no_presence", outcomeAuthUnavailable
 			if drop := pres.firstDrop(c.seat); drop != "" {

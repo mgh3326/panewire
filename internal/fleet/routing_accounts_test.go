@@ -268,6 +268,26 @@ func TestQuotaExhaustionNamesAccountsOnlyOnExcludedHostsInPlan(t *testing.T) {
 	}
 }
 
+func TestQuotaExhaustionOmitsExcludedAccountMissingSeatCapability(t *testing.T) {
+	a, _, _, src := accountConsultFixture(t)
+	for _, profile := range []string{"opus", "fable"} {
+		seat := a.Policy.Profiles[profile]
+		seat.Capability = "blender"
+		a.Policy.Profiles[profile] = seat
+	}
+	a.Config.Hosts["host-b"]["blender"] = true
+	src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(30, 8))}
+	src.accounts[testClaudeB] = SharedAccount{Key: testClaudeB, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(120, 8))}
+	src.accounts[testCodexA] = SharedAccount{Key: testCodexA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(120, 8))}
+	if err := a.planCmd(context.Background(), []string{"--role", "consult", "--grade", "A", "--t", "T1", "--exclude-host", "host-a"}); exitCode(err) != exitRoleWait {
+		t.Fatalf("plan exhaustion: got %v, want exit %d", err, exitRoleWait)
+	}
+	text := a.Out.(*bytes.Buffer).String()
+	if strings.Contains(text, "account "+testClaudeA+" only on excluded/not-accepting hosts") {
+		t.Fatalf("plan named an account whose excluded host lacks the seat capability:\n%s", text)
+	}
+}
+
 func TestLaunchKeepsSelectedAccountAndJSONReceipt(t *testing.T) {
 	a, s, q, src := accountConsultFixture(t)
 	a.Config.Local["spawn"] = true
