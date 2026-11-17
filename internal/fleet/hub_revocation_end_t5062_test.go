@@ -456,3 +456,154 @@ func TestRecordJobUsageModelWriteAfterHubRevocation_t5062(t *testing.T) {
 		t.Fatalf("record = %v puts=%d, want the new owner's record untouched", rec, putsOf(store))
 	}
 }
+
+// A revocation that lands while done reads the harness session (after the
+// upload's check) still stops the terminal PUT, and so does one that lands
+// between the PUTs of strictCompletedPutUntil's retries or at the pin of a
+// retry whose settlement is already receipted.
+func TestDoneAndEscalateRevokedDuringSessionRead_t5062(t *testing.T) {
+	for _, kind := range []string{"done", "escalate"} {
+		t.Run(kind, func(t *testing.T) {
+			a := testApp(t)
+			f := ledgerRunner(t, a)
+			hk := useFakeHK(t)
+			noHKCLI(t, f)
+			hk.Handle(hkCommentAnswer)
+			claudeFixture(t, a.Home)
+			store := usageJob(t, a, claudeSession())
+			revoked := false
+			base := f.Do
+			f.Do = func(c Command) Result {
+				if !revoked && c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+					revoked = true
+					writeHubRevocationRecord(t, a, "j")
+				}
+				return base(c)
+			}
+			path := filepath.Join(a.Jobs, "j", "report.md")
+			if err := os.WriteFile(path, []byte("report\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store.mu.Lock()
+			store.calls = nil
+			store.mu.Unlock()
+			args := []string{"j", "--report", path}
+			if kind == "escalate" {
+				args = append(args, "--question", "which way?")
+			}
+			err := a.lifecycle(t.Context(), kind, args)
+			if !revoked {
+				t.Fatal("the session read never ran, so the revocation never landed")
+			}
+			if code(err) != exitStateConflict || !strings.Contains(err.Error(), "reassigned") {
+				t.Fatalf("err = %v, want the reassignment refusal", err)
+			}
+			if got := store.record(t, "j")["state"]; got != "spawned" || putsOf(store) != 0 {
+				t.Fatalf("hk state=%v puts=%d, want the new owner's record untouched", got, putsOf(store))
+			}
+		})
+	}
+}
+
+// putRevokeStore lands the revocation with the first PUT, which it answers
+// with an ambiguous failure so the writer retries.
+type putRevokeStore struct {
+	*fakeJobStore
+	revoke func()
+	puts   int
+}
+
+func (s *putRevokeStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	s.puts++
+	if s.puts == 1 {
+		s.revoke()
+		return &BackendError{Status: 503}
+	}
+	return s.fakeJobStore.Put(ctx, id, fields)
+}
+
+func TestStrictCompletedPutRechecksBeforeRetry_t5062(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	base := a.JobStore.(*fakeJobStore)
+	store := &putRevokeStore{fakeJobStore: base, revoke: func() { writeHubRevocationRecord(t, a, "j") }}
+	a.JobStore = store
+	if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
+		t.Fatal(err)
+	}
+	seedJob(t, a, "j", "implementer")
+	_, err := a.strictCompletedPutUntil(t.Context(), "j", map[string]any{"state": "completed"}, nil, nil, time.Now().Add(time.Minute))
+	if !isDoneResultFailure(err, "job_reassigned") || store.puts != 1 || base.record(t, "j")["state"] != "spawned" {
+		t.Fatalf("err=%v puts=%d state=%v, want one PUT (before the revocation) and then the refusal", err, store.puts, base.record(t, "j")["state"])
+	}
+}
+
+// A retry whose settlement is receipted skips the completed write; a
+// revocation landing during its report upload still stops the pin.
+func TestDoneRetryRevokedDuringUploadDoesNotPin_t5062(t *testing.T) {
+	r := newDoneRig(t)
+	r.write("report\n")
+	digest := reportDigest([]byte("report\n"))
+	putEvent(t, r.a, "j", "job.completed", map[string]any{"report": r.path, "report_sha256": digest, "question": ""})
+	putEvent(t, r.a, "j", eventRecordSettled, map[string]any{"report_sha256": digest, "pinned": false})
+	r.store.records["j"]["state"] = "completed"
+	revoked := false
+	r.hk.Handle(func(req hkRequest) (int, string, bool) {
+		if !revoked && strings.HasPrefix(req.Route(), "PUT /v1/documents/") {
+			revoked = true
+			writeHubRevocationRecord(t, r.a, "j")
+		}
+		return 0, "", false
+	})
+	r.store.mu.Lock()
+	r.store.calls = nil
+	r.store.mu.Unlock()
+	err := r.done()
+	if !revoked || code(err) != exitStateConflict || !strings.Contains(err.Error(), "reassigned") {
+		t.Fatalf("revoked=%v err=%v, want the reassignment refusal", revoked, err)
+	}
+	if rec := r.store.record(t, "j"); rec["report_doc"] != nil || putsOf(r.store) != 0 {
+		t.Fatalf("record=%v puts=%d, want no pin written", rec, putsOf(r.store))
+	}
+}
+
+// The spawn repair PUT is a write to the record too: a revocation that lands
+// during the read-back that finds the record still claimed stops it.
+func TestStrictCompletedPutRechecksBeforeSpawnRepair_t5062(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	base := a.JobStore.(*fakeJobStore)
+	store := &revokeOnGetStore{fakeJobStore: base, revoke: func() { writeHubRevocationRecord(t, a, "j") }}
+	a.JobStore = store
+	if err := base.Claim(t.Context(), "j", "42", "test-host"); err != nil {
+		t.Fatal(err)
+	}
+	seedJob(t, a, "j", "implementer")
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.putErr = &BackendError{Status: 503}
+	_, err = a.strictCompletedPutUntil(t.Context(), "j", map[string]any{"state": "completed"}, nil, spawnReceiptForRepair(j.Events), time.Now().Add(time.Minute))
+	puts := putsOf(base)
+	if !isDoneResultFailure(err, "job_reassigned") || puts != 1 {
+		t.Fatalf("err=%v puts=%d, want the one PUT before the revocation and then the refusal, no repair PUT", err, puts)
+	}
+}
+
+// done reports the refusal and announces nothing when the revocation lands
+// during the terminal PUT's retries: a failed completed write alone is a
+// warning, so the refusal must not be taken for one.
+func TestDoneRevokedBetweenTerminalPutRetriesAnnouncesNothing_t5062(t *testing.T) {
+	r := newDoneRig(t)
+	r.write("report\n")
+	store := &putRevokeStore{fakeJobStore: r.store, revoke: func() { writeHubRevocationRecord(t, r.a, "j") }}
+	r.a.JobStore = store
+	err := r.done()
+	if !isDoneResultFailure(err, "job_reassigned") {
+		t.Fatalf("err = %v, want the reassignment refusal", err)
+	}
+	if got := len(r.events("job.completed")); got != 0 || r.store.record(t, "j")["state"] != "spawned" {
+		t.Fatalf("job.completed events=%d state=%v, want nothing announced and the record untouched", got, r.store.record(t, "j")["state"])
+	}
+}
