@@ -2,6 +2,9 @@
 # node daemon's --herdr-socket points at, e.g. `worker`). Copy it to
 # ~/.config/systemd/user/herdr-<session>.service, replace SESSION, then
 # `systemctl --user daemon-reload && systemctl --user enable --now herdr-<session>`.
+# A user unit runs only while the user's systemd manager does: run
+# `loginctl enable-linger <user>` once so it starts at boot and survives logout
+# (the node daemon's unit needs the same when it is a user unit).
 #
 # OOMPolicy=continue: every pane runs in this unit's cgroup. With systemd's
 # default (stop), one pane process that the kernel OOM-kills stops the unit and
