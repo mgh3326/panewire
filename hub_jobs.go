@@ -571,16 +571,18 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, error) {
 	h.mu.Unlock()
 	// Intent creation and reassignment share the per-job lock. The database
 	// check must not hold mu while it waits for a connection or query.
-	// Fail closed on a store error: a restart must not erase the fence.
+	// Fail closed on a configured store error: a restart must not erase the
+	// fence. An inbox-less hub cannot create actions and warns once instead.
 	if h.inbox == nil {
-		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
-	}
-	id, err := h.inbox.store.pendingPoolAction(ctx, jobID)
-	if err != nil {
-		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
-	}
-	if id != "" {
-		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action %s is pending", jobID, id)
+		h.poolStoreWarningOnce.Do(func() { h.logger.Warn("close action finality unchecked without inbox store") })
+	} else {
+		id, err := h.inbox.store.pendingPoolAction(ctx, jobID)
+		if err != nil {
+			return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
+		}
+		if id != "" {
+			return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action %s is pending or awaiting terminal job state or pane release", jobID, id)
+		}
 	}
 	h.mu.Lock()
 	job = h.jobs[jobID]

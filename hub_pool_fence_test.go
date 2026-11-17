@@ -31,8 +31,20 @@ func TestPoolActionDisabledStoreCannotProveNoPriorAction(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = hub.Close() })
 	hub.jobs[action.Job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: action.Job, Epoch: 1}, Node: action.Node, Orphaned: true}
-	if _, err := hub.reassignJob(action.Job, "machine-b"); err == nil || !strings.Contains(err.Error(), "store unavailable") {
-		t.Fatalf("reassignment without the prior store was not fenced: %v", err)
+	// Removing a store with unresolved actions drops their fence along with
+	// the rest of that inbox's state; operators must drain it first.
+	if _, err := hub.reassignJob(action.Job, "machine-b"); err != nil {
+		t.Fatalf("reassignment without an inbox store: %v", err)
+	}
+}
+
+func TestPoolActionReassignFailsOnConfiguredStoreError(t *testing.T) {
+	f, action := poolActionFixture(t)
+	if err := f.hub.inbox.store.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.reassignJob(action.Job, "machine-b"); err == nil || !strings.Contains(err.Error(), "store unavailable") {
+		t.Fatalf("configured store error did not keep the guard: %v", err)
 	}
 }
 

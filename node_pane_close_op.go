@@ -75,9 +75,12 @@ const (
 	// to this pane and label, or the attempt has ended; no operation was
 	// opened and nothing closed.
 	nodeCloseOpMismatch = "mismatch"
-	// nodeCloseOpSuperseded is a durable proof that an unknown operation's
-	// attempt is no longer current; its journal retains the unknown outcome.
+	// nodeCloseOpSuperseded proves an operation's attempt is no longer current;
+	// its journal retains the original outcome.
 	nodeCloseOpSuperseded = "superseded"
+	// nodeCloseIntentCancelled proves the request's close intent ended; it
+	// does not prove the pane or its watcher can no longer write to hk.
+	nodeCloseIntentCancelled = "intent_cancelled"
 )
 
 type nodePaneCloseOpArgs struct {
@@ -162,7 +165,7 @@ func validNodeCloseOpStatusResult(result nodeCloseOpStatusResult) bool {
 		return !result.Released
 	case fleet.CloseOpCancelled:
 		return result.Released
-	case nodeCloseOpSuperseded:
+	case nodeCloseOpSuperseded, nodeCloseIntentCancelled:
 		return result.Attempt != ""
 	case fleet.CloseOpClosed, fleet.CloseOpRefused, fleet.CloseOpGone, fleet.CloseOpUnknown, fleet.CloseOpPreempted:
 		return true
@@ -997,7 +1000,7 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 			return nil, "journal_failed"
 		}
 	}
-	if op.State == fleet.CloseOpUnknown {
+	if op.State == fleet.CloseOpUnknown || op.State == fleet.CloseOpGone || op.State == fleet.CloseOpClosed {
 		ctx, cancel := context.WithTimeout(context.Background(), hubCloseLockBudget)
 		unlock, err := client.hubCloseLedger().LockEnd(ctx, jobDir)
 		cancel()
@@ -1008,6 +1011,37 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 		target, err := readNodeCloseTarget(job)
 		if err != nil {
 			return nil, "journal_failed"
+		}
+		events, err := readNodeJobLedgerEvents(job)
+		if err != nil {
+			return nil, "journal_failed"
+		}
+		matching, cancelled, laterSettled := false, false, false
+		var attempt string
+		for _, event := range events {
+			switch {
+			case nodeJobClaimKind(event.kind), event.kind == "job.spawned", event.kind == "job.reprompted":
+				attempt = event.name
+			case event.kind == "job.hub_close_intent" && event.request == args.RequestID:
+				matching = event.attempt == op.Attempt && event.pane == op.PaneID
+				cancelled, laterSettled = false, false
+			case event.kind == "job.hub_close_cancelled" && event.request == args.RequestID && matching:
+				cancelled = true
+			case event.kind == "job.lost" && event.reason == "hub_close" && event.final && cancelled && attempt == op.Attempt:
+				laterSettled = true
+			}
+		}
+		if laterSettled {
+			if err := client.hubCloseLedger().SyncEvents(job); err != nil {
+				return nil, "journal_failed"
+			}
+			return nodeCloseOpStatusResult{State: op.State, Released: op.Released != nil, Settled: true, Attempt: target.attempt}, ""
+		}
+		if cancelled {
+			if err := client.hubCloseLedger().SyncEvents(job); err != nil {
+				return nil, "journal_failed"
+			}
+			return nodeCloseOpStatusResult{State: nodeCloseIntentCancelled, Released: op.Released != nil, Attempt: target.attempt}, ""
 		}
 		if target.attempt != "" && target.attempt != op.Attempt {
 			if err := client.hubCloseLedger().SyncEvents(job); err != nil {

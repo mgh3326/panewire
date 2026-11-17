@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket/wsjson"
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -13,6 +14,11 @@ import (
 // the reconciler actually sends, so the test can distinguish no retry from a
 // retry without waiting for a missing command.
 func runUnknownRetry(t *testing.T, f *quotaReplaceFixture, action poolAction, attempt string) {
+	t.Helper()
+	runUnknownRetryWithStatus(t, f, action, attempt, "idle")
+}
+
+func runUnknownRetryWithStatus(t *testing.T, f *quotaReplaceFixture, action poolAction, attempt, paneStatus string) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -36,7 +42,7 @@ func runUnknownRetry(t *testing.T, f *quotaReplaceFixture, action poolAction, at
 			case nodeCommandPaneCloseStatus:
 				result = map[string]any{"state": fleet.CloseOpUnknown, "released": false, "settled": false, "attempt": attempt}
 			case nodeCommandAgentsList:
-				result = map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project"}}, "panes_ok": true}
+				result = map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: paneStatus, Cwd: "/work/project"}}, "panes_ok": true}
 			default:
 				return
 			}
@@ -53,6 +59,8 @@ func runUnknownRetry(t *testing.T, f *quotaReplaceFixture, action poolAction, at
 
 func TestPoolActionUnknownRetriesAgainAfterRefusedSuccessor(t *testing.T) {
 	f, action := poolActionFixture(t)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.hub.now = func() time.Time { return start }
 	runUnknownRetry(t, f, action, action.Data.Args.Attempt)
 	actions, err := f.hub.inbox.store.activePoolActions(t.Context())
 	if err != nil || len(actions) != 2 {
@@ -72,6 +80,7 @@ func TestPoolActionUnknownRetriesAgainAfterRefusedSuccessor(t *testing.T) {
 	}
 	restartPoolActionHub(t, f)
 	original := readOnlyPoolAction(t, f.hub)
+	f.hub.now = func() time.Time { return start.Add(11 * time.Second) }
 	runUnknownRetry(t, f, original, original.Data.Args.Attempt)
 	actions, err = f.hub.inbox.store.activePoolActions(t.Context())
 	if err != nil || len(actions) != 2 {
@@ -87,6 +96,49 @@ func TestPoolActionUnknownRetriesAgainAfterRefusedSuccessor(t *testing.T) {
 	}
 	if id, err := f.hub.inbox.store.pendingPoolAction(t.Context(), f.job); err != nil || id == "" {
 		t.Fatalf("original uncertainty lost its fence: %q %v", id, err)
+	}
+}
+
+func TestPoolActionUnknownRetryBackoffSurvivesRestart(t *testing.T) {
+	f, action := poolActionFixture(t)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.hub.now = func() time.Time { return start }
+	runUnknownRetry(t, f, action, action.Data.Args.Attempt)
+	actions, err := f.hub.inbox.store.activePoolActions(t.Context())
+	if err != nil || len(actions) != 2 {
+		t.Fatalf("first retry: %+v %v", actions, err)
+	}
+	var retry poolAction
+	for _, row := range actions {
+		if row.ID != action.ID {
+			retry = row
+		}
+	}
+	restartPoolActionHub(t, f)
+	if err := runPoolActionStep(t, f.hub, f.node, retry, poolStatus(fleet.CloseOpRefused, false, false)); err != nil {
+		t.Fatal(err)
+	}
+	restartPoolActionHub(t, f)
+	original := readOnlyPoolAction(t, f.hub)
+	f.hub.now = func() time.Time { return start.Add(5 * time.Second) }
+	runUnknownRetry(t, f, original, original.Data.Args.Attempt)
+	if actions, err = f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(actions) != 1 {
+		t.Fatalf("early retry left %d active actions: %v", len(actions), err)
+	}
+	restartPoolActionHub(t, f)
+	original = readOnlyPoolAction(t, f.hub)
+	f.hub.now = func() time.Time { return start.Add(11 * time.Second) }
+	runUnknownRetry(t, f, original, original.Data.Args.Attempt)
+	if actions, err = f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(actions) != 2 {
+		t.Fatalf("retry after backoff left %d active actions: %v", len(actions), err)
+	}
+}
+
+func TestPoolActionUnknownDoesNotRetryBusyPane(t *testing.T) {
+	f, action := poolActionFixture(t)
+	runUnknownRetryWithStatus(t, f, action, action.Data.Args.Attempt, "working")
+	if actions, err := f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(actions) != 1 {
+		t.Fatalf("busy pane left %d pending requests, want only the original: %v", len(actions), err)
 	}
 }
 
@@ -121,6 +173,17 @@ func TestPoolActionUnknownDoesNotRetryANewerAttempt(t *testing.T) {
 	runUnknownRetry(t, f, action, "00009-job.reprompted.json")
 	if actions, err := f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(actions) != 1 {
 		t.Fatalf("newer attempt left %d pending requests, want only the original: %v", len(actions), err)
+	}
+}
+
+func TestPoolActionUnknownDoesNotRetryAfterCapabilityWithdrawal(t *testing.T) {
+	f, action := poolActionFixture(t)
+	f.hub.mu.Lock()
+	delete(f.hub.nodes[action.Node].capabilities, hubCapabilityCloseOps)
+	f.hub.mu.Unlock()
+	runUnknownRetry(t, f, action, action.Data.Args.Attempt)
+	if actions, err := f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(actions) != 1 {
+		t.Fatalf("withdrawn node left %d pending requests, want only the original: %v", len(actions), err)
 	}
 }
 

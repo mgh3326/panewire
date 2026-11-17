@@ -5,25 +5,28 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // poolActionSchema is also installed by Postgres migration 0021.
 const poolActionSchema = `CREATE TABLE IF NOT EXISTS pool_actions (
  id TEXT PRIMARY KEY, job TEXT NOT NULL, node TEXT NOT NULL,
  epoch BIGINT NOT NULL CHECK(epoch>0),
- phase TEXT NOT NULL CHECK(phase IN ('pending','settled','done','refused')),
+ phase TEXT NOT NULL CHECK(phase IN ('pending','guarded','settled','done','refused')),
  data TEXT NOT NULL)`
 
 const (
 	poolActionPending = "pending"
+	poolActionGuarded = "guarded"
 	poolActionSettled = "settled"
 	poolActionDone    = "done"
 	poolActionRefused = "refused"
 )
 
 // poolAction is the durable ownership fence and replayable close request. Its
-// phase becomes final only after a node answer excludes another hk write.
-// The settled phase still owes the terminal-record check and owner notice.
+// A guarded action needs no more close commands but retains the ownership
+// fence until the old job cannot write. A settled action still owes the
+// terminal-record check and owner notice.
 type poolAction struct {
 	ID, Job, Node, Phase string
 	Epoch                uint64
@@ -36,11 +39,13 @@ type poolActionData struct {
 	TargetAttempt             string
 	Args                      *nodePaneCloseOpArgs
 	RetryID                   string
+	RetryAfter                int64
+	RetryCount                uint8
 }
 
 // retryPoolAction atomically keeps the uncertain request fenced and records
 // one successor request. A restart cannot create another successor for it.
-func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry poolAction) error {
+func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry poolAction, now time.Time) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
 	retryData, err := json.Marshal(retry.Data)
@@ -61,6 +66,9 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 		return err
 	}
 	if current.RetryID != "" {
+		if now.UnixMilli() < current.RetryAfter {
+			return nil
+		}
 		var phase string
 		if err := tx.QueryRowContext(ctx, s.q(`SELECT phase FROM pool_actions WHERE id=? AND job=?`), current.RetryID, action.Job).Scan(&phase); err != nil {
 			return err
@@ -70,11 +78,15 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 		}
 	}
 	current.RetryID = retry.ID
+	current.RetryAfter = now.Add(poolRetryBackoff(current.RetryCount)).UnixMilli()
+	if current.RetryCount < 7 {
+		current.RetryCount++
+	}
 	data, err := json.Marshal(current)
 	if err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE pool_actions SET data=? WHERE id=? AND phase=?`), string(data), action.ID, poolActionPending)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE pool_actions SET data=? WHERE id=? AND phase=? AND data=?`), string(data), action.ID, poolActionPending, currentData)
 	if err != nil {
 		return err
 	}
@@ -87,9 +99,20 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	return tx.Commit()
 }
 
-func (s *laneInboxStore) poolRetryReady(parent context.Context, action poolAction) (bool, error) {
+func poolRetryBackoff(count uint8) time.Duration {
+	delay := 10 * time.Second
+	for i := uint8(0); i < count && delay < 10*time.Minute; i++ {
+		delay *= 2
+	}
+	return min(delay, 10*time.Minute)
+}
+
+func (s *laneInboxStore) poolRetryReady(parent context.Context, action poolAction, now time.Time) (bool, error) {
 	if action.Data.RetryID == "" {
 		return true, nil
+	}
+	if now.UnixMilli() < action.Data.RetryAfter {
+		return false, nil
 	}
 	ctx, cancel := s.op(parent)
 	defer cancel()
@@ -124,11 +147,22 @@ func (s *laneInboxStore) pendingPoolAction(parent context.Context, job string) (
 	ctx, cancel := s.op(parent)
 	defer cancel()
 	var id string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM pool_actions WHERE job=? AND phase=? LIMIT 1`), job, poolActionPending).Scan(&id)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM pool_actions WHERE job=? AND phase IN (?,?) LIMIT 1`), job, poolActionPending, poolActionGuarded).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return id, err
+}
+
+func (s *laneInboxStore) guardedPoolAction(parent context.Context, job string) (bool, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	var id string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM pool_actions WHERE job=? AND phase=? LIMIT 1`), job, poolActionGuarded).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (s *laneInboxStore) hasPoolAction(parent context.Context, job string) (bool, error) {
@@ -161,7 +195,7 @@ func (s *laneInboxStore) poolNoticeOwned(parent context.Context, owner, eventID 
 func (s *laneInboxStore) activePoolActions(parent context.Context) ([]poolAction, error) {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,job,node,epoch,phase,data FROM pool_actions WHERE phase IN (?,?) ORDER BY id`), poolActionPending, poolActionSettled)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,job,node,epoch,phase,data FROM pool_actions WHERE phase IN (?,?,?) ORDER BY id`), poolActionPending, poolActionGuarded, poolActionSettled)
 	if err != nil {
 		return nil, err
 	}

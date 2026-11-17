@@ -458,6 +458,7 @@ type HubServer struct {
 	spawnSentry          *sentry.Client
 	spawnCoordinatorOnce sync.Once
 	poolActionOnce       sync.Once
+	poolStoreWarningOnce sync.Once
 	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
 	// consultPlan resolves a consult seat and its spawn submission. Nil uses
 	// the hub's own fleet App (fleet.App.PlanConsult); tests inject one.

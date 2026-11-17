@@ -44,6 +44,31 @@ func TestCloseStatusSupersededAfterReprompt(t *testing.T) {
 	}
 }
 
+func TestCloseStatusSupersededForGoneOrClosed(t *testing.T) {
+	for _, state := range []string{fleet.CloseOpGone, fleet.CloseOpClosed} {
+		t.Run(state, func(t *testing.T) {
+			client, inbox := unknownCloseNode(t, true)
+			root, err := os.OpenRoot(seedCloseOpJob(t, inbox))
+			if err != nil {
+				t.Fatal(err)
+			}
+			op, _, err := fleet.ReadCloseOp(root, "unknown-op")
+			if err != nil {
+				t.Fatal(err)
+			}
+			op.State = state
+			if err := fleet.WriteCloseOp(root, op); err != nil {
+				t.Fatal(err)
+			}
+			root.Close()
+			result, code := nodeRun(t, client, nodeCommandPaneCloseStatus, closeOpRef("unknown-op"))
+			if code != "" || result["state"] != "superseded" {
+				t.Fatalf("%s status=%v code=%q; want superseded", state, result, code)
+			}
+		})
+	}
+}
+
 func TestCloseStatusSameAttemptIsNotSuperseded(t *testing.T) {
 	client, _ := unknownCloseNode(t, false)
 	client.nodeHubClose = &failingCloseEventSync{fakeHubClose: &fakeHubClose{watcher: fleet.HubCloseWatcherAware}}

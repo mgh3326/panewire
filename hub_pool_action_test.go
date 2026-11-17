@@ -204,15 +204,21 @@ func TestPoolActionFenceSurvivesHubRestart(t *testing.T) {
 	assertPoolActionFence(t, f, action, true)
 }
 
-func TestPoolActionFenceFailsClosedWithoutStore(t *testing.T) {
+func TestPoolActionReassignWithoutStoreWarnsOnce(t *testing.T) {
 	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
-	h.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", Epoch: 1}, Node: "machine-a", Orphaned: true}
-	if _, err := h.reassignJob("job-a", "machine-b"); err == nil || !strings.Contains(err.Error(), "store unavailable") {
-		t.Fatalf("reassigned without durable guard: %v", err)
+	logs := captureHubLog(h)
+	for _, id := range []string{"job-a", "job-b"} {
+		h.jobs[id] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: id, Epoch: 1}, Node: "machine-a", Orphaned: true}
+		if _, err := h.reassignJob(id, "machine-b"); err != nil {
+			t.Fatalf("inbox-less reassignment: %v", err)
+		}
+	}
+	if n := strings.Count(logs.String(), "close action finality unchecked without inbox store"); n != 1 {
+		t.Fatalf("got %d unavailable-store warnings, want one: %s", n, logs.String())
 	}
 }
 
@@ -558,13 +564,15 @@ func TestPoolActionCompletionBeforeCloseReleasesUnsentIntent(t *testing.T) {
 
 func TestWriteJobLostReturnsActualTerminalRecord(t *testing.T) {
 	jobs := &quotaJobs{records: map[string]map[string]any{
-		"complete": {"state": "completed", "end_reason": "already done"},
-		"lost":     {"state": "lost", "end_reason": "prior loss"},
-		"live":     {"state": "spawned"},
+		"complete":  {"state": "completed", "end_reason": "already done"},
+		"escalated": {"state": "escalated", "end_reason": "independent escalation"},
+		"lost":      {"state": "lost", "end_reason": "prior loss"},
+		"live":      {"state": "spawned"},
 	}}
 	app := &fleet.App{JobStore: jobs, Now: time.Now}
 	for _, tc := range []struct{ job, state, reason string }{
-		{"complete", "completed", "already done"}, {"lost", "lost", "prior loss"}, {"live", "lost", "new loss"},
+		{"complete", "completed", "already done"}, {"escalated", "escalated", "independent escalation"},
+		{"lost", "lost", "prior loss"}, {"live", "lost", "new loss"},
 	} {
 		t.Run(tc.job, func(t *testing.T) {
 			state, reason := (&HubServer{}).writeJobLost(t.Context(), app, tc.job, "new loss")

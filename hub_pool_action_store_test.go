@@ -2,7 +2,22 @@ package panewire
 
 import (
 	"testing"
+	"time"
 )
+
+func TestPoolActionRetryBackoffIsBounded(t *testing.T) {
+	previous := time.Duration(0)
+	for n := uint8(0); n < 20; n++ {
+		delay := poolRetryBackoff(n)
+		if delay < previous || delay > 10*time.Minute {
+			t.Fatalf("retry %d delay %v after %v", n, delay, previous)
+		}
+		previous = delay
+	}
+	if poolRetryBackoff(0) != 10*time.Second || previous != 10*time.Minute {
+		t.Fatalf("retry bounds: first=%v last=%v", poolRetryBackoff(0), previous)
+	}
+}
 
 // The name puts this contract in CI's Postgres migration and store job.
 func TestLaneInboxStorePoolActionsSurviveRestart(t *testing.T) {
@@ -34,6 +49,20 @@ func TestLaneInboxStorePoolActionsSurviveRestart(t *testing.T) {
 			rows, err := store.activePoolActions(t.Context())
 			if err != nil || len(rows) != 1 || rows[0].Epoch != 3 || rows[0].Data.EndReason != action.Data.EndReason {
 				t.Fatalf("actions = %+v, %v", rows, err)
+			}
+			action.Phase = poolActionGuarded
+			if err := store.savePoolAction(t.Context(), action); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.close(); err != nil {
+				t.Fatal(err)
+			}
+			store = open()
+			if id, err := store.pendingPoolAction(t.Context(), action.Job); err != nil || id != action.ID {
+				t.Fatalf("guard did not survive restart: %q, %v", id, err)
+			}
+			if rows, err := store.activePoolActions(t.Context()); err != nil || len(rows) != 1 || rows[0].Phase != poolActionGuarded {
+				t.Fatalf("guard not reconciled: %+v, %v", rows, err)
 			}
 			action.Phase = poolActionSettled
 			if err := store.savePoolAction(t.Context(), action); err != nil {

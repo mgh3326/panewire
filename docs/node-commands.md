@@ -248,17 +248,21 @@ was registered for, then resumes the guarded close or settles `preempted`. A
 a new id. Reusing an id for another pane is `invalid_args`.
 
 `pane.close_status` (`request_id`, `job`) answers
-`{"state":"none"|"superseded"|<state>,"released":<bool>,"settled":<bool>,"attempt":"<token>"}`, where
+`{"state":"none"|"superseded"|"intent_cancelled"|<state>,"released":<bool>,"settled":<bool>,"attempt":"<token>"}`, where
 `attempt` is the job's current attempt token (empty when its ledger cannot be
 read). `settled` proves a synced final `job.lost` closed this request's
 intent; it also covers an older unknown intent closed by a later request on
 the same attempt. A visible hk `lost` record alone does not prove settlement.
-For an unknown operation, `superseded` proves that a different attempt is
-current. The node checks it under the job end lock and syncs the events
-directory before answering. The unknown journal stays intact: this proof says
-no later hk write belongs to the old intent, not whether its pane was closed.
+For an unknown, gone, or closed operation, `superseded` proves that a different
+attempt is current. The node checks it under the job end lock and syncs the
+events directory before answering. The operation journal stays intact: this
+proof says no later hk write belongs to the old intent, not whether its pane
+was closed.
 It relies on the #662 `endMark` rule: a stale attempt's watcher decision is
 dropped when rechecked under that lock (see the stale-decision rule below).
+`intent_cancelled` proves under the same lock and sync that this request's
+intent was cancelled. The operation journal remains unchanged. A cancelled
+intent alone does not prove that its pane or watcher has stopped writing hk.
 `pane.close_release` takes the
 same arguments, marks a final operation released (a `registered` one becomes
 `cancelled`) and answers the same shape; an operation left `closing` stays
@@ -523,16 +527,23 @@ it returns. The hub issuer in [hub_pool_action.go](../hub_pool_action.go)
 persists each action before issuing it to `job.Node` at `job.Epoch`, and only
 while that node advertises `close_ops_v1`. It reads the attempt from status,
 sends the planned `end_reason`, and retries an unknown close under a new id
-for the same attempt while retaining the original fence. At node startup,
+for the same attempt while retaining the original fence. A retry requires an
+advertised node and a closable pane; retries after refusal back off from ten
+seconds to at most ten minutes. At node startup,
 before advertising close support, the node recovers unfinished pre-epoch
 journals under the close-admission lock: an unstarted operation is cancelled,
 and a possibly executed close becomes unknown for normal settlement. A
 timeout, unknown, or hk record read is not a final answer. Refused, preempted,
 cancelled and released, settled, or superseded answers are final. Superseded
 ends the old action without a notice and permits a later sweep of the new
-attempt. A mismatch or `not-a-job` stays pending until release
+attempt. `intent_cancelled` stops the close action without a notice or role
+release but keeps its reassignment fence until hk is terminal or the node
+reports synced settlement. A mismatch or `not-a-job` stays pending until release
 provides a durable tombstone. `reassignJob` refuses while any action for the
-job remains non-final; it also fails closed if its store is unavailable. A
+job remains pending or guarded; a configured store error fails closed. An
+inbox-less hub allows reassignment and logs that it cannot check close-action
+finality. Do not remove an inbox store with unresolved actions: disabling it
+discards visibility of their fences along with the other inbox state. A
 settled action permits reassignment even before its notice is delivered. If the
 hub's current ownership record has changed, that action releases no role and
 sends no old notice. The store and reconciler resume after a hub restart
