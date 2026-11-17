@@ -336,7 +336,7 @@ func openHubCloseIntents(j Job) (intents []HubCloseIntent, ended, reassigned boo
 			intents = slices.DeleteFunc(intents, func(o HubCloseIntent) bool { return o.RequestID == id })
 		case "job.revoked":
 			ended = ended || len(intents) > 0
-			if ev.Kind == ev.Type && ev.Epoch > 0 {
+			if hubRevocation(ev) {
 				reassigned = reassigned || len(intents) > 0
 			}
 		case "job.completed", "job.reaped", "job.completion", "job.record_settled", "job.joined", "job.handed_off", "job.escalate":

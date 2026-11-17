@@ -32,6 +32,13 @@ type Job struct {
 	ID                                                                                                string
 	Owner, Parent, Role, Label, Pane, Tab, Task, Family, Profile, Effort, Report, HubLane, Machine, T string
 	Keep, Terminal, Reaped                                                                            bool
+	// Reassigned is whether a hub revocation record (hubRevocation) stands in
+	// the job's current attempt, in ledger sequence order (reassignedInLedger):
+	// the hub gave the job to another node, so the shared hk record is that
+	// node's. It outlives a later local end or reprompt of this node's pane and
+	// is cleared only by a new claim or spawn. A writer of that record asks
+	// hubReassigned, which reads the ledger again, not this snapshot.
+	Reassigned bool
 	// SpawnRole is the role the job.spawned receipt names (reviewer, consult, ...).
 	// The claim records only implementer or builder, so the role a quota stop is
 	// handled by comes from here (QuotaRole).
@@ -52,6 +59,60 @@ type Job struct {
 // Ended and At then describe the job's current run only: At is the time of the
 // newest terminal event that still stands, never one a revived job left behind.
 func (j *Job) revive() { j.Terminal, j.Ended, j.Outcome, j.At = false, "", "", time.Time{} }
+
+// hubRevocation reports whether ev is a hub revocation record: the type-only
+// job.revoked that writeHubRevocation stores with the hub's ownership epoch,
+// which no local end carries. The hub gave the job to another node, so this
+// node must not write the shared hk record (#662 review, hk 5062).
+func hubRevocation(ev Event) bool {
+	return ev.Kind == "job.revoked" && ev.Kind == ev.Type && ev.Epoch > 0
+}
+
+// reassignedInLedger reports whether a hub revocation stands in the current
+// attempt: the newest one in ledger sequence order follows the last claim or
+// spawn. Sequence, not timestamp, orders it: a node clock stepped backwards
+// gives the revocation record an mtime before the spawn it followed, and the
+// timestamp fold would then clear the reassignment.
+func reassignedInLedger(evs []Event) bool {
+	reassigned := false
+	for _, ev := range ledgerOrder(evs) {
+		switch {
+		case hubRevocation(ev):
+			reassigned = true
+		case ev.Kind == "job.claim" || ev.Kind == "job.claimed" || ev.Kind == "job.reclaim" || ev.Kind == "job.spawned":
+			reassigned = false
+		}
+	}
+	return reassigned
+}
+
+// hubReassigned reports whether the hub reassigned the job, by the ledger as
+// it is now (the caller's snapshot is not consulted: it may predate the
+// revocation, or be ordered by timestamps). A hub revocation is written without
+// the job end lock (the dispatcher must not stall behind it), so a snapshot
+// taken before a slow read can predate it: a writer of the shared hk record
+// calls this immediately before the write. A ledger that cannot be read fails
+// closed. The recheck narrows the window; the hub's own refusal to reassign a
+// job with a non-final close action is the other fence (hk 4745).
+func (a *App) hubReassigned(j Job) bool {
+	current, err := a.job(j.ID)
+	if err != nil {
+		a.warn("job %s: ledger unreadable before a shared hk write; the write is skipped: %v", j.ID, err)
+		return true
+	}
+	return current.Reassigned
+}
+
+// refuseReassigned is the refusal of a worker command (done, escalate) that
+// would write the shared hk record of a job the hub gave to another node: its
+// pane here is no longer the job's owner. The same job could not be read at
+// all before #662, so the command failed the same way.
+func (a *App) refuseReassigned(j Job) error {
+	if a.hubReassigned(j) {
+		return fail(exitStateConflict, "job %s was reassigned by the hub; its record belongs to the new owner", j.ID)
+	}
+	return nil
+}
 
 func (a *App) events(id string) ([]Event, error) {
 	if !validID(id) {
@@ -187,6 +248,7 @@ func foldJob(id string, evs []Event) (Job, error) {
 			j.Keep = true
 		}
 	}
+	j.Reassigned = reassignedInLedger(evs)
 	if j.Receipt == nil && j.Task == "" {
 		return j, fail(exitStateConflict, "no claim or receipt for job %s", id)
 	}

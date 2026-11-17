@@ -471,7 +471,7 @@ func RecordFreeLimit(cfg devin.Config, job string, stop quotastop.Stop) error {
 func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
-	if emit || !a.hkJobEnded(ctx, j.ID) {
+	if (emit || !a.hkJobEnded(ctx, j.ID)) && !a.hubReassigned(j) {
 		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", ""), "at": a.Now().UTC()}); e != nil {
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}

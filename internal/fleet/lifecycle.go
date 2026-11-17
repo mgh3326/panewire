@@ -116,6 +116,11 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if watchResult && (j.Terminal || j.Reaped) {
 		return nil
 	}
+	if kind == "done" || kind == "escalate" {
+		if e := a.refuseReassigned(j); e != nil {
+			return e
+		}
+	}
 	recovered := false
 	if readErr != nil {
 		// The file is gone. The newest completion announcing this path names
