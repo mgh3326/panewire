@@ -260,7 +260,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 			task = strconv.FormatFloat(id, 'f', -1, 64)
 		}
 		var revokedEpoch uint64
-		if event.Type == "job.revoked" && len(event.Epoch) != 0 {
+		if event.Kind == "job.revoked" && event.Type == event.Kind && len(event.Epoch) != 0 {
 			if err := json.Unmarshal(event.Epoch, &revokedEpoch); err != nil {
 				return nil, errors.New("unreadable job event")
 			}

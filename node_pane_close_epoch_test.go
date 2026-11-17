@@ -32,6 +32,15 @@ func TestCloseOpRevokedEpochSurvivesNodeRestart(t *testing.T) {
 	}
 }
 
+func TestCloseOpIgnoresAnotherEventKindWithRevocationType(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	addCloseOpEvent(t, inbox, "00003-job.note.json", `{"kind":"job.note","type":"job.revoked","epoch":2}`)
+	if result, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("current-op")); code != "" || result["outcome"] != fleet.CloseOpClosed {
+		t.Fatalf("non-revocation event blocked close: result=%v code=%q", result, code)
+	}
+}
+
 func TestCloseOpReplayKeepsItsRegisteredEpoch(t *testing.T) {
 	inbox := t.TempDir()
 	client := closeOpNode(t, inbox, idlePaneHerdr())
