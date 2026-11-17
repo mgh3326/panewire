@@ -10,6 +10,19 @@ import (
 
 // The watcher revives the attempt while the sweep waits for its end lock.
 func TestEndedSweepKeepsRepromptedJobAfterEndLockWait_t4632(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endAgain bool
+	}{
+		{"still live", false},
+		{"ended again on the same pane", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testSweepRevivedDuringEndLockWait(t, tc.endAgain) })
+	}
+}
+
+func testSweepRevivedDuringEndLockWait(t *testing.T, endAgain bool) {
+	t.Helper()
 	f := newPaneSweepFixture(t)
 	pane := f.job("r", "reviewer", "")
 	putEvent(t, f.a, "r", "job.completed", map[string]any{})
@@ -55,6 +68,11 @@ func TestEndedSweepKeepsRepromptedJobAfterEndLockWait_t4632(t *testing.T) {
 	}
 	if err := f.a.event(context.Background(), "r", "job.reprompted", map[string]any{"pane_id": pane}); err != nil {
 		t.Fatal(err)
+	}
+	if endAgain {
+		if err := f.a.event(context.Background(), "r", "job.completed", map[string]any{}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	unlock()
 	locked = false
