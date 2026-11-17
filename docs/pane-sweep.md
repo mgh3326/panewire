@@ -303,6 +303,37 @@ Only a worktree of the clone under the node's own work root is the node's; a
 requester's design worktree, a worktree another job still uses, a dirty one
 on a merged end, and every remote branch stay.
 
+A `<job>-checkout` the node prepared from a checkout spec — a consult, a
+canonical checkout or a spec spawn — belongs to that job alone: the job's
+receipt names the directory and it carries the job-derived name
+(`checkoutWorktreeName`), so ownership is proven from the record, never from
+the directory name alone. It ends with the job whatever the task did —
+answered, failed, lost, abandoned or escalated — because it holds no task's
+work: the tail discards it through the same patch-first path, and a detached
+checkout's HEAD is kept under `refs/panewire/abandoned/<job>` instead of a
+branch delete. A `-c` worktree keeps its requester's own directory name and
+stays under the rules above.
+
+## Checkout sweep
+
+`panewire node sweep-checkouts [--host <machine>] [--dry-run]` is the
+operator's pass over the checkouts that already lie on a node (hk 5091). It
+lists every `*-checkout` directory under the node's work root that is a
+linked worktree of one of its clones, attributes each to a job — a readable
+job record's receipt cwd first, then the spawn journal for a record that is
+gone — and judges it live or not: a job that has not ended, a terminal job
+whose pane herdr still lists, or a pane working inside an orphaned checkout
+keeps it (`job_live`, `pane_open`). Everything else goes through the same
+guarded path as the tail — the node work root, no other job using it, not a
+symlink, no ignored state — and a job-owned checkout is discarded with its
+patch saved; a directory that is not the owning job's own `<job>-checkout`
+is kept `task_open_kept`. `--dry-run` reports each row as `would_remove`
+without changing anything. The answer is one JSON document of
+`{path, job, outcome, reason}` rows: `removed`, `kept` or `would_remove`, in
+path order. A checkout whose job cannot be attributed, whose job record or
+herdr list cannot be read, or whose patch cannot be saved is kept with the
+reason, so the pass never removes blind.
+
 ## Configuration
 
 Daemon flags (see [config.md](config.md#task-pane-sweep)):

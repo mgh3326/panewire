@@ -19,6 +19,8 @@ func runNodeCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return runNodeJobDoneCLI(args[1:], stdout, stderr, deps)
 	case "close-ops":
 		return runNodeCloseOpsCLI(args[1:], stdout, stderr, nil)
+	case "sweep-checkouts":
+		return runNodeCheckoutSweepCLI(args[1:], stdout, stderr, deps)
 	}
 	return ExitUsage
 }

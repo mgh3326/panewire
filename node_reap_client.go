@@ -47,10 +47,14 @@ func NewNodeReapClient(hubURL, clientID, token, cfAccessClientID, cfAccessClient
 }
 
 func newNodeReapClient(hubURL string, env hubTokenEnv, cf hubCFAccessEnv, deps hubCLIDeps) (*NodeReapClient, error) {
+	return newNodeReapClientTimeout(hubURL, env, cf, deps, nodeReapClientTimeout)
+}
+
+func newNodeReapClientTimeout(hubURL string, env hubTokenEnv, cf hubCFAccessEnv, deps hubCLIDeps, timeout time.Duration) (*NodeReapClient, error) {
 	if !machineIDPattern.MatchString(env.MachineID) || env.MachineID == hubOperatorMachineID || !validHubToken(env.Token) {
 		return nil, errors.New("reap credential must be a service client id and token")
 	}
-	hub, err := newHubOperatorClient(hubURL, env.Token, cf, deps, nodeReapClientTimeout)
+	hub, err := newHubOperatorClient(hubURL, env.Token, cf, deps, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +162,16 @@ func mustNodeReapJSON(value any) json.RawMessage {
 type nodeReapConnect struct {
 	hubURL, tokenPath, cfPath, machine *string
 	allowOperator                      bool
+	// timeout overrides nodeReapClientTimeout for ops whose hub wait is
+	// longer; zero keeps the default.
+	timeout time.Duration
+}
+
+func (connect nodeReapConnect) wait() time.Duration {
+	if connect.timeout > 0 {
+		return connect.timeout
+	}
+	return nodeReapClientTimeout
 }
 
 func nodeReapFlags(flags *flag.FlagSet) nodeReapConnect {
@@ -187,13 +201,13 @@ func (connect nodeReapConnect) open(stderr io.Writer, deps hubCLIDeps, label str
 	}
 	if env.MachineID == hubOperatorMachineID {
 		var hub *hubOperatorClient
-		hub, err = newHubOperatorClient(*connect.hubURL, env.Token, cf, deps, nodeReapClientTimeout)
+		hub, err = newHubOperatorClient(*connect.hubURL, env.Token, cf, deps, connect.wait())
 		if err == nil {
 			hub.machineID = env.MachineID
 			client = &NodeReapClient{hub: hub}
 		}
 	} else {
-		client, err = newNodeReapClient(*connect.hubURL, env, cf, deps)
+		client, err = newNodeReapClientTimeout(*connect.hubURL, env, cf, deps, connect.wait())
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, label+" rejected: invalid hub URL")
@@ -210,7 +224,7 @@ func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, ca
 	if client == nil {
 		return code
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), nodeReapClientTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), connect.wait())
 	defer cancel()
 	result, err := call(ctx, client, *connect.machine)
 	var hubErr *NodeReapError

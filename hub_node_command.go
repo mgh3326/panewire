@@ -284,7 +284,14 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "node_unavailable", "state": state})
 		return
 	}
-	timer := time.NewTimer(hubNodeWait(h.nodeCommandWait, hubNodeCommandWait))
+	// checkout.sweep's pass can outlast the default wait; its own budget is
+	// longer than the node's run budget, so the node's answer arrives first
+	// (node_checkout_sweep.go).
+	wait := hubNodeCommandWait
+	if body.Op == nodeCommandCheckoutSweep {
+		wait = hubCheckoutSweepWait
+	}
+	timer := time.NewTimer(hubNodeWait(h.nodeCommandWait, wait))
 	defer timer.Stop()
 	result := h.awaitNodeCommand(request, requestID, pending, timer.C)
 	logReap(nodeCommandOutcome(result))

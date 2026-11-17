@@ -79,7 +79,8 @@ func knownNodeCommandOp(op string) bool {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
-		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease:
+		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
+		nodeCommandCheckoutSweep:
 		return true
 	}
 	return false
@@ -245,6 +246,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandQuotaRefresh:     {"pool"},
 	nodeCommandPRStatus:         {"repo", "pr", "fresh"},
 	nodeCommandCheckoutPull:     {"checkout", "rev"},
+	nodeCommandCheckoutSweep:    {"dry_run"},
 	nodeCommandPaneCloseOp:      {"request_id", "job", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed", "end_reason"},
 	nodeCommandPaneCloseStatus:  {"request_id", "job"},
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
@@ -418,6 +420,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		valid := decodeNodeCommandStrict(raw, &args) && nodeCheckoutNamePattern.MatchString(args.Checkout) &&
 			(args.Rev == "" || nodeCheckoutRevPattern.MatchString(args.Rev))
 		return args, valid
+	case nodeCommandCheckoutSweep:
+		var args nodeCheckoutSweepArgs
+		return args, decodeNodeCommandStrict(raw, &args)
 	}
 	return nil, false
 }
@@ -538,6 +543,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandCheckoutPull:
 		var result nodeCheckoutPullResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeCheckoutPullResult(result)
+		target = result
+	case nodeCommandCheckoutSweep:
+		var result nodeCheckoutSweepResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeCheckoutSweepResult(result)
 		target = result
 	}
 	if !valid {
@@ -749,10 +758,14 @@ type nodeCommandReply struct {
 }
 
 // nodeCommandRunBudget is the run deadline for op: a checkout pull fetches and
-// may run an install, so it gets nodeCheckoutPullRunTimeout.
+// may run an install, and a checkout sweep removes every stale *-checkout
+// worktree, so both get longer budgets than the default.
 func nodeCommandRunBudget(op string) time.Duration {
 	if op == nodeCommandCheckoutPull {
 		return nodeCheckoutPullRunTimeout
+	}
+	if op == nodeCommandCheckoutSweep {
+		return nodeCheckoutSweepRunTimeout
 	}
 	return nodeCommandRunTimeout
 }
@@ -890,6 +903,13 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		// Serialized by the per-clone git-op lock, not nodeCommandMu, so a
 		// slow install never queues a pane close behind it.
 		return client.nodeCheckoutPull(ctx, args)
+	case nodeCheckoutSweepArgs:
+		// One acting command at a time per node: the removals are git
+		// mutations that must not interleave with a pane close or another
+		// sweep.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeCheckoutSweep(ctx, args)
 	}
 	return client.nodeAgentsList(ctx)
 }
