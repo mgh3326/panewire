@@ -27,6 +27,13 @@ import (
 //     absent on purpose.
 const hubCapabilityCheckoutSparse = "checkout_sparse_v1"
 
+// hubFeatureCheckoutSparse is the same name in the hub.features frame: the
+// feature a hub lists once per connection so a node knows the hub's spawn
+// result accepts checkout_mode. An older hub's result parser rejects the
+// unknown key and drops the whole answer, so the node sends the field only to
+// a hub that named it (hk 5098 review).
+const hubFeatureCheckoutSparse = hubCapabilityCheckoutSparse
+
 // checkoutSparseGitVersion is the git release the node's sparse checkout
 // needs. 2.37 made cone mode the default for `sparse-checkout set`; the node
 // always passes --no-cone, so the floor is the release that ships the flag.

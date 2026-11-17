@@ -17,6 +17,34 @@ import (
 // git in a temp dir; these tests drive that path through worktree.prepare, so
 // what they assert is what lands on disk.
 
+// isolateGitRepositoryEnv removes the variables that make git read a caller's
+// repository or index instead of the -C target, so the fixture and the sweep
+// commands it drives can never touch the caller's checkout (hk 5098 review).
+func isolateGitRepositoryEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE"} {
+		value, set := os.LookupEnv(name)
+		if !set {
+			continue
+		}
+		t.Cleanup(func() { _ = os.Setenv(name, value) })
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// requireSparseGit skips a test that needs the node's sparse commands on a git
+// older than the floor checkout_sparse_v1 needs: the node then prepares the
+// full checkout, which is correct but not what the test asserts.
+func requireSparseGit(t *testing.T) {
+	t.Helper()
+	ok, err := nodeGitVersionAtLeast(t.Context(), defaultNodeCommandRunner(), checkoutSparseGitMajor, checkoutSparseGitMinor)
+	if err != nil || !ok {
+		t.Skipf("git is older than %d.%d, the floor for the sparse checkout commands", checkoutSparseGitMajor, checkoutSparseGitMinor)
+	}
+}
+
 // seedSparseTree adds one commit with the trees the sparse tests cut and
 // pushes it as pull/2/head. It returns the commit id.
 func seedSparseTree(t *testing.T, fixture *nodeWorktreeFixture) string {
@@ -32,6 +60,8 @@ func seedSparseTree(t *testing.T, fixture *nodeWorktreeFixture) string {
 		"Assets/a1.txt":             "sibling without brackets\n",
 		"Assets/b*.txt":             "literal star file\n",
 		"Assets/b1.txt":             "sibling without a star\n",
+		"Assets/notes.txt":          "no trailing space in the name\n",
+		"Assets/notes.txt ":         "the name ends in a space\n",
 		"docs/generated/big.md":     "generated\n",
 		"docs/generated/deep/x.txt": "nested inside the excluded tree\n",
 	} {
@@ -61,6 +91,8 @@ func sparsePrepareArgs(fixture *nodeWorktreeFixture, sha string, exclude, includ
 }
 
 func TestSparseCheckoutLeavesExcludedTreesOffDisk(t *testing.T) {
+	isolateGitRepositoryEnv(t)
+	requireSparseGit(t)
 	fixture := newNodeWorktreeFixture(t)
 	sha := seedSparseTree(t, fixture)
 	client := fixture.client()
@@ -100,6 +132,8 @@ func TestSparseCheckoutLeavesExcludedTreesOffDisk(t *testing.T) {
 }
 
 func TestSparseCheckoutIncludesGlobCharactersLiterally(t *testing.T) {
+	isolateGitRepositoryEnv(t)
+	requireSparseGit(t)
 	fixture := newNodeWorktreeFixture(t)
 	sha := seedSparseTree(t, fixture)
 	args := sparsePrepareArgs(fixture, sha, []string{"Assets"}, []string{"Assets/a[1].txt", "Assets/b*.txt"})
@@ -122,7 +156,55 @@ func TestSparseCheckoutIncludesGlobCharactersLiterally(t *testing.T) {
 	}
 }
 
+// gitignore drops an unquoted trailing space, so a changed file whose name
+// ends in one needs the pattern to quote it (hk 5098 review).
+func TestSparseCheckoutIncludesATrailingSpaceName(t *testing.T) {
+	isolateGitRepositoryEnv(t)
+	requireSparseGit(t)
+	fixture := newNodeWorktreeFixture(t)
+	sha := seedSparseTree(t, fixture)
+	args := sparsePrepareArgs(fixture, sha, []string{"Assets"}, []string{"Assets/notes.txt "})
+
+	result, code := nodeRun(t, fixture.client(), nodeCommandWorktreePrepare, args)
+	if code != "" || result["outcome"] != nodePreparePrepared || result["checkout_mode"] != nodeCheckoutSparse {
+		t.Fatalf("prepare outcome=%v mode=%v code=%q", result["outcome"], result["checkout_mode"], code)
+	}
+	dir := filepath.Join(fixture.workRoot, "repo.job")
+	if _, err := os.Stat(filepath.Join(dir, "Assets", "notes.txt ")); err != nil {
+		t.Fatalf("the include whose name ends in a space is missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Assets", "notes.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the trimmed sibling was checked out instead (err=%v)", err)
+	}
+}
+
+// A worktree this job prepared sparse stays sparse until it is turned off; a
+// later full request for the same directory must not report "full" while the
+// excluded paths are absent (hk 5098 review).
+func TestSparseReuseTurnsSparseOffForAFullRequest(t *testing.T) {
+	isolateGitRepositoryEnv(t)
+	requireSparseGit(t)
+	fixture := newNodeWorktreeFixture(t)
+	sha := seedSparseTree(t, fixture)
+	client := fixture.client()
+	if result, code := nodeRun(t, client, nodeCommandWorktreePrepare, sparsePrepareArgs(fixture, sha, []string{"Assets"}, nil)); code != "" || result["checkout_mode"] != nodeCheckoutSparse {
+		t.Fatalf("sparse prepare outcome=%v code=%q", result["outcome"], code)
+	}
+	dir := filepath.Join(fixture.workRoot, "repo.job")
+	if _, err := os.Stat(filepath.Join(dir, "Assets", "Logo.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the fixture worktree is not sparse: %v", err)
+	}
+	result, code := nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("detached", "", sha, "pull/2/head", "repo.job"))
+	if code != "" || result["outcome"] != nodePrepareReused || result["checkout_mode"] != nodeCheckoutFull {
+		t.Fatalf("full reuse outcome=%v mode=%v code=%q", result["outcome"], result["checkout_mode"], code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Assets", "Logo.bin")); err != nil {
+		t.Fatalf("a reuse reported full while the excluded tree was still missing: %v", err)
+	}
+}
+
 func TestNodeRefusesABadSparsePattern(t *testing.T) {
+	isolateGitRepositoryEnv(t)
 	fixture := newNodeWorktreeFixture(t)
 	sha := seedSparseTree(t, fixture)
 	for _, tc := range []struct {
@@ -148,6 +230,7 @@ func TestNodeRefusesABadSparsePattern(t *testing.T) {
 }
 
 func TestNodeRefusesAnOverBoundSparseList(t *testing.T) {
+	isolateGitRepositoryEnv(t)
 	fixture := newNodeWorktreeFixture(t)
 	sha := seedSparseTree(t, fixture)
 	exclude := make([]string, 65)
@@ -169,6 +252,7 @@ func TestNodeRefusesAnOverBoundSparseList(t *testing.T) {
 }
 
 func TestSparseRequestOnAnOldGitPreparesTheFullCheckout(t *testing.T) {
+	isolateGitRepositoryEnv(t)
 	fixture := newNodeWorktreeFixture(t)
 	sha := seedSparseTree(t, fixture)
 	client := fixture.client()
@@ -195,6 +279,8 @@ func TestSparseRequestOnAnOldGitPreparesTheFullCheckout(t *testing.T) {
 }
 
 func TestSparseFailureAfterAddLeavesNoWorktree(t *testing.T) {
+	isolateGitRepositoryEnv(t)
+	requireSparseGit(t)
 	fixture := newNodeWorktreeFixture(t)
 	sha := seedSparseTree(t, fixture)
 	client := fixture.client()

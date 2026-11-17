@@ -998,11 +998,14 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   commit and clean. `exclude` and `include` are accepted in this mode only
   (hk 5098): each entry is a plain path or pattern — one that starts with `!`
   or `/`, or contains `..`, a NUL or a newline, is `invalid_args`; at most 64
-  excludes and 500 includes, each at most 4096 bytes. With either list
+  excludes and 500 includes, each at most 4096 bytes, 128 KiB together. With
+  either list
   present the node adds the worktree with `--no-checkout`, feeds its own
   pattern list to `git sparse-checkout set --no-cone --stdin` on stdin
   (`/*`, then `!/<exclude>`, then `/<include>` with a literal path's glob
-  characters escaped), and runs `git checkout --detach <sha>`. A failure after
+  characters and trailing spaces escaped), and runs `git checkout --detach
+  <sha>`. A non-sparse request that finds a sparse worktree at `dir` runs
+  `git sparse-checkout disable` first, so a reuse reported as `full` really is. A failure after
   the add removes the half-made worktree the same forced way the
   interrupted-add cleanup does. A node whose git is older than 2.37, or one
   that never advertised `checkout_sparse_v1`, prepares the full checkout

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,10 +15,51 @@ import (
 // the sweep's job-owned checkout tail and the node's checkout.sweep pass —
 // remove one through the same guarded removal a full worktree gets.
 
+// isolateGitRepositoryEnv removes the variables that make git read a caller's
+// repository or index instead of the -C target. Without it a host that exports
+// GIT_DIR would have these fixture commits land in the caller's checkout, and
+// the sweep's own git calls would read the wrong repository (hk 5098 review).
+func isolateGitRepositoryEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE"} {
+		value, set := os.LookupEnv(name)
+		if !set {
+			continue
+		}
+		t.Cleanup(func() { _ = os.Setenv(name, value) })
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// requireSparseGit skips a test whose fixture needs the sparse checkout
+// commands on a git older than their floor.
+func requireSparseGit(t *testing.T) {
+	t.Helper()
+	output, err := exec.Command("git", "--version").Output()
+	if err != nil {
+		t.Skip("git is not installed")
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) < 3 {
+		t.Skip("git --version is unreadable")
+	}
+	parts := strings.Split(fields[2], ".")
+	if len(parts) < 2 {
+		t.Skip("git --version is unreadable")
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || major < 2 || (major == 2 && minor < 37) {
+		t.Skip("git is older than 2.37, the floor for the sparse checkout commands")
+	}
+}
+
 func sparseGit(t *testing.T, dir, input string, args ...string) string {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false"}, args...)...)
-	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	command.Env = append(gitFixtureEnv(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	command.Stdin = strings.NewReader(input)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -75,6 +117,20 @@ func sparseSweepCheckout(t *testing.T, workRoot, job string) string {
 
 // realGitRunner sends every git command to the real binary; the sweep fixtures
 // fake everything else.
+// gitFixtureEnv is os.Environ without the repository-location variables, so a
+// fixture command can only touch the -C target.
+func gitFixtureEnv() []string {
+	drop := map[string]bool{"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_INDEX_FILE": true, "GIT_OBJECT_DIRECTORY": true, "GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_COMMON_DIR": true, "GIT_NAMESPACE": true}
+	var env []string
+	for _, value := range os.Environ() {
+		name, _, _ := strings.Cut(value, "=")
+		if !drop[name] {
+			env = append(env, value)
+		}
+	}
+	return env
+}
+
 func realGitRunner(f *paneSweepFixture) {
 	base := f.runner.Do
 	f.runner.Do = func(c Command) Result {
@@ -89,6 +145,8 @@ func TestSweepRemovesASparseJobCheckout(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}
+	isolateGitRepositoryEnv(t)
+	requireSparseGit(t)
 	g := newSweepGitFake(t)
 	f := newPaneSweepFixture(t)
 	f.withGit(g)
@@ -114,6 +172,8 @@ func TestCheckoutSweepRemovesASparseJobCheckout(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}
+	isolateGitRepositoryEnv(t)
+	requireSparseGit(t)
 	g := newSweepGitFake(t)
 	f := newPaneSweepFixture(t)
 	f.withGit(g)

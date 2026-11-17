@@ -452,13 +452,19 @@ func (client *HubClient) endHubSpawn(requestID string) {
 }
 
 func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
-	result = spawnResultForHub(result, peer.acceptsLaunchProof.Load())
+	result = spawnResultForHub(result, peer.acceptsLaunchProof.Load(), peer.acceptsCheckoutSparse.Load())
 	_ = peer.write(ctx, spawnResultWire(result, extended))
 }
 
-func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof bool) hubSpawnResult {
+// spawnResultForHub drops the fields the connected hub does not understand: a
+// strict result parser rejects the whole answer for one unknown key, so
+// checkout_mode goes only to a hub that listed hubFeatureCheckoutSparse.
+func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof, acceptsCheckoutSparse bool) hubSpawnResult {
 	if result.Error == "launch_proof_failed" && !acceptsLaunchProof {
 		result.Error = "spawn_failed"
+	}
+	if !acceptsCheckoutSparse {
+		result.CheckoutMode = ""
 	}
 	return result
 }

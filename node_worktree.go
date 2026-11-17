@@ -1255,6 +1255,11 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeG
 				return nodeOutcomeGitFailed
 			}
 			result.CheckoutMode = nodeCheckoutSparse
+		} else if err := nodeDisableSparseCheckout(ctx, tracker, dir, args.Sha); err != nil {
+			// A worktree this job prepared sparse earlier stays sparse until
+			// it is turned off; reusing it as "full" would report paths that
+			// are not on disk.
+			return nodeOutcomeGitFailed
 		}
 		return nodePrepareReused
 	}
@@ -1277,6 +1282,23 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeG
 		result.CheckoutMode = nodeCheckoutSparse
 	}
 	return nodePreparePrepared
+}
+
+// nodeDisableSparseCheckout restores the whole tree of a reused worktree that
+// carries sparse patterns from an earlier prepare, so a non-sparse reuse is
+// really full. A worktree that is not sparse is left alone: `sparse-checkout
+// list` then fails, which is the proof there is nothing to undo (hk 5098
+// review).
+func nodeDisableSparseCheckout(ctx context.Context, tracker *nodeGitTracker, dir, sha string) error {
+	listed, err := tracker.git(ctx, "-C", dir, "sparse-checkout", "list")
+	if err != nil || strings.TrimSpace(string(listed)) == "" {
+		return nil
+	}
+	if _, err := tracker.git(ctx, "-C", dir, "sparse-checkout", "disable"); err != nil {
+		return err
+	}
+	_, err = tracker.git(ctx, "-C", dir, "checkout", "--detach", sha)
+	return err
 }
 
 // nodeCheckoutSparse and nodeCheckoutFull are the checkout_mode values the

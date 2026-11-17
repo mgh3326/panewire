@@ -524,7 +524,14 @@ the lists only to a node whose hello advertises `checkout_sparse_v1` (its git
 is 2.37 or newer) and drops them for every other node, whose strict frame
 decoder would refuse the fields; that node prepares the full checkout, a
 superset that is never wrong. The node answers `checkout_mode` (`sparse` or
-`full`) and the same value lands in the job record.
+`full`) and the same value lands in the job record. The hub names
+`checkout_sparse_v1` in the once-per-connection `hub.features` frame too: a
+node sends `checkout_mode` in its spawn result only to a hub that listed it,
+because an older hub's strict result parser drops the whole answer for one
+unknown key. The lists are not part of a spawn's replay identity
+(`spawnFingerprint`): they are added or dropped with the target node's
+capability, so a replay after that node's upgrade or rollback still matches its
+journaled request.
 
 The response is HTTP 202 with `job_id`, `request_id`, `operation_url`, `status`
 and `claim: durable_hub_reservation`. This is a hub DB reservation; the immutable

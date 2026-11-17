@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -213,5 +214,112 @@ func TestSpawnAnswerCarriesCheckoutMode(t *testing.T) {
 	}
 	if strings.Contains(string(legacy), "checkout_mode") {
 		t.Fatalf("legacy answer carries an unknown field: %s", legacy)
+	}
+}
+
+// A list is valid only on a detached spec: the hub applies the same rule the
+// node does, so a branch-mode request with lists is refused on submit instead
+// of being accepted and refused (or silently run full) at the node (hk 5098
+// review).
+func TestHubRefusesSparseListsOnABranchCheckout(t *testing.T) {
+	_, server := t14Hub(t)
+	body := t14SpawnBody(t14RequestID(954))
+	body["checkout"] = map[string]any{
+		"origin": "https://github.com/example/project.git", "mode": "branch",
+		"branch": "wk/task", "sha": sparseSpecSha(), "dir": "project.test-job",
+		"exclude": []string{"Assets"},
+	}
+	status, _, answer := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawn", t14OperatorToken, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("branch checkout with lists: %d %s", status, answer)
+	}
+	// The submit path refuses the same request too, naming the rule.
+	request := durableSpawnRequest()
+	request.Repository.Checkout = &fleet.HubCheckout{Origin: "https://github.com/example/project.git", Mode: "branch", Branch: "wk/task", Sha: sparseSpecSha(), Dir: "project.test-job", Exclude: []string{"Assets"}}
+	status, _, answer = t14HTTP(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, request)
+	if status != http.StatusBadRequest || !strings.Contains(string(answer), "detached checkout spec") {
+		t.Fatalf("branch checkout with lists: %d %s", status, answer)
+	}
+}
+
+// The per-entry bound alone allows megabytes of pattern text; the lists
+// together must fit the transport that carries them (hk 5098 review).
+func TestHubRefusesAnOverSizeSparseList(t *testing.T) {
+	h := asyncSpawnHub(t)
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	include := make([]string, 40)
+	for i := range include {
+		include[i] = "dir" + strconv.Itoa(i) + "/" + strings.Repeat("p", 4090)
+	}
+	request := durableSpawnRequest()
+	request.Repository.Checkout = sparseSpecCheckout(nil, include)
+	status, _, body := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, request)
+	if status != http.StatusBadRequest || !strings.Contains(string(body), "together") {
+		t.Fatalf("over-size list: %d %s", status, body)
+	}
+}
+
+// A node from before the feature cannot answer checkout_mode, but the hub
+// knows it dropped the lists and that the node therefore prepared the full
+// checkout; the answer says "full" rather than nothing (hk 5098 review).
+func TestHubReportsFullForAStrippedSparseRequest(t *testing.T) {
+	h, server := t14Hub(t)
+	node := sparseNode(t, h, server, "machine-a", []string{"spawn_v2", "spawn_ops_v1"})
+	requestID := t14RequestID(953)
+	body := t14SpawnBody(requestID)
+	body["checkout"] = map[string]any{
+		"origin": "https://github.com/example/project.git", "mode": "detached",
+		"sha": sparseSpecSha(), "fetch": "refs/heads/main", "dir": "project.test-job",
+		"exclude": []string{"Assets"},
+	}
+	reply := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawn", t14OperatorToken, body)
+	message := readSpawnFrame(t, node)
+	var decoded struct {
+		Checkout map[string]json.RawMessage `json:"checkout"`
+	}
+	if err := json.Unmarshal(message["checkout"], &decoded.Checkout); err == nil {
+		if _, present := decoded.Checkout["exclude"]; present {
+			t.Fatalf("the incapable node received the lists: %s", message["checkout"])
+		}
+	}
+	// The pre-feature node's answer carries no checkout_mode at all.
+	if err := wsjson.Write(t.Context(), node, map[string]any{
+		"type": "job.spawn.result", "request_id": requestID, "rc": 81, "job_id": "project.test-job",
+		"pane": "", "stdout_tail": "", "error": "checkout_refused:git-failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result := <-reply
+	if result.status != http.StatusOK || !strings.Contains(string(result.body), `"checkout_mode":"full"`) {
+		t.Fatalf("answer=%d %s, want checkout_mode full", result.status, result.body)
+	}
+}
+
+// The hub names checkout_sparse_v1 in the frame it sends a node once per
+// connection, which is the signal the node gates checkout_mode on.
+func TestHubFeaturesFrameNamesTheSparseCheckout(t *testing.T) {
+	if !slices.Contains(hubFeaturesFrame().Features, hubFeatureCheckoutSparse) {
+		t.Fatalf("hub.features=%v", hubFeaturesFrame().Features)
+	}
+}
+
+// A node must not put checkout_mode on the wire to a hub that did not name the
+// feature: an older hub's strict result parser drops the whole answer for one
+// unknown key (hk 5098 review).
+func TestSpawnResultHidesCheckoutModeFromAnOldHub(t *testing.T) {
+	result := hubSpawnResult{RequestID: t14RequestID(955), CheckoutMode: nodeCheckoutSparse}
+	if got := spawnResultForHub(result, true, false); got.CheckoutMode != "" {
+		t.Fatalf("old hub result = %+v, want no checkout_mode", got)
+	}
+	if got := spawnResultForHub(result, true, true); got.CheckoutMode != nodeCheckoutSparse {
+		t.Fatalf("new hub result = %+v, want checkout_mode sparse", got)
+	}
+	raw, err := json.Marshal(spawnResultWire(spawnResultForHub(result, true, false), true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "checkout_mode") {
+		t.Fatalf("old hub wire=%s", raw)
 	}
 }

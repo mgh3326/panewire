@@ -19,6 +19,13 @@ const (
 	MaxSparseExcludes     = 64
 	MaxSparseIncludes     = 500
 	MaxSparsePatternBytes = 4096
+	// MaxSparseListBytes bounds both lists together. The per-entry and
+	// per-list bounds alone allow megabytes of pattern text, which the
+	// transports that carry it are far smaller than: the node reads a
+	// job.spawn frame at hubSpawnMaxBodyBytes (512 KiB) and drops the
+	// connection on more. 128 KiB keeps the encoded frame well inside that
+	// read limit while leaving room for 500 changed paths.
+	MaxSparseListBytes = 128 << 10
 )
 
 // SparseRefusal returns why a sparse request is refused, or "" when both lists
@@ -30,7 +37,26 @@ func SparseRefusal(exclude, include []string) string {
 	if reason := sparseListRefusal("--checkout-exclude", exclude, MaxSparseExcludes); reason != "" {
 		return reason
 	}
-	return sparseListRefusal("--checkout-include", include, MaxSparseIncludes)
+	if reason := sparseListRefusal("--checkout-include", include, MaxSparseIncludes); reason != "" {
+		return reason
+	}
+	if total := sparseListBytes(exclude, include); total > MaxSparseListBytes {
+		return fmt.Sprintf("--checkout-exclude and --checkout-include carry %d bytes of patterns together; the limit is %d", total, MaxSparseListBytes)
+	}
+	return ""
+}
+
+// sparseListBytes is the pattern text both lists carry, before the node adds
+// its prefixes and escaping.
+func sparseListBytes(exclude, include []string) int {
+	total := 0
+	for _, entry := range exclude {
+		total += len(entry)
+	}
+	for _, entry := range include {
+		total += len(entry)
+	}
+	return total
 }
 
 func sparseListRefusal(flag string, entries []string, limit int) string {
@@ -87,7 +113,7 @@ func SparsePatterns(exclude, include []string) []string {
 	patterns := make([]string, 0, 1+len(exclude)+len(include))
 	patterns = append(patterns, "/*")
 	for _, entry := range exclude {
-		patterns = append(patterns, "!/"+entry)
+		patterns = append(patterns, "!/"+EscapeSparseTrailingSpaces(entry))
 	}
 	for _, entry := range include {
 		patterns = append(patterns, "/"+EscapeSparseInclude(entry))
@@ -99,14 +125,33 @@ func SparsePatterns(exclude, include []string) []string {
 // reads: a backslash, the glob characters, and a leading "!" or "#" are
 // escaped so the path is matched exactly as written.
 func EscapeSparseInclude(path string) string {
+	body := strings.TrimRight(path, " ")
 	var b strings.Builder
 	b.Grow(len(path) + 4)
-	for i := range len(path) {
-		c := path[i]
+	for i := range len(body) {
+		c := body[i]
 		if c == '\\' || c == '*' || c == '?' || c == '[' || i == 0 && (c == '!' || c == '#') {
 			b.WriteByte('\\')
 		}
 		b.WriteByte(c)
+	}
+	b.WriteString(EscapeSparseTrailingSpaces(path[len(body):]))
+	return b.String()
+}
+
+// EscapeSparseTrailingSpaces quotes every trailing space of a pattern, because
+// gitignore drops an unquoted one: a path whose name ends in a space would
+// otherwise name a different file (hk 5098 review).
+func EscapeSparseTrailingSpaces(value string) string {
+	trimmed := strings.TrimRight(value, " ")
+	if len(trimmed) == len(value) {
+		return value
+	}
+	var b strings.Builder
+	b.Grow(len(value) + len(value) - len(trimmed))
+	b.WriteString(trimmed)
+	for range len(value) - len(trimmed) {
+		b.WriteString(`\ `)
 	}
 	return b.String()
 }

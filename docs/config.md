@@ -386,16 +386,22 @@ panewire:
    inside an excluded tree. Both are valid only with the three spec flags.
    An entry must be a plain path or pattern: one that starts with `!` or `/`,
    or contains `..`, a NUL or a newline, refuses with the entry's index in the
-   sentence. At most 64 excludes and 500 includes, each at most 4096 bytes.
+   sentence; a branch-mode checkout refuses any list. At most 64 excludes and
+   500 includes, each at most 4096 bytes, and 128 KiB of pattern text in both
+   lists together (the node reads a spawn frame at 512 KiB and would drop the
+   connection on more).
    The node builds the gitignore list itself — `/*`, then `!/<exclude>`, then
-   `/<include>` with a literal path's glob characters escaped — and runs
+   `/<include>` with a literal path's glob characters and trailing spaces
+   escaped — and runs
    `git worktree add --no-checkout --detach`, `git sparse-checkout set
    --no-cone --stdin` (patterns on stdin, never a command line) and
    `git checkout --detach`; a failure after the add leaves no worktree behind.
    The CLI asks for `checkout_sparse_v1` too, so a hub that would drop the
    lists refuses the flags. A node whose hello does not advertise
    `checkout_sparse_v1` (its git is older than 2.37) gets no lists and
-   prepares the full checkout, a superset that is never wrong. The spawn
+   prepares the full checkout, a superset that is never wrong, and the hub
+   answers `checkout_mode: full` itself when that node's older build cannot
+   report one. The spawn
    answer and the `job.spawned` record carry `checkout_mode` (`sparse` or
    `full`), so a reader knows the absent paths are absent on purpose.
 3. sends the flags the hub's allowlist carries (`-m -l --t --job --owner

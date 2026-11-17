@@ -1374,8 +1374,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	// Likewise the sparse lists: only a node that advertises
 	// checkout_sparse_v1 reads exclude/include, and every other node gets the
 	// full checkout (hk 5098).
+	unfiltered := node.Checkout
 	node.Checkout = sparseCheckoutForNode(node.Checkout, record.capabilities)
-	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1)}
+	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1), checkoutStripped: node.Checkout != unfiltered}
 	h.spawnRecords[node.RequestID] = entry
 	h.mu.Unlock()
 	releaseAdmission()

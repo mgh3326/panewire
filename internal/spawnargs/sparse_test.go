@@ -75,6 +75,21 @@ func TestSparseRefusalBounds(t *testing.T) {
 	}
 }
 
+// The lists together must fit the transport that carries them, not just each
+// entry: 500 entries of 4096 bytes would never reach the node (hk 5098 review).
+func TestSparseRefusalBoundsTheWholeList(t *testing.T) {
+	includes := make([]string, 40)
+	for i := range includes {
+		includes[i] = strings.Repeat("p", MaxSparsePatternBytes)
+	}
+	if reason := SparseRefusal(nil, includes); !strings.Contains(reason, "carry") || !strings.Contains(reason, "together") {
+		t.Fatalf("an over-size list: %q", reason)
+	}
+	if reason := SparseRefusal(nil, includes[:10]); reason != "" {
+		t.Fatalf("a list inside the total bound was refused: %s", reason)
+	}
+}
+
 func TestSparseSpecRefusalNeedsDetachedMode(t *testing.T) {
 	if reason := SparseSpecRefusal("branch", []string{"Assets"}, nil); !strings.Contains(reason, "detached") {
 		t.Fatalf("branch mode with lists: %q", reason)
@@ -88,11 +103,12 @@ func TestSparseSpecRefusalNeedsDetachedMode(t *testing.T) {
 }
 
 func TestSparsePatternsStageExcludesThenLiteralIncludes(t *testing.T) {
-	got := SparsePatterns([]string{"Assets/Bin", "docs/generated"}, []string{"Assets/Changed.prefab", "a[1].txt", "b*.txt", "q?.md", `back\slash`, "!bang", "#hash"})
+	got := SparsePatterns([]string{"Assets/Bin", "docs/generated ", "trailing  "}, []string{"Assets/Changed.prefab", "a[1].txt", "b*.txt", "q?.md", `back\slash`, "!bang", "#hash", "notes.txt "})
 	want := []string{
 		"/*",
 		"!/Assets/Bin",
-		"!/docs/generated",
+		`!/docs/generated\ `,
+		`!/trailing\ \ `,
 		"/Assets/Changed.prefab",
 		`/a\[1].txt`,
 		`/b\*.txt`,
@@ -100,6 +116,7 @@ func TestSparsePatternsStageExcludesThenLiteralIncludes(t *testing.T) {
 		`/back\\slash`,
 		`/\!bang`,
 		`/\#hash`,
+		`/notes.txt\ `,
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("patterns = %#v\nwant %#v", got, want)
