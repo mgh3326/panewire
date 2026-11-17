@@ -147,6 +147,29 @@ func TestExplorerRoleRefusedWithImplementerHint(t *testing.T) {
 	}
 }
 
+func TestResolveReportsDefaultGradeAndTier(t *testing.T) {
+	a, _, _ := consultFixture(t)
+	if err := a.resolveCmd(context.Background(), []string{"--role", "implementer"}); err != nil {
+		t.Fatal(err)
+	}
+	text := a.Out.(*bytes.Buffer).String()
+	if !strings.Contains(text, "grade=C grade_source=default t=T0 t_source=default") {
+		t.Fatalf("resolve must identify the grade and T it defaulted: %s", text)
+	}
+}
+
+func TestResolveReviewerAndJudgeRequireGrade(t *testing.T) {
+	for _, role := range []string{"reviewer", "judge"} {
+		t.Run(role, func(t *testing.T) {
+			a, _, _ := consultFixture(t)
+			err := a.resolveCmd(context.Background(), []string{"--role", role, "--author-family", "anthropic"})
+			if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "needs --grade") {
+				t.Fatalf("resolve %s without a grade: got %v, want usage refusal", role, err)
+			}
+		})
+	}
+}
+
 // Acceptance 2: the implementer role keeps today's ordering among its allowed
 // profiles — quota that would be wasted precedes free SWE-2.
 func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {

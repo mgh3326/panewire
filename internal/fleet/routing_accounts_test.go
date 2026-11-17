@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -239,6 +240,31 @@ func TestAccountHostPinDoesNotClaimFleetExhaustion(t *testing.T) {
 	_, err := a.selectProfile(context.Background(), s)
 	if err == nil || !strings.Contains(err.Error(), "--host host-a restricts accounts") || !strings.Contains(err.Error(), "not fleet exhaustion") {
 		t.Fatalf("pinned-host refusal: %v", err)
+	}
+}
+
+func TestQuotaExhaustionNamesAccountsOnlyOnExcludedHostsInPlan(t *testing.T) {
+	for _, mode := range []string{"exclude-host", "not-accepting"} {
+		t.Run(mode, func(t *testing.T) {
+			a, _, _, src := accountConsultFixture(t)
+			src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(30, 8))}
+			src.accounts[testClaudeB] = SharedAccount{Key: testClaudeB, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(120, 8))}
+			src.accounts[testCodexA] = SharedAccount{Key: testCodexA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(120, 8))}
+			args := []string{"--role", "consult", "--grade", "A", "--t", "T1"}
+			if mode == "exclude-host" {
+				args = append(args, "--exclude-host", "host-a")
+			} else {
+				src.hosts[0].Reason = "not_accepting"
+			}
+			if err := a.planCmd(context.Background(), args); exitCode(err) != exitRoleWait {
+				t.Fatalf("plan exhaustion: got %v, want exit %d", err, exitRoleWait)
+			}
+			text := a.Out.(*bytes.Buffer).String()
+			want := "account " + testClaudeA + " only on excluded/not-accepting hosts host-a"
+			if !strings.Contains(text, want) {
+				t.Fatalf("plan must name the account filtered by %s; want %q in:\n%s", mode, want, text)
+			}
+		})
 	}
 }
 

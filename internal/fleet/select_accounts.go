@@ -32,6 +32,87 @@ type accountBinding struct {
 	holders []selHost
 }
 
+func (sp *selPresence) excludedOnlyBindings(pool string, eligible []accountBinding) map[string][]string {
+	eligibleKeys := make(map[string]bool, len(eligible))
+	for _, binding := range eligible {
+		eligibleKeys[binding.key] = true
+	}
+	byAccount := map[string]map[string]bool{}
+	for _, host := range sp.hosts {
+		notAccepting := host.view != nil && strings.Contains(host.view.Reason, "not_accepting")
+		if !host.eligible || !host.excluded || !host.excludedByFlag && !notAccepting || !host.awake && !host.wakeable {
+			continue
+		}
+		for _, key := range hostAccounts(sp.presence, pool, host.presence, sp.now, sp.presTTL) {
+			if eligibleKeys[key] {
+				continue
+			}
+			if byAccount[key] == nil {
+				byAccount[key] = map[string]bool{}
+			}
+			byAccount[key][host.name] = true
+		}
+	}
+	result := make(map[string][]string, len(byAccount))
+	for key, hosts := range byAccount {
+		for host := range hosts {
+			result[key] = append(result[key], host)
+		}
+		slices.Sort(result[key])
+	}
+	return result
+}
+
+func (p *selPlan) addExcludedBindings(pool string, bindings map[string][]string) {
+	if len(bindings) == 0 {
+		return
+	}
+	if p.excludedBindings == nil {
+		p.excludedBindings = map[string]map[string]map[string]bool{}
+	}
+	if p.excludedBindings[pool] == nil {
+		p.excludedBindings[pool] = map[string]map[string]bool{}
+	}
+	for key, hosts := range bindings {
+		if p.excludedBindings[pool][key] == nil {
+			p.excludedBindings[pool][key] = map[string]bool{}
+		}
+		for _, host := range hosts {
+			p.excludedBindings[pool][key][host] = true
+		}
+	}
+}
+
+func (p *selPlan) excludedBindingNote() string {
+	byAccount := map[string]map[string]bool{}
+	for current := p; current != nil; current = current.before {
+		for _, bindings := range current.excludedBindings {
+			for key, hosts := range bindings {
+				if byAccount[key] == nil {
+					byAccount[key] = map[string]bool{}
+				}
+				for host := range hosts {
+					byAccount[key][host] = true
+				}
+			}
+		}
+	}
+	var accounts []string
+	for key, hosts := range byAccount {
+		var names []string
+		for host := range hosts {
+			names = append(names, host)
+		}
+		slices.Sort(names)
+		accounts = append(accounts, fmt.Sprintf("account %s only on excluded/not-accepting hosts %s", key, strings.Join(names, ",")))
+	}
+	slices.Sort(accounts)
+	if len(accounts) == 0 {
+		return ""
+	}
+	return "; " + strings.Join(accounts, "; ")
+}
+
 func (sp *selPresence) hostEligible(h selHost, seat *Seat) bool {
 	return !h.excluded && sp.canMeasure(h, seat)
 }
@@ -532,7 +613,7 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		if req.route != nil && req.route.rule != nil {
 			return a.roleExhausted(ctx, s, req, p)
 		}
-		return p, fail(exitRoleWait, "%s: every eligible account is measured exhausted%s%s", outcomeQuotaExhausted, hostScope(s), p.poolAtCapNote())
+		return p, fail(exitRoleWait, "%s: every eligible account is measured exhausted%s%s%s", outcomeQuotaExhausted, hostScope(s), p.poolAtCapNote(), p.excludedBindingNote())
 	}
 	p.outcome, p.routeRefusal = outcomeNoRoleCandidate, reasonRoleNoCandidate
 	if note := p.poolAtCapNote(); note != "" {
