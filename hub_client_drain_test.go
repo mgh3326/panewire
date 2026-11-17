@@ -14,7 +14,7 @@ func drainClient(t *testing.T, started chan<- struct{}, release <-chan struct{})
 	t.Helper()
 	return &HubClient{
 		spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write,
-		spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+		spawnEngine: func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 			started <- struct{}{}
 			<-release
 			return t14EngineOK()
@@ -63,7 +63,7 @@ func TestStopDrainRefusesNewSpawn(t *testing.T) {
 	started := make(chan struct{}, 1)
 	var engineRuns atomic.Int32
 	client := drainClient(t, started, closedChannel())
-	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		engineRuns.Add(1)
 		return t14EngineOK()
 	}
@@ -163,7 +163,7 @@ func TestDaemonStopDrainsBeforeCancelling(t *testing.T) {
 func TestStopAbortLeavesSpawnRowExecuting(t *testing.T) {
 	started := make(chan struct{}, 1)
 	client := drainClient(t, started, closedChannel())
-	client.spawnEngine = func(ctx context.Context, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(ctx context.Context, _, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
 		started <- struct{}{}
 		<-ctx.Done()
 		return &hubSpawnOutput{}, fleet.Execution{RC: 124}

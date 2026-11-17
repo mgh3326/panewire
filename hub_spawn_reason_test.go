@@ -290,7 +290,7 @@ func TestSpawnTraceCloseWithoutClientBuildsNone(t *testing.T) {
 func runFailingHubSpawn(t *testing.T, requestID, stderr string, rc int) hubSpawnResult {
 	t.Helper()
 	message := hubOutboundMessage{RequestID: requestID, CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 5, Args: []string{"--job", "job-coded"}}
-	return (&HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	return (&HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		output := &hubSpawnOutput{}
 		_, _ = output.stderr.Write([]byte(stderr))
 		return output, fleet.Execution{RC: rc, Stage: "launch"}

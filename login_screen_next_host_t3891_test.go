@@ -38,7 +38,7 @@ func t3891RunHubSpawn(t *testing.T, profile string, retryable bool, capture stri
 			t.Fatal(err)
 		}
 	}
-	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		output := &hubSpawnOutput{}
 		_, _ = output.Write([]byte("BRIEF_SUBMISSION_UNCONFIRMED: no working transition\n"))
 		output.jobID = "job-3891"

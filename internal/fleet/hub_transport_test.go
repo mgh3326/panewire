@@ -150,7 +150,7 @@ func TestHubWorktreeCheckouts(t *testing.T) {
 			if e != nil || !handled || rec["chose"] != "h1" {
 				t.Fatalf("handled=%v rec=%v err=%v", handled, rec, e)
 			}
-			if len(hub.spawns) != 1 || hub.spawns[0].Checkout == nil || *hub.spawns[0].Checkout != tc.want {
+			if len(hub.spawns) != 1 || hub.spawns[0].Checkout == nil || !reflect.DeepEqual(*hub.spawns[0].Checkout, tc.want) {
 				t.Fatalf("checkout: %+v", hub.spawns)
 			}
 			got := hub.spawns[0]

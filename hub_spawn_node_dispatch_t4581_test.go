@@ -776,7 +776,7 @@ func TestDispatcherRunsRealNodeEnginesIndependently_t4581(t *testing.T) {
 			spawnConfigPath: t14SpawnConfig(t, t.TempDir()),
 			spawnJournalDir: t.TempDir(),
 			fleetEvents:     (&fleetEventRecorder{}).write,
-			spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+			spawnEngine: func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 				count := running.Add(1)
 				if isA {
 					startedA.Add(1)

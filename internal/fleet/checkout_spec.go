@@ -39,6 +39,9 @@ func (s Spawn) checkoutSpec() (*HubCheckout, string, error) {
 		}
 	}
 	if given == 0 {
+		if len(s.CheckoutExclude) != 0 || len(s.CheckoutInclude) != 0 {
+			return nil, "", fail(exitUsage, "--checkout-exclude and --checkout-include need %s: a sparse checkout is a spec checkout", checkoutSpecFlags)
+		}
 		return nil, "", nil
 	}
 	if given != 3 {
@@ -65,12 +68,19 @@ func (s Spawn) checkoutSpec() (*HubCheckout, string, error) {
 	if !validID(name) || !hubKeyRule.MatchString(RepoKey(name)) {
 		return nil, "", fail(exitUsage, "--checkout-origin names repository %q, which is not a hub cwd key (lowercase letters, digits, dot, underscore or hyphen, at most 64)", name)
 	}
+	// The lists are refused here as at the hub and the node; the entry index
+	// names the bad one rather than repeating its text (hk 5098).
+	if reason := spawnargs.SparseRefusal(s.CheckoutExclude, s.CheckoutInclude); reason != "" {
+		return nil, "", fail(exitUsage, "%s", reason)
+	}
 	return &HubCheckout{
-		Origin: origin,
-		Mode:   "detached",
-		Sha:    s.CheckoutCommit,
-		Fetch:  s.CheckoutRef,
-		Dir:    checkoutWorktreeName(s.Job),
+		Origin:  origin,
+		Mode:    "detached",
+		Sha:     s.CheckoutCommit,
+		Fetch:   s.CheckoutRef,
+		Dir:     checkoutWorktreeName(s.Job),
+		Exclude: s.CheckoutExclude,
+		Include: s.CheckoutInclude,
 	}, name, nil
 }
 

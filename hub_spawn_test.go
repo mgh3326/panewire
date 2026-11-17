@@ -468,7 +468,7 @@ func TestPW6NodeFetchesBriefDocFromHandoffkeep(t *testing.T) {
 	briefPath := filepath.Join(root, "brief")
 	t.Setenv("T14_BRIEF_FILE", briefPath)
 
-	client := &HubClient{spawnConfigPath: config, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: config, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		raw, err := os.ReadFile(brief)
 		if err != nil {
 			t.Error(err)
@@ -507,7 +507,7 @@ func TestPW6CheckoutRefusalSkipsSpawnAndPreparedCWD(t *testing.T) {
 	preparedCWD := ""
 	client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
 		return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: filepath.Join(root, "prepared")}}, ""
-	}, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+	}, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		preparedCWD = cwd
 		return t14EngineOK()
 	}}
@@ -705,7 +705,7 @@ func TestT14NodeAC9AC10AC13ArgvAndTemporary(t *testing.T) {
 	seen := make(chan string, 1)
 	marker := filepath.Join(root, "must-not-run")
 	args := []string{"--owner", "x; touch " + marker}
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, received []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ string, _ time.Time, received []string) (*hubSpawnOutput, fleet.Execution) {
 		if cwd != root || workspace != "worker" || session != "worker" || strings.Join(args, "\x00") != strings.Join(received, "\x00") {
 			t.Errorf("execution inputs: cwd=%q workspace=%q session=%q args=%v", cwd, workspace, session, received)
 		}
@@ -748,7 +748,7 @@ func TestT14NodeAC10FailureAndAC11TimeoutCleanup(t *testing.T) {
 		t.Run(strconv.FormatBool(timeout), func(t *testing.T) {
 			root := t.TempDir()
 			temporary := ""
-			client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+			client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 				temporary = brief
 				if timeout {
 					<-ctx.Done()
@@ -822,7 +822,7 @@ func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.spawnEngine = func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(ctx context.Context, cwd, brief, workspace, session string, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		file, err := os.OpenFile(ledger, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
 			t.Error(err)

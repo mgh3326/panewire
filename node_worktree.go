@@ -76,13 +76,15 @@ var (
 )
 
 type nodeWorktreePrepareArgs struct {
-	Origin      string `json:"origin"`
-	Mode        string `json:"mode"`
-	Branch      string `json:"branch"`
-	Sha         string `json:"sha"`
-	Fetch       string `json:"fetch"`
-	Dir         string `json:"dir"`
-	VerifyReuse bool   `json:"verify_reuse,omitempty"`
+	Origin      string   `json:"origin"`
+	Mode        string   `json:"mode"`
+	Branch      string   `json:"branch"`
+	Sha         string   `json:"sha"`
+	Fetch       string   `json:"fetch"`
+	Dir         string   `json:"dir"`
+	VerifyReuse bool     `json:"verify_reuse,omitempty"`
+	Exclude     []string `json:"exclude,omitempty"`
+	Include     []string `json:"include,omitempty"`
 }
 
 type nodeWorktreeRemoveArgs struct {
@@ -105,6 +107,10 @@ type nodeWorktreePrepareResult struct {
 	RetryAfterS   int           `json:"retry_after_s,omitempty"`
 	FastForwarded bool          `json:"fast_forwarded,omitempty"`
 	Reason        string        `json:"reason,omitempty"`
+	// CheckoutMode is "sparse" when this prepare applied the request's pattern
+	// list, "full" when the whole tree is on disk. Empty for branch mode,
+	// which never asks for a sparse checkout (hk 5098).
+	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
 type nodeWorktreeRemoveResult struct {
@@ -224,6 +230,14 @@ func nodeGitOpRetryAfter(wait time.Duration) int {
 // documents: prepare and remove refuse old git the same way rather than
 // parsing worktree output they can't trust.
 func nodeGitVersionOK(ctx context.Context, git relayCommandRunner) (bool, error) {
+	return nodeGitVersionAtLeast(ctx, git, 2, 31)
+}
+
+// nodeGitVersionAtLeast reports whether git meets a version floor. The
+// sparse-checkout floor is its own: `sparse-checkout set --no-cone` became
+// git's default mode in 2.37, and the node advertises checkout_sparse_v1 only
+// there (hk 5098).
+func nodeGitVersionAtLeast(ctx context.Context, git relayCommandRunner, wantMajor, wantMinor int) (bool, error) {
 	out, err := git(ctx, "--version")
 	if err != nil {
 		return false, err
@@ -241,7 +255,7 @@ func nodeGitVersionOK(ctx context.Context, git relayCommandRunner) (bool, error)
 	if err1 != nil || err2 != nil {
 		return false, nil
 	}
-	return major > 2 || (major == 2 && minor >= 31), nil
+	return major > wantMajor || (major == wantMajor && minor >= wantMinor), nil
 }
 
 type nodeWorktreeEntry struct {
@@ -671,6 +685,12 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	if !ok {
 		return nil, "invalid_args"
 	}
+	// The hub validates the lists on submit too; the node validates what it is
+	// handed, since a request can reach it from another build (hk 5098).
+	if reason := spawnargs.SparseSpecRefusal(args.Mode, args.Exclude, args.Include); reason != "" {
+		slog.Warn("node worktree prepare refused a sparse request", "reason", reason)
+		return nil, "invalid_args"
+	}
 	workRoot, err := client.nodeWorkRoot()
 	if err != nil {
 		return nil, "work_root_unset"
@@ -773,7 +793,7 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 	case "branch":
 		outcome = client.nodePrepareBranch(ctx, tracker, clone, dir, args, &result)
 	case "detached":
-		outcome = client.nodePrepareDetached(ctx, tracker, clone, dir, args)
+		outcome = client.nodePrepareDetached(ctx, tracker, clone, dir, args, &result)
 	}
 	result.Outcome = outcome
 	if outcome == nodePreparePrepared || outcome == nodePrepareReused {
@@ -814,6 +834,19 @@ func (tracker *nodeGitTracker) git(ctx context.Context, args ...string) ([]byte,
 	tracker.step = subcmd
 	tracker.subcmd = subcmd
 	out, err := tracker.runner(ctx, args...)
+	if err != nil {
+		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
+	}
+	return out, err
+}
+
+// gitStdin runs one git command with stdin and records a failure the way git
+// records every other step, so a sparse checkout failure names its subcommand.
+func (tracker *nodeGitTracker) gitStdin(ctx context.Context, stdin nodeGitStdinRunner, input string, args ...string) ([]byte, error) {
+	subcmd := nodeGitSubcommand(args)
+	tracker.step = subcmd
+	tracker.subcmd = subcmd
+	out, err := stdin(ctx, input, args...)
 	if err != nil {
 		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
 	}
@@ -1150,11 +1183,19 @@ func nodeBranchRelationReason(local, expected, relation string) string {
 }
 
 // nodePrepareDetached fetches the caller's closed ref, requires the commit
-// to exist and to be FETCH_HEAD or an ancestor of it (a ref that contains
+// to exist to be FETCH_HEAD or an ancestor of it (a ref that contains
 // the sha, see docs/node-commands.md), and reuses only a clean worktree
 // detached at exactly that sha. The worktree is always detached at args.Sha.
-func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs) string {
+//
+// A request that carries the sparse lists is added with --no-checkout, then
+// gets the node's own pattern list (`sparse-checkout set --no-cone --stdin`)
+// and `checkout --detach`; an existing worktree has the list re-applied, so a
+// reuse says "sparse" only when the files really are. A git older than the
+// sparse floor, a node that never advertised the capability, prepares the full
+// checkout instead and says "full" (hk 5098).
+func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
 	git := tracker.git
+	result.CheckoutMode = nodeCheckoutFull
 	if _, err := git(ctx, "-C", clone, "fetch", "origin", args.Fetch); err != nil {
 		return nodeOutcomeGitFailed
 	}
@@ -1168,6 +1209,13 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeG
 	if !strings.EqualFold(strings.TrimSpace(string(fetched)), args.Sha) {
 		if _, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", args.Sha, "FETCH_HEAD"); err != nil {
 			return nodePrepareShaMissing
+		}
+	}
+	sparse := len(args.Exclude) != 0 || len(args.Include) != 0
+	if sparse {
+		if ok, err := nodeGitVersionAtLeast(ctx, git, checkoutSparseGitMajor, checkoutSparseGitMinor); err != nil || !ok {
+			// The full checkout is a superset: never wrong, only larger.
+			sparse = false
 		}
 	}
 	entries, err := nodeListWorktrees(ctx, git, clone)
@@ -1202,12 +1250,64 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeG
 		if !clean {
 			return nodeOutcomeDirty
 		}
+		if sparse {
+			if err := nodeApplySparseCheckout(ctx, tracker, client.nodeGitStdinRunner(), dir, args); err != nil {
+				return nodeOutcomeGitFailed
+			}
+			result.CheckoutMode = nodeCheckoutSparse
+		}
 		return nodePrepareReused
 	}
-	if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, intent, "-C", clone, "worktree", "add", "--detach", dir, args.Sha); err != nil {
+	add := []string{"-C", clone, "worktree", "add", "--detach", dir, args.Sha}
+	if sparse {
+		// The tree is filled after the pattern list exists, so no excluded
+		// path is ever written and removed again.
+		add = []string{"-C", clone, "worktree", "add", "--no-checkout", "--detach", dir, args.Sha}
+	}
+	if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, intent, add...); err != nil {
 		return nodeOutcomeGitFailed
 	}
+	if sparse {
+		if err := nodeApplySparseCheckout(ctx, tracker, client.nodeGitStdinRunner(), dir, args); err != nil {
+			// The add itself succeeded, so the interrupted-add path is over:
+			// remove the half-made worktree the same forced way it does.
+			nodeDiscardPreparedWorktree(git, clone, dir)
+			return nodeOutcomeGitFailed
+		}
+		result.CheckoutMode = nodeCheckoutSparse
+	}
 	return nodePreparePrepared
+}
+
+// nodeCheckoutSparse and nodeCheckoutFull are the checkout_mode values the
+// spawn answer and the job record carry (hk 5098).
+const (
+	nodeCheckoutSparse = "sparse"
+	nodeCheckoutFull   = "full"
+)
+
+// nodeApplySparseCheckout writes the node's own pattern list into dir and
+// checks the pinned commit out over it. The list goes on stdin: it is never
+// part of a command line or a shell, so a path with a space, a quote or a
+// metacharacter is carried exactly as the spec named it.
+func nodeApplySparseCheckout(ctx context.Context, tracker *nodeGitTracker, stdin nodeGitStdinRunner, dir string, args nodeWorktreePrepareArgs) error {
+	patterns := strings.Join(spawnargs.SparsePatterns(args.Exclude, args.Include), "\n") + "\n"
+	if _, err := tracker.gitStdin(ctx, stdin, patterns, "-C", dir, "sparse-checkout", "set", "--no-cone", "--stdin"); err != nil {
+		return err
+	}
+	_, err := tracker.git(ctx, "-C", dir, "checkout", "--detach", args.Sha)
+	return err
+}
+
+// nodeDiscardPreparedWorktree removes a worktree this prepare added when a
+// later step fails, through the same forced removal the interrupted-add
+// cleanup uses, so a failed spawn leaves no worktree behind (hk 5098).
+func nodeDiscardPreparedWorktree(git relayCommandRunner, clone, dir string) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := git(cleanupCtx, "-C", clone, "worktree", "remove", "--force", "--force", dir); err != nil {
+		slog.Warn("node worktree sparse cleanup failed", "path", dir, "err", err)
+	}
 }
 
 func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktreeRemoveArgs) (any, string) {

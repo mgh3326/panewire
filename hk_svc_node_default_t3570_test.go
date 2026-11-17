@@ -61,7 +61,7 @@ func runDefaultNodeBriefSpawn(t *testing.T, home string) hubSpawnResult {
 		t.Fatal(err)
 	}
 	client := defaultNodeClient()
-	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		return t14EngineOK()
 	}
 	return client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(3570), CWDKey: "repo-a", BriefDoc: "briefs/job-3570/brief.md", WaitSeconds: 1})

@@ -968,7 +968,8 @@ is refused every other op on this route.
 
 ### `worktree.prepare`
 
-`args: {origin, mode, branch, sha, fetch, dir}`. Prepares a worktree of a
+`args: {origin, mode, branch, sha, fetch, dir, exclude?, include?}`. Prepares a
+worktree of a
 clone under the node's work root — set in the node's own `spawn.json`
 `work_root`, never by the caller — with the clone at `<work_root>/<repo>`
 and the worktree at `<work_root>/<dir>`. `dir` is a single safe path
@@ -994,7 +995,18 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   contains the sha; otherwise `sha-missing`). It then runs `git worktree add
   --detach <dir> <sha>`, so the worktree sits at `sha`, never at the fetched
   tip. An existing worktree is reused only when detached at exactly that
-  commit and clean.
+  commit and clean. `exclude` and `include` are accepted in this mode only
+  (hk 5098): each entry is a plain path or pattern — one that starts with `!`
+  or `/`, or contains `..`, a NUL or a newline, is `invalid_args`; at most 64
+  excludes and 500 includes, each at most 4096 bytes. With either list
+  present the node adds the worktree with `--no-checkout`, feeds its own
+  pattern list to `git sparse-checkout set --no-cone --stdin` on stdin
+  (`/*`, then `!/<exclude>`, then `/<include>` with a literal path's glob
+  characters escaped), and runs `git checkout --detach <sha>`. A failure after
+  the add removes the half-made worktree the same forced way the
+  interrupted-add cleanup does. A node whose git is older than 2.37, or one
+  that never advertised `checkout_sparse_v1`, prepares the full checkout
+  instead; `checkout_mode` says which happened.
 
 A hub-staged author replacement sets `verify_reuse` on its spawn checkout.
 The node then requires an existing clean, unlocked checkout at exactly the
@@ -1027,6 +1039,8 @@ refused. A missing clone is created with `git clone <origin>`.
 When a branch is fast-forwarded, the result includes `fast_forwarded: true`.
 A tip mismatch that cannot be fast-forwarded includes `reason` with
 `local=<sha7> expected=<sha7> relation=ahead|diverged`.
+A detached prepare includes `checkout_mode`: `sparse` when it applied the
+request's list, `full` when the whole tree is on disk (hk 5098).
 
 An add interrupted by a crash leaves its worktree locked `initializing`. The
 node records the process group of the `git worktree add` child in the clone's

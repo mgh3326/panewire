@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 // Repository carries checkout evidence read on the submitting host. The hub
@@ -94,6 +96,12 @@ func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, err
 	}
 	if request.CheckoutSpec {
 		needs = append(needs, struct{ feature, flag string }{"checkout_spec_v1", "--checkout-origin"})
+	}
+	// A sparse checkout's lists are dropped by a hub that predates
+	// checkout_sparse_v1 (hk 5098), so the request would run the full checkout
+	// without saying so; ask first.
+	if checkout := request.Repository.Checkout; checkout != nil && (len(checkout.Exclude) != 0 || len(checkout.Include) != 0) {
+		needs = append(needs, struct{ feature, flag string }{"checkout_sparse_v1", "--checkout-exclude"})
 	}
 	if len(needs) != 0 {
 		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/features", nil, 5*time.Second)
@@ -463,6 +471,13 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	}
 	if repo.Relative != "" {
 		return s, fail(exitPlacement, "hub_subdirectory_unsupported: use the checkout root before submitting")
+	}
+	// A sparse spec reaches the node as these lists (hk 5098): refuse a bad
+	// entry where the flag is read, naming its index.
+	if repo.Checkout != nil {
+		if reason := spawnargs.SparseSpecRefusal(repo.Checkout.Mode, repo.Checkout.Exclude, repo.Checkout.Include); reason != "" {
+			return s, fail(exitUsage, "%s", reason)
+		}
 	}
 	return s, nil
 }

@@ -65,7 +65,7 @@ func newConcurrencyRig(t *testing.T, slots int) *concurrencyRig {
 		rig.mu.Unlock()
 		return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: dir, Head: args.Sha}}, ""
 	}
-	client.spawnEngine = func(_ context.Context, cwd, brief, _, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(_ context.Context, cwd, brief, _, _, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		owner, _ := os.ReadFile(filepath.Join(cwd, "owner"))
 		text, _ := os.ReadFile(brief)
 		rig.mu.Lock()

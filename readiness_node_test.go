@@ -172,7 +172,7 @@ func TestSpawnConfigOptionalAtTheDefaultPath(t *testing.T) {
 	// missing directory is unmapped.
 	for key, want := range map[string]bool{"panewire": true, "missing": false, "linked": false, "Bad Key": false} {
 		message := hubOutboundMessage{RequestID: t14RequestID(200), CWDKey: key, BriefInline: "b", WaitSeconds: 1}
-		client.spawnEngine = func(_ context.Context, cwd, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
+		client.spawnEngine = func(_ context.Context, cwd, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
 			if cwd != filepath.Join(workRoot, "panewire") {
 				t.Errorf("engine cwd=%s", cwd)
 			}

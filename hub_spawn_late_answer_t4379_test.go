@@ -244,7 +244,7 @@ func TestNodeReplayAnswersNotStartedOnlyWithoutJournalRow_t4379(t *testing.T) {
 	peer := &hubClientConnection{connection: conn}
 	engineCalls := 0
 	// herdr cannot be read, so the restart settle (hub_spawn_settle.go) decides nothing.
-	client := &HubClient{nodeHerdr: func(context.Context, ...string) ([]byte, error) { return nil, errors.New("herdr down") }, spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write, spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{nodeHerdr: func(context.Context, ...string) ([]byte, error) { return nil, errors.New("herdr down") }, spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write, spawnEngine: func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		engineCalls++
 		return t14EngineOK()
 	}}

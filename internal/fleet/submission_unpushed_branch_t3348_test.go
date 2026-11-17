@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -68,7 +69,7 @@ func TestSubmissionRequiresBranchOnOrigin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := request.Repository.Checkout; got == nil || *got != tc.want {
+			if got := request.Repository.Checkout; got == nil || !reflect.DeepEqual(*got, tc.want) {
 				t.Fatalf("checkout: %+v, want %+v", got, tc.want)
 			}
 		})

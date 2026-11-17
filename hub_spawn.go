@@ -72,6 +72,11 @@ type hubSpawnCheckout struct {
 	Fetch       string `json:"fetch,omitempty"`
 	Dir         string `json:"dir"`
 	VerifyReuse bool   `json:"verify_reuse,omitempty"`
+	// Exclude and Include are the sparse checkout lists the node turns into
+	// its own pattern list (hk 5098). They travel only to a node that
+	// advertises checkout_sparse_v1; every other node gets the full checkout.
+	Exclude []string `json:"exclude,omitempty"`
+	Include []string `json:"include,omitempty"`
 }
 
 type hubSpawnRequest struct {
@@ -103,6 +108,9 @@ type hubSpawnResult struct {
 	StdoutTail  string                  `json:"stdout_tail"`
 	CompletedAt *time.Time              `json:"completed_at,omitempty"`
 	Error       string                  `json:"error,omitempty"`
+	// CheckoutMode is the node's answer for a checkout spec: "sparse" or
+	// "full" (hk 5098). Empty for a spawn that names no spec.
+	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
 type hubSpawnRecord struct {
@@ -153,7 +161,7 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 	case "branch":
 		return validNodeRefName(checkout.Branch) && (checkout.Sha == "" || nodeShaPattern.MatchString(checkout.Sha)) && (!checkout.VerifyReuse || checkout.Sha != "") && checkout.Fetch == ""
 	case "detached":
-		return !checkout.VerifyReuse && checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch)
+		return !checkout.VerifyReuse && checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch) && spawnargs.SparseRefusal(checkout.Exclude, checkout.Include) == ""
 	default:
 		return false
 	}
@@ -332,6 +340,11 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	entry := &hubSpawnRecord{request: body, status: "pending", created: now, waiter: make(chan hubSpawnResult, 1)}
 	h.spawnRecords[body.RequestID] = entry
 	agent := record.agent
+	// Only a node that advertises checkout_sparse_v1 reads exclude/include;
+	// every other node gets the full checkout and says so (hk 5098). The
+	// record keeps the request as sent, so a replay to a capable node keeps
+	// the lists.
+	checkout := sparseCheckoutForNode(body.Checkout, record.capabilities)
 	h.mu.Unlock()
 
 	message := struct {
@@ -342,7 +355,7 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 		Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
 		Args        []string          `json:"args"`
 		WaitSeconds int               `json:"wait_seconds"`
-	}{Type: "job.spawn", RequestID: body.RequestID, CWDKey: body.CWDKey, Brief: body.Brief, Checkout: body.Checkout, Args: body.Args, WaitSeconds: body.WaitSeconds}
+	}{Type: "job.spawn", RequestID: body.RequestID, CWDKey: body.CWDKey, Brief: body.Brief, Checkout: checkout, Args: body.Args, WaitSeconds: body.WaitSeconds}
 	if err := agent.writeJSON(message); err != nil {
 		h.mu.Lock()
 		delete(h.spawnRecords, body.RequestID)

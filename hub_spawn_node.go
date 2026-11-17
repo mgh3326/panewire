@@ -464,7 +464,7 @@ func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof bool) hubSpawnR
 }
 func spawnResultWire(result hubSpawnResult, extended bool) any {
 	if !extended {
-		result.Receipt, result.Stage, result.StageMS, result.Retryable = nil, "", nil, false
+		result.Receipt, result.Stage, result.StageMS, result.Retryable, result.CheckoutMode = nil, "", nil, false, ""
 		switch result.Error {
 		case "reconciling", "unknown", "journal_unavailable", "journal_conflict":
 			result.Error = "timeout" // Legacy hubs understand uncertainty as timeout.
@@ -482,7 +482,9 @@ func spawnResultWire(result hubSpawnResult, extended bool) any {
 		StageMS    map[string]int64        `json:"stage_ms,omitempty"`
 		Stage      string                  `json:"stage,omitempty"`
 		Retryable  bool                    `json:"retryable,omitempty"`
-	}{result.Receipt, "job.spawn.result", result.RequestID, result.RC, result.JobID, result.Pane, result.StdoutTail, result.Error, result.StageMS, result.Stage, result.Retryable}
+		// CheckoutMode is "sparse" or "full" for a spec checkout (hk 5098).
+		CheckoutMode string `json:"checkout_mode,omitempty"`
+	}{result.Receipt, "job.spawn.result", result.RequestID, result.RC, result.JobID, result.Pane, result.StdoutTail, result.Error, result.StageMS, result.Stage, result.Retryable, result.CheckoutMode}
 }
 
 func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
@@ -594,7 +596,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			result.RC, result.Error = 81, "checkout_refused:"+nodeOutcomeBusy
 			return result
 		}
-		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir, VerifyReuse: message.Checkout.VerifyReuse})
+		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir, VerifyReuse: message.Checkout.VerifyReuse, Exclude: message.Checkout.Exclude, Include: message.Checkout.Include})
 		unlock()
 		ms := time.Since(started).Milliseconds()
 		checkoutMS = &ms
@@ -613,6 +615,9 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			return result
 		}
 		cwd = outcome.Worktree.Path
+		// What the node actually put on disk travels with the answer and into
+		// the job record (hk 5098).
+		result.CheckoutMode = outcome.CheckoutMode
 		if spawnLaneEscapes(cwd, hubSpawnFlagArg(message.Args, "-L")) {
 			// The held job dir must be where the agent runs (hk 4578).
 			result.RC, result.Error = 81, "checkout_refused:lane_outside_worktree"
@@ -647,7 +652,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	if message.ExpiresMS > 0 {
 		expiresAt = time.UnixMilli(message.ExpiresMS)
 	}
-	output, execution := engine(runContext, cwd, temporaryName, config.Workspace, config.HERDRSession, expiresAt, message.Args)
+	output, execution := engine(runContext, cwd, temporaryName, config.Workspace, config.HERDRSession, result.CheckoutMode, expiresAt, message.Args)
 	result.Receipt = &execution.Receipt
 	result.StdoutTail = output.tailString()
 	result.Pane, result.JobID = output.pane, output.jobID
@@ -977,11 +982,14 @@ func hubSpawnEnvironment(environment []string, session string) []string {
 	return append(filtered, "HERDR_SESSION="+session)
 }
 
-type hubSpawnEngine func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution)
+type hubSpawnEngine func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution)
 
-func runHubSpawnEngine(ctx context.Context, cwd, brief, workspace, session string, expiresAt time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+// runHubSpawnEngine launches the spawned job with the checkout mode the node
+// prepared, so its job.spawned record says whether paths are absent on purpose
+// (hk 5098).
+func runHubSpawnEngine(ctx context.Context, cwd, brief, workspace, session, checkoutMode string, expiresAt time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 	output := &hubSpawnOutput{}
-	result := fleet.ExecuteNode(ctx, cwd, brief, workspace, session, expiresAt, args, output, &output.stderr)
+	result := fleet.ExecuteNode(ctx, cwd, brief, workspace, session, checkoutMode, expiresAt, args, output, &output.stderr)
 	return output, result
 }
 

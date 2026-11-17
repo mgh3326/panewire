@@ -41,7 +41,21 @@ func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) 
 	// (hk 4738).
 	// start_conditions_v1: --after conditions are queued as waiting and
 	// checked in one batched hk snapshot per scheduler pass (hk 4736).
-	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1", "checkout_spec_v1"}})
+	// checkout_sparse_v1: the request's checkout spec carries exclude[] and
+	// include[], which the hub forwards to a node whose hello advertises it
+	// and drops for every other node (hk 5098).
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1", "checkout_spec_v1", "checkout_sparse_v1"}})
+}
+
+// hubCheckoutSparseRefusal names the sparse list entry a request refuses, or ""
+// when the request may proceed (or names no checkout spec). The http refusal
+// repeats it so the submitter reads the entry index rather than a generic
+// invalid_request (hk 5098).
+func hubCheckoutSparseRefusal(checkout *fleet.HubCheckout) string {
+	if checkout == nil {
+		return ""
+	}
+	return spawnargs.SparseSpecRefusal(checkout.Mode, checkout.Exclude, checkout.Include)
 }
 
 // decodeSpawnRequest authenticates and validates a spawn request for the submit
@@ -62,6 +76,9 @@ func (h *HubServer) decodeSpawnRequest(w http.ResponseWriter, r *http.Request) (
 	if request.LadderStep != nil {
 		err = errors.New("ladder step metadata is hub-internal")
 	}
+	// A sparse list's refusal names the bad entry index (hk 5098); the
+	// generic invalid_request would hide which one.
+	sparseReason := hubCheckoutSparseRefusal(request.Repository.Checkout)
 	if err == nil {
 		raw, _ := json.Marshal(request.Repository.Checkout)
 		var spec hubSpawnCheckout
@@ -70,7 +87,12 @@ func (h *HubServer) decodeSpawnRequest(w http.ResponseWriter, r *http.Request) (
 		}
 	}
 	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
-		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
+		refusal := map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"}
+		if sparseReason != "" {
+			refusal["reason"] = sparseReason
+			refusal["fix"] = "correct the named flag; the node would refuse this request"
+		}
+		writeJSON(w, 400, refusal)
 		return fleet.Submission{}, fleet.Spawn{}, false
 	}
 	// The node applies this same rule to the args it receives; refusing here
@@ -1349,6 +1371,10 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	if !record.capabilities[hubCapabilityConsultStamp] {
 		node.Args = withoutSpawnFlag(node.Args, fleet.ConsultStampArg)
 	}
+	// Likewise the sparse lists: only a node that advertises
+	// checkout_sparse_v1 reads exclude/include, and every other node gets the
+	// full checkout (hk 5098).
+	node.Checkout = sparseCheckoutForNode(node.Checkout, record.capabilities)
 	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1)}
 	h.spawnRecords[node.RequestID] = entry
 	h.mu.Unlock()
@@ -1498,13 +1524,13 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 			if err != nil {
 				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 			}
-			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result)}, nil
+			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), CheckoutMode: result.CheckoutMode}, nil
 		}
 		if handled, err := t.nextHostAfterRefusal(ctx, node, result); handled {
 			if err != nil {
 				return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 			}
-			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), NextHost: true}, nil
+			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), NextHost: true, CheckoutMode: result.CheckoutMode}, nil
 		}
 	}
 	changed, err := h.completeSpawn(h.closeCtx, t.task, outcome)
@@ -1517,7 +1543,7 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 		// replayed completion must not count twice.
 		h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
 	}
-	return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
+	return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error, CheckoutMode: result.CheckoutMode}, nil
 }
 
 func spawnNodeOutcome(task hubSpawnTask, node hubSpawnRequest, result hubSpawnResult) hubSpawnOutcome {
