@@ -288,6 +288,24 @@ func TestQuotaExhaustionOmitsExcludedAccountMissingSeatCapability(t *testing.T) 
 	}
 }
 
+func TestQuotaExhaustionOmitsExcludedAccountWithUnusableOtherHolder(t *testing.T) {
+	a, _, _, src := accountConsultFixture(t)
+	a.Config.Hosts["host-c"] = map[string]any{}
+	a.Config.HostOrder = append(a.Config.HostOrder, "host-c")
+	src.hosts = append(src.hosts, HostView{Name: "host-c", Connected: false})
+	src.presence = append(src.presence, PresenceRecord{HostID: "host-c", AccountKey: testClaudeA, LastSeen: a.Now()})
+	src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(30, 8))}
+	src.accounts[testClaudeB] = SharedAccount{Key: testClaudeB, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(120, 8))}
+	src.accounts[testCodexA] = SharedAccount{Key: testCodexA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: ptrPool(riskPool(120, 8))}
+	if err := a.planCmd(context.Background(), []string{"--role", "consult", "--grade", "A", "--t", "T1", "--exclude-host", "host-a"}); exitCode(err) != exitRoleWait {
+		t.Fatalf("plan exhaustion: got %v, want exit %d", err, exitRoleWait)
+	}
+	text := a.Out.(*bytes.Buffer).String()
+	if strings.Contains(text, "account "+testClaudeA+" only on excluded/not-accepting hosts") {
+		t.Fatalf("plan named an account also held by an asleep, non-wakeable host:\n%s", text)
+	}
+}
+
 func TestLaunchKeepsSelectedAccountAndJSONReceipt(t *testing.T) {
 	a, s, q, src := accountConsultFixture(t)
 	a.Config.Local["spawn"] = true
