@@ -113,6 +113,10 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if h.inbox == nil {
+		if caller.kind == hubCallerNode && caller.id != h.prStatusHost {
+			writeHubAccessDenied(w, hubAccessForbidden)
+			return
+		}
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "durable_store_required", "fix": "configure the hub inbox database before accepting consults"})
 		return
 	}
