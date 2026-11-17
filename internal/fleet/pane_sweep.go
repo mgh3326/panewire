@@ -1158,6 +1158,10 @@ func (s *TaskPaneSweeper) reapSweptPane(ctx context.Context, a *App, latest, j J
 	key := paneSweepKey(j)
 	delete(s.idleSince, key)
 	delete(s.endedSince, key)
+	if a.hubCloseOwnsEnd(ctx, latest.ID) {
+		a.warn("job %s: a hub close owns its end; its record and lease are left to the node's settlement", latest.ID)
+		return
+	}
 	a.markSweptJob(ctx, latest, end.state)
 	if haveSession {
 		a.writeJobSession(ctx, latest.ID, session)

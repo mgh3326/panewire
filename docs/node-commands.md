@@ -250,22 +250,29 @@ node's acting lock, and a visible journal state is fsynced before it is reported
 or acted on. `journal_failed` answers a journal read, write or sync that failed;
 the operation then stays as last recorded.
 
-**Enabling close operations** (hk 4632). A node advertises `close_ops_v1`
-only while `fleet.CloseOpsReady` holds, and a hub issues these ops only to a
-node whose current registration advertises it. `CloseOpsReady` has two parts:
+**Enabling close operations** (hk 4632). `close_ops_v1` is **off by
+default**. A node advertises it, and admits a new close, only while
+`fleet.CloseOpsReady` holds. A hub issues these ops only to a node whose
+current registration advertises it. `CloseOpsReady` has three parts:
 
 - **The migration barrier.** `panewire node close-ops enable
   [--inbox-root DIR]` is run once on the node host after its binary is
   upgraded. It records `jobs/.close-ops-enabled` only when no older watcher
   runs on the host (rc 5 otherwise, and nothing is recorded).
+- **The advertise step.** `panewire node close-ops advertise
+  [--inbox-root DIR]` records `jobs/.close-ops-advertise`, and refuses
+  (rc 5) without the barrier. It is the explicit rollout step that turns
+  `close_ops_v1` on. hk 4745's rollout runs it once the hub issuer is
+  deployed; this PR's rollout does not.
 - **A fresh process scan** (`fleet.HubCloseWatchersReady`): every live
   `_watch <job>` process of a job under the jobs root (whatever the
   executable is named) must be the job's aware watcher.
   - An aware watcher is one that holds
-    `jobs/<job>/.panewire-watch-hubclose-v2.lock` for its whole life.
+    `jobs/<job>/.panewire-watch-hubclose-v3.lock` for its whole life, and
+    lends its watch lock (below).
   - A watcher of an older binary holds only `.panewire-watch.lock`, or that
-    and the v1 lock `.panewire-watch-hubclose.lock`. A v1 watcher lacks the
-    stale-decision check below.
+    and the v1 or v2 lock. A v1 watcher lacks the stale-decision check below;
+    a v2 one cannot lend its lock.
   - Kernel locks live exactly as long as their process, so a stale file or
     a reused pid certifies nothing.
   - Any listing or lock error fails closed.
@@ -273,17 +280,23 @@ node whose current registration advertises it. `CloseOpsReady` has two parts:
 Launchers (`spawn`, `work`, `restore`, `_spawn-stdin`, a daemon re-arm, a
 renamed or retained binary) need no check of their own. **The node fences
 the job**: while any hub-close intent of a job is open, the node holds that
-job's `.panewire-watch.lock`, unless an aware watcher holds it. Every watcher
-of every binary takes that lock first and exits when it is held.
+job's `.panewire-watch.lock`. Every watcher of every binary takes that lock
+first and exits when it is held.
+
+- With no watcher running, the node takes the lock itself.
+- With an aware watcher, the node borrows the watcher's own locked open file
+  description over the watcher's unix socket (`jobs/<job>/.panewire-watch.sock`,
+  or `/tmp/panewire-watch-<hash>.sock` when that path is too long), using
+  SCM_RIGHTS. flock stays held until every reference closes, so the watcher
+  exiting or being killed mid-close cannot free the lock.
 
 - The fence is reconciled under the job's end lock, which admission also
   holds. So a release can never drop the fence of a close admitted
   meanwhile, and a fence taken for an older, still-open intent survives a
   newer one that is cancelled.
 - Reconciliation runs at admission, before and after every settlement
-  step, and every 2 s for jobs with an open intent or a held fence. So the
-  fence replaces an aware watcher that exits mid-close, and is taken again
-  after a node restart.
+  step, and every 2 s for jobs with an open intent or a held fence. After a
+  node restart, the fence is taken or borrowed again before settling.
 - A settlement step runs only while the fence or an aware watcher holds the
   lock. It waits while a watcher that ignores hub closes holds it.
 - When no intent is open any more (settled, cancelled, or made stale by a
@@ -304,10 +317,25 @@ still resumes and settles after readiness is withdrawn. Per close, the node
 also refuses `watcher_incompatible` when the job's watch lock is held by
 anything but an aware watcher. Both mean "not closed, retry later".
 
-Rollout order: deploy the hub of this build and upgrade every node's binary,
-then run `panewire node close-ops enable` on each node. A hub of an older
-build ignores the capability, and only a hub with an issuer (hk 4745) acts
-on it.
+**Precondition: no old-binary panewire after the barrier.** Once a host's
+barrier is recorded, no panewire binary older than this build may run there:
+no watcher, launcher (`spawn`, `work`, `restore`, `_spawn-stdin`) or daemon.
+The exclusion above covers watchers that are already running or that start
+while a close is fenced. It cannot cover an old binary that starts while no
+process holds the watch lock: during a node restart (until the restart pass
+takes or borrows the fence again), or when every holder died while the node
+was down.
+**A rollback must first withdraw close ops**:
+
+1. Remove `jobs/.close-ops-advertise` and `jobs/.close-ops-enabled`. The node
+   stops advertising and admitting new closes within 30 s.
+2. Drain the open closes: wait until `fleet.PendingHubCloseJobs` is empty
+   (the node's settlement pass logs each one).
+3. Only then replace the binary.
+
+Rollout order: deploy the hub of this build and upgrade every node's
+binary, then run `panewire node close-ops enable` on each node. Advertising
+(`panewire node close-ops advertise`) waits for hk 4745's hub issuer.
 
 #### Hub close protocol
 

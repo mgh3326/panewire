@@ -3,6 +3,7 @@ package panewire
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -140,6 +141,9 @@ func TestNodeCloseOpsEnableCLI_t4632(t *testing.T) {
 	}
 	clean := func(context.Context) ([]byte, error) { return []byte("  1 /sbin/init\n"), nil }
 	var stdout, stderr bytes.Buffer
+	if rc := runNodeCloseOpsCLI([]string{"advertise", "--inbox-root", inbox}, &stdout, &stderr, old); rc != ExitConditionInvalid {
+		t.Fatalf("advertise before the barrier: rc=%d, want %d", rc, ExitConditionInvalid)
+	}
 	if rc := runNodeCloseOpsCLI([]string{"enable", "--inbox-root", inbox}, &stdout, &stderr, old); rc != ExitConditionInvalid {
 		t.Fatalf("rc=%d stderr=%q, want %d", rc, stderr.String(), ExitConditionInvalid)
 	}
@@ -149,11 +153,17 @@ func TestNodeCloseOpsEnableCLI_t4632(t *testing.T) {
 	if rc := runNodeCloseOpsCLI([]string{"enable", "--inbox-root", inbox}, &stdout, &stderr, clean); rc != ExitOK {
 		t.Fatalf("rc=%d stderr=%q, want 0", rc, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "close ops enabled") {
+	if !strings.Contains(stdout.String(), "barrier recorded") {
 		t.Fatalf("stdout %q", stdout.String())
 	}
+	if fleet.CloseOpsReady(t.Context(), jobs, clean) {
+		t.Fatal("ready after the barrier alone: close_ops_v1 is off by default")
+	}
+	if rc := runNodeCloseOpsCLI([]string{"advertise", "--inbox-root", inbox}, &stdout, &stderr, clean); rc != ExitOK {
+		t.Fatalf("advertise rc=%d stderr=%q", rc, stderr.String())
+	}
 	if !fleet.CloseOpsReady(t.Context(), jobs, clean) {
-		t.Fatal("not ready after the barrier")
+		t.Fatal("not ready after the barrier and the advertise step")
 	}
 	if fleet.CloseOpsReady(t.Context(), jobs, old) {
 		t.Fatal("ready while an older watcher runs after the barrier")
@@ -350,5 +360,22 @@ func TestAcceptedCloseResumesWithoutReadiness_t4632(t *testing.T) {
 	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
 	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-2")); code != "close_ops_not_ready" && code != "close_in_progress" {
 		t.Fatalf("a new close while unready: code=%q", code)
+	}
+}
+
+// #662 review round 3: an intent write that fails keeps the fence while the
+// ledger shows any intent open (an older one, or this one made visible
+// before its sync failed), and releases it only when none is.
+func TestFailedIntentWriteKeepsTheFenceWhileAnIntentIsOpen_t4632(t *testing.T) {
+	for _, open := range []bool{true, false} {
+		client, ledger, dir, _ := fenceNode(t)
+		ledger.open = open
+		ledger.record = func(string, fleet.HubCloseIntent) error { return errors.New("sync failed") }
+		if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1")); code != "journal_failed" {
+			t.Fatalf("code=%q, want journal_failed", code)
+		}
+		if held := watchLockHeld(t, dir); held != open {
+			t.Fatalf("intent open=%v: fence held=%v", open, held)
+		}
 	}
 }

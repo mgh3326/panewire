@@ -202,6 +202,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// (FenceWatchers): the node settles that close itself.
 		return nil
 	}
+	// The lending socket is up before the capability lock, so a watcher the
+	// node probes as aware can always lend its watch lock.
+	stopLending, e := serveWatchLock(filepath.Join(a.Jobs, id), lock)
+	if e != nil {
+		return e
+	}
+	defer stopLending()
 	// Held for the watcher's life: it tells the node this watcher defers to
 	// hub-close intents (watch_hub_close.go ProbeHubCloseWatcher).
 	hubCloseLock, e := secureOpen(filepath.Join(a.Jobs, id, hubCloseWatchLock), true, a.warn)
@@ -241,6 +248,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	var creditAttempts int
 	quotaRetry := false
 	var lastCredit time.Time
+	var watchedAttempt string
 	for {
 		j, e := a.job(id)
 		if e != nil {
@@ -280,17 +288,25 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 			return a.event(ctx, id, "job.credit_published", map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)})
 		}
-		// A hand-off belongs to the attempt it was read on: a re-prompt,
-		// reclaim or respawn since then ends it (#662 review).
-		if handOff.active && handOff.attempt != endMark(j)[0] {
-			handOff = quotaHandOff{}
+		// Observation state belongs to the attempt it was read on: a
+		// re-prompt, reclaim or respawn since then ends a hand-off and starts
+		// a fresh completion deadline (#662 review).
+		if mark := endMark(j)[0]; mark != watchedAttempt {
+			if watchedAttempt != "" {
+				handOff = quotaHandOff{}
+				deadline, latePoll = a.Now().Add(timeout), false
+				pending, size, modified = false, -1, time.Time{}
+				missing, seen, wasWaiting = 0, false, false
+				screenRead = quotaStopWatch{}
+			}
+			watchedAttempt = mark
 		}
 		// The job.lost announced for a quota stop (by this watcher for a
 		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.
 		if !handOff.active {
 			if stop, ok := announcedQuotaStop(j); ok && !j.Reaped {
-				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true, attempt: endMark(j)[0]}
+				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
 			}
 		}
 		credit, creditPending := pendingCreditRejection(j)
@@ -409,7 +425,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						if seq == nil {
 							seq, _ = creditRejectionStateChangeSeq(j, credit)
 						}
-						handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: seq, active: true, attempt: endMark(j)[0]}
+						handOff = quotaHandOff{stop: credit, until: a.Now().Add(a.QuotaHandOffGrace), seq: seq, active: true}
 					}
 				}
 			}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -242,13 +243,60 @@ func TestSettlementAfterALegacyTypeOnlyRevocation_t4632(t *testing.T) {
 	wantHubCloseFinished(t, a, h)
 }
 
-// A hand-off read on one attempt never ends a later one (#662 review): the
-// stop is dropped once the attempt mark changes.
-func TestHandOffBelongsToItsAttempt_t4632(t *testing.T) {
-	j := Job{Events: []Event{{Kind: "job.spawned", name: "00001-job.spawned.json"}}}
-	h := quotaHandOff{active: true, attempt: endMark(j)[0]}
-	j.Events = append(j.Events, Event{Kind: "job.reprompted", name: "00002-job.reprompted.json"})
-	if h.attempt == endMark(j)[0] {
-		t.Fatal("attempt mark did not change on a re-prompt")
+// #662 review round 3: a newer close B left registered must not mask an
+// older close A that already closed the pane. After a local end, settlement
+// drives every open intent and finishes the job with A's planned record.
+func TestSettlementReachesAnOlderClosedIntent_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	older := liveIntent(t, a)
+	recordHubClose(t, a, older)
+	writeJobCloseOp(t, a, CloseOp{RequestID: older.RequestID, Attempt: older.Attempt, State: CloseOpClosed})
+	newer := older
+	newer.RequestID, newer.EndReason = "close-2", "quota_stop pool=other replaced_by=j3"
+	recordHubClose(t, a, newer)
+	writeJobCloseOp(t, a, CloseOp{RequestID: newer.RequestID, Attempt: newer.Attempt, State: CloseOpRegistered})
+	if e := a.event(context.Background(), "j", "job.completed", map[string]any{}); e != nil {
+		t.Fatal(e)
 	}
+	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
+		t.Fatalf("settle %v, %v; want settled through the older close", state, e)
+	}
+	wantHubCloseFinished(t, a, h)
+	if pending, _ := PendingHubCloseJobs(a.Jobs); len(pending) != 0 {
+		t.Fatalf("still pending: %v", pending)
+	}
+}
+
+// #662 consult (L8I4): `reap --apply` leaves a job whose hub close is still
+// open to settlement: no generic hk lost lands first (settlement would keep
+// it and lose the planned reason), and no job.reaped is recorded.
+func TestReapLeavesAnOpenHubCloseToSettlement_t4632(t *testing.T) {
+	a, h := hubCloseFixture(t)
+	in := liveIntent(t, a)
+	recordHubClose(t, a, in)
+	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
+	if e := a.event(context.Background(), "j", "job.revoked", map[string]any{"reason": "owner"}); e != nil {
+		t.Fatal(e)
+	}
+	var out strings.Builder
+	a.Out = &out
+	now := a.Now
+	a.Now = func() time.Time { return now().Add(time.Hour) }
+	if e := a.hygiene(context.Background(), "reap", []string{"--job", "j", "--grace", "1m", "--apply"}); e != nil {
+		t.Logf("reap: %v", e)
+	}
+	a.Now = now
+	if !strings.Contains(out.String(), "action=reap") {
+		t.Fatalf("reap did not select the job: %s", out.String())
+	}
+	if slices.Contains(eventKinds(t, a), "job.reaped") {
+		t.Fatal("reaped a job whose hub close is open")
+	}
+	if st := str(h.record(t, "j"), "state"); st == "lost" {
+		t.Fatal("reap wrote a generic lost record before settlement")
+	}
+	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
+		t.Fatalf("settle %v, %v", state, e)
+	}
+	wantHubCloseFinished(t, a, h)
 }

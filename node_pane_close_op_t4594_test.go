@@ -936,3 +936,16 @@ func TestCloseOpEndLockWaitIsBounded_t4652(t *testing.T) {
 func (f *fakeHubClose) FenceState(string) (bool, bool, error) {
 	return f.state == fleet.HubClosePending && len(f.intents) > 0, true, nil
 }
+
+// Borrow lends the fake's job a fence of the node's own (no watcher process
+// runs in these fixtures).
+func (f *fakeHubClose) Borrow(_ context.Context, dir string) (func(), error) {
+	release, ok, err := fleet.FenceWatchers(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return func() {}, nil
+	}
+	return release, nil
+}

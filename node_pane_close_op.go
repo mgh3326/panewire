@@ -436,9 +436,11 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 	// an intent with no operation, which the watcher defers to until the
 	// hub's repeat registers it or its release cancels it.
 	if client.hubCloseLedger().RecordIntent(ctx, args.Job, fleet.HubCloseIntent{RequestID: args.RequestID, Attempt: attempt, Pane: args.PaneID, Label: args.Name, EndReason: args.EndReason}) != nil {
-		if fenced {
-			// Only a fence this admission took: one held for an older open
-			// intent stays.
+		// The write may have failed after the intent became visible (its
+		// directory sync), and an older intent may be open: under the end
+		// lock admission still holds, the fence is released only when the
+		// ledger shows none open (#662 review round 3).
+		if open, _, err := client.hubCloseLedger().FenceState(args.Job); fenced && err == nil && !open {
 			client.releaseWatcherFence(args.Job)
 		}
 		return op, nil, "", "journal_failed"
@@ -461,6 +463,9 @@ type nodeHubCloseLedger interface {
 	Watcher(jobDir string) (fleet.HubCloseWatcher, error)
 	// Fence takes the job's watch lock for the node (fleet.FenceWatchers).
 	Fence(jobDir string) (release func(), ok bool, err error)
+	// Borrow receives an aware watcher's own locked watch-lock description
+	// (fleet.BorrowWatchLock), which keeps the lock held after it exits.
+	Borrow(ctx context.Context, jobDir string) (release func(), err error)
 	// FenceState reads whether any hub-close intent of the job is open and
 	// whether its attempt is live (fleet.HubCloseFenceState). The caller
 	// holds the job's end lock.
@@ -493,6 +498,10 @@ func (l nodeFleetHubClose) CloseOpsReady(ctx context.Context) bool {
 
 func (l nodeFleetHubClose) Fence(jobDir string) (func(), bool, error) {
 	return fleet.FenceWatchers(jobDir)
+}
+
+func (l nodeFleetHubClose) Borrow(ctx context.Context, jobDir string) (func(), error) {
+	return fleet.BorrowWatchLock(ctx, jobDir)
 }
 
 func (l nodeFleetHubClose) FenceState(job string) (bool, bool, error) {
@@ -562,12 +571,28 @@ func (client *HubClient) admitHubCloseWatcher(ctx context.Context, job, jobDir s
 	case watcher == fleet.HubCloseWatcherIncompatible:
 		return "watcher_incompatible", false
 	case watcher == fleet.HubCloseWatcherAware:
-		return "", false
+		// The node holds the watcher's own lock description for the close,
+		// so the watcher exiting cannot free the lock (#662 consult NCxM).
+		if !client.borrowWatcherFence(ctx, job, jobDir) {
+			return "watcher_incompatible", false
+		}
+		return "", true
 	}
 	if code := client.takeWatcherFence(job, jobDir); code != "" {
 		return code, false
 	}
 	return "", true
+}
+
+// borrowWatcherFence keeps an aware watcher's lent watch lock as the job's
+// fence; false when the watcher did not lend it (retry later).
+func (client *HubClient) borrowWatcherFence(ctx context.Context, job, jobDir string) bool {
+	release, err := client.hubCloseLedger().Borrow(ctx, jobDir)
+	if err != nil {
+		return false
+	}
+	client.storeWatcherFence(job, release)
+	return true
 }
 
 // takeWatcherFence takes and keeps the job's watch lock for the node; a
@@ -580,6 +605,11 @@ func (client *HubClient) takeWatcherFence(job, jobDir string) string {
 	case !ok:
 		return "watcher_incompatible"
 	}
+	client.storeWatcherFence(job, release)
+	return ""
+}
+
+func (client *HubClient) storeWatcherFence(job string, release func()) {
 	client.closeFenceMu.Lock()
 	defer client.closeFenceMu.Unlock()
 	if client.closeFences == nil {
@@ -589,7 +619,6 @@ func (client *HubClient) takeWatcherFence(job, jobDir string) string {
 		old()
 	}
 	client.closeFences[job] = release
-	return ""
 }
 
 func (client *HubClient) holdsWatcherFence(job string) bool {
@@ -626,8 +655,9 @@ func (client *HubClient) settleHubClose(ctx context.Context, job string) {
 // reconcileWatcherFence makes the node's fence on the job's watch lock match
 // its ledger, under the job's end lock, which admission also holds: so a
 // release can never drop the fence of a close admitted meanwhile. While any
-// intent is open the fence is held unless an aware watcher holds the lock
-// (taken again when that watcher exits, or after a node restart). Once none
+// intent is open the node holds the lock: its own when no watcher runs, or
+// the aware watcher's lent description (so that watcher exiting cannot free
+// it); after a node restart it is taken or borrowed again before settling. Once none
 // is open it is released, and a live attempt gets its watcher re-armed: a
 // watcher that met the fence exited. safe reports that no watcher which
 // ignores hub closes can run for the job now.
@@ -664,7 +694,7 @@ func (client *HubClient) reconcileWatcherFence(ctx context.Context, job string) 
 	case err != nil:
 		return false
 	case watcher == fleet.HubCloseWatcherAware:
-		return true
+		return client.borrowWatcherFence(ctx, job, dir)
 	case watcher == fleet.HubCloseWatcherNone:
 		return client.takeWatcherFence(job, dir) == ""
 	}

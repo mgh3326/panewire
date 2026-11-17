@@ -87,7 +87,9 @@ func (a *App) eventSynced(ctx context.Context, job, kind string, payload map[str
 //     which it re-checks against a freshly read ledger under the lock. So no
 //     watcher end can interleave with an intent being recorded.
 //   - hubCloseWatchLock is held for its whole life by a watcher that defers to
-//     hub-close intents and drops decisions a settled close made stale. A
+//     hub-close intents, drops decisions a settled close made stale and lends
+//     its watch lock to the node (watch_lock_handoff.go). A v2 watcher (no
+//     lending) is incompatible too. A
 //     watcher of an older binary holds only the watch lock, or the watch lock
 //     and the v1 lock (hubCloseWatchLockV1, which lacks the stale-decision
 //     check); the node refuses to open a hub close while either runs.
@@ -97,8 +99,11 @@ func (a *App) eventSynced(ctx context.Context, job, kind string, payload map[str
 const (
 	jobEndLock          = ".panewire-end.lock"
 	jobWatchLock        = ".panewire-watch.lock"
-	hubCloseWatchLock   = ".panewire-watch-hubclose-v2.lock"
+	hubCloseWatchLock   = ".panewire-watch-hubclose-v3.lock"
 	hubCloseWatchLockV1 = ".panewire-watch-hubclose.lock"
+	// hubCloseWatchLockV2 is held by a watcher that defers but cannot lend
+	// its watch lock (BorrowWatchLock): incompatible.
+	hubCloseWatchLockV2 = ".panewire-watch-hubclose-v2.lock"
 )
 
 // FenceWatchers takes the job's watch lock for the node, without blocking,
@@ -184,8 +189,10 @@ func ProbeHubCloseWatcher(jobDir string) (HubCloseWatcher, error) {
 	if running, e := held(jobWatchLock); e != nil || running {
 		return HubCloseWatcherIncompatible, e
 	}
-	if v1, e := held(hubCloseWatchLockV1); e != nil || v1 {
-		return HubCloseWatcherIncompatible, e
+	for _, older := range []string{hubCloseWatchLockV1, hubCloseWatchLockV2} {
+		if held, e := held(older); e != nil || held {
+			return HubCloseWatcherIncompatible, e
+		}
 	}
 	return HubCloseWatcherNone, nil
 }
@@ -285,7 +292,16 @@ func pendingHubCloseIntent(j Job) (HubCloseIntent, bool) {
 // hub's ownership epoch) followed the intent: the hub gave the job to another
 // node, so this node must not write the shared hk record (#662 review).
 func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended, reassigned bool) {
-	var intents []HubCloseIntent
+	all, ended, reassigned := openHubCloseIntents(j)
+	if len(all) == 0 {
+		return HubCloseIntent{}, false, false, false
+	}
+	return all[len(all)-1], true, ended, reassigned
+}
+
+// openHubCloseIntents is every open intent of the job's current attempt,
+// oldest first (hubCloseIntentState folds the same ledger).
+func openHubCloseIntents(j Job) (intents []HubCloseIntent, ended, reassigned bool) {
 	var attempt, pane, label string
 	// The protocol is folded in ledger sequence (file-name) order, as the
 	// node's readNodeJobLedgerEvents folds it: j.Events is ordered by
@@ -331,9 +347,9 @@ func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended, reassigned bool
 		}
 	}
 	if len(intents) == 0 {
-		return HubCloseIntent{}, false, false, false
+		return nil, false, false
 	}
-	return intents[len(intents)-1], true, ended, reassigned
+	return intents, ended, reassigned
 }
 
 // hubCloseSettledLoss reports whether ev is the final job.lost the node's
@@ -494,6 +510,32 @@ func HubCloseFenceState(jobs, job string) (open, live bool, err error) {
 	return open, !j.Terminal && !j.Reaped && !hubCloseSettledNow(j), nil
 }
 
+// hubCloseOwnsEnd reports whether a hub close still owns the job's end: an
+// intent is open in its ledger, read in sequence order under the job's end
+// lock. A generic end (reap, pane sweep) then leaves the hk record, the lease
+// and job.reaped to settlement, which writes the planned record (#662 review:
+// a generic lost written first would be kept and lose the planned reason).
+// An end lock it cannot take in time counts as owned: the reaper retries.
+func (a *App) hubCloseOwnsEnd(ctx context.Context, id string) bool {
+	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	unlock, err := LockJobEndContext(lockCtx, filepath.Join(a.Jobs, id))
+	if err != nil {
+		return true
+	}
+	defer unlock()
+	evs, err := a.events(id)
+	if err != nil {
+		return false
+	}
+	j, err := foldJob(id, ledgerOrder(evs))
+	if err != nil {
+		return false
+	}
+	_, open := pendingHubCloseIntent(j)
+	return open
+}
+
 // PendingHubCloseJobs lists the jobs under the jobs root whose ledger holds an
 // open hub-close intent: the node's startup and retry pass settles them.
 func PendingHubCloseJobs(jobs string) ([]string, error) {
@@ -597,10 +639,32 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 	// A reaped job's open intent is still settled (#662 review): a reaper
 	// may have run while hk was unavailable, and only settlement writes the
 	// planned record.
-	in, open, ended, reassigned := hubCloseIntentState(j)
-	if !open {
+	// Every open intent is driven, newest first (#662 review): a newer close
+	// left registered must not mask an older one that already closed the
+	// pane. The first settled one finishes the job (its final job.lost
+	// closes every intent); otherwise any pending one keeps the job pending.
+	intents, ended, reassigned := openHubCloseIntents(j)
+	if len(intents) == 0 {
 		return HubCloseNone, nil
 	}
+	result := HubCloseCancelled
+	for i := len(intents) - 1; i >= 0; i-- {
+		state, err := a.settleHubCloseIntent(ctx, j, intents[i], ended, reassigned, listed, needHK)
+		switch {
+		case err != nil:
+			return HubClosePending, err
+		case state == HubCloseSettled:
+			return state, nil
+		case state == HubClosePending:
+			result = HubClosePending
+		}
+	}
+	return result, nil
+}
+
+// settleHubCloseIntent drives one open intent one step; the caller holds the
+// job's end lock and folded j under it.
+func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent, ended, reassigned bool, listed func(ctx context.Context, session, pane string) (bool, error), needHK func() error) (HubCloseState, error) {
 	cancel := func(reason string) (HubCloseState, error) {
 		return HubCloseCancelled, a.eventSynced(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": reason})
 	}

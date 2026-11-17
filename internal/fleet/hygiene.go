@@ -150,6 +150,10 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		if reason == "stale-pane-absent" && present {
 			continue
 		}
+		if a.hubCloseOwnsEnd(ctx, j.ID) {
+			a.warn("job %s not reaped: a hub close owns its end; the node settles it", j.ID)
+			continue
+		}
 		a.recordJobUsage(ctx, latest, true)
 		a.markEndedJobLost(ctx, latest)
 		if present {

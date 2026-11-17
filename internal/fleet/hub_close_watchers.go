@@ -84,9 +84,31 @@ func HubCloseWatchersReady(ctx context.Context, jobs string, list ProcessLister)
 	return true, nil
 }
 
-// closeOpsEnabledFile, under the jobs root, records that the migration
-// barrier (EnableCloseOps) passed on this host.
-const closeOpsEnabledFile = ".close-ops-enabled"
+const (
+	// closeOpsEnabledFile, under the jobs root, records that the migration
+	// barrier (EnableCloseOps) passed on this host.
+	closeOpsEnabledFile = ".close-ops-enabled"
+	// closeOpsAdvertiseFile, under the jobs root, is the explicit rollout
+	// step (AdvertiseCloseOps) that turns close_ops_v1 on. It is off by
+	// default: hk 4745's rollout runs it once the hub issuer is deployed.
+	closeOpsAdvertiseFile = ".close-ops-advertise"
+)
+
+// ErrCloseOpsNoBarrier is AdvertiseCloseOps refusing on a host whose
+// barrier was never recorded.
+var ErrCloseOpsNoBarrier = errors.New("close ops not advertised: run `panewire node close-ops enable` first")
+
+// AdvertiseCloseOps is the rollout step that turns close_ops_v1 on for the
+// node (hk 4632, off by default): it requires the barrier record, and
+// records durably under the jobs root that the node may advertise. Removing
+// both files withdraws it (docs/node-commands.md, "Enabling close
+// operations").
+func AdvertiseCloseOps(jobs string, now time.Time) error {
+	if info, err := os.Stat(filepath.Join(jobs, closeOpsEnabledFile)); err != nil || !info.Mode().IsRegular() {
+		return ErrCloseOpsNoBarrier
+	}
+	return durable.ReplaceFileAtomically(filepath.Join(jobs, closeOpsAdvertiseFile), ".tmp-close-ops-*", []byte("advertised_at="+now.UTC().Format(time.RFC3339)+"\n"), 0o600)
+}
 
 // ErrCloseOpsNotReady is EnableCloseOps refusing: an older panewire watcher
 // still runs on the host, or the process listing failed.
@@ -111,11 +133,14 @@ func EnableCloseOps(ctx context.Context, jobs string, list ProcessLister, now ti
 	return durable.ReplaceFileAtomically(filepath.Join(jobs, closeOpsEnabledFile), ".tmp-close-ops-*", []byte("enabled_at="+now.UTC().Format(time.RFC3339)+"\n"), 0o600)
 }
 
-// CloseOpsReady reports whether the node may advertise close_ops_v1 now: the
-// barrier was recorded and every live watcher is aware.
+// CloseOpsReady reports whether the node may advertise close_ops_v1 and
+// admit new closes now: the barrier and the advertise step were recorded,
+// and every live watcher is aware.
 func CloseOpsReady(ctx context.Context, jobs string, list ProcessLister) bool {
-	if info, err := os.Stat(filepath.Join(jobs, closeOpsEnabledFile)); err != nil || !info.Mode().IsRegular() {
-		return false
+	for _, name := range []string{closeOpsEnabledFile, closeOpsAdvertiseFile} {
+		if info, err := os.Stat(filepath.Join(jobs, name)); err != nil || !info.Mode().IsRegular() {
+			return false
+		}
 	}
 	ready, err := HubCloseWatchersReady(ctx, jobs, list)
 	return err == nil && ready

@@ -121,6 +121,13 @@ func TestHubCloseWatchersReadyFailsClosedOnAScanError_t4652(t *testing.T) {
 	}
 }
 
+// Advertising refuses without the barrier record.
+func TestAdvertiseNeedsTheBarrier_t4632(t *testing.T) {
+	if e := AdvertiseCloseOps(t.TempDir(), time.Now()); e != ErrCloseOpsNoBarrier {
+		t.Fatalf("advertise without the barrier: %v", e)
+	}
+}
+
 // The barrier is not ready without its record, even with no older process.
 func TestCloseOpsReadyNeedsTheBarrier_t4632(t *testing.T) {
 	jobs := t.TempDir()
@@ -131,7 +138,13 @@ func TestCloseOpsReadyNeedsTheBarrier_t4632(t *testing.T) {
 	if e := EnableCloseOps(context.Background(), jobs, listing("  9 /old/panewire _watch "+filepath.Base(t.TempDir())+"\n"), time.Now()); e != nil {
 		t.Fatalf("a watcher of another root blocked the barrier: %v", e)
 	}
+	if CloseOpsReady(context.Background(), jobs, clean) {
+		t.Fatal("ready after the barrier alone: advertising is off by default")
+	}
+	if e := AdvertiseCloseOps(jobs, time.Now()); e != nil {
+		t.Fatal(e)
+	}
 	if !CloseOpsReady(context.Background(), jobs, clean) {
-		t.Fatal("not ready after the barrier")
+		t.Fatal("not ready after the barrier and the advertise step")
 	}
 }
