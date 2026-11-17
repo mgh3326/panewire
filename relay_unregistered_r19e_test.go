@@ -172,7 +172,7 @@ func TestR19eCompletionBeforeAnyHeartbeatIsRelayed(t *testing.T) {
 	if record == nil || !record.Completed || record.AgentLabel != "agent-short" || record.Node != r19eWorkerNode {
 		t.Fatalf("late registration=%+v", record)
 	}
-	if _, ok := f.hub.reassignJob("job-short", r19eLaneNode); ok {
+	if _, err := f.hub.reassignJob("job-short", r19eLaneNode); err == nil {
 		t.Fatal("late-registered completion became a redispatch candidate")
 	}
 }

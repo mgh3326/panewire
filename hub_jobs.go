@@ -1,7 +1,10 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"maps"
 	"regexp"
 	"sort"
@@ -544,19 +547,34 @@ func (h *HubServer) consoleJobs(machine, lane string, includeCompleted bool) []h
 	return jobs
 }
 
-func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, bool) {
+func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, error) {
 	if !hubJobIDPattern.MatchString(jobID) || !machineIDPattern.MatchString(to) || to == hubOperatorMachineID {
-		return hubJobEventPayload{}, false
+		return hubJobEventPayload{}, errors.New("job reassignment rejected")
 	}
 	h.mu.Lock()
 	job := h.jobs[jobID]
 	if job == nil || !job.Orphaned || job.Completed || job.Node == to {
 		h.mu.Unlock()
-		return hubJobEventPayload{}, false
+		return hubJobEventPayload{}, errors.New("job reassignment rejected")
 	}
 	if _, knownNode := h.auth.Load().tokens[to]; !knownNode {
 		h.mu.Unlock()
-		return hubJobEventPayload{}, false
+		return hubJobEventPayload{}, errors.New("job reassignment rejected")
+	}
+	// The action is inserted under this same lock before any close is sent.
+	// Fail closed on a store error: a restart must not erase the fence.
+	if h.inbox == nil {
+		h.mu.Unlock()
+		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
+	}
+	id, err := h.inbox.store.pendingPoolAction(context.Background(), jobID)
+	if err != nil {
+		h.mu.Unlock()
+		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
+	}
+	if id != "" {
+		h.mu.Unlock()
+		return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action %s is pending", jobID, id)
 	}
 	from := job.Node
 	job.Epoch++
@@ -596,7 +614,7 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, bool) {
 	// The queue is also retried on reconnect and heartbeat; attempting now only
 	// reduces the time to a local stop marker for an already-online predecessor.
 	h.tryPendingRevocations(from)
-	return payload, true
+	return payload, nil
 }
 
 func (h *HubServer) enqueueRevocationLocked(machineID string, event hubJobRevokedEvent) {

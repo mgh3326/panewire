@@ -54,6 +54,7 @@ func (q *quotaJobs) Get(_ context.Context, id string) (map[string]any, error) {
 
 type quotaReplaceFixture struct {
 	hub         *HubServer
+	relay       *fakeHandoffkeep
 	node        *websocket.Conn
 	jobs        *quotaJobs
 	destination *hubAgent
@@ -102,7 +103,6 @@ func newQuotaReplaceFixtureWith(t *testing.T, role, job string, mutate func(*fle
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = fake
 	t.Cleanup(func() { hub.Close() })
 	hub.quotaReplacePoll = 5 * time.Millisecond
 	hub.quotaMarkBackoff = time.Millisecond
@@ -132,7 +132,7 @@ func newQuotaReplaceFixtureWith(t *testing.T, role, job string, mutate func(*fle
 	if err != nil || held.Status != "succeeded" {
 		t.Fatalf("holder %+v %v", held, err)
 	}
-	return &quotaReplaceFixture{hub: hub, node: node, jobs: jobs, destination: destination, holder: held, job: job, paneStatus: "idle", role: role, stopPool: "claude"}
+	return &quotaReplaceFixture{hub: hub, relay: fake, node: node, jobs: jobs, destination: destination, holder: held, job: job, paneStatus: "idle", role: role, stopPool: "claude"}
 }
 
 // quotaStopEvent is one relayed job.lost quota stop. Its reason names the

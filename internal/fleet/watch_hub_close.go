@@ -43,6 +43,7 @@ const (
 type HubCloseIntent struct {
 	RequestID string
 	Attempt   string
+	Epoch     uint64
 	Pane      string
 	Label     string
 	EndReason string
@@ -60,9 +61,13 @@ func RecordHubCloseIntent(ctx context.Context, jobs, job string, in HubCloseInte
 // watcher reads intents from the event files, so the close must not proceed on
 // an intent a crash could drop.
 func (a *App) recordHubCloseIntent(ctx context.Context, job string, in HubCloseIntent) error {
-	return a.eventSynced(ctx, job, hubCloseIntentKind, map[string]any{
+	payload := map[string]any{
 		"request_id": in.RequestID, "attempt": in.Attempt, "pane_id": in.Pane, "label": in.Label, "end_reason": in.EndReason,
-	})
+	}
+	if in.Epoch != 0 {
+		payload["epoch"] = strconv.FormatUint(in.Epoch, 10)
+	}
+	return a.eventSynced(ctx, job, hubCloseIntentKind, payload)
 }
 
 // eventSynced appends a hub-close protocol event and fsyncs the events
@@ -319,7 +324,8 @@ func openHubCloseIntents(j Job) (intents []HubCloseIntent, ended, reassigned boo
 		case "job.reprompted":
 			attempt, intents, ended, reassigned = ev.name, nil, false, false
 		case hubCloseIntentKind:
-			in := HubCloseIntent{RequestID: str(ev.Payload, "request_id"), Attempt: str(ev.Payload, "attempt"), Pane: str(ev.Payload, "pane_id"), Label: str(ev.Payload, "label"), EndReason: str(ev.Payload, "end_reason")}
+			epoch, _ := strconv.ParseUint(str(ev.Payload, "epoch"), 10, 64)
+			in := HubCloseIntent{RequestID: str(ev.Payload, "request_id"), Attempt: str(ev.Payload, "attempt"), Epoch: epoch, Pane: str(ev.Payload, "pane_id"), Label: str(ev.Payload, "label"), EndReason: str(ev.Payload, "end_reason")}
 			if ValidCloseOpID(in.RequestID) && in.EndReason != "" && in.Attempt == attempt && in.Pane == pane && in.Pane != "" && in.Label == label {
 				// A repeat of a request records its intent again.
 				intents = slices.DeleteFunc(intents, func(o HubCloseIntent) bool { return o.RequestID == in.RequestID })

@@ -66,13 +66,13 @@ func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane, agent stri
 // probeNodePanes reads machine's agents.list and finds the row with pane id
 // pane (when non-empty) or agent name agent (when non-empty).
 func (h *HubServer) probeNodePanes(ctx context.Context, machine, pane, agent string) heldProbe {
-	pending, id, _, sent := h.sendNodeCommand(machine, nodeCommandAgentsList, json.RawMessage("{}"))
+	ctx, cancel := context.WithTimeout(ctx, spawnHeldPaneProbeWait)
+	defer cancel()
+	pending, id, _, sent := h.sendNodeCommandWithContext(ctx, machine, nodeCommandAgentsList, json.RawMessage("{}"))
 	if !sent {
 		return heldProbe{reason: "node_unreachable"}
 	}
 	defer h.forgetNodeCommand(id)
-	ctx, cancel := context.WithTimeout(ctx, spawnHeldPaneProbeWait)
-	defer cancel()
 	select {
 	case reply := <-pending.done:
 		var list nodeAgentsListResult
@@ -190,7 +190,14 @@ func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app *fleet.App
 	// rests on the node's own ledger (a role, a quota stop, the result itself),
 	// so that end goes through the node even on the hub's own host.
 	if hubHost, known := app.NodeID(); known && hubHost == host && endReason != reviewerResultPosted {
-		return h.writeJobLost(ctx, app, holder.Job, endReason)
+		state, reason := h.writeJobLost(ctx, app, holder.Job, endReason)
+		if state == "lost" {
+			return true, "hk_lost"
+		}
+		if hkTerminalState(state) {
+			return true, state
+		}
+		return false, reason
 	}
 	if pane == "" && label == "" {
 		return false, "no_pane_or_label"
@@ -238,16 +245,19 @@ func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app *fleet.App
 // writeJobLost is the hub-local fallback. hk never rewrites a terminal record
 // (409), so a refused write re-reads it: a record now completed or lost
 // releases the role as the terminal path does; anything else keeps the hold.
-func (h *HubServer) writeJobLost(ctx context.Context, app *fleet.App, job, endReason string) (bool, string) {
+func (h *HubServer) writeJobLost(ctx context.Context, app *fleet.App, job, endReason string) (state, reason string) {
 	if err := app.MarkJobLostBecause(ctx, job, endReason); err != nil {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		record, exists, readErr := app.ExistingJob(readCtx, job)
 		cancel()
-		if state, _ := record["state"].(string); readErr != nil || !exists || state != "completed" && state != "lost" {
-			return false, "hk_write_failed"
+		state, _ = record["state"].(string)
+		if readErr != nil || !exists || !hkTerminalState(state) {
+			return "", "hk_write_failed"
 		}
+		reason, _ = record["end_reason"].(string)
+		return state, reason
 	}
-	return true, "hk_lost"
+	return "lost", endReason
 }
 
 // releaseFinishedSpawnRole frees the role held by a succeeded operation whose
@@ -260,6 +270,11 @@ func (h *HubServer) writeJobLost(ctx context.Context, app *fleet.App, job, endRe
 // pane with the holder's agent name under another id (a pane herdr moved across
 // workspaces) also keeps the hold.
 func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, roleKey string) (released bool, probe heldProbe) {
+	unlock, free := h.lockWithoutPoolAction(ctx, holder.Job)
+	if !free {
+		return false, heldProbe{reason: "pool_action_pending"}
+	}
+	defer unlock()
 	label := heldAgentName(holder, record)
 	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, label)
 	if probe.state != heldPaneAbsent {
@@ -433,7 +448,11 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 			}
 		case hkTerminalState(state):
 			trace.hk = state
-			released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, roleKey) == nil
+			unlock, free := h.lockWithoutPoolAction(ctx, priorJob)
+			if free {
+				released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, roleKey) == nil
+				unlock()
+			}
 			trace.branch = "release_write_failed"
 		case priorStatus == "failed":
 			trace.hk, trace.branch = state, "failed_pane_held"

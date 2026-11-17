@@ -16,12 +16,14 @@ import (
 func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	clock := time.Date(2026, 9, 2, 6, 0, 0, 0, time.UTC)
 	hub, err := NewHubServer(HubServerConfig{
-		Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken, "node-c": "node-c-token-123456"},
-		Now:    func() time.Time { return clock }, GracePeriod: 2 * time.Second, OrphanGrace: 2 * time.Second, KeepaliveInterval: time.Hour,
+		InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"),
+		Tokens:         map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken, "node-c": "node-c-token-123456"},
+		Now:            func() time.Time { return clock }, GracePeriod: 2 * time.Second, OrphanGrace: 2 * time.Second, KeepaliveInterval: time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = hub.Close() })
 	old := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", old, false)
 	first := HubActiveJob{JobID: "recover-me", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
@@ -67,9 +69,9 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	hub.disconnect("node-a", old)
 	clock = clock.Add(2 * time.Second)
 	r14Sweep(hub)
-	result, ok := hub.reassignJob(second.JobID, "node-b")
-	if !ok || result.From != "node-a" || result.To != "node-b" || result.Epoch != 2 {
-		t.Fatalf("bad reassignment: result=%+v ok=%t", result, ok)
+	result, err := hub.reassignJob(second.JobID, "node-b")
+	if err != nil || result.From != "node-a" || result.To != "node-b" || result.Epoch != 2 {
+		t.Fatalf("bad reassignment: result=%+v err=%v", result, err)
 	}
 	newOwner := &hubAgent{revocations: make(chan hubJobRevokedEvent, 4), assignments: make(chan hubJobAssignedEvent, 4)}
 	hub.connect("node-b", "r14", "fixture", newOwner, false)
@@ -126,7 +128,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	hub.disconnect("node-a", old)
 	clock = clock.Add(2 * time.Second)
 	r14Sweep(hub)
-	if _, ok := hub.reassignJob(chain.JobID, "node-b"); !ok {
+	if _, err := hub.reassignJob(chain.JobID, "node-b"); err != nil {
 		t.Fatal("A→B reassignment failed")
 	}
 	hub.connect("node-b", "r14", "fixture", newOwner, false)
@@ -134,8 +136,8 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	hub.disconnect("node-b", newOwner)
 	clock = clock.Add(2 * time.Second)
 	r14Sweep(hub)
-	if result, ok := hub.reassignJob(chain.JobID, "node-a"); !ok || result.Epoch != 3 {
-		t.Fatalf("B→A reassignment failed: %+v ok=%t", result, ok)
+	if result, err := hub.reassignJob(chain.JobID, "node-a"); err != nil || result.Epoch != 3 {
+		t.Fatalf("B→A reassignment failed: %+v err=%v", result, err)
 	}
 	if hub.observeJobCompletion("node-a", hubJobEventPayload{JobID: chain.JobID, Epoch: 1}, clock) {
 		t.Fatal("current owner accepted its old epoch completion")
@@ -155,8 +157,8 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	hub.disconnect("node-b", newOwner)
 	clock = clock.Add(2 * time.Second)
 	r14Sweep(hub)
-	if result, ok := hub.reassignJob(third.JobID, "node-c"); !ok || result.Epoch != 3 {
-		t.Fatalf("B→C reassignment failed: %+v ok=%t", result, ok)
+	if result, err := hub.reassignJob(third.JobID, "node-c"); err != nil || result.Epoch != 3 {
+		t.Fatalf("B→C reassignment failed: %+v err=%v", result, err)
 	}
 	if got := hub.jobs[third.JobID].FencedNodes; got["node-a"] != 3 || got["node-b"] != 3 {
 		t.Fatalf("redispatch history was not retained: %+v", got)
@@ -180,17 +182,18 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 
 func TestHubR14ReassignImmediatelyDeliversAssignedEpoch(t *testing.T) {
 	clock := time.Date(2026, 9, 4, 3, 10, 0, 0, time.UTC)
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken}, Now: func() time.Time { return clock }})
+	hub, err := NewHubServer(HubServerConfig{InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"), Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken}, Now: func() time.Time { return clock }})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = hub.Close() })
 	hub.jobs["immediate-assignment"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "immediate-assignment", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}, Node: "node-a", Orphaned: true, FencedNodes: make(map[string]uint64)}
 	recipient := &hubAgent{assignments: make(chan hubJobAssignedEvent, 1)}
 	hub.connect("node-b", "r14", "fixture", recipient, false)
 	// Mutant M5b: deleting reassignJob's immediate queueAssignment leaves this
 	// receive empty even though the heartbeat re-delivery path still exists.
-	if result, ok := hub.reassignJob("immediate-assignment", "node-b"); !ok || result.Epoch != 2 {
-		t.Fatalf("reassignment failed: result=%+v ok=%t", result, ok)
+	if result, err := hub.reassignJob("immediate-assignment", "node-b"); err != nil || result.Epoch != 2 {
+		t.Fatalf("reassignment failed: result=%+v err=%v", result, err)
 	}
 	select {
 	case assigned := <-recipient.assignments:
@@ -225,10 +228,11 @@ func TestHubR14HeartbeatJobMetadataIsBoundedAndBodyFree(t *testing.T) {
 
 func TestHubR14JobEndpointsRequireOperator(t *testing.T) {
 	clock := time.Date(2026, 9, 2, 7, 0, 0, 0, time.UTC)
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken}, Now: func() time.Time { return clock }, GracePeriod: time.Second, OrphanGrace: time.Second})
+	hub, err := NewHubServer(HubServerConfig{InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"), Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken}, Now: func() time.Time { return clock }, GracePeriod: time.Second, OrphanGrace: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = hub.Close() })
 	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", agent, false)
 	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: "operator-gate", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}}, clock)
@@ -274,10 +278,11 @@ func TestHubR14JobEndpointsRequireOperator(t *testing.T) {
 
 func TestHubR14RevocationRetriesUntilLocalAck(t *testing.T) {
 	clock := time.Date(2026, 9, 2, 8, 0, 0, 0, time.UTC)
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken}, Now: func() time.Time { return clock }, GracePeriod: time.Second, OrphanGrace: time.Second, KeepaliveInterval: time.Hour})
+	hub, err := NewHubServer(HubServerConfig{InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"), Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken}, Now: func() time.Time { return clock }, GracePeriod: time.Second, OrphanGrace: time.Second, KeepaliveInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = hub.Close() })
 	old := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", old, false)
 	job := HubActiveJob{JobID: "retry-me", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
@@ -285,7 +290,7 @@ func TestHubR14RevocationRetriesUntilLocalAck(t *testing.T) {
 	hub.disconnect("node-a", old)
 	clock = clock.Add(time.Second)
 	r14Sweep(hub)
-	if _, ok := hub.reassignJob(job.JobID, "node-b"); !ok {
+	if _, err := hub.reassignJob(job.JobID, "node-b"); err != nil {
 		t.Fatal("reassignment failed")
 	}
 	// Simulate a saturated per-agent channel at reconnect. The hub must retain

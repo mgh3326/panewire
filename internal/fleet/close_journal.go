@@ -60,6 +60,8 @@ func ValidCloseOpID(id string) bool { return closeOpIDPattern.MatchString(id) }
 type CloseOp struct {
 	RequestID string `json:"request_id"`
 	PaneID    string `json:"pane_id"`
+	// Epoch binds a registered hub request to its ownership decision.
+	Epoch uint64 `json:"epoch,omitempty"`
 	// Attempt is the job attempt the operation was registered against: the
 	// ledger event that started it. A resumed operation acts only while it is
 	// still the job's current attempt.

@@ -27,7 +27,7 @@ func TestCloseOpsDrainWaitsForInFlightClose_t4632(t *testing.T) {
 		<-finish
 		return nil
 	}
-	args := nodePaneCloseOpArgs{RequestID: "op-1", Job: closeOpJob, Attempt: closeOpAttempt, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a", EndReason: "rollback test"}
+	args := nodePaneCloseOpArgs{RequestID: "op-1", Job: closeOpJob, Epoch: 1, Attempt: closeOpAttempt, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a", EndReason: "rollback test"}
 	closeDone := make(chan string, 1)
 	go func() { _, code := client.nodePaneCloseOp(context.Background(), args); closeDone <- code }()
 	select {
@@ -117,7 +117,7 @@ func TestCloseOpsDrainCLIResolvesInterruptedIntent_t4632(t *testing.T) {
 	}
 	client := closeOpNode(t, inbox, idlePaneHerdr())
 	result, code := client.nodePaneCloseOp(context.Background(), nodePaneCloseOpArgs{
-		RequestID: "orphan", Job: closeOpJob, Attempt: closeOpAttempt, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a", EndReason: "rollback test",
+		RequestID: "orphan", Job: closeOpJob, Epoch: 1, Attempt: closeOpAttempt, PaneID: "w1:p1", Name: "job-a", AgentStatus: "idle", Cwd: "/work/a", EndReason: "rollback test",
 	})
 	replayed, ok := result.(nodePaneCloseOpResult)
 	if code != "" || !ok || replayed.Outcome != fleet.CloseOpCancelled || !replayed.Replayed {
