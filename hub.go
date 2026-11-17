@@ -511,7 +511,9 @@ type HubServer struct {
 	spawnAdmissions         hubKeyedLocks
 	poolActionLocks         hubKeyedLocks
 	poolActionMu            sync.Mutex
-	placementTraces         hubKeyedLocks
+	// poolActionObserved avoids repeating inventory logs while an action is active.
+	poolActionObserved sync.Map
+	placementTraces    hubKeyedLocks
 	// placementStalls holds the reason last logged for each attempt whose
 	// record is still undelivered (hub_placement_stall.go).
 	placementStallMu sync.Mutex

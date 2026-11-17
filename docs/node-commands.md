@@ -371,8 +371,11 @@ while any close is open: its process-held watcher fence must remain held.
    retry rather than treating an incomplete scan as an empty drain.
 3. Keep the new node binary running for at least 30 seconds (two hub status
    cycles). There is no command to list pending pool actions by node. In the
-   hub log, confirm `pool close action finalized` for this `node` and each
-   known `action` before replacing the binary. An `outcome` of `guarded`
+   hub log, find `pool close action created`, `pool close action retry`, and
+   `pool close action pending` lines for this `node`. Match every distinct
+   `action` to a `pool close action finalized` line for the same ID before
+   replacing the binary. Retry lines include `retry_of`; pending lines also
+   inventory unresolved actions after a hub restart. An `outcome` of `guarded`
    means the close action is done but reassignment remains fenced. If any
    action cannot be accounted for, keep the new binary running: local drain
    alone does not prove the hub stored the answer. A durable hub acknowledgement
@@ -566,7 +569,7 @@ run `panewire node close-ops enable` on each node, then run
 `panewire node close-ops drain` on every node and wait for it to report no
 pending jobs; drain removes the advertisement and barrier markers. Keep the
 new binary running during the drain and for at least 30 seconds afterwards;
-confirm the hub's `pool close action finalized` log for each known action on
+match the hub's action inventory and `pool close action finalized` logs for
 that node, as in the rollback steps above. Remove any remaining barrier marker
 before rolling back. Do not advertise on a hub without the guard.
 

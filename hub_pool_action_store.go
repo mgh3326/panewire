@@ -45,32 +45,32 @@ type poolActionData struct {
 
 // retryPoolAction atomically keeps the uncertain request fenced and records
 // one successor request. A restart cannot create another successor for it.
-func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry poolAction, now time.Time) error {
+func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry poolAction, now time.Time) (bool, error) {
 	ctx, cancel := s.op(parent)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	var currentData string
 	if err := tx.QueryRowContext(ctx, s.q(`SELECT data FROM pool_actions WHERE id=? AND phase=?`), action.ID, poolActionPending).Scan(&currentData); err != nil {
-		return err
+		return false, err
 	}
 	var current poolActionData
 	if err := json.Unmarshal([]byte(currentData), &current); err != nil {
-		return err
+		return false, err
 	}
 	if now.UnixMilli() < current.RetryAfter {
-		return nil
+		return false, nil
 	}
 	if current.RetryID != "" {
 		var phase string
 		if err := tx.QueryRowContext(ctx, s.q(`SELECT phase FROM pool_actions WHERE id=? AND job=?`), current.RetryID, action.Job).Scan(&phase); err != nil {
-			return err
+			return false, err
 		}
 		if phase != poolActionRefused {
-			return nil
+			return false, nil
 		}
 	}
 	current.RetryID = retry.ID
@@ -83,23 +83,26 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	retry.Data.RetryAfter, retry.Data.RetryCount = current.RetryAfter, current.RetryCount
 	retryData, err := json.Marshal(retry.Data)
 	if err != nil {
-		return err
+		return false, err
 	}
 	data, err := json.Marshal(current)
 	if err != nil {
-		return err
+		return false, err
 	}
 	result, err := tx.ExecContext(ctx, s.q(`UPDATE pool_actions SET data=? WHERE id=? AND phase=? AND data=?`), string(data), action.ID, poolActionPending, currentData)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if n, err := result.RowsAffected(); err != nil || n != 1 {
-		return errors.New("pool action changed before retry")
+		return false, errors.New("pool action changed before retry")
 	}
 	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data) VALUES(?,?,?,?,?,?)`), retry.ID, retry.Job, retry.Node, retry.Epoch, retry.Phase, string(retryData)); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func poolRetryBackoff(count uint8) time.Duration {

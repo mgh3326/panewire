@@ -64,7 +64,12 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 	if pending, err := h.inbox.store.pendingPoolAction(ctx, task.Job); err != nil || pending != "" {
 		return errors.New("job already has a pending close action")
 	}
-	return h.inbox.store.insertPoolAction(ctx, action)
+	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
+		return err
+	}
+	h.poolActionObserved.Store(action.ID, struct{}{})
+	h.logger.Info("pool close action created", "node", action.Node, "job", action.Job, "action", action.ID)
+	return nil
 }
 
 const poolActionInterval = 10 * time.Second
@@ -115,6 +120,7 @@ func (h *HubServer) reconcilePoolActions(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		h.logObservedPoolAction(action)
 		if err := h.reconcilePoolAction(ctx, action); err != nil {
 			h.logger.Warn("pool action pending", "job", action.Job, "action", action.ID, "error", h.inbox.store.loggable("pool action", err))
 		}
@@ -255,7 +261,15 @@ func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolActio
 	retry.Data.TargetAttempt = action.Data.Args.Attempt
 	retry.Data.Args = nil
 	retry.Data.RetryID = ""
-	return h.inbox.store.retryPoolAction(ctx, action, retry, now)
+	inserted, err := h.inbox.store.retryPoolAction(ctx, action, retry, now)
+	if err != nil {
+		return err
+	}
+	if inserted {
+		h.poolActionObserved.Store(retry.ID, struct{}{})
+		h.logger.Info("pool close action retry", "node", retry.Node, "job", retry.Job, "action", retry.ID, "retry_of", action.ID)
+	}
+	return nil
 }
 
 // The close request is finished, but its pane or watcher may still write hk.
@@ -306,13 +320,26 @@ func (h *HubServer) refusePoolAction(ctx context.Context, action poolAction) err
 		return err
 	}
 	h.poolSweep.release(action.Job)
+	h.poolActionObserved.Delete(action.ID)
 	return nil
+}
+
+func (h *HubServer) logObservedPoolAction(action poolAction) {
+	if _, seen := h.poolActionObserved.LoadOrStore(action.ID, struct{}{}); seen {
+		return
+	}
+	if action.Phase == poolActionPending {
+		h.logger.Info("pool close action pending", "node", action.Node, "job", action.Job, "action", action.ID)
+		return
+	}
+	h.logger.Info("pool close action finalized", "node", action.Node, "job", action.Job, "action", action.ID, "outcome", action.Phase)
 }
 
 func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, outcome string) error {
 	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
 		return err
 	}
+	h.poolActionObserved.Store(action.ID, struct{}{})
 	h.logger.Info("pool close action finalized", "node", action.Node, "job", action.Job, "action", action.ID, "outcome", outcome)
 	return nil
 }
@@ -331,7 +358,11 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		// Settlement permits reassignment. Once another owner has the job,
 		// this old action must not release its role or announce its end.
 		action.Phase = poolActionDone
-		return h.inbox.store.savePoolAction(ctx, action)
+		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			return err
+		}
+		h.poolActionObserved.Delete(action.ID)
+		return nil
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
@@ -362,5 +393,9 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		}
 	}
 	action.Phase = poolActionDone
-	return h.inbox.store.savePoolAction(ctx, action)
+	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		return err
+	}
+	h.poolActionObserved.Delete(action.ID)
+	return nil
 }
