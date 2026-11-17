@@ -15,7 +15,8 @@ panewire consult request --task N --question hk:doc/KEY \
   [--requester LANE|TOOL] [--json]
 ```
 
-The CLI posts to `POST /v1/consults`:
+By default the CLI asks its local node daemon to post to `POST /v1/consults`.
+The direct hub credential flags retain the direct path:
 
 ```json
 {"task_id": "4552", "requester": "mergewake/owner/repo#12",
@@ -24,7 +25,8 @@ The CLI posts to `POST /v1/consults`:
 ```
 
 - `requester` is the lane or tool id the answer belongs to. It defaults to
-  `PANEWIRE_LANE`, else the credential's machine id. A lane requester gets one
+  the lane bound to the calling pane on the local-node path; on the direct path it
+  defaults to `PANEWIRE_LANE`, else the credential's machine id. A lane requester gets one
   `ready` lane event; a tool requester polls.
 - `question_doc` is the question document. The hub fetches its body and puts
   it after a fixed consult preamble.
@@ -135,7 +137,7 @@ Only the review tool and the design lane ask for a consult. A worker does not
 call `panewire consult request` and does not call a model API for one (operator
 decision 313, hk 4837): the fleet-v1 preamble tells an implementer to send an
 ESC `--type decision` to its owner lane with the question as an hk doc key. The
-hub refuses a worker's node credential on this route, and the refusal names
+node and hub refuse a worker pane on this route, and the refusal names
 that ESC route.
 
 ## Auth
@@ -147,10 +149,19 @@ The consult routes admit:
   `HUB_TOKEN_<machine>`), which is what mergewake uses on oci;
 - a service credential holding the `consult` scope.
 
-A node credential is admitted only on the hub's `--pr-status-host` (default
-`oci`, the mergewake host); every other node gets `403`. That is the same
-machine restriction `pr.status` already uses: a consult spends a paid seat and
-can put an arbitrary hk document into a brief, so no other node may drive it.
+A node on `--pr-status-host` (default `oci`) retains direct access. On
+another node, the daemon obtains the socket peer PID and walks its parent chain
+to a herdr pane's shell. It refuses a pane in the spawn journal; the hub also
+refuses a job pane. The hub requires a live route binding that machine and pane
+to the requester, which must satisfy the configured design-lane policy. When
+no requester is supplied, the route identifies it; if multiple lanes share the
+pane, supply `--requester`. The row records the requester, machine and pane.
+
+Every process on a node runs as the same OS user and can read its node
+credential. A process bypassing the daemon can lie about `caller_pane`; this
+guard does not stop it. `panewire spawn` has the same limit. The guard stops a
+worker following its preamble and catches environment mistakes; it is not a
+defence against a hostile same-user process.
 
 They refuse an unauthenticated caller with `401`, and a service whose scopes
 do not include `consult` with `403 {"error":"scope_forbidden"}`. The `consult`
