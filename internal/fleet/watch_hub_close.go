@@ -561,7 +561,8 @@ func hubCloseOpenRead(a *App, id string) (open, readable bool) {
 }
 
 // PendingHubCloseJobs lists the jobs under the jobs root whose ledger holds an
-// open hub-close intent: the node's startup and retry pass settles them.
+// open hub-close intent, or whose ledger cannot be read: the node's startup
+// and retry pass settles them, and the rollback drain waits on them.
 func PendingHubCloseJobs(jobs string) ([]string, error) {
 	entries, err := os.ReadDir(jobs)
 	if err != nil {
@@ -575,17 +576,28 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 		}
 		// The intent is recorded before the journal directory exists, so
 		// the ledger's file names, which carry the event kind, decide.
+		// A job whose ledger cannot be read is listed, not skipped: the
+		// rollback drain and the settlement pass fail closed on it (#662).
 		names, err := os.ReadDir(filepath.Join(jobs, entry.Name(), "events"))
-		if err != nil || !slices.ContainsFunc(names, func(n os.DirEntry) bool { return strings.HasSuffix(n.Name(), "-"+hubCloseIntentKind+".json") }) {
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			out = append(out, entry.Name())
+			continue
+		}
+		if !slices.ContainsFunc(names, func(n os.DirEntry) bool { return strings.HasSuffix(n.Name(), "-"+hubCloseIntentKind+".json") }) {
 			continue
 		}
 		evs, err := a.events(entry.Name())
 		if err != nil {
+			out = append(out, entry.Name())
 			continue
 		}
 		// Reaped is folded in ledger sequence order, as settlement folds it.
 		j, err := foldJob(entry.Name(), ledgerOrder(evs))
 		if err != nil {
+			out = append(out, entry.Name())
 			continue
 		}
 		if _, open := pendingHubCloseIntent(j); open {

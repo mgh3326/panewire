@@ -82,11 +82,14 @@ func TestWatchLockSocketDirIsPrivate_t4632(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("socket dir %s mode %v err %v; want 0700", dir, info.Mode().Perm(), err)
 	}
+	// The directory made insecure is the one the function returned, so the
+	// long-path branch (a long TMPDIR on macOS) is exercised as well.
 	open := t.TempDir()
-	if err := os.Mkdir(filepath.Join(open, ".panewire-watch-sock"), 0o755); err != nil {
+	used, err := watchLockSocketDir(open)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(open, ".panewire-watch-sock"), 0o755); err != nil {
+	if err := os.Chmod(used, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := watchLockSocketDir(open); err == nil {

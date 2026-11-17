@@ -1091,10 +1091,18 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	// is told the job ended, so a failed close never leaves a finished record
 	// beside an open pane.
 	session, haveSession := a.readJobSession(ctx, latest, true)
+	// The end lock is taken before the physical close and held through the
+	// reap, so a hub close that owns the end keeps its pane (#662).
+	owned, endUnlock := a.lockUnlessHubCloseOwnsEnd(ctx, latest.ID)
+	if owned {
+		a.warn("job %s: a hub close owns its end; the pane is left to the node's settlement", latest.ID)
+		return paneSweepKept("hub_close_owns_end")
+	}
+	defer endUnlock()
 	if err := a.must(ctx, "herdr", "pane", "close", j.Pane); err != nil {
 		return paneSweepKept("close_failed")
 	}
-	s.reapSweptPane(ctx, a, latest, j, task, end, session, haveSession, now)
+	s.reapSweptPaneHeld(ctx, a, latest, j, task, end, session, haveSession, now)
 	return paneSweepClose{swept: swept}
 }
 
@@ -1155,15 +1163,24 @@ func (s *TaskPaneSweeper) paneUnlisted(ctx context.Context, a *App, j Job, swept
 // end state on its hk record when it never reported one, the usage and skill
 // facts, the quota lease, the lane, the job.reaped event, and the worktree.
 func (s *TaskPaneSweeper) reapSweptPane(ctx context.Context, a *App, latest, j Job, task string, end paneSweepEnd, session jobSession, haveSession bool, now time.Time) {
-	key := paneSweepKey(j)
-	delete(s.idleSince, key)
-	delete(s.endedSince, key)
 	owned, endUnlock := a.lockUnlessHubCloseOwnsEnd(ctx, latest.ID)
 	if owned {
+		key := paneSweepKey(j)
+		delete(s.idleSince, key)
+		delete(s.endedSince, key)
 		a.warn("job %s: a hub close owns its end; its record and lease are left to the node's settlement", latest.ID)
 		return
 	}
 	defer endUnlock()
+	s.reapSweptPaneHeld(ctx, a, latest, j, task, end, session, haveSession, now)
+}
+
+// reapSweptPaneHeld is reapSweptPane run by a caller that already holds the
+// job's end lock and checked that no hub close owns the end.
+func (s *TaskPaneSweeper) reapSweptPaneHeld(ctx context.Context, a *App, latest, j Job, task string, end paneSweepEnd, session jobSession, haveSession bool, now time.Time) {
+	key := paneSweepKey(j)
+	delete(s.idleSince, key)
+	delete(s.endedSince, key)
 	a.markSweptJob(ctx, latest, end.state)
 	if haveSession {
 		a.writeJobSession(ctx, latest.ID, session)

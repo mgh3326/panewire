@@ -157,6 +157,17 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		}
 		e = func() error {
 			defer endUnlock()
+			// The lock can wait: re-read the ledger under it, and keep a job
+			// whose ledger moved since the snapshot (a restore, a new end).
+			// #662.
+			again, err := a.job(j.ID)
+			if err != nil {
+				return err
+			}
+			if len(again.Events) != len(latest.Events) || again.Reaped || again.Pane != latest.Pane {
+				a.warn("job %s not reaped: its ledger changed while the reap waited", j.ID)
+				return nil
+			}
 			return a.reapEnded(ctx, j, latest, present, reason, *worktrees)
 		}()
 		if e != nil {

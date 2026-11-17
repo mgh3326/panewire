@@ -335,10 +335,14 @@ takes or borrows the fence again), or when every holder died while the node
 was down.
 **A rollback must first withdraw close ops**:
 
-1. Remove `jobs/.close-ops-advertise` and `jobs/.close-ops-enabled`. The node
-   stops advertising and admitting new closes within 30 s.
-2. Drain the open closes: wait until `fleet.PendingHubCloseJobs` is empty
-   (the node's settlement pass logs each one).
+1. Remove `jobs/.close-ops-advertise` and `jobs/.close-ops-enabled`, then
+   restart the node on the same (new) binary. The restart ends every
+   `pane.close_op` that passed the readiness check before the markers went,
+   and the restarted node reads no markers, so it admits no new close.
+2. Drain the open closes: wait until `fleet.PendingHubCloseJobs` is empty.
+   It lists a job whose ledger cannot be read as pending too, so an empty
+   result means a complete scan; the restarted node's settlement pass
+   settles the rest.
 3. Only then replace the binary.
 
 Rollout order: deploy the hub of this build and upgrade every node's
