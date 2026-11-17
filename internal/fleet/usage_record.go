@@ -39,6 +39,10 @@ func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 		case "completed", "escalated", "lost":
 			return
 		}
+		if a.hubReassigned(j) {
+			// The model is this node's session; the record is the new owner's.
+			return
+		}
 		e = store.Put(ctx, j.ID, map[string]any{"model": session.usage.Model})
 	}
 	if e != nil {

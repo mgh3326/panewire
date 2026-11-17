@@ -353,3 +353,106 @@ func (s *revokeOnGetStore) Get(ctx context.Context, id string) (map[string]any, 
 	}
 	return rec, err
 }
+
+// A worker pane left on the node the hub took the job from must not complete
+// or escalate the new owner's record: the command is refused, whether the
+// revocation is already in the ledger or lands while the report uploads (the
+// hub writes it without the job's locks).
+func TestDoneAndEscalateAfterHubRevocationLeaveHKRecord_t5062(t *testing.T) {
+	commands := map[string][]string{
+		"done":     {"--report"},
+		"escalate": {"--report", "--question", "which way?"},
+	}
+	for _, kind := range []string{"done", "escalate"} {
+		for _, during := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/revoked-during-upload=%v", kind, during), func(t *testing.T) {
+				r := newDoneRig(t)
+				r.write("report\n")
+				revoke := func() { writeHubRevocationRecord(t, r.a, "j") }
+				if during {
+					revoked := false
+					r.hk.Handle(func(req hkRequest) (int, string, bool) {
+						if !revoked && strings.HasPrefix(req.Route(), "PUT /v1/documents/") {
+							revoked = true
+							revoke()
+						}
+						return 0, "", false
+					})
+				} else {
+					revoke()
+				}
+				r.store.mu.Lock()
+				r.store.calls = nil
+				r.store.mu.Unlock()
+				uploads := 0
+				if !during {
+					r.hk.Handle(func(req hkRequest) (int, string, bool) {
+						if strings.HasPrefix(req.Route(), "PUT /v1/documents/") {
+							uploads++
+						}
+						return 0, "", false
+					})
+				}
+				args := []string{"j"}
+				for _, a := range commands[kind] {
+					args = append(args, a)
+					if a == "--report" {
+						args = append(args, r.path)
+					}
+				}
+				err := r.a.lifecycle(t.Context(), kind, args)
+				if code(err) != exitStateConflict || !strings.Contains(err.Error(), "reassigned") {
+					t.Fatalf("err = %v, want the reassignment refusal", err)
+				}
+				if got := r.store.record(t, "j")["state"]; got != "spawned" || putsOf(r.store) != 0 {
+					t.Fatalf("hk state=%v puts=%d, want the new owner's record untouched", got, putsOf(r.store))
+				}
+				if uploads != 0 {
+					t.Fatalf("%d report upload(s) before the refusal, want none for a revocation already in the ledger", uploads)
+				}
+			})
+		}
+	}
+}
+
+// Ownership is read in ledger sequence order, not timestamp order: a node
+// clock stepped backwards gives the revocation record an mtime before the
+// spawn it followed, and the timestamp fold would clear the reassignment.
+func TestHubReassignedReadsLedgerSequenceOrder_t5062(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	seedJob(t, a, "j", "implementer")
+	path := writeHubRevocationRecord(t, a, "j")
+	past := a.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if folded, err := a.job("j"); err != nil || !folded.Reassigned {
+		t.Fatalf("fold err=%v reassigned=%v, want the revocation to stand though its mtime precedes the spawn", err, folded.Reassigned)
+	}
+	if !a.hubReassigned(Job{ID: "j"}) {
+		t.Fatal("hubReassigned missed a revocation that follows the spawn in ledger order")
+	}
+}
+
+// recordJobUsage of a live job also writes the session's model to the record;
+// a revocation that lands while it reads the harness session stops that write
+// too, not only the usage one.
+func TestRecordJobUsageModelWriteAfterHubRevocation_t5062(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	claudeFixture(t, a.Home)
+	store := usageJob(t, a, claudeSession())
+	stale, err := a.job("j")
+	if err != nil || stale.Terminal || stale.Reassigned {
+		t.Fatalf("snapshot err=%v terminal=%v reassigned=%v", err, stale.Terminal, stale.Reassigned)
+	}
+	writeHubRevocationRecord(t, a, "j")
+	store.mu.Lock()
+	store.calls = nil
+	store.mu.Unlock()
+	a.recordJobUsage(t.Context(), stale, false)
+	if rec := store.record(t, "j"); rec["model"] != nil || rec["usage"] != nil || putsOf(store) != 0 {
+		t.Fatalf("record = %v puts=%d, want the new owner's record untouched", rec, putsOf(store))
+	}
+}

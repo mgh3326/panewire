@@ -206,6 +206,11 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 
 	resultSHA := resultDigest(in.result)
 	if _, ok := receipts.settledWith(resultSHA); !ok {
+		// The report upload above can take time: a revocation that landed
+		// meanwhile (written without this job's locks) stops the write.
+		if e := a.refuseReassigned(j); e != nil {
+			return e
+		}
 		a.recordJobUsage(ctx, j, false)
 		completing := receipts.completing(in.digest)
 		fields := map[string]any{"state": "completed", "at": a.Now().UTC()}
@@ -498,6 +503,9 @@ func (a *App) escalateReport(ctx context.Context, j Job, report, question string
 		} else {
 			a.warn("report upload failed; local report retained")
 		}
+	}
+	if e := a.refuseReassigned(j); e != nil {
+		return e
 	}
 	a.recordJobUsage(ctx, j, false)
 	rec := map[string]any{"state": "escalated", "at": a.Now().UTC()}
