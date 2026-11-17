@@ -111,10 +111,22 @@ func (h *HubServer) reconcilePoolActions(ctx context.Context) {
 		return
 	}
 	defer h.poolActionMu.Unlock()
+	started := h.now().UTC()
 	actions, err := h.inbox.store.activePoolActions(ctx)
 	if err != nil {
 		h.logger.Warn("pool actions unavailable", "error", h.inbox.store.loggable("pool actions", err))
 		return
+	}
+	// Inventory the whole snapshot before any potentially slow node call. The
+	// count lets a rollback operator detect missing log entries; see the runbook.
+	inventory, err := fleet.NewRequestID()
+	if err != nil {
+		h.logger.Warn("pool action inventory unavailable", "error", err)
+	} else {
+		for _, action := range actions {
+			h.logger.Info("pool close action inventory entry", "inventory", inventory, "node", action.Node, "job", action.Job, "action", action.ID, "phase", action.Phase)
+		}
+		h.logger.Info("pool close action inventory complete", "inventory", inventory, "started_at", started, "count", len(actions))
 	}
 	for _, action := range actions {
 		if ctx.Err() != nil {

@@ -369,16 +369,25 @@ while any close is open: its process-held watcher fence must remain held.
    jobs` and exits 0. Exit 5 lists pending jobs; the running node's settlement
    pass retries them. An unreadable ledger is pending, so repair storage and
    retry rather than treating an incomplete scan as an empty drain.
-3. Keep the new node binary running for at least 30 seconds (two hub status
-   cycles). There is no command to list pending pool actions by node. In the
-   hub log, find `pool close action created`, `pool close action retry`, and
-   `pool close action pending` lines for this `node`. Match every distinct
-   `action` to a `pool close action finalized` line for the same ID before
-   replacing the binary. Retry lines include `retry_of`; pending lines also
-   inventory unresolved actions after a hub restart. An `outcome` of `guarded`
-   means the close action is done but reassignment remains fenced. If any
-   action cannot be accounted for, keep the new binary running: local drain
-   alone does not prove the hub stored the answer. A durable hub acknowledgement
+3. Keep the new node binary running for at least 30 seconds. A hub configured
+   with neither an inbox store nor a database URL creates no pool actions and
+   emits no inventory; this assumes no store was removed with unresolved
+   actions. Otherwise, there is no command to list pending pool actions by
+   node. In the hub log, find a
+   `pool close action inventory complete` line whose `started_at` is after the
+   drain succeeded. For that line's `inventory` ID, verify that the number of
+   distinct `pool close action inventory entry` lines matches its `count`;
+   the entries enumerate the scan's snapshot of active actions, even
+   after a hub restart. A slow node can delay the next scan, so do not treat
+   30 seconds alone as proof that an inventory completed.
+
+   For this node's entries, match each `action` to a `pool close action
+   finalized` line for the same ID. Also match each `pool close action created`
+   or `pool close action retry` line for this node after the scan began; retry
+   lines include `retry_of`. An `outcome` of `guarded` means the close action
+   is done but reassignment remains fenced. If any action or inventory entry
+   cannot be accounted for, keep the new binary running: local drain alone
+   does not prove the hub stored the answer. A durable hub acknowledgement
    is tracked by hk 5073.
 4. Only then stop the node and replace the binary.
 
