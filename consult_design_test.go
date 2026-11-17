@@ -82,7 +82,7 @@ func TestConsultPaneResolution(t *testing.T) {
 		return json.Marshal(map[string]any{"process_info": map[string]int{"shell_pid": shell}})
 	}
 	parents := map[int]int{42: 30, 30: 20, 20: 1}
-	got, _, err := consultPane(context.Background(), run, 42, func(pid int) (int, error) { return parents[pid], nil })
+	got, err := consultPane(context.Background(), run, 42, func(pid int) (int, error) { return parents[pid], nil })
 	if err != nil || got != "p2" {
 		t.Fatalf("pane %q: %v", got, err)
 	}
@@ -119,8 +119,11 @@ func TestConsultLocalDaemonForwardsAndRefusesJob(t *testing.T) {
 	root := t.TempDir()
 	client := &HubClient{machineID: "machine-b", token: "node-token-b", endpoints: []string{strings.Replace(server.URL, "http://", "ws://", 1)}, spawnJournalDir: root,
 		nodeHerdr: func(_ context.Context, args ...string) ([]byte, error) {
-			if len(args) == 2 {
-				return []byte(`{"panes":[{"pane_id":"w1:p1","label":"design"}]}`), nil
+			if len(args) == 2 && args[0] == "pane" {
+				return []byte(`{"panes":[{"pane_id":"w1:p1"}]}`), nil
+			}
+			if len(args) == 2 && args[0] == "agent" {
+				return []byte(`{"result":{"agents":[{"pane_id":"w1:p1","name":"design"}]}}`), nil
 			}
 			return json.Marshal(map[string]any{"process_info": map[string]int{"shell_pid": os.Getpid()}})
 		}}
