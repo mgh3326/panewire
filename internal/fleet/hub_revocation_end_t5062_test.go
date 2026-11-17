@@ -607,3 +607,27 @@ func TestDoneRevokedBetweenTerminalPutRetriesAnnouncesNothing_t5062(t *testing.T
 		t.Fatalf("job.completed events=%d state=%v, want nothing announced and the record untouched", got, r.store.record(t, "j")["state"])
 	}
 }
+
+// The pin reads the record before it writes it; a revocation that lands during
+// that read stops the write, and done returns the refusal rather than a pin
+// warning.
+func TestDonePinRevokedDuringRecordReadDoesNotPin_t5062(t *testing.T) {
+	r := newDoneRig(t)
+	r.write("report\n")
+	digest := reportDigest([]byte("report\n"))
+	putEvent(t, r.a, "j", "job.completed", map[string]any{"report": r.path, "report_sha256": digest, "question": ""})
+	putEvent(t, r.a, "j", eventRecordSettled, map[string]any{"report_sha256": digest, "pinned": false})
+	r.store.records["j"]["state"] = "completed"
+	store := &revokeOnGetStore{fakeJobStore: r.store, revoke: func() { writeHubRevocationRecord(t, r.a, "j") }}
+	r.a.JobStore = store
+	r.store.mu.Lock()
+	r.store.calls = nil
+	r.store.mu.Unlock()
+	err := r.done()
+	if !store.revoked || !isDoneResultFailure(err, "job_reassigned") {
+		t.Fatalf("revoked=%v err=%v, want the reassignment refusal", store.revoked, err)
+	}
+	if rec := r.store.record(t, "j"); rec["report_doc"] != nil || putsOf(r.store) != 0 {
+		t.Fatalf("record=%v puts=%d, want no pin written", rec, putsOf(r.store))
+	}
+}

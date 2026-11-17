@@ -276,6 +276,8 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 		}
 		res, e := a.pinReport(ctx, id, doc, in.digest)
 		switch {
+		case isDoneResultFailure(e, "job_reassigned"):
+			return e
 		case e != nil:
 			pinPending = true
 			a.warn("report pin failed: reason=%s", doneResultReason(e))
@@ -416,6 +418,11 @@ func (a *App) pinReport(ctx context.Context, id, doc, digest string) (pinResult,
 	default:
 		a.warn("report pin kept: job %s record already names another report", id)
 		return pinResult{outcome: pinHeld, document: doc}, nil
+	}
+	// The read above can block: ownership is read again just before the pin
+	// write, and a revocation that landed meanwhile stops it.
+	if a.hubReassigned(Job{ID: id}) {
+		return pinResult{}, &doneResultFailure{code: exitStateConflict, reason: "job_reassigned"}
 	}
 	switch e = a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest}); {
 	case e == nil:
