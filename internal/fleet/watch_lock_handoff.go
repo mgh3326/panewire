@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -21,15 +24,50 @@ import (
 // watcher of any binary can take it before the node releases it. A second
 // open of the same path would be a different description and would not do.
 
-// watchLockSocket is the watcher's lending socket for a job directory: inside
-// it when the path fits a sockaddr_un (104 bytes on macOS), else a name in
-// /tmp derived from the directory.
-func watchLockSocket(jobDir string) string {
-	if path := filepath.Join(jobDir, ".panewire-watch.sock"); len(path) < 100 {
-		return path
+// watchLockSocket is the watcher's lending socket for a job directory. It
+// lives in a directory only this user can enter (watchLockSocketDir), so no
+// other local user can connect, even before the socket's own mode is set: the
+// directory is the peer check.
+func watchLockSocket(jobDir string) (string, error) {
+	dir, err := watchLockSocketDir(jobDir)
+	if err != nil {
+		return "", err
 	}
-	sum := sha256.Sum256([]byte(filepath.Clean(jobDir)))
-	return filepath.Join("/tmp", "panewire-watch-"+hex.EncodeToString(sum[:12])+".sock")
+	return filepath.Join(dir, "watch.sock"), nil
+}
+
+// watchLockSocketDir is `<job>/.panewire-watch-sock`, or, when that path is
+// too long for a sockaddr_un (104 bytes on macOS),
+// `/tmp/panewire-<uid>/<hash of the job dir>`. Each is created 0700 and must
+// be a real directory owned by this user with no group or other access.
+func watchLockSocketDir(jobDir string) (string, error) {
+	dir := filepath.Join(jobDir, ".panewire-watch-sock")
+	if len(dir)+len("/watch.sock") >= 100 {
+		sum := sha256.Sum256([]byte(filepath.Clean(jobDir)))
+		base := filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+		if err := privateDir(base); err != nil {
+			return "", err
+		}
+		dir = filepath.Join(base, hex.EncodeToString(sum[:12]))
+	}
+	return dir, privateDir(dir)
+}
+
+// privateDir makes dir (mode 0700) when missing and verifies it is a
+// directory, not a symlink, owned by this user, with no group or other bits.
+func privateDir(dir string) error {
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 || !ok || int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("watch-lock socket directory %s is not private", dir)
+	}
+	return nil
 }
 
 // serveWatchLock lends lock (the watcher's locked watch-lock file) to every
@@ -37,7 +75,10 @@ func watchLockSocket(jobDir string) string {
 // listening before the watcher takes its capability lock, so a watcher the
 // node probes as aware can always lend.
 func serveWatchLock(jobDir string, lock *os.File) (stop func(), err error) {
-	path := watchLockSocket(jobDir)
+	path, err := watchLockSocket(jobDir)
+	if err != nil {
+		return nil, err
+	}
 	_ = os.Remove(path)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
@@ -74,8 +115,12 @@ var errNoLend = errors.New("watcher did not lend its watch lock")
 // description and returns its release (closing only this reference). It
 // verifies the description is the job's watch-lock file.
 func BorrowWatchLock(ctx context.Context, jobDir string) (release func(), err error) {
+	path, err := watchLockSocket(jobDir)
+	if err != nil {
+		return nil, err
+	}
 	var dialer net.Dialer
-	c, err := dialer.DialContext(ctx, "unix", watchLockSocket(jobDir))
+	c, err := dialer.DialContext(ctx, "unix", path)
 	if err != nil {
 		return nil, err
 	}

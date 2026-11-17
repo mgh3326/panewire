@@ -300,3 +300,56 @@ func TestReapLeavesAnOpenHubCloseToSettlement_t4632(t *testing.T) {
 	}
 	wantHubCloseFinished(t, a, h)
 }
+
+// #662 round 4: an announced quota stop is watchable, so the fence release
+// re-arms its watcher (the hand-off grace fallback needs one).
+func TestFenceStateCountsAnAnnouncedQuotaStopLive_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	if e := a.event(context.Background(), "j", "job.lost", map[string]any{"reason": "quota_stop", "pool": "devin-free", "pane_id": "w:p1"}); e != nil {
+		t.Fatal(e)
+	}
+	if open, live, e := HubCloseFenceState(a.Jobs, "j"); e != nil || open || !live {
+		t.Fatalf("open=%v live=%v err=%v; want a watchable hand-off", open, live, e)
+	}
+}
+
+// #662 round 4: a generic end holds the end lock through its end when no
+// close owns the job, and fails closed on an open intent or an unreadable
+// ledger.
+func TestGenericEndOwnershipUnderTheEndLock_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	owned, unlock := a.lockUnlessHubCloseOwnsEnd(context.Background(), "j")
+	if owned || unlock == nil {
+		t.Fatal("owned with no intent open")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	if _, e := LockJobEndContext(ctx, filepath.Join(a.Jobs, "j")); e == nil {
+		t.Fatal("end lock free while the generic end holds it")
+	}
+	cancel()
+	unlock()
+	recordHubClose(t, a, liveIntent(t, a))
+	if owned, _ := a.lockUnlessHubCloseOwnsEnd(context.Background(), "j"); !owned {
+		t.Fatal("not owned with an open intent")
+	}
+	if e := os.WriteFile(filepath.Join(a.Jobs, "j", "events", "99998-job.bad.json"), []byte("{"), 0o600); e != nil {
+		t.Fatal(e)
+	}
+	if owned, _ := a.lockUnlessHubCloseOwnsEnd(context.Background(), "j"); !owned {
+		t.Fatal("not owned with an unreadable ledger")
+	}
+}
+
+// #662 round 4: the job-dir TTL keeps a dir whose hub-close intent is open.
+func TestJobDirTTLKeepsAnOpenHubClose_t4632(t *testing.T) {
+	a, _ := hubCloseFixture(t)
+	recordHubClose(t, a, liveIntent(t, a))
+	var out strings.Builder
+	p := &JobDirTTL{TTL: 24 * time.Hour, Out: &out, Only: []string{"j"}}
+	if _, e := p.Pass(context.Background(), a); e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(out.String(), "reason=hub-close-open") {
+		t.Fatalf("ttl output %q, want the dir kept as hub-close-open", out.String())
+	}
+}

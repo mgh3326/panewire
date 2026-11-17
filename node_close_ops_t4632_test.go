@@ -379,3 +379,16 @@ func TestFailedIntentWriteKeepsTheFenceWhileAnIntentIsOpen_t4632(t *testing.T) {
 		}
 	}
 }
+
+// #662 round 4: a failed intent write that releases its own fence (no intent
+// open) re-arms the live job's watcher, which may have met the fence.
+func TestFailedIntentWriteReArmsTheWatcher_t4632(t *testing.T) {
+	client, ledger, _, rearmed := fenceNode(t)
+	ledger.record = func(string, fleet.HubCloseIntent) error { return errors.New("write failed") }
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1")); code != "journal_failed" {
+		t.Fatalf("code=%q", code)
+	}
+	if !slices.Equal(*rearmed, []string{closeOpJob}) {
+		t.Fatalf("rearmed %v, want the job", *rearmed)
+	}
+}

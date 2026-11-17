@@ -68,3 +68,28 @@ func TestRunningWatcherLendsItsLock_t4632(t *testing.T) {
 		t.Fatal("the running watcher did not lend its lock")
 	}
 }
+
+// #662 round 4: the lending socket lives in a directory only this user can
+// enter, made before the socket binds; a pre-existing directory open to
+// others is refused, not used.
+func TestWatchLockSocketDirIsPrivate_t4632(t *testing.T) {
+	job := t.TempDir()
+	dir, err := watchLockSocketDir(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("socket dir %s mode %v err %v; want 0700", dir, info.Mode().Perm(), err)
+	}
+	open := t.TempDir()
+	if err := os.Mkdir(filepath.Join(open, ".panewire-watch-sock"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(open, ".panewire-watch-sock"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := watchLockSocketDir(open); err == nil {
+		t.Fatal("used a socket directory open to others")
+	}
+}

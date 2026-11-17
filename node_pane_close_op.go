@@ -440,8 +440,12 @@ func (client *HubClient) bindCloseOpLocked(ctx context.Context, job *os.Root, jo
 		// directory sync), and an older intent may be open: under the end
 		// lock admission still holds, the fence is released only when the
 		// ledger shows none open (#662 review round 3).
-		if open, _, err := client.hubCloseLedger().FenceState(args.Job); fenced && err == nil && !open {
+		if open, live, err := client.hubCloseLedger().FenceState(args.Job); fenced && err == nil && !open {
 			client.releaseWatcherFence(args.Job)
+			if live {
+				// A watcher started since admission met the fence and exited.
+				client.rearmAfterFence(args.Job)
+			}
 		}
 		return op, nil, "", "journal_failed"
 	}

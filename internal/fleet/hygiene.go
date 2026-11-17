@@ -150,32 +150,17 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		if reason == "stale-pane-absent" && present {
 			continue
 		}
-		if a.hubCloseOwnsEnd(ctx, j.ID) {
+		owned, endUnlock := a.lockUnlessHubCloseOwnsEnd(ctx, j.ID)
+		if owned {
 			a.warn("job %s not reaped: a hub close owns its end; the node settles it", j.ID)
 			continue
 		}
-		a.recordJobUsage(ctx, latest, true)
-		a.markEndedJobLost(ctx, latest)
-		if present {
-			if e = a.must(ctx, "herdr", "pane", "close", j.Pane); e != nil {
-				return e
-			}
-		}
-		if e = a.releaseQuota(ctx, j); e != nil {
+		e = func() error {
+			defer endUnlock()
+			return a.reapEnded(ctx, j, latest, present, reason, *worktrees)
+		}()
+		if e != nil {
 			return e
-		}
-		if owner, foreign := a.laneOwnedElsewhere(j); foreign {
-			a.warn("lane %s retained: it belongs to machine %s and this host is %s; a node cannot remove another machine's lane, so remove it from %s", j.HubLane, j.Machine, owner, j.Machine)
-		} else if e = a.removeLane(ctx, j); e != nil {
-			a.warn("lane retained: %v", e)
-		}
-		if e = a.event(ctx, j.ID, "job.reaped", map[string]any{"pane_id": j.Pane, "reason": reason}); e != nil {
-			return e
-		}
-		if *worktrees {
-			if e = a.reapWorktree(ctx, j); e != nil {
-				a.warn("worktree retained: %v", e)
-			}
 		}
 	}
 	if !*expire {
@@ -191,6 +176,36 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 	}
 	_, e = expiry.Pass(ctx, a)
 	return e
+}
+
+// reapEnded is reap's end of one eligible job, run under its end lock
+// (lockUnlessHubCloseOwnsEnd) so no hub close is admitted while it runs.
+func (a *App) reapEnded(ctx context.Context, j, latest Job, present bool, reason string, worktrees bool) error {
+	var e error
+	a.recordJobUsage(ctx, latest, true)
+	a.markEndedJobLost(ctx, latest)
+	if present {
+		if e = a.must(ctx, "herdr", "pane", "close", j.Pane); e != nil {
+			return e
+		}
+	}
+	if e = a.releaseQuota(ctx, j); e != nil {
+		return e
+	}
+	if owner, foreign := a.laneOwnedElsewhere(j); foreign {
+		a.warn("lane %s retained: it belongs to machine %s and this host is %s; a node cannot remove another machine's lane, so remove it from %s", j.HubLane, j.Machine, owner, j.Machine)
+	} else if e = a.removeLane(ctx, j); e != nil {
+		a.warn("lane retained: %v", e)
+	}
+	if e = a.event(ctx, j.ID, "job.reaped", map[string]any{"pane_id": j.Pane, "reason": reason}); e != nil {
+		return e
+	}
+	if worktrees {
+		if e = a.reapWorktree(ctx, j); e != nil {
+			a.warn("worktree retained: %v", e)
+		}
+	}
+	return nil
 }
 
 // reapPRKeep is the task pane sweep's open-PR keep (paneSweepPRKeep) for a

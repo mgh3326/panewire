@@ -285,9 +285,12 @@ first and exits when it is held.
 
 - With no watcher running, the node takes the lock itself.
 - With an aware watcher, the node borrows the watcher's own locked open file
-  description over the watcher's unix socket (`jobs/<job>/.panewire-watch.sock`,
-  or `/tmp/panewire-watch-<hash>.sock` when that path is too long), using
-  SCM_RIGHTS. flock stays held until every reference closes, so the watcher
+  description over the watcher's unix socket, using SCM_RIGHTS. The socket
+  is `jobs/<job>/.panewire-watch-sock/watch.sock`, or
+  `/tmp/panewire-<uid>/<hash>/watch.sock` when that path is too long. Its
+  directory is created 0700 before the socket binds, and is refused unless it
+  is a real directory owned by the user with no group or other access. So no
+  other local user can connect. flock stays held until every reference closes, so the watcher
   exiting or being killed mid-close cannot free the lock.
 
 - The fence is reconciled under the job's end lock, which admission also
@@ -299,6 +302,11 @@ first and exits when it is held.
   node restart, the fence is taken or borrowed again before settling.
 - A settlement step runs only while the fence or an aware watcher holds the
   lock. It waits while a watcher that ignores hub closes holds it.
+- Generic ends defer to an open close. `reap --apply`, the pane sweep and
+  the abandoned-review end take the job's end lock and check for an open
+  intent; they fail closed on an unreadable ledger. They keep the end lock
+  through their hk write, pane close, lease release and `job.reaped`. The
+  job-dir TTL keeps a dir whose intent is open (`hub-close-open`).
 - When no intent is open any more (settled, cancelled, or made stale by a
   new attempt), the fence is released and the node re-arms the watchers of
   live jobs, since a watcher that met the fence exited.

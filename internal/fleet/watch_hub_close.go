@@ -507,33 +507,57 @@ func HubCloseFenceState(jobs, job string) (open, live bool, err error) {
 		return false, false, err
 	}
 	_, open = pendingHubCloseIntent(j)
-	return open, !j.Terminal && !j.Reaped && !hubCloseSettledNow(j), nil
+	// Watchable as the re-arm pass counts it: an announced quota stop is
+	// terminal locally but its hand-off still needs a watcher.
+	_, handOff := announcedQuotaStop(j)
+	return open, (!j.Terminal || handOff) && !j.Reaped && !hubCloseSettledNow(j), nil
 }
 
-// hubCloseOwnsEnd reports whether a hub close still owns the job's end: an
-// intent is open in its ledger, read in sequence order under the job's end
-// lock. A generic end (reap, pane sweep) then leaves the hk record, the lease
-// and job.reaped to settlement, which writes the planned record (#662 review:
-// a generic lost written first would be kept and lose the planned reason).
-// An end lock it cannot take in time counts as owned: the reaper retries.
-func (a *App) hubCloseOwnsEnd(ctx context.Context, id string) bool {
+// lockUnlessHubCloseOwnsEnd takes the job's end lock for a generic end (reap,
+// pane sweep, an abandoned review) and reads, under it, whether a hub close
+// still owns the job's end: an intent is open in its ledger, read in sequence
+// order. When owned (or the lock or the ledger cannot be read: fail closed),
+// it returns owned true and holds nothing; the caller leaves the hk record,
+// the lease and job.reaped to settlement, which writes the planned record
+// (#662 review: a generic lost written first would be kept and lose the
+// planned reason). Otherwise the caller holds the end lock through its whole
+// end and runs unlock after it, so no close is admitted in between.
+func (a *App) lockUnlessHubCloseOwnsEnd(ctx context.Context, id string) (owned bool, unlock func()) {
 	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	unlock, err := LockJobEndContext(lockCtx, filepath.Join(a.Jobs, id))
+	release, err := LockJobEndContext(lockCtx, filepath.Join(a.Jobs, id))
 	if err != nil {
-		return true
+		return true, nil
 	}
-	defer unlock()
+	if hubCloseOpenNow(a, id) {
+		release()
+		return true, nil
+	}
+	return false, release
+}
+
+// hubCloseOpenNow reads whether any hub-close intent of the job is open. A
+// job with no events directory has none; any other unreadable ledger answers
+// unreadable, which a caller decides on (a generic end fails closed).
+func hubCloseOpenNow(a *App, id string) bool {
+	open, readable := hubCloseOpenRead(a, id)
+	return open || !readable
+}
+
+func hubCloseOpenRead(a *App, id string) (open, readable bool) {
 	evs, err := a.events(id)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, true
+	}
 	if err != nil {
-		return false
+		return false, false
 	}
 	j, err := foldJob(id, ledgerOrder(evs))
 	if err != nil {
-		return false
+		return false, false
 	}
-	_, open := pendingHubCloseIntent(j)
-	return open
+	_, open = pendingHubCloseIntent(j)
+	return open, true
 }
 
 // PendingHubCloseJobs lists the jobs under the jobs root whose ledger holds an

@@ -167,6 +167,14 @@ var paneSweepResultReadHook func(job string)
 // re-proves the policy under the job's operation lock, which `panewire done` and
 // the quota-stop record take: none of them lands between.
 func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, reason string, now time.Time) (string, error) {
+	// The end lock first, as the watcher and settlement take it before the
+	// operation lock: a job whose hub close is open is left to settlement,
+	// and none is admitted while this end runs (#662 review).
+	owned, endUnlock := a.lockUnlessHubCloseOwnsEnd(ctx, j.ID)
+	if owned {
+		return "", errJobAlreadyEnded
+	}
+	defer endUnlock()
 	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
 	if err != nil {
 		return "", err
