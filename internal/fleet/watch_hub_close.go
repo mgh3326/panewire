@@ -290,8 +290,7 @@ func pendingHubCloseIntent(j Job) (HubCloseIntent, bool) {
 // settled (a closed operation) or cancelled (nothing registered or closed).
 //
 // reassigned is whether a hub revocation record (a job.revoked carrying the
-// hub's ownership epoch) is in the current attempt's ledger, before or after
-// the intent: the hub gave the job to another
+// hub's ownership epoch) followed the intent: the hub gave the job to another
 // node, so this node must not write the shared hk record (#662 review).
 func hubCloseIntentState(j Job) (in HubCloseIntent, open, ended, reassigned bool) {
 	all, ended, reassigned := openHubCloseIntents(j)
@@ -331,12 +330,8 @@ func openHubCloseIntents(j Job) (intents []HubCloseIntent, ended, reassigned boo
 			intents = slices.DeleteFunc(intents, func(o HubCloseIntent) bool { return o.RequestID == id })
 		case "job.revoked":
 			ended = ended || len(intents) > 0
-			// A hub revocation reassigns the attempt whatever its order
-			// relative to the intent: the hub allocates its sequence without
-			// the ledger lock, so it can sort before a concurrent intent
-			// (#662 r4597976581).
 			if ev.Kind == ev.Type && ev.Epoch > 0 {
-				reassigned = true
+				reassigned = reassigned || len(intents) > 0
 			}
 		case "job.completed", "job.reaped", "job.completion", "job.record_settled", "job.joined", "job.handed_off", "job.escalate":
 			ended = ended || len(intents) > 0

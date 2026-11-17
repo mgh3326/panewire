@@ -2,7 +2,6 @@ package fleet
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -355,36 +354,11 @@ func TestJobDirTTLKeepsAnOpenHubClose_t4632(t *testing.T) {
 	}
 }
 
-// #662 round 8 (r4597976581): the hub's revocation writer allocates its
-// sequence without the ledger lock, so a revocation can land at a sequence
-// before a concurrent close intent. It is on disk when settlement rereads
-// the ledger, so settlement must still leave the shared hk record to the new
-// owner and write no hk lost.
-func TestSettlementHonorsARevocationSequencedBeforeTheIntent_t4632(t *testing.T) {
-	a, h := hubCloseFixture(t)
-	in := liveIntent(t, a)
-	dir := filepath.Join(a.Jobs, "j", "events")
-	files, e := os.ReadDir(dir)
-	if e != nil {
-		t.Fatal(e)
-	}
-	name := fmt.Sprintf("%05d-job.revoked.json", len(files)+1)
-	if e := os.WriteFile(filepath.Join(dir, name), []byte(`{"type":"job.revoked","job_id":"j","epoch":2}`), 0o600); e != nil {
-		t.Fatal(e)
-	}
-	recordHubClose(t, a, in)
-	writeJobCloseOp(t, a, CloseOp{RequestID: in.RequestID, Attempt: in.Attempt, State: CloseOpClosed})
-	evs, _ := os.ReadDir(dir)
-	if last := evs[len(evs)-1].Name(); last <= name {
-		t.Fatalf("intent %s does not sort after the revocation %s", last, name)
-	}
-	if state, e := (HubCloseSettlement{App: a}).Settle(context.Background(), "j"); e != nil || state != HubCloseSettled {
-		t.Fatalf("settle %v, %v; want settled", state, e)
-	}
-	if st := str(h.record(t, "j"), "state"); st != "spawned" {
-		t.Fatalf("hk state %s, want the new owner's record untouched", st)
-	}
-	if lost := lostEvents(t, a); len(lost) != 1 || !boolean(lost[0], "superseded", false) {
-		t.Fatalf("job.lost %v, want one superseded settlement", lost)
-	}
-}
+// Documented scenario, not tested here (#662 r4597976581, r4598442230,
+// r4598452167): a hub revocation whose sequence sorts before a concurrent
+// close intent is not honored by the settlement fold, which stays
+// intent-ordered. The node ledger records no assignment epoch, so no
+// node-local fold can tell a stale revocation from a current one; ordering
+// against a hub reassignment is the hub issuer's contract (hk 4745: reassign
+// guard, finalization, epoch binding). No hub code sends pane.close_op in
+// #662, so the fold path is unreachable until that issuer lands.
