@@ -18,7 +18,10 @@ import (
 // branch with it. A merged end removes only a clean worktree whose HEAD
 // merged; a non-merged end (a canceled task, a job closed abandoned or
 // superseded) saves the worktree's changes first and removes it whatever its
-// state, so the next attempt can use the directory. Only a worktree of the
+// state, so the next attempt can use the directory. A checkout the node
+// prepared for the job alone — the <job>-checkout a spec spawn, a consult or
+// a canonical checkout gets — belongs to no task and ends with the job,
+// whatever the task did (hk 5091). Only a worktree of the
 // clone under the node's own work root is the node's; a requester's design
 // worktree, a reviewer's, and every remote branch stay with mergewake.
 
@@ -62,29 +65,43 @@ func (s *TaskPaneSweeper) sweepWorktree(ctx context.Context, a *App, j Job, end 
 	keep := func(reason string) {
 		s.info("task worktree kept", "job", j.ID, "worktree", base, "reason", reason)
 	}
-	if !boolean(a.Config.Sweep, "remove_worktrees", true) {
-		keep(sweepWorktreeDisabled)
+	clone, branch, owned, reason := s.worktreePlan(ctx, a, j, cwd, end)
+	if reason != "" {
+		keep(reason)
 		return
+	}
+	if reason := s.removeWorktree(ctx, a, j, end, clone, branch, cwd, base, owned); reason != "" {
+		keep(reason)
+	}
+}
+
+// worktreePlan runs every keep check the worktree tail shares with the
+// checkout sweep command, in the order the tail has always applied them. It
+// returns the clone and branch nodeWorktree proved, whether the job owns the
+// checkout (sweepJobCheckout), and "" when nothing keeps the worktree — or
+// the keep reason.
+func (s *TaskPaneSweeper) worktreePlan(ctx context.Context, a *App, j Job, cwd string, end paneSweepEnd) (clone, branch string, owned bool, reason string) {
+	if !boolean(a.Config.Sweep, "remove_worktrees", true) {
+		return "", "", false, sweepWorktreeDisabled
 	}
 	clone, branch, ok := s.nodeWorktree(ctx, a, cwd)
 	if !ok {
-		keep(sweepWorktreeNotNode)
-		return
+		return "", "", false, sweepWorktreeNotNode
 	}
+	owned = sweepJobCheckout(j, cwd)
 	// A merged end proves the work landed; a non-merged end proves nothing and
-	// the work is saved before it goes. Any other end (a closed job whose task
-	// is still open) keeps the worktree for the task's owner.
-	if !end.merged && !end.discard {
-		keep(sweepWorktreeTaskOpen)
-		return
+	// the work is saved before it goes. A checkout the node prepared for this
+	// job alone (sweepJobCheckout) belongs to no task and ends with the job.
+	// Any other end (a closed job whose task is still open) keeps the
+	// worktree for the task's owner.
+	if !owned && !end.merged && !end.discard {
+		return "", "", false, sweepWorktreeTaskOpen
 	}
 	if s.worktreeInUse(ctx, a, j, cwd) {
-		keep(sweepWorktreeShared)
-		return
+		return "", "", false, sweepWorktreeShared
 	}
 	if sweepSymlink(cwd) {
-		keep(sweepWorktreeSymlink)
-		return
+		return "", "", false, sweepWorktreeSymlink
 	}
 	// Harness state excluded by prepare must remain safe from either removal path.
 	args := []string{"-C", cwd, "ls-files", "--others", "--ignored", "-z"}
@@ -92,70 +109,77 @@ func (s *TaskPaneSweeper) sweepWorktree(ctx context.Context, a *App, j Job, end 
 		args = append(args, "--exclude="+pattern)
 	}
 	if r := a.call(ctx, "git", args...); r.Code != 0 || r.Out != "" {
-		keep(sweepWorktreeDirty)
-		return
+		return "", "", false, sweepWorktreeDirty
 	}
-	if end.discard && !end.merged {
-		s.discardWorktree(ctx, a, j, end, clone, branch, cwd, base)
-		return
+	return clone, branch, owned, ""
+}
+
+// removeWorktree removes the worktree worktreePlan cleared and returns the
+// keep reason when it stays. A job-owned checkout or a non-merged end goes
+// through discardWorktree, which saves the work first; any other cleared end
+// is the merged path.
+func (s *TaskPaneSweeper) removeWorktree(ctx context.Context, a *App, j Job, end paneSweepEnd, clone, branch, cwd, base string, owned bool) string {
+	if owned || (end.discard && !end.merged) {
+		return s.discardWorktree(ctx, a, j, end, clone, branch, cwd, base)
 	}
 	if r := a.call(ctx, "git", "-C", cwd, "status", "--porcelain"); r.Code != 0 || r.Out != "" {
-		keep(sweepWorktreeDirty)
-		return
+		return sweepWorktreeDirty
 	}
 	// origin/* refs are a cache: refresh them in the clone before they prove
 	// the HEAD merged. A remote that cannot be read keeps the worktree.
 	if err := a.must(ctx, "git", "-C", clone, "fetch", "origin"); err != nil {
 		a.warn("worktree retained: %v", err)
-		keep(sweepWorktreeFetchFailed)
-		return
+		return sweepWorktreeFetchFailed
 	}
 	if err := a.must(ctx, "git", "-C", cwd, "merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/main"); err != nil {
-		keep(sweepWorktreeUnmerged)
-		return
+		return sweepWorktreeUnmerged
 	}
 	if err := a.must(ctx, "git", "-C", clone, "worktree", "remove", cwd); err != nil {
 		a.warn("worktree retained: %v", err)
-		keep(sweepWorktreeRemoveFailed)
-		return
+		return sweepWorktreeRemoveFailed
 	}
 	s.info("task worktree removed", "job", j.ID, "worktree", base, "reason", sweepWorktreeRemoved)
 	// -d, never -D: git refuses a branch that never merged. A branch another
 	// worktree still holds is left for that worktree.
 	if branch == "" || s.branchHeld(ctx, a, clone, branch) {
-		return
+		return ""
 	}
 	if err := a.must(ctx, "git", "-C", clone, "branch", "-d", branch); err != nil {
 		a.warn("branch retained: %v", err)
 	}
+	return ""
 }
 
-// discardWorktree removes the worktree of a non-merged end. The worktree's
+// sweepJobCheckout reports that cwd is the checkout the node prepared for
+// this job alone: the job's receipt names it and its directory carries the
+// job-derived name a spec spawn or a canonical checkout gets
+// (checkoutWorktreeName). A -c worktree keeps the requester's own directory
+// name, so it matches only when it was deliberately named <job>-checkout.
+func sweepJobCheckout(j Job, cwd string) bool {
+	return cwd != "" && filepath.Base(filepath.Clean(cwd)) == checkoutWorktreeName(j.ID)
+}
+
+// discardWorktree removes the worktree of a job-owned checkout or a
+// non-merged end, returning the keep reason when it stays. The worktree's
 // status, its diff and the contents of its untracked files are saved to the job
 // directory first, and a patch that cannot be saved keeps the worktree. The local branch goes (-D) only when its
 // tip is already on origin, so no commit exists nowhere else.
-func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, end paneSweepEnd, clone, branch, cwd, base string) {
-	keep := func(reason string) {
-		s.info("task worktree kept", "job", j.ID, "worktree", base, "reason", reason)
-	}
+func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, end paneSweepEnd, clone, branch, cwd, base string) string {
 	status := a.call(ctx, "git", "-C", cwd, "status", "--porcelain")
 	diff := a.call(ctx, "git", "-C", cwd, "diff", "--binary", "HEAD")
 	if status.Code != 0 || diff.Code != 0 {
-		keep(sweepWorktreePatchFailed)
-		return
+		return sweepWorktreePatchFailed
 	}
 	// git diff HEAD leaves untracked files out and the removal below deletes
 	// them, so each goes into the patch as a new-file diff. One that cannot be
 	// captured keeps the worktree. Ignored files are build output, not work.
 	untracked, ok := sweepUntrackedDiff(ctx, a, cwd)
 	if !ok {
-		keep(sweepWorktreePatchFailed)
-		return
+		return sweepWorktreePatchFailed
 	}
 	if err := saveAbandonedWorktree(a, j.ID, base, end.reason, status.Out, diff.Out+untracked); err != nil {
 		a.warn("worktree retained: %v", err)
-		keep(sweepWorktreePatchFailed)
-		return
+		return sweepWorktreePatchFailed
 	}
 	// Commits made on a detached HEAD are in no branch, and the diff above holds
 	// only the uncommitted changes. A ref under refs/panewire keeps them from
@@ -163,18 +187,16 @@ func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, en
 	if branch == "" {
 		if err := a.must(ctx, "git", "-C", cwd, "update-ref", "refs/panewire/abandoned/"+j.ID, "HEAD"); err != nil {
 			a.warn("worktree retained: %v", err)
-			keep(sweepWorktreeRefFailed)
-			return
+			return sweepWorktreeRefFailed
 		}
 	}
 	if err := a.must(ctx, "git", "-C", clone, "worktree", "remove", "--force", cwd); err != nil {
 		a.warn("worktree retained: %v", err)
-		keep(sweepWorktreeRemoveFailed)
-		return
+		return sweepWorktreeRemoveFailed
 	}
 	s.info("task worktree removed", "job", j.ID, "worktree", base, "reason", end.reason, "patch", AbandonedWorktreeFile)
 	if branch == "" || s.branchHeld(ctx, a, clone, branch) {
-		return
+		return ""
 	}
 	// origin/* refs are a cache: refresh them, pruning the ones origin no
 	// longer has, before they prove the tip is there. A tip that cannot be
@@ -185,17 +207,18 @@ func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, en
 	if err := a.must(ctx, "git", "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		a.warn("branch retained: %v", err)
 		keepBranch(sweepBranchFetchFailed)
-		return
+		return ""
 	}
 	if r := a.call(ctx, "git", "-C", clone, "branch", "-r", "--contains", branch, "--list", "origin/*"); r.Code != 0 || strings.TrimSpace(r.Out) == "" {
 		keepBranch(sweepBranchNotOnOrigin)
-		return
+		return ""
 	}
 	if err := a.must(ctx, "git", "-C", clone, "branch", "-D", branch); err != nil {
 		a.warn("branch retained: %v", err)
-		return
+		return ""
 	}
 	s.info("task branch removed", "job", j.ID, "branch", branch, "reason", sweepBranchOnOrigin)
+	return ""
 }
 
 // sweepUntrackedDiff renders every untracked, non-ignored file of the worktree

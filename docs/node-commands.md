@@ -834,6 +834,33 @@ jobs, the agent list, or the hk record answers `sweep_failed`. An out-of-range
 `age_s` answers `invalid_args`. The op does not take the node's acting lock:
 each pane's close takes it, so the op never holds it across the whole pass.
 
+### `checkout.sweep`
+
+`args: {dry_run}`. The operator's stale-checkout pass (hk 5091; see
+[pane-sweep.md](pane-sweep.md#checkout-sweep)): it lists every `*-checkout`
+directory under the node's work root that is a linked worktree of one of its
+clones, attributes each to a job — a readable job record's receipt cwd, then
+the spawn journal for a record that is gone — and removes each non-live
+job-owned checkout through the pane sweep's guarded worktree path. `dry_run`
+reports without changing anything.
+
+It replies `{"dry_run":bool,"checkouts":[...]}` with one
+`{path, job, outcome, reason}` row per candidate in path order: `outcome` is
+`removed`, `kept` or `would_remove` (dry run only); `reason` is the keep
+reason (`job_live`, `pane_open`, `agents_unreadable`, `no_job`,
+`job_unreadable`, or the tail's own such as `task_open_kept`, `shared_kept`,
+`symlink_kept`, `patch_failed_kept`), `discard` on a `would_remove` row, or
+empty. A
+candidate that cannot be judged is kept with its reason; the pass never
+removes blind.
+
+The op holds the node's acting lock for the whole pass — the removals are git
+mutations that must not interleave with another acting command — and runs
+under its own 90-second budget, longer than the default command timeout. A
+node without a jobs root or work root answers `jobs_root_unset` or
+`work_root_unset`; a failed pass answers `sweep_failed`. The CLI is
+`panewire node sweep-checkouts --host <machine> [--dry-run]`.
+
 ### `worktree.inspect`
 
 `args: {cwd, expected_dir?, verify_branch?}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git

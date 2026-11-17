@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -185,6 +186,39 @@ func (j *nodeSpawnJournal) executing(ctx context.Context) ([]executingSpawn, err
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// checkoutOwners maps each completed spawn's prepared *-checkout cwd to its
+// job id, for the checkout sweep's attribution of a directory whose job
+// record is gone. Only rows whose stored result names such a cwd are
+// decoded; the LIKE prefilter keeps the scan off every other row.
+func (j *nodeSpawnJournal) checkoutOwners(ctx context.Context) (map[string]string, error) {
+	rows, err := j.db.QueryContext(ctx, `SELECT job_id,result FROM spawn_inbox WHERE status='completed' AND job_id != '' AND result LIKE '%-checkout%'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	owners := map[string]string{}
+	for rows.Next() {
+		var jobID, stored string
+		if err := rows.Scan(&jobID, &stored); err != nil {
+			return nil, err
+		}
+		var result struct {
+			Receipt *struct {
+				CWD string `json:"cwd"`
+			} `json:"receipt"`
+		}
+		if json.Unmarshal([]byte(stored), &result) != nil || result.Receipt == nil {
+			continue
+		}
+		cwd := result.Receipt.CWD
+		if cwd == "" || !strings.HasSuffix(filepath.Base(filepath.Clean(cwd)), "-checkout") {
+			continue
+		}
+		owners[nodeResolvedPath(cwd)] = jobID
+	}
+	return owners, rows.Err()
 }
 
 // resultOf returns the stored completion of a request, if it has one.
