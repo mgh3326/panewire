@@ -48,10 +48,6 @@ type poolActionData struct {
 func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry poolAction, now time.Time) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	retryData, err := json.Marshal(retry.Data)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -65,10 +61,10 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	if err := json.Unmarshal([]byte(currentData), &current); err != nil {
 		return err
 	}
+	if now.UnixMilli() < current.RetryAfter {
+		return nil
+	}
 	if current.RetryID != "" {
-		if now.UnixMilli() < current.RetryAfter {
-			return nil
-		}
 		var phase string
 		if err := tx.QueryRowContext(ctx, s.q(`SELECT phase FROM pool_actions WHERE id=? AND job=?`), current.RetryID, action.Job).Scan(&phase); err != nil {
 			return err
@@ -81,6 +77,13 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	current.RetryAfter = now.Add(poolRetryBackoff(current.RetryCount)).UnixMilli()
 	if current.RetryCount < 7 {
 		current.RetryCount++
+	}
+	// Carry the same budget to an unknown successor: a chain of uncertain
+	// closes must not mint a fresh request on every reconciliation pass.
+	retry.Data.RetryAfter, retry.Data.RetryCount = current.RetryAfter, current.RetryCount
+	retryData, err := json.Marshal(retry.Data)
+	if err != nil {
+		return err
 	}
 	data, err := json.Marshal(current)
 	if err != nil {
@@ -108,11 +111,11 @@ func poolRetryBackoff(count uint8) time.Duration {
 }
 
 func (s *laneInboxStore) poolRetryReady(parent context.Context, action poolAction, now time.Time) (bool, error) {
-	if action.Data.RetryID == "" {
-		return true, nil
-	}
 	if now.UnixMilli() < action.Data.RetryAfter {
 		return false, nil
+	}
+	if action.Data.RetryID == "" {
+		return true, nil
 	}
 	ctx, cancel := s.op(parent)
 	defer cancel()

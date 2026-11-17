@@ -144,6 +144,8 @@ func TestPoolActionUnknownDoesNotRetryBusyPane(t *testing.T) {
 
 func TestPoolActionUnknownSuccessorCanRetryWhileOriginalIsPending(t *testing.T) {
 	f, action := poolActionFixture(t)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.hub.now = func() time.Time { return start }
 	runUnknownRetry(t, f, action, action.Data.Args.Attempt)
 	actions, err := f.hub.inbox.store.activePoolActions(t.Context())
 	if err != nil || len(actions) != 2 {
@@ -162,9 +164,45 @@ func TestPoolActionUnknownSuccessorCanRetryWhileOriginalIsPending(t *testing.T) 
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f)
+	f.hub.now = func() time.Time { return start.Add(11 * time.Second) }
 	runUnknownRetry(t, f, retry, retry.Data.Args.Attempt)
 	if actions, err = f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(actions) != 3 {
 		t.Fatalf("unknown successor left %d pending requests, want three: %v", len(actions), err)
+	}
+}
+
+func TestPoolActionUnknownSuccessorHonorsRetryBackoff(t *testing.T) {
+	f, original := poolActionFixture(t)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.hub.now = func() time.Time { return start }
+	runUnknownRetry(t, f, original, original.Data.Args.Attempt)
+	actions, err := f.hub.inbox.store.activePoolActions(t.Context())
+	if err != nil || len(actions) != 2 {
+		t.Fatalf("first retry: %+v %v", actions, err)
+	}
+	var successor poolAction
+	for _, row := range actions {
+		if row.ID != original.ID {
+			successor = row
+		}
+	}
+	args := *original.Data.Args
+	args.RequestID = successor.ID
+	successor.Data.Args = &args
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), successor); err != nil {
+		t.Fatal(err)
+	}
+	restartPoolActionHub(t, f)
+	f.hub.now = func() time.Time { return start.Add(5 * time.Second) }
+	runUnknownRetry(t, f, successor, successor.Data.Args.Attempt)
+	if actions, err = f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(actions) != 2 {
+		t.Fatalf("unknown successor retried early: %d actions, %v", len(actions), err)
+	}
+	restartPoolActionHub(t, f)
+	f.hub.now = func() time.Time { return start.Add(11 * time.Second) }
+	runUnknownRetry(t, f, successor, successor.Data.Args.Attempt)
+	if actions, err = f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(actions) != 3 {
+		t.Fatalf("unknown successor did not retry after backoff: %d actions, %v", len(actions), err)
 	}
 }
 

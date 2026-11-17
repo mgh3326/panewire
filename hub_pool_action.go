@@ -255,7 +255,6 @@ func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolActio
 	retry.Data.TargetAttempt = action.Data.Args.Attempt
 	retry.Data.Args = nil
 	retry.Data.RetryID = ""
-	retry.Data.RetryAfter, retry.Data.RetryCount = 0, 0
 	return h.inbox.store.retryPoolAction(ctx, action, retry, now)
 }
 

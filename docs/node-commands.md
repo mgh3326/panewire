@@ -528,8 +528,8 @@ persists each action before issuing it to `job.Node` at `job.Epoch`, and only
 while that node advertises `close_ops_v1`. It reads the attempt from status,
 sends the planned `end_reason`, and retries an unknown close under a new id
 for the same attempt while retaining the original fence. A retry requires an
-advertised node and a closable pane; retries after refusal back off from ten
-seconds to at most ten minutes. At node startup,
+advertised node and a closable pane; retries after an uncertain or refused
+successor back off from ten seconds to at most ten minutes. At node startup,
 before advertising close support, the node recovers unfinished pre-epoch
 journals under the close-admission lock: an unstarted operation is cancelled,
 and a possibly executed close becomes unknown for normal settlement. A
