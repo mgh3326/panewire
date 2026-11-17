@@ -369,7 +369,32 @@ while any close is open: its process-held watcher fence must remain held.
    jobs` and exits 0. Exit 5 lists pending jobs; the running node's settlement
    pass retries them. An unreadable ledger is pending, so repair storage and
    retry rather than treating an incomplete scan as an empty drain.
-3. Only then stop the node and replace the binary.
+3. Keep the new node binary running for at least 30 seconds. If the inbox kill
+   switch (`--delivery-policy off`) is active with a configured store, the
+   hub does not open that store or emit inventory logs. Restore a non-off
+   delivery policy using the same store and complete the checks below before
+   rollback; missing inventory is not evidence that the store is empty.
+
+   A hub configured with neither an inbox store nor a database URL creates no
+   pool actions and emits no inventory; this assumes no store was removed with
+   unresolved actions. Otherwise, there is no command to list pending pool
+   actions by node. In the hub log, find a
+   `pool close action inventory complete` line whose `started_at` is after the
+   drain succeeded. For that line's `inventory` ID, verify that the number of
+   distinct `pool close action inventory entry` lines matches its `count`;
+   the entries enumerate the scan's snapshot of active actions, even
+   after a hub restart. A slow node can delay the next scan, so do not treat
+   30 seconds alone as proof that an inventory completed.
+
+   For this node's entries, match each `action` to a `pool close action
+   finalized` line for the same ID. Also match each `pool close action created`
+   or `pool close action retry` line for this node after the scan began; retry
+   lines include `retry_of`. An `outcome` of `guarded` means the close action
+   is done but reassignment remains fenced. If any action or inventory entry
+   cannot be accounted for, keep the new binary running: local drain alone
+   does not prove the hub stored the answer. A durable hub acknowledgement
+   is tracked by hk 5073.
+4. Only then stop the node and replace the binary.
 
 After withdrawal has quiesced admissions, settlement durably cancels an
 unregistered intent or a registered operation, leaving a released journal
@@ -557,7 +582,9 @@ run `panewire node close-ops enable` on each node, then run
 `panewire node close-ops advertise` on each. Before any binary rollback, run
 `panewire node close-ops drain` on every node and wait for it to report no
 pending jobs; drain removes the advertisement and barrier markers. Keep the
-new binary running during the drain, and remove any remaining barrier marker
+new binary running during the drain and for at least 30 seconds afterwards;
+match the hub's action inventory and `pool close action finalized` logs for
+that node, as in the rollback steps above. Remove any remaining barrier marker
 before rolling back. Do not advertise on a hub without the guard.
 
 ### `pane.capture`
