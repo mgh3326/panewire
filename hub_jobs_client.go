@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const defaultHubJobActiveMaxAge = 72 * time.Hour
@@ -587,15 +585,6 @@ func writeHubRevocation(inboxRoot string, revoked hubJobRevokedEvent) error {
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
 		return err
 	}
-	// Settlement holds this same lock from its ledger read through the hk
-	// write; do not publish or acknowledge a reassignment in between.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	unlock, err := fleet.LockJobEndContext(ctx, filepath.Dir(eventsDir))
-	if err != nil {
-		return err
-	}
-	defer unlock()
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
 		return err

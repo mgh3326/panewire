@@ -511,7 +511,21 @@ after `unknown`, retry under a new request id while the pane is still
 there; read `attempt` from `pane.close_status` when it decides; drive every
 operation it opens to a final state or release it; and not write a
 terminal hk record other than the planned one for a job whose close it
-opened.
+opened. It also owns the ownership fence, which no node-local lock can
+provide: the node's local ledger learns of a reassignment only when the
+revocation arrives, and its reread before the hk write catches only a
+revocation already in that ledger (consult
+`evidence/2026-11-17/pw-4632-r7-consult/report.md`).
+
+- **I1 (reassign guard).** The node writes hk `lost` for a job only while
+  the hub would refuse to reassign it. `reassignJob` refuses a job that has
+  a close action whose durable row is not final, and the issuer sends
+  `pane.close_op` only to `job.Node` at `job.Epoch`.
+- **I2 (finalization).** A close action row becomes final only from a node
+  answer that rules out a later hk write for that request id: `refused`,
+  `preempted`, `mismatch`/`not_a_job`, `cancelled` with release, or
+  `recorded` (hk `lost` read back with the request's `end_reason`). A
+  timeout or an `unknown` never finalizes a row.
 
 ### `pane.capture`
 

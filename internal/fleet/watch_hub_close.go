@@ -711,17 +711,27 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 	return result, nil
 }
 
+// settlementBetweenDrainAndJournalReads is a test seam that runs between
+// settlement's drain-marker read and its close-journal read.
+var settlementBetweenDrainAndJournalReads func()
+
 // settleHubCloseIntent drives one open intent one step; the caller holds the
 // job's end lock and folded j under it.
 func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent, ended, reassigned bool, listed func(ctx context.Context, session, pane string) (bool, error), needHK func() error) (HubCloseState, error) {
 	cancel := func(reason string) (HubCloseState, error) {
 		return HubCloseCancelled, a.eventSynced(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": reason})
 	}
-	op, found, err := a.readJobCloseOp(j.ID, in.RequestID)
+	// Read the drain marker first. Once it is visible every admitted close
+	// has finished and none can start, so a journal read after it is current;
+	// the reverse order can pair a stale registered entry with a fresh marker.
 	draining, drainErr := closeOpsDraining(a.Jobs)
 	if drainErr != nil {
 		return HubClosePending, drainErr
 	}
+	if settlementBetweenDrainAndJournalReads != nil {
+		settlementBetweenDrainAndJournalReads()
+	}
+	op, found, err := a.readJobCloseOp(j.ID, in.RequestID)
 	switch {
 	case err != nil:
 		a.warn("hub close of job %s waits: close operation unreadable: %v", j.ID, err)
@@ -834,9 +844,12 @@ func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent
 		a.warn("hub close of job %s: hk holds another terminal record (%s); kept", j.ID, state)
 		return a.finishHubClose(ctx, j, in, true), nil
 	default:
-		// Re-read immediately before the shared write too. The hub's local
-		// revocation writer holds the end lock; this also fails closed if an
-		// independent ledger writer changed ownership since the first fold.
+		// Re-read immediately before the shared write too: a revocation
+		// already in the local ledger at this reread stops the write, and it
+		// fails closed if another ledger writer changed ownership since the
+		// first fold. This is defence in depth only; the local end lock does
+		// not fence a hub reassignment. The hub refuses to reassign a job with
+		// a non-final close action (docs/node-commands.md, I1/I2, hk 4745).
 		events, err := a.events(j.ID)
 		if err != nil {
 			return HubClosePending, err
