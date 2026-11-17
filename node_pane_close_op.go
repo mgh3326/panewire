@@ -1004,20 +1004,17 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 		if err != nil {
 			return nil, "journal_failed"
 		}
+		defer unlock()
 		target, err := readNodeCloseTarget(job)
 		if err != nil {
-			unlock()
 			return nil, "journal_failed"
 		}
 		if target.attempt != "" && target.attempt != op.Attempt {
-			err := client.hubCloseLedger().SyncEvents(job)
-			unlock()
-			if err != nil {
+			if err := client.hubCloseLedger().SyncEvents(job); err != nil {
 				return nil, "journal_failed"
 			}
 			return nodeCloseOpStatusResult{State: nodeCloseOpSuperseded, Released: op.Released != nil, Attempt: target.attempt}, ""
 		}
-		unlock()
 	}
 	settled := false
 	if op.State == fleet.CloseOpClosed || op.State == fleet.CloseOpGone || op.State == fleet.CloseOpUnknown {
