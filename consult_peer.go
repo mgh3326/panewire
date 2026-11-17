@@ -46,57 +46,61 @@ func processParent(pid int) (int, error) {
 	return strconv.Atoi(strings.TrimSpace(string(out)))
 }
 
-func consultPane(ctx context.Context, run relayCommandRunner, pid int, parent func(int) (int, error)) (string, error) {
+func consultPane(ctx context.Context, run relayCommandRunner, pid int, parent func(int) (int, error)) (string, string, error) {
 	raw, err := run(ctx, "pane", "list")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var top map[string]json.RawMessage
 	if err = json.Unmarshal(raw, &top); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if v := top["result"]; v != nil {
 		if err = json.Unmarshal(v, &top); err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
 	var panes []struct {
-		ID string `json:"pane_id"`
+		ID    string `json:"pane_id"`
+		Label string `json:"label"`
+		Name  string `json:"name"`
 	}
 	if err = json.Unmarshal(top["panes"], &panes); err != nil || panes == nil {
-		return "", errors.New("cannot read herdr pane list")
+		return "", "", errors.New("cannot read herdr pane list")
 	}
 	shells := make(map[string]int)
+	labels := make(map[string]string)
 	for _, p := range panes {
 		if p.ID == "" {
-			return "", errors.New("invalid herdr pane list")
+			return "", "", errors.New("invalid herdr pane list")
 		}
 		raw, err = run(ctx, "pane", "process-info", "--pane", p.ID)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		top = nil
 		if err = json.Unmarshal(raw, &top); err != nil {
-			return "", err
+			return "", "", err
 		}
 		if v := top["result"]; v != nil {
 			if err = json.Unmarshal(v, &top); err != nil {
-				return "", err
+				return "", "", err
 			}
 		}
 		var info struct {
 			Shell int `json:"shell_pid"`
 		}
 		if err = json.Unmarshal(top["process_info"], &info); err != nil || info.Shell <= 0 {
-			return "", errors.New("cannot read pane process info")
+			return "", "", errors.New("cannot read pane process info")
 		}
 		shells[p.ID] = info.Shell
+		labels[p.ID] = firstNonEmptyString(p.Label, p.Name)
 	}
 	pane := resolveConsultPane(pid, parent, shells)
 	if pane == "" {
-		return "", errors.New("not inside a herdr pane")
+		return "", "", errors.New("not inside a herdr pane")
 	}
-	return pane, nil
+	return pane, labels[pane], nil
 }
 
 func (d *Daemon) handleConsult(ctx context.Context, c net.Conn, req *localConsultRequest) (any, error) {
@@ -114,7 +118,7 @@ func (d *Daemon) handleConsult(ctx context.Context, c net.Conn, req *localConsul
 	if req.Session != "" && !consultRequesterPattern.MatchString(req.Session) {
 		return nil, &codedError{ExitUsage, errors.New("consult request: invalid herdr session")}
 	}
-	pane, err := consultPane(ctx, client.nodeHerdrRunnerForSession(req.Session), pid, processParent)
+	pane, label, err := consultPane(ctx, client.nodeHerdrRunnerForSession(req.Session), pid, processParent)
 	if err != nil {
 		return nil, &codedError{ExitConditionInvalid, fmt.Errorf("consult request: %w", err)}
 	}
@@ -145,7 +149,11 @@ func (d *Daemon) handleConsult(ctx context.Context, c net.Conn, req *localConsul
 			return nil, &codedError{ExitInternal, errors.New("consult request: spawn journal unreadable")}
 		}
 		if result.Pane == pane {
-			worker = true
+			// A receipt label binds the historical journal entry to the
+			// current pane; absent labels remain unproven and fail closed.
+			if result.Receipt == nil || result.Receipt.Label == "" || label == "" || result.Receipt.Label == label {
+				worker = true
+			}
 		}
 	}
 	err = rows.Err()

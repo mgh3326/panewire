@@ -58,6 +58,16 @@ func TestDesignConsultAuthorization(t *testing.T) {
 	if code != http.StatusForbidden || !strings.Contains(out["reason"].(string), "ESC") {
 		t.Fatalf("job: %d %v", code, out)
 	}
+	for _, state := range []string{"completed", "orphaned"} {
+		f.hub.mu.Lock()
+		f.hub.jobs["job"].Completed = state == "completed"
+		f.hub.jobs["job"].Orphaned = state == "orphaned"
+		f.hub.mu.Unlock()
+		code, out = f.post(t, "machine-b", "node-token-b", body)
+		if code != http.StatusOK {
+			t.Fatalf("%s job on reused pane: %d %v", state, code, out)
+		}
+	}
 }
 
 func TestConsultPaneResolution(t *testing.T) {
@@ -72,7 +82,7 @@ func TestConsultPaneResolution(t *testing.T) {
 		return json.Marshal(map[string]any{"process_info": map[string]int{"shell_pid": shell}})
 	}
 	parents := map[int]int{42: 30, 30: 20, 20: 1}
-	got, err := consultPane(context.Background(), run, 42, func(pid int) (int, error) { return parents[pid], nil })
+	got, _, err := consultPane(context.Background(), run, 42, func(pid int) (int, error) { return parents[pid], nil })
 	if err != nil || got != "p2" {
 		t.Fatalf("pane %q: %v", got, err)
 	}
@@ -110,7 +120,7 @@ func TestConsultLocalDaemonForwardsAndRefusesJob(t *testing.T) {
 	client := &HubClient{machineID: "machine-b", token: "node-token-b", endpoints: []string{strings.Replace(server.URL, "http://", "ws://", 1)}, spawnJournalDir: root,
 		nodeHerdr: func(_ context.Context, args ...string) ([]byte, error) {
 			if len(args) == 2 {
-				return []byte(`{"panes":[{"pane_id":"w1:p1"}]}`), nil
+				return []byte(`{"panes":[{"pane_id":"w1:p1","label":"design"}]}`), nil
 			}
 			return json.Marshal(map[string]any{"process_info": map[string]int{"shell_pid": os.Getpid()}})
 		}}
@@ -143,7 +153,7 @@ func TestConsultLocalDaemonForwardsAndRefusesJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = j.db.Exec(`INSERT INTO spawn_inbox(request_id,fingerprint,status,result) VALUES('worker','x','completed',?)`, `{"pane":"w1:p1"}`)
+	_, err = j.db.Exec(`INSERT INTO spawn_inbox(request_id,fingerprint,status,result) VALUES('worker','x','completed',?)`, `{"pane":"w1:p1","receipt":{"label":"design"}}`)
 	client.releaseSpawnJournal()
 	if err != nil {
 		t.Fatal(err)
@@ -152,5 +162,20 @@ func TestConsultLocalDaemonForwardsAndRefusesJob(t *testing.T) {
 	errOut.Reset()
 	if code := runConsultLocal(req, false, &out, &errOut, path); code != ExitConditionInvalid || !strings.Contains(errOut.String(), "ESC") {
 		t.Fatalf("worker: %d %s", code, errOut.String())
+	}
+	// The old journal's pane ID may later belong to a different pane label.
+	j, err = client.acquireSpawnJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = j.db.Exec(`UPDATE spawn_inbox SET result=? WHERE request_id='worker'`, `{"pane":"w1:p1","receipt":{"label":"old-worker"}}`)
+	client.releaseSpawnJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := runConsultLocal(req, false, &out, &errOut, path); code != ExitOK {
+		t.Fatalf("reused pane: %d %s", code, errOut.String())
 	}
 }

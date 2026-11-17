@@ -223,7 +223,7 @@ func (h *HubServer) authorizeDesignConsult(machine string, request *hubConsultRe
 	}
 	h.mu.Lock()
 	for _, job := range h.jobs {
-		if job.Node == machine && job.Pane == request.CallerPane {
+		if !job.Completed && !job.Orphaned && job.Node == machine && job.Pane == request.CallerPane {
 			h.mu.Unlock()
 			return consultWorkerRefusal
 		}
