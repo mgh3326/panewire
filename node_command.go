@@ -312,6 +312,28 @@ func nodeWorktreePrepareFields(raw json.RawMessage) bool {
 	return true
 }
 
+// nodeWorktreeRemoveFields accepts the required fields plus any subset of the
+// optional detached and disposable arguments.
+func nodeWorktreeRemoveFields(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	for _, name := range nodeCommandArgFields[nodeCommandWorktreeRemove] {
+		value, found := fields[name]
+		if !found || isJSONNull(value) {
+			return false
+		}
+		delete(fields, name)
+	}
+	for key, value := range fields {
+		if (key != "detached" && key != "disposable") || isJSONNull(value) {
+			return false
+		}
+	}
+	return true
+}
+
 func nodeWorktreeInspectFields(raw json.RawMessage) bool {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil || fields["cwd"] == nil || isJSONNull(fields["cwd"]) {
@@ -338,7 +360,7 @@ func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	names, known := nodeCommandArgFields[op]
 	optionalKind := op == nodeCommandPaneRead && nodeCommandHasFields(raw, append(append([]string(nil), names...), "kind"))
-	optionalDetached := op == nodeCommandWorktreeRemove && nodeCommandHasFields(raw, append(append([]string(nil), names...), "detached"))
+	optionalRemove := op == nodeCommandWorktreeRemove && nodeWorktreeRemoveFields(raw)
 	optionalUnnamed := (op == nodeCommandPaneClose || op == nodeCommandPaneCapture) && nodeCommandHasFields(raw, append(append([]string(nil), names...), "allow_unnamed"))
 	optionalList := op == nodeCommandWorktreeList && nodeWorktreeListFields(raw)
 	optionalInspect := op == nodeCommandWorktreeInspect && nodeWorktreeInspectFields(raw)
@@ -346,7 +368,7 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalEndReason := op == nodeCommandJobMarkLost && nodeCommandHasFields(raw, append(append([]string(nil), names...), "end_reason"))
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect) {
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect) {
 		return nil, false
 	}
 	switch op {
@@ -441,6 +463,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 			nodeShaPattern.MatchString(args.ExpectHead) && validNodeRefName(args.Base) && args.Regenerable != nil
 		for _, glob := range args.Regenerable {
 			valid = valid && validNodeGlob(glob)
+		}
+		if valid && args.Disposable != nil {
+			valid = valid && validNodeDisposableList(args.Disposable)
 		}
 		return args, valid
 	case nodeCommandQuotaRefresh:
@@ -542,17 +567,17 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		}
 		switch result.Outcome {
 		case nodeRemoveRemoved:
-			valid = result.Worktree != nil && result.Worktree.Head != "" && result.RetryAfterS == 0 && result.Files == nil
+			valid = result.Worktree != nil && result.Worktree.Head != "" && result.RetryAfterS == 0 && result.Files == nil && (result.Disposable == nil || validNodeDisposableList(result.Disposable))
 		case nodeOutcomeBusy:
-			valid = result.RetryAfterS > 0 && result.Worktree == nil && result.Files == nil
+			valid = result.RetryAfterS > 0 && result.Worktree == nil && result.Files == nil && result.Disposable == nil
 		case nodeRemoveIgnoredFiles:
-			valid = len(result.Files) > 0 && result.Worktree == nil && result.RetryAfterS == 0
+			valid = len(result.Files) > 0 && result.Worktree == nil && result.RetryAfterS == 0 && result.Disposable == nil
 		case nodeRemoveWorktreeGone, nodeRemoveWorktreeChanged, nodeRemoveUnregistered,
 			nodeRemoveLocked, nodeRemoveDetached, nodeRemoveNotDetached, nodeRemoveStatusCheckFailed,
 			nodeOutcomeDirty, nodeRemovePaneInUse, nodeRemovePaneScanFailed,
 			nodeRemoveUnmerged, nodeRemoveOutsideWorkRoot, nodeOutcomeGitFailed,
 			nodeOutcomeGitTooOld, nodeOutcomeCancelled:
-			valid = result.Worktree == nil && result.Files == nil && result.RetryAfterS == 0
+			valid = result.Worktree == nil && result.Files == nil && result.RetryAfterS == 0 && result.Disposable == nil
 		}
 		target = result
 	case nodeCommandQuotaRefresh:
