@@ -89,6 +89,14 @@ func newQuotaReplaceFixture(t *testing.T, role, job string) *quotaReplaceFixture
 
 // newQuotaReplaceFixtureWith lets a test change the stopped job's stored submission.
 func newQuotaReplaceFixtureWith(t *testing.T, role, job string, mutate func(*fleet.Submission)) *quotaReplaceFixture {
+	return newQuotaReplaceFixtureLogged(t, role, job, mutate, io.Discard)
+}
+
+// newQuotaReplaceFixtureLogged is newQuotaReplaceFixtureWith with the hub's log
+// sink set at construction. The hub's node session reads the logger on its own
+// goroutine, so a test must not assign hub.logger once the fixture has started
+// the server (hk 5282: a DATA RACE under -race). logs must accept concurrent writes.
+func newQuotaReplaceFixtureLogged(t *testing.T, role, job string, mutate func(*fleet.Submission), logs io.Writer) *quotaReplaceFixture {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	fake, client, stop := newFakeHandoffkeep(t)
@@ -97,7 +105,7 @@ func newQuotaReplaceFixtureWith(t *testing.T, role, job string, mutate func(*fle
 		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"},
 		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
 		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:          slog.New(slog.NewTextHandler(logs, nil)),
 		handoffkeep:     client,
 	})
 	if err != nil {

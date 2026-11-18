@@ -27,9 +27,10 @@ import (
 // a tool requester polls.
 
 const (
-	// consultToolLane owns a consult a tool asked for. A lane requester owns
-	// its own consult. The lane is only the spawn's owner (completion routing);
-	// the tool reads GET /v1/consults/{id}.
+	// consultToolLane owns a consult a tool asked for when no author job names
+	// an owner lane (operator decision 421, docs/consult-on-request.md §Owner).
+	// The lane is only the spawn's owner (completion routing); the tool reads
+	// GET /v1/consults/{id}.
 	consultToolLane = "operator-desk"
 	// consultReasonLimit bounds a refusal reason carried in a row.
 	consultReasonLimit = 512
@@ -180,7 +181,16 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 	}
 	c.Updated = now
 	c.ClaimUntil = now.Add(consultLease(now, c.Deadline))
-	plan, reason := h.planConsultRequest(ctx, request)
+	// The owner is fixed for the row (decision 421): a new consult takes it
+	// from its author job; a retry keeps the owner the row already has, even
+	// when its new evidence resolves to another lane. Respawn and recovery
+	// read the stored owner, so notices never move between attempts.
+	if replace {
+		c.Owner = existing.ownerLane()
+	} else {
+		c.Owner = h.consultOwnerFor(ctx, request)
+	}
+	plan, reason := h.planConsultRequest(ctx, request, c.Owner)
 	if reason != "" {
 		c.State = consultRefused
 		c.Reason = reason
@@ -203,7 +213,7 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, consultView(*conflict))
 		return
 	}
-	if err := h.claimConsultSpawn(ctx, plan, consultOwner(c.Requester)); err != nil {
+	if err := h.claimConsultSpawn(ctx, plan, c.ownerLane()); err != nil {
 		h.failConsult(ctx, c, consultReason(err))
 		writeJSON(w, http.StatusCreated, consultView(h.consultOrEmpty(ctx, c)))
 		return
@@ -302,11 +312,41 @@ func consultIdemKey(task, pr, head string) string {
 	return task + "|" + pr + "|" + head
 }
 
+// consultOwner is the owner when no author job names one: the requesting lane,
+// else operator-desk for a tool requester.
 func consultOwner(requester string) string {
 	if validLaneReference(requester) {
 		return requester
 	}
 	return consultToolLane
+}
+
+// consultOwnerFor picks the lane a consult belongs to (operator decision 421).
+// The owner lane of the author job the hub holds wins when that lane is
+// registered; otherwise the requester rule applies. An unknown author job, an
+// unregistered owner or a store error falls back to the next rule: the
+// consult is never dropped for its owner.
+func (h *HubServer) consultOwnerFor(ctx context.Context, request hubConsultRequest) string {
+	if request.AuthorJob != "" {
+		if holder, err := h.inbox.store.latestSpawnForJob(ctx, request.AuthorJob); err == nil && h.consultLaneRegistered(holder.Owner) {
+			return holder.Owner
+		}
+	}
+	return consultOwner(request.Requester)
+}
+
+// consultLaneRegistered reports whether lane has a report-relay route on this
+// hub, the same registration the lane's own notices need.
+func (h *HubServer) consultLaneRegistered(lane string) bool {
+	if !validLaneReference(lane) {
+		return false
+	}
+	routes, err := loadReportRelayRoutesResult(h.reportRelayPath)
+	if err != nil {
+		return false
+	}
+	_, registered := routes[lane]
+	return registered
 }
 
 func consultReason(err error) string {
@@ -315,7 +355,7 @@ func consultReason(err error) string {
 
 // planConsultRequest resolves the repository evidence and the seat. A refusal
 // names why the consult stays unspawned.
-func (h *HubServer) planConsultRequest(ctx context.Context, request hubConsultRequest) (fleet.ConsultPlan, string) {
+func (h *HubServer) planConsultRequest(ctx context.Context, request hubConsultRequest, owner string) (fleet.ConsultPlan, string) {
 	repo, reason := h.consultRepository(ctx, request)
 	if reason != "" {
 		return fleet.ConsultPlan{}, reason
@@ -323,7 +363,7 @@ func (h *HubServer) planConsultRequest(ctx context.Context, request hubConsultRe
 	plan, err := h.resolveConsultPlan(ctx, fleet.ConsultPlanInput{
 		Task: request.Task, Question: request.QuestionDoc, AuthorJob: request.AuthorJob,
 		AuthorFamily: request.AuthorFamily, PR: request.PR, Head: request.Head,
-		Requester: request.Requester, Owner: consultOwner(request.Requester), Repository: repo,
+		Requester: request.Requester, Owner: owner, Repository: repo,
 	})
 	if err != nil {
 		return fleet.ConsultPlan{}, consultReason(err)
@@ -346,18 +386,36 @@ func (h *HubServer) resolveConsultPlan(ctx context.Context, in fleet.ConsultPlan
 }
 
 // consultRepository reads the author job's stored submission, else the job
-// the task is bound to. A consult changes no code but still runs in a checkout
-// of the requested head.
+// the task is bound to. An unknown author job falls back to the task's bound
+// job, the same evidence an omitted author job uses, so the consult still
+// runs. A consult changes no code but still runs in a checkout of the
+// requested head.
 func (h *HubServer) consultRepository(ctx context.Context, request hubConsultRequest) (*fleet.Repository, string) {
-	job := request.AuthorJob
-	if job == "" {
-		bound, err := fleet.TaskBinding(ctx, request.Task)
-		if err != nil {
-			return nil, "task_unreadable: " + consultReason(err)
+	unknown := ""
+	if request.AuthorJob != "" {
+		holder, err := h.inbox.store.latestSpawnForJob(ctx, request.AuthorJob)
+		switch {
+		case err == nil:
+			repo := holder.Request.Repository
+			return &repo, ""
+		case errors.Is(err, sql.ErrNoRows):
+			unknown = "author_job_unknown: no spawn operation for " + request.AuthorJob
+		default:
+			return nil, "author_job_unreadable: " + consultReason(err)
 		}
-		job = bound
+	}
+	bind := h.consultTaskBinding
+	if bind == nil {
+		bind = fleet.TaskBinding
+	}
+	job, err := bind(ctx, request.Task)
+	if err != nil {
+		return nil, "task_unreadable: " + consultReason(err)
 	}
 	if job == "" {
+		if unknown != "" {
+			return nil, unknown + "; the task is bound to none"
+		}
 		return nil, "author_job_required: no author job and the task is bound to none"
 	}
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, job)
@@ -615,6 +673,7 @@ func consultRequestOf(c hubConsult) hubConsultRequest {
 // the row was stored but the claim never ran (a crash or a store error).
 func (h *HubServer) recoverConsult(ctx context.Context, c hubConsult) {
 	request := consultRequestOf(c)
+	owner := c.ownerLane()
 	repo, why := h.consultRepository(ctx, request)
 	if why != "" {
 		h.failConsult(ctx, c, "recover_failed: "+why)
@@ -623,7 +682,7 @@ func (h *HubServer) recoverConsult(ctx context.Context, c hubConsult) {
 	plan, err := h.resolveConsultPlan(ctx, fleet.ConsultPlanInput{
 		Task: request.Task, Question: request.QuestionDoc, AuthorJob: request.AuthorJob,
 		AuthorFamily: request.AuthorFamily, PR: request.PR, Head: request.Head,
-		Requester: request.Requester, Owner: consultOwner(request.Requester), Repository: repo,
+		Requester: request.Requester, Owner: owner, Repository: repo,
 		ExcludeProfiles: c.ExcludeProfiles,
 	})
 	if err != nil {
@@ -633,11 +692,12 @@ func (h *HubServer) recoverConsult(ctx context.Context, c hubConsult) {
 	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
 	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
 	c.Reason = ""
+	c.Owner = owner
 	c.ClaimUntil = h.now().Add(consultLease(h.now(), c.Deadline))
 	if err := h.saveConsult(ctx, c); err != nil {
 		return
 	}
-	if err := h.claimConsultSpawn(ctx, plan, consultOwner(request.Requester)); err != nil {
+	if err := h.claimConsultSpawn(ctx, plan, owner); err != nil {
 		h.failConsult(ctx, c, "recover_unavailable: "+consultReason(err))
 		return
 	}
@@ -649,6 +709,7 @@ func (h *HubServer) recoverConsult(ctx context.Context, c hubConsult) {
 
 func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason string) {
 	request := consultRequestOf(c)
+	owner := c.ownerLane()
 	repo, why := h.consultRepository(ctx, request)
 	if why != "" {
 		h.failConsult(ctx, c, "no_respawn_seat after "+reason+": "+why)
@@ -660,7 +721,7 @@ func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason str
 	plan, err := h.resolveConsultPlan(ctx, fleet.ConsultPlanInput{
 		Task: request.Task, Question: request.QuestionDoc, AuthorJob: request.AuthorJob,
 		AuthorFamily: request.AuthorFamily, PR: request.PR, Head: request.Head,
-		Requester: request.Requester, Owner: consultOwner(request.Requester), Repository: repo,
+		Requester: request.Requester, Owner: owner, Repository: repo,
 		ExcludeProfiles: c.ExcludeProfiles,
 	})
 	if err != nil {
@@ -673,11 +734,12 @@ func (h *HubServer) respawnConsult(ctx context.Context, c hubConsult, reason str
 	c.State, c.Job, c.RequestID = consultQueued, plan.Job, plan.Request.RequestID
 	c.SeatProfile, c.SeatFamily, c.SeatGrade = plan.Seat.Profile, plan.Seat.Family, plan.Seat.Grade
 	c.Respawns, c.Reason = c.Respawns+1, ""
+	c.Owner = owner
 	c.ClaimUntil = h.now().Add(consultLease(h.now(), c.Deadline))
 	if err := h.saveConsult(ctx, c); err != nil {
 		return
 	}
-	if err := h.claimConsultSpawn(ctx, plan, consultOwner(request.Requester)); err != nil {
+	if err := h.claimConsultSpawn(ctx, plan, owner); err != nil {
 		h.failConsult(ctx, c, "respawn_unavailable after "+reason+": "+consultReason(err))
 		return
 	}

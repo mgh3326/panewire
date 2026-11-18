@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/agybusy"
 )
 
 func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
@@ -141,7 +143,23 @@ func (a *App) agents(ctx context.Context) ([]Agent, error) {
 	if e := check(r, "herdr agent list"); e != nil {
 		return nil, e
 	}
-	return ParseAgents([]byte(r.Out))
+	agents, err := ParseAgents([]byte(r.Out))
+	if err != nil {
+		return nil, err
+	}
+	// The agy busy check (hk 5241): herdr can read an agy pane done between
+	// tool runs, so its screen decides before any caller judges it finished.
+	for index := range agents {
+		pane := agents[index].Pane
+		agents[index].Status = agybusy.Status(agents[index].Kind, agents[index].Status, func() (string, error) {
+			read := a.call(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", strconv.Itoa(agybusy.VisibleLines))
+			if e := check(read, "herdr agent read"); e != nil {
+				return "", e
+			}
+			return read.Out, nil
+		})
+	}
+	return agents, nil
 }
 
 // ParseAgents decodes herdr agent.list metadata.
