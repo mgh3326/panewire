@@ -160,7 +160,7 @@ func TestLoopLedgerDailyRowOncePerDayAcrossRestart(t *testing.T) {
 		existing[key] = true
 		return nil
 	}
-	h.loopsDocExists = func(_ context.Context, key string) bool { return existing[key] }
+	h.loopsDocExists = func(_ context.Context, key string) (bool, error) { return existing[key], nil }
 	ctx := context.Background()
 
 	for _, m := range loopMechanisms {
@@ -184,7 +184,7 @@ func TestLoopLedgerDailyRowOncePerDayAcrossRestart(t *testing.T) {
 		existing[key] = true
 		return nil
 	}
-	restarted.loopsDocExists = func(_ context.Context, key string) bool { return existing[key] }
+	restarted.loopsDocExists = func(_ context.Context, key string) (bool, error) { return existing[key], nil }
 	restarted.maybeWriteLoopsRow(ctx)
 	if got := published[loopsRowKey("2026-11-19")]; got != 1 {
 		t.Fatalf("restarted hub rewrote 2026-11-19: publishes=%d, want 1", got)
@@ -229,7 +229,7 @@ func TestLoopLedgerProgressNotice(t *testing.T) {
 
 	var body string
 	h.loopsDocPublish = func(_ context.Context, _, b string) error { body = b; return nil }
-	h.loopsDocExists = func(_ context.Context, _ string) bool { return false }
+	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return false, nil }
 	h.maybeWriteLoopsRow(context.Background())
 	var doc loopsRowDoc
 	if err := json.Unmarshal([]byte(body), &doc); err != nil {
@@ -271,5 +271,76 @@ func TestLoopLedgerNoticeAtMostOnePerMechanismPerDay(t *testing.T) {
 	st.mu.Unlock()
 	if sent != 1 {
 		t.Fatalf("inbox notices sent=%d, want 1", sent)
+	}
+}
+
+// Loops whose interval is configured off never tick, and must not be
+// reported as stopped: a disabled interval is excluded from the stale check.
+func TestLoopLedgerDisabledLoopsExcludedFromStale(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	h.poolTriggerInterval = 0
+	if got := h.loopInterval(loopFleetStatus); got != 0 {
+		t.Fatalf("fleet_status interval=%v, want 0 when disabled", got)
+	}
+	if got := h.loopInterval(loopPaneSweep); got != 0 {
+		t.Fatalf("pane_sweep interval=%v, want 0 when disabled", got)
+	}
+	if got := h.loopInterval(loopPoolTriggers); got != 0 {
+		t.Fatalf("pool_triggers interval=%v, want 0 when disabled", got)
+	}
+	now = now.Add(2 * time.Hour)
+	for _, m := range h.loopsStaleHits(now) {
+		if m == loopFleetStatus || m == loopPaneSweep || m == loopPoolTriggers {
+			t.Fatalf("disabled loop %s flagged stale: %v", m, h.loopsStaleHits(now))
+		}
+	}
+}
+
+// An unreadable row is neither absent nor present: the write is skipped, the
+// failure counts, and the next sweep retries the read instead of
+// overwriting the day's counts with a restart-fresh ledger.
+func TestLoopLedgerUnreadableRowSkipsWriteAndRetries(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	published := 0
+	readErr := errors.New("hk timeout")
+	h := loopLedgerTestHub(t, &now, nil)
+	h.loopsDocPublish = func(_ context.Context, _, _ string) error { published++; return nil }
+	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return false, readErr }
+	ctx := context.Background()
+
+	for _, m := range loopMechanisms {
+		h.loopTick(m)
+	}
+	h.maybeWriteLoopsRow(ctx)
+	if published != 0 {
+		t.Fatalf("unreadable row published=%d, want 0", published)
+	}
+	if got := h.loopSnapshot()[loopFleetStatus].Errors; got < 1 {
+		t.Fatalf("fleet_status errors=%d, want >= 1 for the unreadable row", got)
+	}
+	readErr = nil
+	h.maybeWriteLoopsRow(ctx)
+	if published != 1 {
+		t.Fatalf("retried publishes=%d, want 1", published)
+	}
+}
+
+// A notice whose lane.event persist fails is not marked sent, so the next
+// sweep retries it instead of losing it for the day.
+func TestLoopLedgerNoticeRetryWhenPersistFails(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+
+	h.loopNoteSilentError(loopInbox, "hub_inbox.go:pendingBatches", errors.New("boom"))
+	h.inbox.store.abort()
+	h.maybeSendLoopsNotice(ctx)
+	st := h.loopLedger()
+	st.mu.Lock()
+	_, marked := st.noticeSent[string(loopInbox)+"|"+now.Format("2006-01-02")]
+	st.mu.Unlock()
+	if marked {
+		t.Fatalf("failed notice was marked sent; the next sweep would skip it")
 	}
 }

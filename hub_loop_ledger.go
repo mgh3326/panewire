@@ -269,24 +269,33 @@ func (h *HubServer) loopInterval(m loopMechanism) time.Duration {
 	case loopQuotaLadder:
 		return quotaReconcileEvery
 	case loopPoolTriggers:
-		if h != nil && h.poolTriggerInterval > 0 {
-			return h.poolTriggerInterval
+		if h == nil {
+			return defaultPoolTriggerInterval
 		}
-		return defaultPoolTriggerInterval
+		if h.poolTriggerInterval <= 0 {
+			return 0
+		}
+		return h.poolTriggerInterval
 	case loopPoolActions:
 		return poolActionInterval
 	case loopPlacementRecords:
 		return 2 * time.Second
 	case loopFleetStatus:
-		if h != nil && h.fleetStatusInterval > 0 {
-			return h.fleetStatusInterval
+		if h == nil {
+			return defaultFleetStatusInterval
 		}
-		return defaultFleetStatusInterval
+		if h.fleetStatusInterval <= 0 {
+			return 0
+		}
+		return h.fleetStatusInterval
 	case loopPaneSweep:
-		if h != nil && h.paneSweepInterval > 0 {
-			return h.paneSweepInterval
+		if h == nil {
+			return defaultHubPaneSweepInterval
 		}
-		return defaultHubPaneSweepInterval
+		if h.paneSweepInterval <= 0 {
+			return 0
+		}
+		return h.paneSweepInterval
 	case loopReviewerEnd:
 		return reviewerEndInterval
 	}
@@ -352,19 +361,30 @@ func (h *HubServer) loopsPublish(ctx context.Context, key, body string) error {
 	return fleet.PutHKDocument(ctx, key, loopsRowDocKind, "", body)
 }
 
-// loopsRowExists reports whether the row document already exists. A failed
-// write retries on the next sweep; an existing document is never rewritten.
-func (h *HubServer) loopsRowExists(ctx context.Context, key string) bool {
+// loopsRowState reports whether the row document already exists. Unknown is
+// true when the read itself failed for any reason other than absence: the
+// caller then skips the write and retries the read on the next sweep, so a
+// transient hk failure can never overwrite the day's counts with a
+// restart-fresh ledger.
+func (h *HubServer) loopsRowState(ctx context.Context, key string) (exists, unknown bool) {
 	if h.loopsDocExists != nil {
-		return h.loopsDocExists(ctx, key)
+		exists, err := h.loopsDocExists(ctx, key)
+		return exists, err != nil
 	}
 	_, err := fleet.HKDocumentAnswer(ctx, key)
-	return err == nil
+	if err == nil {
+		return true, false
+	}
+	if fleet.HKDocumentMissing(err) {
+		return false, false
+	}
+	return false, true
 }
 
 // maybeWriteLoopsRow writes exactly one daily row per UTC date. It is called
-// from the hub's slow sweeps; a failed write counts in the ledger (against
-// fleet_status, the hub's other hk writer) and is retried on the next sweep.
+// from the hub's slow sweeps; a failed write or an unreadable row counts in
+// the ledger (against fleet_status, the hub's other hk writer) and is
+// retried on the next sweep.
 func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 	if h == nil {
 		return
@@ -378,7 +398,13 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 		return
 	}
 	st.mu.Unlock()
-	if h.loopsRowExists(ctx, loopsRowKey(date)) {
+	exists, unknown := h.loopsRowState(ctx, loopsRowKey(date))
+	if unknown {
+		h.loopNoteError(loopFleetStatus)
+		h.logger.Warn("hub loops row unreadable; retrying", "key", loopsRowKey(date))
+		return
+	}
+	if exists {
 		st.mu.Lock()
 		st.rowDate = date
 		st.mu.Unlock()
@@ -512,12 +538,11 @@ func (h *HubServer) maybeSendLoopsNotice(ctx context.Context) {
 		key := string(m) + "|" + date
 		st := h.loopLedger()
 		st.mu.Lock()
-		if by, ok := st.noticeSent[key]; ok && by == date {
-			st.mu.Unlock()
+		sent := st.noticeSent[key] == date
+		st.mu.Unlock()
+		if sent {
 			continue
 		}
-		st.noticeSent[key] = date
-		st.mu.Unlock()
 		text := fmt.Sprintf("loop %s: %s (machine hub, day %s)", m, strings.Join(reasons, "; "), date)
 		event := hubJobEventPayload{
 			EventID: "loops:" + string(m) + ":" + date,
@@ -526,7 +551,11 @@ func (h *HubServer) maybeSendLoopsNotice(ctx context.Context) {
 		}
 		result := h.relayLaneEventContext(ctx, event, nil)
 		if result.RejectedTooLong || result.PersistFailed {
-			h.logger.Warn("loops notice not persisted; retrying", "mechanism", string(m), "lane", h.loopsNoticeLane())
+			h.logger.Warn("loops notice not persisted; retrying on the next sweep", "mechanism", string(m), "lane", h.loopsNoticeLane())
+			continue
 		}
+		st.mu.Lock()
+		st.noticeSent[key] = date
+		st.mu.Unlock()
 	}
 }

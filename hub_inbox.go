@@ -587,6 +587,7 @@ func (h *HubServer) flushInbox() {
 		return
 	}
 	defer h.inbox.flushMu.Unlock()
+	h.loopTick(loopInbox)
 	if h.inbox.persistDisabled || h.closeCtx.Err() != nil || h.now().Before(h.inbox.nextAttempt) {
 		if h.inbox.persistDisabled {
 			h.loopNoteSilentError(loopInbox, "hub_inbox.go:persistDisabled", nil)
@@ -596,7 +597,6 @@ func (h *HubServer) flushInbox() {
 		return
 	}
 	h.loopClearSilent("hub_inbox.go:persistDisabled")
-	h.loopTick(loopInbox)
 	failed := false
 	defer func() { h.noteInboxFlushResult(failed) }()
 	// A held-batching failure must not starve ordinary digests or batches

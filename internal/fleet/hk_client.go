@@ -93,6 +93,13 @@ func hkTaskID(task string) (int64, error) {
 	return id, nil
 }
 
+// HKDocumentMissing reports whether a failed document read means hk has no
+// document under the key, as opposed to an outage or unreadable answer a
+// later read may answer.
+func HKDocumentMissing(err error) bool {
+	return errors.Is(err, errHKNotFound)
+}
+
 // TaskReadPermanent reports whether a failed task read will not change on a
 // retry for as long as the request stands: the task is gone, or the id names
 // no task. Any other error is an hk outage or an unreadable answer, which a

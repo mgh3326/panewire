@@ -162,8 +162,9 @@ type HubServerConfig struct {
 	// writes with fleet.PutHKDocument under the hub's hk credential.
 	LoopsDocPublish func(context.Context, string, string) error
 	// LoopsDocExists reports whether a daily loops-row document already
-	// exists; nil reads it with the hub's hk credential.
-	LoopsDocExists func(context.Context, string) bool
+	// exists; a non-nil error means the read itself failed for any reason
+	// other than absence. Nil reads it with the hub's hk credential.
+	LoopsDocExists func(context.Context, string) (bool, error)
 	// FleetStatusPlans replaces the per-grade plan in tests; nil runs the
 	// hub's own fleet App as a read-only dry run.
 	FleetStatusPlans func(context.Context) []fleet.StatusPlan
@@ -715,7 +716,7 @@ type HubServer struct {
 	loops           *loopLedgerState
 	loopsLane       string
 	loopsDocPublish func(context.Context, string, string) error
-	loopsDocExists  func(context.Context, string) bool
+	loopsDocExists  func(context.Context, string) (bool, error)
 	// fleetStatusInterval is how often the fleet status snapshot is written;
 	// zero disables it. fleetStatusPublish and fleetStatusPlanFn are the
 	// test seams for the hk write and the per-grade plan (fleet_status.go).

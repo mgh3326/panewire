@@ -14,7 +14,7 @@ hk 5117 adds per-node rows beside these.
 |---|---|---|---|
 | `spawn_coordinator` | 2 s | pending `spawn_operations` rows seen in the scan (plus waiting rows released by the start-condition check) | rows handed to a worker or a node dispatch (a start-condition release, give-up, refusal or cancellation also counts) |
 | `consult_coordinator` | 5 s | active consult rows read | consults answered, timed out, failed, respawned or settled |
-| `lane_stall_drain_wake` | keepalive (10 s) | backlog lanes observed in a sweep (stall candidates plus drain lanes stepped) | stall alarms activated plus drain lines queued to a design lane's pane |
+| `lane_stall_drain_wake` | keepalive (10 s) | stall candidates observed, plus drain sweeps where a lane owed a line | stall alarms activated plus drain lines queued to a design lane's pane |
 | `inbox` | 100 ms | batches listed for flush, plus inbox-wake lanes due at a window end | batches handed to the relay (marked sent), plus wake lines sent |
 | `quota_ladder` | 2 m | quota successor rows plus expired ladder stages seen | hk records written with `replaced_by`, plus ladder stages activated, discarded or cancelled |
 | `pool_triggers_exhausted` | 10 m | live pools checked | exhausted-pool sweeps started (retired or credit-exhausted) |
@@ -64,12 +64,12 @@ counts against `fleet_status` in the ledger and is retried on the next sweep.
 ## Notice
 
 The notice goes to `--loops-notice-lane` (default `panewire-design`), one
-lane.event line per hit. It fires when any of these holds:
+lane.event line per hit mechanism. It fires when any of these holds:
 
 - `last_tick` is older than three intervals for the mechanism;
 - `made` ≥ 20 and `done` = 0, or `done/made` < 10%;
 - a previously silent error path counted ≥ 1.
 
 Thresholds (`3`, `20`, `10%`) live in `hub_loop_ledger.go` (`loopStaleIntervals`,
-`loopMadeFloor`, `loopDoneRatio`). At most one notice per mechanism per reason
-per day.
+`loopMadeFloor`, `loopDoneRatio`). At most one notice per mechanism per day;
+several reasons for one mechanism share its one line.
