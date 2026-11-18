@@ -47,7 +47,7 @@ func (client *HubClient) spawnHelloCapabilities(ctx context.Context) []string {
 	client.closeOpsAdvertised.Store(ready)
 	capabilities := slices.Clone(hubSpawnCapabilities)
 	if ready {
-		capabilities = append(capabilities, hubCapabilityCloseOps)
+		capabilities = append(capabilities, hubCapabilityCloseOps, hubCapabilityHandoverCheck)
 	}
 	if client.checkoutSparseReady(ctx) {
 		capabilities = append(capabilities, hubCapabilityCheckoutSparse)
@@ -106,6 +106,14 @@ type nodePaneCloseOpArgs struct {
 	// hub-close intent before the operation is registered, so the job's
 	// watcher writes no competing record and finishes with exactly this one.
 	EndReason string `json:"end_reason"`
+	// Handover requires the old worktree still to match the saved checkout.
+	Handover *nodeHandoverCloseGuard `json:"handover,omitempty"`
+}
+
+type nodeHandoverCloseGuard struct {
+	Origin string `json:"origin"`
+	Branch string `json:"branch"`
+	Commit string `json:"commit"`
 }
 
 // nodePaneCloseOpResult.Outcome is a final fleet.CloseOp state, or
@@ -114,6 +122,7 @@ type nodePaneCloseOpArgs struct {
 type nodePaneCloseOpResult struct {
 	Outcome  string `json:"outcome"`
 	Replayed bool   `json:"replayed"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 type nodeCloseOpRefArgs struct {
@@ -139,10 +148,20 @@ type nodeCloseOpStatusResult struct {
 	// Attempt is the job's current attempt token, the value a pane.close_op
 	// for it must name; empty when the job has no readable attempt.
 	Attempt string `json:"attempt"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 func validNodePaneCloseOpArgs(args nodePaneCloseOpArgs) bool {
-	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && args.Epoch > 0 && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != ""
+	guard := args.Handover
+	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && args.Epoch > 0 && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != "" && (guard == nil || guard.Origin != "" && validNodeRefName(guard.Branch) && nodeShaPattern.MatchString(guard.Commit))
+}
+
+func validHandoverCloseReason(reason string) bool {
+	switch reason {
+	case "", handoverDirty, handoverUnpushed, handoverBranchMismatch, handoverGitFailed:
+		return true
+	}
+	return false
 }
 
 // validNodeAttemptToken bounds an attempt token: a ledger event file name.
@@ -153,6 +172,9 @@ func validNodeCloseOpRefArgs(args nodeCloseOpRefArgs) bool {
 }
 
 func validNodePaneCloseOpResult(result nodePaneCloseOpResult) bool {
+	if !validHandoverCloseReason(result.Reason) || result.Reason != "" && result.Outcome != fleet.CloseOpRefused {
+		return false
+	}
 	switch result.Outcome {
 	case fleet.CloseOpClosed, fleet.CloseOpRefused, fleet.CloseOpGone, fleet.CloseOpUnknown, fleet.CloseOpCancelled, fleet.CloseOpPreempted:
 		return true
@@ -163,6 +185,9 @@ func validNodePaneCloseOpResult(result nodePaneCloseOpResult) bool {
 }
 
 func validNodeCloseOpStatusResult(result nodeCloseOpStatusResult) bool {
+	if !validHandoverCloseReason(result.Reason) || result.Reason != "" && result.State != fleet.CloseOpRefused {
+		return false
+	}
 	if result.Attempt != "" && !validNodeAttemptToken(result.Attempt) {
 		return false
 	}
@@ -297,7 +322,7 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 	case found && (op.PaneID != args.PaneID || op.Attempt != args.Attempt || op.Epoch != args.Epoch && !(op.Epoch == 0 && op.State == fleet.CloseOpCancelled)):
 		return nil, "invalid_args"
 	case found && op.Final():
-		return nodePaneCloseOpResult{Outcome: op.State, Replayed: true}, ""
+		return nodePaneCloseOpResult{Outcome: op.State, Replayed: true, Reason: op.Reason}, ""
 	case found && op.State == fleet.CloseOpClosing:
 		return client.finishCloseOp(job, op, fleet.CloseOpUnknown)
 	}
@@ -311,6 +336,13 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 		return nodePaneCloseOpResult{Outcome: outcome}, ""
 	}
 	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, target: target}
+	if target.role == "implementer" {
+		// An idle implementer may be waiting on an ESC answer: the hub's
+		// hand-over close keeps the open-question guard pane.close has
+		// (hk 4633).
+		closeArgs.QuestionJob = args.Job
+	}
+	var prepared nodeHandoverPrepared
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
 		// The proof is read again after the settle: the job's watcher, a
 		// separate process, may have recorded a re-prompt or an end of the
@@ -328,8 +360,34 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 			}
 			return nodeCloseHookStop{outcome: fleet.CloseOpPreempted}
 		}
+		if guard := args.Handover; guard != nil {
+			if again.role != "implementer" {
+				op.Reason = handoverGitFailed
+				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
+			}
+			var reason string
+			prepared, reason = client.handoverPrepare(ctx, nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: guard.Origin, Branch: guard.Branch}, &again)
+			if reason == "" && prepared.tip != guard.Commit {
+				reason = handoverUnpushed
+			}
+			if reason != "" {
+				op.Reason = reason
+				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
+			}
+		}
 		op.State, op.Updated = fleet.CloseOpClosing, client.nowUTC()
 		return fleet.WriteCloseOp(job, op)
+	}, func() error {
+		if args.Handover != nil {
+			localCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			check := client.handoverCheckLocal(localCtx, prepared)
+			cancel()
+			if check.Outcome != handoverCheckOK {
+				op.Reason = check.Outcome
+				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
+			}
+		}
+		return nil
 	})
 	if code != "" {
 		// The journal keeps registered or closing; a repeat of this request
@@ -362,10 +420,10 @@ type nodeCloseHookStop struct{ outcome, code string }
 func (stop nodeCloseHookStop) Error() string { return "close stopped: " + stop.outcome }
 
 type nodeCloseTarget struct {
-	attempt                    string
-	receipt                    bool
-	pane, label, role, session string
-	ended                      bool
+	attempt                         string
+	receipt                         bool
+	pane, label, role, session, cwd string
+	ended                           bool
 	// announced: the attempt's newest end-like event is a quota stop
 	// announced for the hub's hand-over, or a reviewer's quota-stop intent
 	// is still open; whether the job already ended is in hk, not the ledger.
@@ -387,7 +445,7 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 			target = nodeCloseTarget{attempt: event.name, role: event.role}
 		case event.kind == "job.spawned":
 			target.attempt, target.receipt, target.ended, target.announced, target.intent, target.hubClose = event.name, true, false, false, false, false
-			target.pane, target.label, target.session = event.pane, event.label, event.session
+			target.pane, target.label, target.session, target.cwd = event.pane, event.label, event.session, event.cwd
 			if event.role != "" {
 				target.role = event.role
 			}
@@ -1002,7 +1060,7 @@ func (client *HubClient) finishCloseOp(job *os.Root, op fleet.CloseOp, state str
 	if fleet.WriteCloseOp(job, op) != nil {
 		return nil, "journal_failed"
 	}
-	return nodePaneCloseOpResult{Outcome: state}, ""
+	return nodePaneCloseOpResult{Outcome: state, Reason: op.Reason}, ""
 }
 
 // nodePaneCloseStatus reads one close operation. The caller holds
@@ -1178,7 +1236,7 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 			}
 		}
 	}
-	return nodeCloseOpStatusResult{State: op.State, Released: op.Released != nil, Settled: settled, Attempt: currentAttempt(job)}, ""
+	return nodeCloseOpStatusResult{State: op.State, Released: op.Released != nil, Settled: settled, Attempt: currentAttempt(job), Reason: op.Reason}, ""
 }
 
 // cancelUnregisteredIntent fences a request the hub released before the node

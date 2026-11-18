@@ -96,7 +96,7 @@ func TestPoolActionCreationLogsNodeAndAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.hub.createPoolAction(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseRetired}, f.holder, app); err != nil {
+	if err := f.hub.createPoolAction(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseRetired}, f.holder, app, nil); err != nil {
 		t.Fatal(err)
 	}
 	action := readOnlyPoolAction(t, f.hub)
@@ -122,7 +122,7 @@ func TestPoolActionCreationDoesNotLogStoreFailure(t *testing.T) {
 	if err := f.hub.inbox.store.close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.hub.createPoolAction(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseRetired}, f.holder, app); err == nil {
+	if err := f.hub.createPoolAction(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseRetired}, f.holder, app, nil); err == nil {
 		t.Fatal("creation succeeded after the store closed")
 	}
 	if strings.Contains(logs.String(), "pool close action created") {

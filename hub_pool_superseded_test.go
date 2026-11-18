@@ -30,7 +30,7 @@ func TestPoolActionSupersededPermitsFreshAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.hub.createPoolAction(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseRetired}, f.holder, app); err != nil {
+	if err := f.hub.createPoolAction(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseRetired}, f.holder, app, nil); err != nil {
 		t.Fatalf("new attempt remained fenced: %v", err)
 	}
 	if next := readOnlyPoolAction(t, f.hub); next.ID == action.ID {

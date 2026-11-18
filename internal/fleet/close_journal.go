@@ -65,8 +65,10 @@ type CloseOp struct {
 	// Attempt is the job attempt the operation was registered against: the
 	// ledger event that started it. A resumed operation acts only while it is
 	// still the job's current attempt.
-	Attempt string    `json:"attempt"`
-	State   string    `json:"state"`
+	Attempt string `json:"attempt"`
+	State   string `json:"state"`
+	// Reason records a hand-over eligibility refusal across node restarts.
+	Reason  string    `json:"reason,omitempty"`
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 	// Released is set when the hub has finished with the operation.
