@@ -79,6 +79,10 @@ func reassignedInLedger(evs []Event) bool {
 		switch {
 		case hubRevocation(ev):
 			reassigned = true
+		case ev.Kind == "job.spawned" && str(ev.Payload, "adopted_from") != "":
+			// A spawn receipt `done` adopted from job.brief_sent (adoptBriefSent)
+			// is this node's own late bookkeeping, not a new claim: it must not
+			// clear a revocation the hub wrote meanwhile (hk 5174).
 		case ev.Kind == "job.claim" || ev.Kind == "job.claimed" || ev.Kind == "job.reclaim" || ev.Kind == "job.spawned":
 			reassigned = false
 		}

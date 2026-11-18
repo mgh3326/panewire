@@ -1320,7 +1320,8 @@ is true when the local event ledger contains a `job.completed` event.
 `activity_events` counts the ledger's `events/` files that are not spawn
 bookkeeping: `job.claim`, `job.reclaim`, `job.placement`, `job.task_link`,
 `job.duplicate_override`, `job.spawn_retryable`, `job.spawn_aborted`,
-`job.record_failed`, `job.cleanup_pending`, `job.cleanup_refused`, `lease.*` and
+`job.record_failed`, `job.cleanup_pending`, `job.cleanup_refused`,
+`job.brief_sent`, `lease.*` and
 `quota_pool.*`. Any other kind, and any name that does not parse as
 `NNNNN-<kind>.json` (exactly five digits), counts, so a job that shows 0 has had nothing after its
 claim. A node that predates the field omits it; a caller reads that as unknown,
