@@ -21,10 +21,16 @@ import (
 //     whichever comes first.
 const accountCreditMarkPool = "commandcode"
 
+// accountCreditLoadRetryDefault spaces retries of a failed durable-mark read.
+// The read runs inline for every fleet-state snapshot, so an unreadable store
+// must not turn each snapshot into another 5 s wait (hk 5138 review).
+const accountCreditLoadRetryDefault = 30 * time.Second
+
 // ensureAccountCreditMarks loads the durable marks on first use and retries
 // after a failed read (a busy store at hub start must not leave every mark
-// unserved for the process lifetime). A successful load merges into memory,
-// keeping any newer mark this process already wrote.
+// unserved for the process lifetime), rate-limited so the retry itself never
+// stalls every snapshot while the store stays unreadable. A successful load
+// merges into memory, keeping any newer mark this process already wrote.
 func (h *HubServer) ensureAccountCreditMarks() error {
 	if h.inbox == nil {
 		return nil
@@ -33,6 +39,9 @@ func (h *HubServer) ensureAccountCreditMarks() error {
 	defer h.accountCreditLoadMu.Unlock()
 	if h.accountCreditLoaded {
 		return nil
+	}
+	if h.accountCreditLoadErr != nil && time.Now().Before(h.accountCreditRetryAt) {
+		return h.accountCreditLoadErr
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -48,9 +57,16 @@ func (h *HubServer) ensureAccountCreditMarks() error {
 		} else {
 			h.logger.Debug("account credit marks still unreadable", "error", err)
 		}
+		retry := h.accountCreditLoadRetry
+		if retry <= 0 {
+			retry = accountCreditLoadRetryDefault
+		}
+		h.accountCreditLoadErr = err
+		h.accountCreditRetryAt = time.Now().Add(retry)
 		return err
 	}
 	h.accountCreditLoadFailed = false
+	h.accountCreditLoadErr = nil
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.accountCreditMarks == nil {

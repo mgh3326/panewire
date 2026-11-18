@@ -225,6 +225,7 @@ func TestAccountCreditMarkLoadRetriesAfterFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
+	f.hub.accountCreditLoadRetry = time.Nanosecond
 	f.hub.accountCreditRead = func(ctx context.Context) (map[string]accountCreditMark, error) {
 		calls++
 		if calls == 1 {
@@ -357,5 +358,25 @@ func TestAccountCreditMarksEndpointFailsClosed_t5138(t *testing.T) {
 	defer server.Close()
 	if status, body := fsGet(t, server, "/v1/state/account-credit", fsOperator()); status != 503 {
 		t.Fatalf("GET account-credit = %d %s, want 503", status, body)
+	}
+}
+
+// hk 5138 review: the retry is rate-limited, so an unreadable store cannot make
+// every fleet-state snapshot wait on the store again.
+func TestAccountCreditMarkLoadRetryIsRateLimited_t5138(t *testing.T) {
+	f := newSweepFixture(t)
+	f.hub.accountCreditLoadRetry = time.Hour
+	calls := 0
+	f.hub.accountCreditRead = func(context.Context) (map[string]accountCreditMark, error) {
+		calls++
+		return nil, errors.New("store busy")
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := f.hub.snapshotAccountCreditMarks(f.hub.now()); err == nil {
+			t.Fatalf("pass %d reported a successful load", i)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("store reads = %d, want one within the retry window", calls)
 	}
 }

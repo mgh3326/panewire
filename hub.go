@@ -611,6 +611,9 @@ type HubServer struct {
 	accountCreditLoadMu     sync.Mutex
 	accountCreditLoaded     bool
 	accountCreditLoadFailed bool
+	accountCreditLoadErr    error
+	accountCreditRetryAt    time.Time
+	accountCreditLoadRetry  time.Duration
 	accountCreditRead       func(context.Context) (map[string]accountCreditMark, error)
 	accountCreditDelete     func(context.Context, string, time.Time) error
 	// accountCreditPending holds lifted marks whose durable delete failed; it
