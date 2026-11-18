@@ -311,7 +311,9 @@ the directory name alone. It ends with the job whatever the task did —
 answered, failed, lost, abandoned or escalated — because it holds no task's
 work: the tail discards it through the same patch-first path, and a detached
 checkout's HEAD is kept under `refs/panewire/abandoned/<job>` instead of a
-branch delete. A `-c` worktree keeps its requester's own directory name and
+branch delete. A branch checkout — a successor spec's local branch (hk 5118) —
+keeps its commits on that branch: the branch is deleted only when its tip is
+already on origin. A `-c` worktree keeps its requester's own directory name and
 stays under the rules above.
 
 ## Checkout sweep

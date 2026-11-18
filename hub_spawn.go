@@ -109,7 +109,8 @@ type hubSpawnResult struct {
 	CompletedAt *time.Time              `json:"completed_at,omitempty"`
 	Error       string                  `json:"error,omitempty"`
 	// CheckoutMode is the node's answer for a checkout spec: "sparse" or
-	// "full" (hk 5098). Empty for a spawn that names no spec.
+	// "full" (hk 5098), or "branch" for a successor checkout (hk 5118).
+	// Empty for a spawn that names no spec.
 	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
@@ -173,6 +174,11 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 		return validNodeRefName(checkout.Branch) && (checkout.Sha == "" || nodeShaPattern.MatchString(checkout.Sha)) && (!checkout.VerifyReuse || checkout.Sha != "") && checkout.Fetch == ""
 	case "detached":
 		return !checkout.VerifyReuse && checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch)
+	case fleet.HubCheckoutSuccessor:
+		// An implementer spec on refs/heads/<branch> (hk 5118): the node
+		// prepares a local branch at the pinned commit, so both are required
+		// and it fetches the whole remote itself.
+		return !checkout.VerifyReuse && validNodeRefName(checkout.Branch) && nodeShaPattern.MatchString(checkout.Sha) && checkout.Fetch == ""
 	default:
 		return false
 	}
@@ -271,9 +277,9 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 }
 
 // validSpawnCheckoutMode is the closed set a node may answer for a spec
-// checkout (hk 5098).
+// checkout (hk 5098, hk 5118).
 func validSpawnCheckoutMode(value string) bool {
-	return value == "" || value == nodeCheckoutSparse || value == nodeCheckoutFull
+	return value == "" || value == nodeCheckoutSparse || value == nodeCheckoutFull || value == nodeCheckoutBranch
 }
 
 func validHubSpawnResultError(value string) bool {

@@ -713,6 +713,9 @@ type hubClientConnection struct {
 	// acceptsCheckoutSparse is the same for hubFeatureCheckoutSparse
 	// (checkout_sparse.go): the spawn result may carry checkout_mode.
 	acceptsCheckoutSparse atomic.Bool
+	// acceptsCheckoutBranch is the same for hubFeatureCheckoutBranch
+	// (checkout_branch.go): the spawn result may carry checkout_mode "branch".
+	acceptsCheckoutBranch atomic.Bool
 	connection            *websocket.Conn
 	writeMu               hubWriteMutex
 	// closed is closed when the session on this connection ends; a nil
@@ -2210,6 +2213,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsEndedPanes.Store(slices.Contains(message.Features, hubFeatureEndedPanes))
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				peer.acceptsCheckoutSparse.Store(slices.Contains(message.Features, hubFeatureCheckoutSparse))
+				peer.acceptsCheckoutBranch.Store(slices.Contains(message.Features, hubFeatureCheckoutBranch))
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)

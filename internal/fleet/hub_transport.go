@@ -92,7 +92,8 @@ type HubSpawnReply struct {
 	// CheckoutMode is what the node prepared for a checkout spec: "sparse"
 	// when its pattern list was applied, "full" when the whole tree is on
 	// disk (a node without checkout_sparse_v1, a git without the command, or
-	// a spec with no patterns). Empty for a spawn that names no spec.
+	// a spec with no patterns), or "branch" when a successor's local branch
+	// tracks origin/<branch> (hk 5118). Empty for a spawn that names no spec.
 	CheckoutMode string `json:"checkout_mode,omitempty"`
 	// NextHost is set by the hub's own transport when it handed the request back
 	// to placement after a refusal that rules out only this host (a first-run

@@ -373,7 +373,9 @@ panewire:
    `--checkout-commit` is
    the exact 40-character commit (lowercase hex); `--checkout-ref` is
    `pull/<n>/head` or `refs/heads/<branch>`. The node prepares a detached
-   worktree at that commit from that ref, exactly as for a `-c` spawn, and
+   worktree at that commit from that ref, exactly as for a `-c` spawn — except
+   for an implementer's `refs/heads/<branch>` ref, which asks for a local
+   branch (below) — and
    refuses with `checkout_refused:sha-missing` when the fetched ref does not
    contain the commit. The repository name, the worktree directory
    (`<job>-checkout`) and the `cwd_key` come from the origin, not from a local
@@ -404,6 +406,28 @@ panewire:
    report one. The spawn
    answer and the `job.spawned` record carry `checkout_mode` (`sparse` or
    `full`), so a reader knows the absent paths are absent on purpose.
+
+   An implementer spec spawn whose `--checkout-ref` is `refs/heads/<branch>`
+   asks for a local branch instead of a detached HEAD (hk 5118): the node
+   checks out `<branch>` at `--checkout-commit`, tracks `origin/<branch>`, and
+   the worktree continues that branch, so the seat's first commit pushes with a
+   plain `git push`. Reviewers, consults and any `pull/<n>/head` ref keep the
+   detached checkout, because a reader never continues the branch. The recipe
+   for a successor on any host — no `-c`, no host pin:
+   ```
+   panewire spawn --checkout-origin <repo> --checkout-ref refs/heads/<branch> \
+     --checkout-commit <last pushed sha> --parent-job J --host auto ...
+   ```
+   Two refusals end it before any pane starts, and neither forces the branch:
+   - `successor_stale want=<sha> origin=<sha>` — someone pushed after the brief,
+     so `origin/<branch>` is no longer `--checkout-commit`. Start the successor
+     at the branch's current tip instead. The request is stale, not replayable.
+   - `branch_in_use worktree=<dir>` — another worktree of the node's clone
+     already holds `<branch>`, usually the parent job still running there. The
+     branch is never forced or stolen; `--host auto` moves to the next host.
+   A sparse list is refused with this mode (it belongs to a detached spec), and
+   the CLI asks the hub for `checkout_branch_v1` first, so a hub that refuses
+   the mode names the cause instead of answering `invalid_request`.
 3. sends the flags the hub's allowlist carries (`-m -l --t --job --owner
    --effort --role --lane --parent --task|--parent-job --report-relative -L --urgency
    --author-family --builder-job --review-pass`). The node supplies workspace, host and the

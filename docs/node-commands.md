@@ -1010,6 +1010,20 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   interrupted-add cleanup does. A node whose git is older than 2.37, or one
   that never advertised `checkout_sparse_v1`, prepares the full checkout
   instead; `checkout_mode` says which happened.
+- `mode:"successor"` — an implementer spec spawn on `refs/heads/<branch>` (hk
+  5118). `branch` and `sha` are required, `fetch` must be stated empty (the
+  whole remote is fetched), and the sparse lists are refused. The node fetches,
+  then requires the freshly fetched `origin/<branch>` to be exactly `sha`:
+  someone pushed after the brief and a successor must not start behind it, so
+  it refuses `successor_stale` with `reason` `want=<sha> origin=<sha>`
+  (`origin=none` when the branch is not on origin) before anything is
+  prepared. A worktree of the clone that already holds the branch refuses
+  `branch_in_use` with `reason` `worktree=<dir>`; the branch is never forced or
+  stolen. A worktree at `dir` is reused only on that branch, clean, at the
+  commit; a local branch behind the commit is fast-forwarded and one ahead or
+  diverged refuses. The prepared worktree sits on the local branch, which
+  tracks `origin/<branch>` so a plain `git push` pushes it, and the result
+  carries `checkout_mode: branch`.
 
 A hub-staged author replacement sets `verify_reuse` on its spawn checkout.
 The node then requires an existing clean, unlocked checkout at exactly the
@@ -1032,6 +1046,8 @@ refused. A missing clone is created with `git clone <origin>`.
 | `busy` | Another git op holds the per-clone lock; `retry_after_s` is set. |
 | `cancelled` | The caller's context was cancelled while waiting for the per-clone lock; the lock was never taken, nothing ran, and there is no `retry_after_s`. |
 | `branch-elsewhere` | The branch is checked out elsewhere, `dir` sits on another branch/commit, or the branch is not on origin where required. |
+| `successor_stale` | A successor checkout's freshly fetched `origin/<branch>` is not the commit the request names; `reason` carries `want=<sha> origin=<sha>`. |
+| `branch_in_use` | A successor checkout's branch is held by another worktree of the clone; `reason` carries `worktree=<dir>`. |
 | `sha-missing` | The fetched ref does not resolve to `sha`, or the commit is not in the clone after fetching. |
 | `origin-mismatch` | The existing clone tracks a different owner/repo. |
 | `dirty` | The existing worktree at `dir` has uncommitted or untracked files. |
@@ -1043,7 +1059,8 @@ When a branch is fast-forwarded, the result includes `fast_forwarded: true`.
 A tip mismatch that cannot be fast-forwarded includes `reason` with
 `local=<sha7> expected=<sha7> relation=ahead|diverged`.
 A detached prepare includes `checkout_mode`: `sparse` when it applied the
-request's list, `full` when the whole tree is on disk (hk 5098).
+request's list, `full` when the whole tree is on disk (hk 5098). A successor
+prepare includes `checkout_mode: branch` (hk 5118).
 
 An add interrupted by a crash leaves its worktree locked `initializing`. The
 node records the process group of the `git worktree add` child in the clone's

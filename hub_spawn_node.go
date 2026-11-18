@@ -452,18 +452,20 @@ func (client *HubClient) endHubSpawn(requestID string) {
 }
 
 func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
-	result = spawnResultForHub(result, peer.acceptsLaunchProof.Load(), peer.acceptsCheckoutSparse.Load())
+	result = spawnResultForHub(result, peer.acceptsLaunchProof.Load(), peer.acceptsCheckoutSparse.Load(), peer.acceptsCheckoutBranch.Load())
 	_ = peer.write(ctx, spawnResultWire(result, extended))
 }
 
 // spawnResultForHub drops the fields the connected hub does not understand: a
-// strict result parser rejects the whole answer for one unknown key, so
-// checkout_mode goes only to a hub that listed hubFeatureCheckoutSparse.
-func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof, acceptsCheckoutSparse bool) hubSpawnResult {
+// strict result parser rejects the whole answer for one unknown key or value,
+// so checkout_mode goes only to a hub that listed the feature its value
+// belongs to — hubFeatureCheckoutSparse for "sparse"/"full" and
+// hubFeatureCheckoutBranch for "branch" (hk 5098, hk 5118).
+func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof, acceptsCheckoutSparse, acceptsCheckoutBranch bool) hubSpawnResult {
 	if result.Error == "launch_proof_failed" && !acceptsLaunchProof {
 		result.Error = "spawn_failed"
 	}
-	if !acceptsCheckoutSparse {
+	if (result.CheckoutMode == nodeCheckoutBranch && !acceptsCheckoutBranch) || (result.CheckoutMode != nodeCheckoutBranch && !acceptsCheckoutSparse) {
 		result.CheckoutMode = ""
 	}
 	return result
@@ -492,7 +494,8 @@ func spawnResultWire(result hubSpawnResult, extended bool) any {
 		StageMS    map[string]int64        `json:"stage_ms,omitempty"`
 		Stage      string                  `json:"stage,omitempty"`
 		Retryable  bool                    `json:"retryable,omitempty"`
-		// CheckoutMode is "sparse" or "full" for a spec checkout (hk 5098).
+		// CheckoutMode is "sparse", "full" or "branch" for a spec checkout
+		// (hk 5098, hk 5118).
 		CheckoutMode string `json:"checkout_mode,omitempty"`
 	}{result.Receipt, "job.spawn.result", result.RequestID, result.RC, result.JobID, result.Pane, result.StdoutTail, result.Error, result.StageMS, result.Stage, result.Retryable, result.CheckoutMode}
 }
@@ -620,6 +623,12 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			name := "git-failed"
 			if ok && outcome.Outcome != "" {
 				name = outcome.Outcome
+				if outcome.Reason != "" {
+					// A prepare that names what it refused (a successor's stale
+					// commit, a branch another worktree holds) says it in the
+					// answer the submitter reads (hk 5118).
+					name += ": " + outcome.Reason
+				}
 			}
 			result.RC, result.Error = 81, "checkout_refused:"+name
 			return result

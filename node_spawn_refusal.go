@@ -27,6 +27,12 @@ func nodeSpawnRefusalFix(code, rule string) string {
 		return "Inspect the saved operation and same node journal; reconcile the attempt before retrying or closing any pane."
 	}
 	if reason, ok := strings.CutPrefix(code, "checkout_refused:"); ok {
+		// A prepare that names its detail appends it after ": " (a successor's
+		// wanted and origin commits, a branch relation); the fix reads the
+		// outcome alone.
+		if outcome, _, found := strings.Cut(reason, ": "); found {
+			reason = outcome
+		}
 		switch reason {
 		case "cancelled":
 			return "the node ran past the hub deadline; check the node's load, then replay the saved request"
@@ -38,6 +44,10 @@ func nodeSpawnRefusalFix(code, rule string) string {
 			return "Preserve or commit changes in the node checkout before replaying the same saved request."
 		case "origin-mismatch", "branch-elsewhere":
 			return "Inspect the node checkout's origin and worktree binding; correct the conflicting mapping without overwriting unrelated work."
+		case "successor_stale":
+			return "Origin moved past the commit this request names; start the successor at the branch's current tip with the commit listed in the refusal."
+		case "branch_in_use":
+			return "Another worktree of this node's clone holds the branch; end that job or place the successor on another host."
 		case "sha-missing":
 			return "Push the requested commit to the specified origin ref, then replay the saved request."
 		case "git_too_old":
