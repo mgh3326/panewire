@@ -28,14 +28,14 @@ func TestLaneInboxStorePoolActionsSurviveRestart(t *testing.T) {
 			action := poolAction{ID: "action-1", Job: "job-a", Node: "node-a", Epoch: 3, Phase: poolActionPending, Data: poolActionData{EndReason: "quota_stop pool=codex"}}
 			invalid := action
 			invalid.ID, invalid.Phase = "invalid-phase", "unknown"
-			if err := store.insertPoolAction(t.Context(), invalid); err == nil {
+			if err := store.insertPoolAction(t.Context(), invalid, time.Now().UTC()); err == nil {
 				t.Fatal("migration accepted an unknown action phase")
 			}
 			invalid.ID, invalid.Phase, invalid.Epoch = "invalid-epoch", poolActionPending, 0
-			if err := store.insertPoolAction(t.Context(), invalid); err == nil {
+			if err := store.insertPoolAction(t.Context(), invalid, time.Now().UTC()); err == nil {
 				t.Fatal("migration accepted an unbound epoch")
 			}
-			if err := store.insertPoolAction(t.Context(), action); err != nil {
+			if err := store.insertPoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			if err := store.close(); err != nil {
@@ -51,7 +51,7 @@ func TestLaneInboxStorePoolActionsSurviveRestart(t *testing.T) {
 				t.Fatalf("actions = %+v, %v", rows, err)
 			}
 			action.Phase = poolActionGuarded
-			if err := store.savePoolAction(t.Context(), action); err != nil {
+			if err := store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			if err := store.close(); err != nil {
@@ -65,7 +65,7 @@ func TestLaneInboxStorePoolActionsSurviveRestart(t *testing.T) {
 				t.Fatalf("guard not reconciled: %+v, %v", rows, err)
 			}
 			action.Phase = poolActionSettled
-			if err := store.savePoolAction(t.Context(), action); err != nil {
+			if err := store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			if id, err := store.pendingPoolAction(t.Context(), action.Job); err != nil || id != "" {

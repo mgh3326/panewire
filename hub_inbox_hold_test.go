@@ -15,6 +15,13 @@ import (
 
 func holdHub(t *testing.T, thresholds string, docOK bool) (*HubServer, *hubAgent, *time.Time, *[]string, string) {
 	t.Helper()
+	return holdHubWith(t, "10m", thresholds, docOK, filepath.Join(t.TempDir(), "inbox.sqlite3"), nil)
+}
+
+// holdHubWith is holdHub with its own max_hold, inbox store path and clock; a
+// nil clock starts at the current time.
+func holdHubWith(t *testing.T, maxHold, thresholds string, docOK bool, path string, clock *time.Time) (*HubServer, *hubAgent, *time.Time, *[]string, string) {
+	t.Helper()
 	fake := &fakeHandoffkeep{nextID: 100, status: 201, rows: map[string]*handoffkeepRelayEvent{}}
 	docs := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,12 +54,14 @@ func holdHub(t *testing.T, thresholds string, docOK bool) (*HubServer, *hubAgent
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
+	if clock != nil {
+		now = *clock
+	}
 	policy := filepath.Join(t.TempDir(), "policy.yaml")
-	raw := "default: interrupt\nlanes:\n  lane-a:\n    hold_while_working:\n      max_hold: 10m\n" + thresholds
+	raw := "default: interrupt\nlanes:\n  lane-a:\n    hold_while_working:\n      max_hold: " + maxHold + "\n" + thresholds
 	if err := os.WriteFile(policy, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	h, a := quietHub(t, path, policy, hk, &now)
 	return h, a, &now, &docs, policy
 }

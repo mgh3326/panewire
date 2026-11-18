@@ -24,6 +24,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = hub.Close() })
+	useLegacyOwnerStore(hub)
 	old := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", old, false)
 	first := HubActiveJob{JobID: "recover-me", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
@@ -187,6 +188,7 @@ func TestHubR14ReassignImmediatelyDeliversAssignedEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = hub.Close() })
+	useLegacyOwnerStore(hub)
 	hub.jobs["immediate-assignment"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "immediate-assignment", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}, Node: "node-a", Orphaned: true, FencedNodes: make(map[string]uint64)}
 	recipient := &hubAgent{assignments: make(chan hubJobAssignedEvent, 1)}
 	hub.connect("node-b", "r14", "fixture", recipient, false)
@@ -233,6 +235,7 @@ func TestHubR14JobEndpointsRequireOperator(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = hub.Close() })
+	useLegacyOwnerStore(hub)
 	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", agent, false)
 	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: "operator-gate", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}}, clock)
@@ -283,6 +286,7 @@ func TestHubR14RevocationRetriesUntilLocalAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = hub.Close() })
+	useLegacyOwnerStore(hub)
 	old := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", old, false)
 	job := HubActiveJob{JobID: "retry-me", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}

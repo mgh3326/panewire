@@ -22,6 +22,7 @@ import (
 
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/hkcred"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 // `panewire job done|escalate|joined` owns the job record contract the
@@ -49,6 +50,31 @@ type jobCLI struct {
 	stdout, stderr io.Writer
 	socket         string
 	now            func() time.Time
+	ownerEpoch     uint64
+}
+
+func jobRecordEpoch(jobsRoot, job string) (uint64, error) {
+	if !hubJobIDPattern.MatchString(job) {
+		// Legacy-only job IDs cannot receive a hub grant.
+		return 1, nil
+	}
+	return jobowner.Epoch(jobsRoot, job)
+}
+
+func (c *jobCLI) captureOwnerEpoch(jobsRoot, job string) error {
+	epoch, err := jobRecordEpoch(jobsRoot, job)
+	if err != nil {
+		return fmt.Errorf("job assignment unavailable: %w", err)
+	}
+	c.ownerEpoch = epoch
+	return nil
+}
+
+func (c *jobCLI) recordEpoch() uint64 {
+	if c.ownerEpoch == 0 {
+		return 1
+	}
+	return c.ownerEpoch
 }
 
 // validLegacyJobID is the legacy `panewire job` id rule: one portable ASCII
@@ -197,6 +223,9 @@ func (c *jobCLI) done(args []string) int {
 	if err := legacyJobDirCaseRefusal("done", jobsRoot, job); err != nil {
 		return c.exit(err)
 	}
+	if err := c.captureOwnerEpoch(jobsRoot, job); err != nil {
+		return c.exit(err)
+	}
 	fields, err := jobCompletionMetadata(jobsRoot + "/" + job + "/events")
 	if err != nil {
 		return c.exit(jobDie("done cannot find job.claim/job.spawned metadata: %s", job))
@@ -290,6 +319,9 @@ func (c *jobCLI) escalate(args []string) int {
 	if err := legacyJobDirCaseRefusal("escalate", jobsRoot, job); err != nil {
 		return c.exit(err)
 	}
+	if err := c.captureOwnerEpoch(jobsRoot, job); err != nil {
+		return c.exit(err)
+	}
 	owner, label, pane, parent, err := jobBuilderMetadata(jobsRoot, job)
 	if err != nil {
 		return c.exit(err)
@@ -350,6 +382,9 @@ func (c *jobCLI) joined(args []string) int {
 	}
 	jobsRoot := jobJobsRoot()
 	if err := legacyJobDirCaseRefusal("joined", jobsRoot, job); err != nil {
+		return c.exit(err)
+	}
+	if err := c.captureOwnerEpoch(jobsRoot, job); err != nil {
 		return c.exit(err)
 	}
 	owner, label, pane, parent, err := jobBuilderMetadata(jobsRoot, job)
@@ -792,7 +827,7 @@ func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report
 	fields := []jobField{
 		{"kind", "job.completed"}, {"job_id", job}, {"owner_lane", owner}, {"label", label},
 		{"pane_id", pane}, {"host", host}, {"report_path", report}, {"report_last_line", last},
-		{"epoch", 1},
+		{"epoch", c.recordEpoch()},
 	}
 	if digest != "" {
 		fields = append(fields, jobField{"report_sha256", digest})
@@ -822,7 +857,7 @@ func (c *jobCLI) builderFlatEvent(jobsRoot, job, owner, label, pane, parent, hos
 	fields := []jobField{
 		{"kind", kind}, {"job_id", job}, {"owner_lane", owner}, {"label", label},
 		{"pane_id", pane}, {"host", host}, {"report_path", report}, {"report_last_line", last},
-		{"reason", reason}, {"parent_lane", parent}, {"epoch", 1},
+		{"reason", reason}, {"parent_lane", parent}, {"epoch", c.recordEpoch()},
 	}
 	if question != "" {
 		fields = append(fields, jobField{"question", question})
@@ -872,6 +907,8 @@ func writeJobRecord(eventsDir, kind string, fields []jobField) error {
 			body.WriteString(pythonJSONString(value))
 		case int:
 			body.WriteString(strconv.Itoa(value))
+		case uint64:
+			body.WriteString(strconv.FormatUint(value, 10))
 		case fleet.HarnessSession:
 			body.WriteString(`{"kind":`)
 			body.WriteString(pythonJSONString(value.Kind))
@@ -959,7 +996,7 @@ func pythonJSONString(value string) string {
 // non-zero status. The emit's own stderr is discarded here as it was there.
 func (c *jobCLI) emit(kind, jobsRoot, job, owner, label, pane, host, report, last, reason, question, pr, head string) {
 	record := emitRecord{
-		Type: kind, JobID: job, Epoch: 1, CreatedAt: c.now().UTC().Format(time.RFC3339),
+		Type: kind, JobID: job, Epoch: c.recordEpoch(), CreatedAt: c.now().UTC().Format(time.RFC3339),
 		AgentLabel: label, OwnerLane: owner, Label: label, Host: host, ReportPath: report,
 		ReportLastLine: last, Reason: reason, Question: question, PR: pr, Head: head, PaneID: pane,
 	}

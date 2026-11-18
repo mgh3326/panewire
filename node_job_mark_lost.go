@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -111,9 +112,9 @@ type nodeJobLedger struct {
 // job.reap, which must prove the job's own identity before it closes a pane;
 // the mark-lost path ignores them.
 type nodeJobLedgerEvent struct {
-	kind, pane, label, role, task, session string
-	owner                                  string
-	keep                                   bool
+	kind, pane, label, role, task, session, cwd string
+	owner                                       string
+	keep                                        bool
 	// name is the event's file name (its place in the ledger); reason and
 	// final are a job.lost payload's.
 	name, reason string
@@ -228,6 +229,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				AgentLabel string `json:"agent_label"`
 				Role       string `json:"role"`
 				OwnerLane  string `json:"owner_lane"`
+				Cwd        string `json:"cwd"`
 				Keep       bool   `json:"keep"`
 				// TaskID is a string or a number in the ledger.
 				TaskID       any             `json:"task_id"`
@@ -275,7 +277,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				return nil, errors.New("unreadable job event")
 			}
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession,
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession, cwd: event.Payload.Cwd,
 			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID, attempt: event.Payload.Attempt, hubRevokedEpoch: revokedEpoch, closeIntentEpoch: intentEpoch})
 	}
 	return events, nil
@@ -285,6 +287,13 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 // credential, after proving from herdr and the local ledger that the job is
 // still the one the hub means and never completed.
 func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLostArgs) (any, string) {
+	if client.jobsInboxRoot != "" {
+		var err error
+		ctx, err = fleet.CaptureJobOwner(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+		if err != nil {
+			return nil, "mark_lost_failed"
+		}
+	}
 	if args.EndReason == reviewerResultPosted {
 		return client.nodeJobMarkReviewerResultPosted(ctx, args)
 	}
@@ -340,7 +349,10 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	if args.EndReason != "" {
 		record["end_reason"] = args.EndReason
 	}
-	if err := store.Put(ctx, args.Job, record); err != nil {
+	if err := client.putOwnedNodeJob(ctx, store, args.Job, record); err != nil {
+		if fleet.IsJobReassigned(err) {
+			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostNewerClaim}, ""
+		}
 		return nil, "mark_lost_failed"
 	}
 	return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLost}, ""
@@ -416,6 +428,23 @@ func jobAttemptLive(job string, rows []executingSpawn, active []HubActiveJob) bo
 		}
 	}
 	return false
+}
+
+func (client *HubClient) putOwnedNodeJob(ctx context.Context, store fleet.JobStore, id string, fields map[string]any) error {
+	return fleet.PutOwnedJob(ctx, store, filepath.Join(client.jobsInboxRoot, "jobs"), client.machineID, id, fields, client.noteJobFenceSupport)
+}
+
+func (client *HubClient) noteJobFenceSupport(supported bool) {
+	client.jobFenceMu.Lock()
+	defer client.jobFenceMu.Unlock()
+	if supported {
+		client.jobFenceLegacy = false
+	} else if !client.jobFenceLegacy {
+		client.jobFenceLegacy = true
+		if client.warn != nil {
+			client.warn("handoffkeep job owner fencing unavailable; using legacy job writes")
+		}
+	}
 }
 
 // nodeJobStoreForCommand is the node's own hk client: spawn.json

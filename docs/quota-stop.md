@@ -40,7 +40,7 @@ hk 3334. The wait or hand-over rule is hk `policy/quota-stop`; this section is t
 
 A hub restarted between claiming a reviewer's successor and writing the old record is repaired by a periodic pass (`reconcileQuotaReplacements`, every 2 minutes, for successors older than the replacement budget): a successor that placed whose predecessor's record is still live gets the pane closed and the record written with `replaced_by`. A successor that never left `accepted` (no node) can never place a job and gets no pointer; one still reconciling or past its deadline with a node binding does.
 
-Known limits: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
+The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it continues a clean, fully pushed branch on another host; dirty or unpushed work is left with the old pane and reported to the owner. Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
 
 ## Job end on a quota stop
 
@@ -119,17 +119,99 @@ through the quota-stop flow's successor (`hub_quota_replace.go`), and that
 successor excludes no pool: the mark keeps it off the spent account while the
 other accounts stay usable.
 
-For an implementer, or a reviewer or consult on a node that does not advertise
+**An implementer is handed over by the hub (hk 4633, operator decisions 358
+and A336; decision `evidence/2026-11-18/pw-handover-4633/decision-root-causes.md`).**
+On a node that advertises `close_ops_v1` and `handover_check_v1`, the hub
+decides with the §Implementer rule (the job's start, the task's priority and
+`--expected`, `policy/quota-stop`) for every cause: window, free limit past
+`max_wait`, credit, retired and account credit.
+
+- **Wait:** no action; the owner gets one info line naming the reset, and the
+  hub stores a final `wait` row with that reset. The same stop seen again says
+  nothing more (a notice lost in a crash is replayed); a stop with another
+  reset is the second stop and hands over.
+- **Hand over:** a pool action row of kind `handover` (`pool_actions`, the
+  #669 store). **A non-final handover row owns the old job** — settled
+  included, while it still owes its successor. One store predicate,
+  `poolActionOwns`, answers that, and reassignment, task-role release, the
+  quota-stop replacement (`replaceQuotaStopped`, also hk 5138's credit path,
+  and `reconcileQuotaReplacements`) and the pool sweep all check it. The old
+  job's task role stays reserved until the successor's claim takes it over in
+  the same transaction, so no other spawn for the task is admitted between
+  them. In reverse, an existing `<old>-q<n>` spawn means do nothing: whichever
+  creates its row (or successor) first owns the job. The steps are, in this
+  order:
+  1. **Eligibility and saved successor.** The old node runs the read-only
+     `worktree.handover_check` from the worktree root. Tracked changes,
+     non-ignored untracked files, or any assume-unchanged or skip-worktree
+     entries (including in populated submodules) give `dirty_worktree`.
+     HEAD must equal the branch tip read with `git ls-remote origin`; an
+     unpushed or never-pushed branch gives `unpushed_commits`. In either case
+     there is no action row and no close; the owner receives the reason and
+     the hand-over-or-respawn notice. Snapshotting local work is hk 5259.
+     Otherwise the row stores the complete successor with a fixed request id:
+     the same role, owner and brief; job `<old>-q<n>` (at most two); exactly
+     one `--parent-job <old>`; the spent pool or band excluded; its own report
+     path; no start conditions; and a spec checkout at the pushed commit.
+     A pinned profile is dropped, a pinned host is refused, the label is
+     bounded, and the end reason and final submission are validated.
+  2. **Recheck.** Before the close, the hub holds a row during a spawn drain,
+     confirms the stop and task binding, and requires the same idle pane and
+     working directory. Inside `pane.close_op`, after checking the job's
+     attempt, the node reads the branch tip from origin before the final pane
+     and open-question checks. It then checks the local worktree and HEAD
+     against that tip with a two-second deadline as the last step before
+     close. A timeout, dirty or unpushed worktree refuses the close; its
+     journalled reason makes the row `handover_failed` and the owner gets the
+     fallback notice. A writer or resumed pane racing the close itself is not
+     stopped: the continuation note names the old `host:path` and the old
+     job's `abandoned-worktree.patch` as places to look for later work. The
+     ordinary worktree cleanup rules apply; this path creates no keep mark or
+     lock.
+  3. **Close.** The reconciler closes the old pane through `pane.close_op` to
+     the job's node at its epoch, keeping `pane.close`'s open-question guard
+     for an implementer. The node writes the old record `lost` with
+     `end_reason="quota_stop pool=<pool> replaced_by=<new job>"`, the pinned
+     format (`TestQuotaStopEndReasonFormatIsPinned`), before the submit,
+     because the spawn refuses a task still bound to a job that is not lost.
+     If the attempt remains unreadable or release cannot be proved for 30
+     minutes, the hub sends the owner one notice naming the job, host, reason
+     and row. The row stays pending and keeps the job fenced; the owner can
+     check the host and hand the job over by hand. The one exception is a job
+     whose directory the node proves gone (hk 5296): a node that advertises
+     `close_missing_v1` fences the request with a durable tombstone and
+     answers `missing_epoch`, and the row then ends `handover_failed` (reason
+     `job_missing`) with the owner's notice and the fence released
+     ([node-commands.md](node-commands.md#close-operations), "A missing
+     job"). A node without it keeps the hold and the notice.
+  4. **Submit.** Once the close is settled and the record reads `lost` with
+     that reason, the stored successor is claimed with the same request id on
+     every retry. A crash between the claim and saving that fact replays the
+     same operation; nothing is captured or claimed twice.
+  5. **Final.** The row stays non-final (I2) until the successor settles.
+     Placed: the owner gets one info line, `[panewire] handed <old> over to
+     <new> on <host>/<profile> (<pool> <cause>)`. Failed for good, or the old
+     record ended another way: the row ends `handover_failed`, the task role
+     is released, and the owner gets the hand-over-or-respawn notice with the
+     reason.
+
+The decision reads the task the job record names (a `--parent-job` successor
+inherits it) and the job's start; a task whose `refs.job_id` is unavailable or names another job
+is left alone and reported to the owner. For an implementer on a node without those capabilities, past
+the replacement limit, or when no successor can be built (no branch, a pinned
+host, an end reason over its limit, an unreadable pane or a refused read),
+and for a reviewer or consult on a node that does not advertise
 close operations, the hub records a `lane.event` asking the owner to hand the
 job over or end it and respawn it on another pool. On a capable node, the hub
 instead stores a close intent for a reviewer or consult, closes and settles it
 through the node, confirms the planned hk `lost` record, then notifies the
 owner to respawn it. A refused or unconfirmed close holds the notice. A job
-whose id starts `mwr-` is reported to the `mergewake` lane. Both notice kinds
-have fixed producer ids per job, so a restart cannot publish another copy.
+whose id starts `mwr-` is reported to the `mergewake` lane. Notice producer
+ids stay fixed across retries; a later hand-over after a refused attempt has
+its own id, so its result is reported too.
 The action reconciler runs independently of pane liveness and heartbeats.
 The node and ownership contracts are in [node-commands.md](node-commands.md),
-"Hub close protocol". Crash-safe implementer hand-over is hk 4633.
+"Hub close protocol".
 
 ## Hub close (hk 4652)
 

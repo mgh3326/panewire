@@ -88,7 +88,7 @@ func TestWriteHubRevocationConcurrentWritersNeverShareSeq_t5044(t *testing.T) {
 			errors[i] = writeHubRevocation(inbox, hubJobRevokedEvent{
 				Type:  "job.revoked",
 				JobID: "job-concurrent",
-				Epoch: uint64(i + 1),
+				Epoch: uint64(i + 2),
 			})
 		}(i)
 	}

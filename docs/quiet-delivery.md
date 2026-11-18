@@ -593,6 +593,35 @@ single item is also delayed by that window. Must-act tags bypass batching. The f
 the pass sends a batch it creates in that same pass. The pending batch page itself is read
 when a write can change it (or within 1 s), not on every tick (hk 4910).
 
+### Batch building is gated too (hk 5301)
+
+Building held and digest batches (`makeHeldBatches`, `makeBatchesDue`) each open a
+transaction and scan the hold, digest and escalation sets. An idle hub has nothing to
+find, so a tick builds batches only when one of these holds:
+
+- **first pass:** the gate starts unprimed, so the first pass after a hub start (or after
+  a failed pass) rebuilds the earliest due time from the store; a hold or digest that
+  was due soon before a restart is released on time after it;
+- **dirty:** the store counted a write that can create or change batch work
+  (`noteWorkChanged`, `lane_inbox_store.go`). The writes are: an insert into
+  `lane_inbox` (new item, with or without a deadline, digest window or hold; this also
+  covers a superseding insert), `read`, `ack`, `fileUnread` (an item filed as unread
+  inbox; also `fileEventUnread` for a new row), and `releaseBatchClaims` (claims given
+  back for re-escalation). A batch the pass itself creates needs no mark: the pass
+  reports what it left unclaimed. Startup writes (`prepareInbox`, `recoverMustAct`) run
+  before the first pass and retention only deletes;
+- **earliest due time passed:** every pass returns the earliest hold-release, digest
+  (`digest_at`) or escalation (`due_at`) time it left unclaimed, and the gate keeps it in
+  memory (`inbox_work_gate.go`). This is what replaces a fixed polling cadence: a hold
+  due in 3 s is released at 3 s;
+- **a watched hold may have ended:** a held lane also releases when its receiver stops
+  working, which is pane state and not a store write. The gate keeps the lanes it left
+  held and checks them each tick from the in-memory snapshot, with no query;
+- **safety fallback, 60 s (`inboxWorkFallback`):** a write the gate was not taught about
+  delays its work by at most this long and never strands it.
+
+Delivery semantics, ordering and the hourly `pruneInbox` schedule are unchanged.
+
 ## Holding interrupts while a receiver works
 
 A receiving lane can opt into `hold_while_working`. The hub holds interrupt-class

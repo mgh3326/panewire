@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +14,10 @@ import (
 
 // Pool actions hold reassignment from durable intent through the node's
 // settled proof. See docs/node-commands.md, "Hub close protocol".
-func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, app *fleet.App) error {
+// A non-nil handover makes the row an implementer hand-over (hk 4633,
+// hub_pool_handover.go): its close writes the old record with the successor
+// pointer, and settlement submits the stored successor.
+func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, app *fleet.App, handover *poolHandover) error {
 	unlock, err := h.poolActionLocks.lock(ctx, task.Job)
 	if err != nil {
 		return err
@@ -38,6 +42,9 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 		owner = "mergewake"
 	}
 	endReason := fleet.QuotaStopEndReason(exhaustion.Pool, time.Time{}, "", "")
+	if handover != nil {
+		endReason = handoverEndReason(record, exhaustion, handover.Job)
+	}
 	label := heldAgentName(task, record)
 	if !validNodeEndReason(endReason) || !validNodePaneName(label) || !nodeCommandPaneIDPattern.MatchString(task.Outcome.Pane) || !validLaneReference(owner) {
 		return errors.New("invalid close target")
@@ -52,6 +59,10 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 		Owner: owner, Text: text,
 		SpawnRequest: task.Request.RequestID, Pane: task.Outcome.Pane, Label: label, EndReason: endReason,
 	}}
+	if handover != nil {
+		action.Data.Kind, action.Data.Handover = poolActionKindHandover, handover
+		action.Data.Text = poolExhaustionText(exhaustion, task.Job)
+	}
 	// The per-job lock also guards reassignment; mu is needed only to take the
 	// ownership snapshot, not while waiting for the durable store.
 	h.mu.Lock()
@@ -67,10 +78,18 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 	}
 	action.Node, action.Epoch = job.Node, job.Epoch
 	h.mu.Unlock()
-	if pending, err := h.inbox.store.pendingPoolAction(ctx, task.Job); err != nil || pending != "" {
+	// One row per job: a settled hand-over still owns it.
+	if owner, err := h.inbox.store.poolActionOwns(ctx, task.Job); err != nil || owner != "" {
 		return errors.New("job already has a pending close action")
 	}
-	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
+	if handover != nil {
+		if _, err := h.inbox.store.latestSpawnForJob(ctx, handover.Job); !errors.Is(err, sql.ErrNoRows) {
+			// Only a definite absence admits the row; an unreadable store
+			// is not one.
+			return errors.New("successor already exists or unreadable")
+		}
+	}
+	if err := h.inbox.store.insertPoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	h.poolActionObserved.Store(action.ID, struct{}{})
@@ -79,6 +98,11 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 }
 
 const poolActionInterval = 10 * time.Second
+
+var (
+	errCloseAttemptUnavailable = errors.New("close attempt unavailable")
+	errPoolReleaseNotProved    = errors.New("release not proved")
+)
 
 func (h *HubServer) startPoolActions(ctx context.Context) {
 	h.closeMu.Lock()
@@ -153,6 +177,40 @@ func (h *HubServer) reconcilePoolActions(ctx context.Context) {
 }
 
 func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) error {
+	err := h.reconcilePoolActionStep(ctx, action)
+	stuck := errors.Is(err, errCloseAttemptUnavailable) || errors.Is(err, errPoolReleaseNotProved)
+	if !stuck && action.Data.StuckSince == 0 {
+		return err
+	}
+	now := h.now().UTC()
+	current, observeErr := h.inbox.store.observePoolActionStuck(ctx, action.ID, stuck, now)
+	if observeErr != nil {
+		return errors.Join(err, observeErr)
+	}
+	if !stuck || current.Phase != poolActionPending || current.Data.StuckSince == 0 || now.Sub(time.UnixMilli(current.Data.StuckSince)) < 30*time.Minute {
+		return err
+	}
+	if noticeErr := h.notifyStuckPoolAction(ctx, current, err.Error()); noticeErr != nil {
+		return errors.Join(err, noticeErr)
+	}
+	return err
+}
+
+func (h *HubServer) notifyStuckPoolAction(ctx context.Context, action poolAction, reason string) error {
+	eventID := "pool-action-stuck:" + action.ID
+	owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
+	if err != nil || owned {
+		return err
+	}
+	text := fmt.Sprintf("[panewire] The hub holds job %s on host %s: %s (row %s). Check the host; you can hand the job over by hand after checking it.", action.Job, action.Node, reason, action.ID)
+	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	if result.ID == 0 || result.PersistFailed {
+		return errors.New("stuck pool action notice unavailable")
+	}
+	return nil
+}
+
+func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolAction) error {
 	if action.Phase == poolActionSettled {
 		return h.finishPoolAction(ctx, action)
 	}
@@ -165,6 +223,12 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		}
 	}
 	ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}
+	missingAsked := action.Data.Kind != poolActionKindSupersedeClose && h.nodeHasCapability(action.Node, hubCapabilityCloseMissing)
+	if missingAsked {
+		// Only a node that advertises close_missing_v1 takes the argument; an
+		// older one keeps today's hold (hk 5296).
+		ref.Epoch = action.Epoch
+	}
 	var status nodeCloseOpStatusResult
 	if !h.nodeCall(ctx, action.Node, nodeCommandPaneCloseStatus, ref, hubNodeCommandWait, &status) {
 		return errors.New("close status unavailable")
@@ -172,6 +236,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	if status.Settled {
 		action.Phase = poolActionSettled
 		return h.saveFinalPoolAction(ctx, action, "settled")
+	}
+	if missingAsked && status.MissingEpoch != 0 {
+		return h.finishMissingJobAction(ctx, action, status)
 	}
 	if action.Data.Kind == poolActionKindSupersedeClose {
 		fenced, err := h.supersedeFenced(ctx, action)
@@ -206,6 +273,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	}
 	switch status.State {
 	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
+		if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil {
+			action.Data.Handover.Reason = status.Reason
+		}
 		return h.refuseCloseAction(ctx, action)
 	case nodeCloseOpSuperseded:
 		if action.Data.Args == nil || status.Attempt == action.Data.Args.Attempt {
@@ -239,6 +309,29 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		// An hk lost read is not settlement: the node may still retry the write.
 		return nil
 	case nodeCloseOpNone:
+		if action.Data.Kind == poolActionKindHandover && action.Data.Args != nil && status.Attempt == "" {
+			// A transiently unreadable attempt is not proof that the saved
+			// close may bypass the pre-close checks after a hub restart.
+			return errCloseAttemptUnavailable
+		}
+		if action.Data.Kind == poolActionKindHandover && status.Attempt != "" {
+			// The node has registered no close yet, even when Args were saved
+			// before a restart: the last point the hand-over can still be
+			// withdrawn without a trace. The job's lock is held through the
+			// close command, so the checks bind the close (hk 4633).
+			unlock, err := h.poolActionLocks.lock(ctx, action.Job)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			due, err := h.handoverBeforeClose(ctx, &action)
+			if err != nil {
+				return err
+			}
+			if !due {
+				return h.releasePoolAction(ctx, action)
+			}
+		}
 		if action.Data.Args == nil {
 			if status.Attempt == "" {
 				return h.releasePoolAction(ctx, action)
@@ -252,7 +345,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 				// a new attempt while it works is released above, never
 				// closed by this intent.
 				action.Data.TargetAttempt = status.Attempt
-				if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+				if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 					return err
 				}
 			}
@@ -265,6 +358,10 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			if probe.state != heldPanePresent {
 				return errors.New("pane unavailable")
 			}
+			if handover := action.Data.Handover; action.Data.Kind == poolActionKindHandover && handover != nil && probe.row.Cwd != handover.Cwd {
+				// The close must act on the worktree that was checked.
+				return h.releasePoolAction(ctx, action)
+			}
 			if action.Data.Kind == poolActionKindSupersedeClose && !supersedeCloseStatus(probe.row.AgentStatus) {
 				// A working (or blocked) parent is never closed: the row
 				// stays pending and the next pass looks again.
@@ -273,11 +370,18 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			args := &nodePaneCloseOpArgs{RequestID: action.ID, Job: action.Job, Epoch: action.Epoch, Attempt: status.Attempt,
 				PaneID: action.Data.Pane, Name: action.Data.Label, AgentStatus: probe.row.AgentStatus, Cwd: probe.row.Cwd,
 				AllowUnnamed: probe.row.Name == "", EndReason: action.Data.EndReason}
+			if handover := action.Data.Handover; action.Data.Kind == poolActionKindHandover && handover != nil {
+				checkout := handover.Successor.Repository.Checkout
+				if checkout == nil {
+					return errors.New("handover checkout unavailable")
+				}
+				args.Handover = &nodeHandoverCloseGuard{Origin: checkout.Origin, Branch: handover.Branch, Commit: checkout.Sha}
+			}
 			if !validNodePaneCloseOpArgs(*args) {
 				return h.releasePoolAction(ctx, action)
 			}
 			action.Data.Args = args
-			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 				return err
 			}
 		}
@@ -292,11 +396,14 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	if args.RequestID != action.ID || args.Job != action.Job || args.Epoch != action.Epoch {
 		return errors.New("close arguments do not match ownership")
 	}
+	if action.Data.Kind == poolActionKindHandover && args.Handover == nil {
+		return errors.New("handover close guard unavailable")
+	}
 	// Once the action is stored, I1 prevents its ownership changing. An absent
 	// in-memory job after hub restart does not prevent replay of this binding.
 	allowed := func() bool {
 		job, node := h.jobs[action.Job], h.nodes[action.Node]
-		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps]
+		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps] && (action.Data.Kind != poolActionKindHandover || node.capabilities[hubCapabilityHandoverCheck])
 	}
 	var result nodePaneCloseOpResult
 	if !h.nodeCallWhere(ctx, action.Node, nodeCommandPaneCloseOp, *args, hubNodeCommandWait, &result, allowed) {
@@ -304,6 +411,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	}
 	switch result.Outcome {
 	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
+		if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil {
+			action.Data.Handover.Reason = result.Reason
+		}
 		return h.refuseCloseAction(ctx, action)
 	case fleet.CloseOpCancelled:
 		return h.refusePoolAction(ctx, action)
@@ -311,6 +421,38 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		return h.releasePoolAction(ctx, action)
 	}
 	return nil
+}
+
+// finishMissingJobAction ends a row whose job directory the node proved gone
+// (hk 5296, docs/node-commands.md "A missing job"). The proof is the node's
+// durable tombstone for this request, so no delayed close under its id can act
+// on a directory recreated for a later attempt, and it must name an epoch no
+// lower than the row's. Bare absence never reaches here: the node answers
+// plain none for a directory it cannot prove gone, and the row stays held.
+// The row ends refused (a hand-over: handover_failed, by the finality rule
+// I2), the owner is told, and the reassignment fence is released.
+func (h *HubServer) finishMissingJobAction(ctx context.Context, action poolAction, status nodeCloseOpStatusResult) error {
+	if status.State != nodeCloseOpNone || status.Attempt != "" || status.MissingEpoch < action.Epoch {
+		return errors.New("missing-job proof does not cover this action")
+	}
+	if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil {
+		// refusePoolAction tells the owner of a failed hand-over.
+		action.Data.Handover.Reason = handoverJobMissing
+		return h.refusePoolAction(ctx, action)
+	}
+	eventID := "pool-action-missing:" + action.ID
+	owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		text := fmt.Sprintf("[panewire] Host %s no longer has job %s (its directory is gone, proved by the node); the hub released it without a close (row %s). Check whether the job needs a respawn.", action.Node, action.Job, action.ID)
+		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+		if result.ID == 0 || result.PersistFailed {
+			return errors.New("owner notice unavailable")
+		}
+	}
+	return h.refusePoolAction(ctx, action)
 }
 
 func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolAction) error {
@@ -382,7 +524,7 @@ func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolA
 			// The node answered the ack: no later pass repeats it.
 			acked = true
 			action.Data.Acked = true
-			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 				h.logger.Warn("pool action ack not saved", "job", action.Job, "action", action.ID, "error", h.inbox.store.loggable("pool action", err))
 			}
 		}
@@ -422,12 +564,36 @@ func (h *HubServer) releasePoolAction(ctx context.Context, action poolAction) er
 	var status nodeCloseOpStatusResult
 	ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}
 	if !h.nodeCall(ctx, action.Node, nodeCommandPaneCloseRelease, ref, hubNodeCommandWait, &status) || status.State != fleet.CloseOpCancelled || !status.Released {
-		return errors.New("release not proved")
+		return errPoolReleaseNotProved
 	}
 	return h.refusePoolAction(ctx, action)
 }
 
 func (h *HubServer) refusePoolAction(ctx context.Context, action poolAction) error {
+	if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil && action.Data.Handover.Reason != "recovered" {
+		handover := action.Data.Handover
+		if handover.Reason == "" {
+			handover.Reason = "close_refused"
+		}
+		handover.Outcome = handoverFailed
+		// Save the reason before publishing: a lost acknowledgement or a
+		// restart must replay the same notice without closing the old pane.
+		if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
+			return err
+		}
+		eventID := handoverNoticeID(action)
+		owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			text := fmt.Sprintf("[panewire] hand-over of %s failed (%s): %s", action.Job, handover.Reason, action.Data.Text)
+			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+			if result.ID == 0 || result.PersistFailed {
+				return errors.New("owner notice unavailable")
+			}
+		}
+	}
 	action.Phase = poolActionRefused
 	if err := h.saveFinalPoolAction(ctx, action, "refused"); err != nil {
 		return err
@@ -449,7 +615,7 @@ func (h *HubServer) logObservedPoolAction(action poolAction) {
 }
 
 func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, outcome string) error {
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	// The durable terminal transition is the action's exit: settled,
@@ -461,20 +627,44 @@ func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, 
 }
 
 func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) error {
-	unlock, free := h.lockWithoutPoolAction(ctx, action.Job)
-	if !free {
-		return errors.New("another close action is pending")
+	unlock, err := h.poolActionLocks.lock(ctx, action.Job)
+	if err != nil {
+		return err
 	}
 	defer unlock()
+	if owner, err := h.inbox.store.poolActionOwns(ctx, action.Job); err != nil || owner != "" && owner != action.ID {
+		return errors.New("another close action is pending")
+	}
 	h.mu.Lock()
 	job := h.jobs[action.Job]
 	moved := job != nil && (job.Node != action.Node || job.Epoch != action.Epoch)
 	h.mu.Unlock()
+	if moved && action.Data.Kind == poolActionKindHandover {
+		// Reassignment is fenced while the row is active, so this is a move
+		// the fence did not see. A successor already claimed (even when the
+		// flag was not yet saved) is tracked to its own outcome; one never
+		// claimed is not placed beside the moved job, and the row ends
+		// handover_failed with the owner's notice (hk 4633).
+		handover := action.Data.Handover
+		if handover != nil && handover.Outcome == "" && !handover.Submitted {
+			if _, err := h.inbox.store.spawnTask(ctx, handover.Successor.RequestID); err == nil {
+				handover.Submitted = true
+				if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			} else {
+				handover.Outcome, handover.Reason = handoverFailed, "old job moved to another owner"
+			}
+		}
+		return h.finishHandover(ctx, action, "lost", action.Data.EndReason)
+	}
 	if moved {
 		// Settlement permits reassignment. Once another owner has the job,
 		// this old action must not release its role or announce its end.
 		action.Phase = poolActionDone
-		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 			return err
 		}
 		h.poolActionObserved.Delete(action.ID)
@@ -490,8 +680,29 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	cancel()
 	state, _ := record["state"].(string)
 	reason, _ := record["end_reason"].(string)
-	if err != nil || !exists || !hkTerminalState(state) {
+	if err != nil || !exists {
 		return errors.New("terminal job record unavailable")
+	}
+	moved, err = poolActionOwnerMoved(action, record)
+	if err != nil {
+		return err
+	}
+	if moved {
+		action.Phase = poolActionDone
+		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			return err
+		}
+		h.poolActionObserved.Delete(action.ID)
+		h.loopNoteDone(loopPoolActions, action.ID)
+		return nil
+	}
+	if !hkTerminalState(state) {
+		return errors.New("terminal job record unavailable")
+	}
+	if action.Data.Kind == poolActionKindHandover {
+		// The old job's task role passes to the successor in its claim, or
+		// is released when the hand-over fails (finishHandover).
+		return h.finishHandover(ctx, action, state, reason)
 	}
 	if err := h.inbox.store.releaseCompletedSpawnRoleOf(ctx, action.Data.SpawnRequest); err != nil {
 		return err
@@ -513,7 +724,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		}
 	}
 	action.Phase = poolActionDone
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	h.poolActionObserved.Delete(action.ID)

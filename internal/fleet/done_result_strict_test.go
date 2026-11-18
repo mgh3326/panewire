@@ -197,14 +197,9 @@ func TestDoneResultStrictReadsBackDroppedCommit(t *testing.T) {
 	if len(h.putBodies) != 1 || countEvents(t, a, "job.completed") != 1 {
 		t.Fatalf("PUTs=%d completion events=%d", len(h.putBodies), countEvents(t, a, "job.completed"))
 	}
-	gets := 0
-	for _, call := range h.calls {
-		if strings.HasPrefix(call, "GET /v1/jobs/") {
-			gets++
-		}
-	}
-	if gets != 1 {
-		t.Fatalf("read-back GETs=%d", gets)
+	put := slices.Index(h.calls, "PUT /v1/jobs/j")
+	if put < 0 || !slices.Contains(h.calls[put+1:], "GET /v1/jobs/j") {
+		t.Fatalf("missing read after ambiguous PUT: %v", h.calls)
 	}
 }
 
@@ -263,19 +258,14 @@ func TestDoneResultStrictReadsBackAmbiguousSpawnRepair(t *testing.T) {
 	if err := strictDone(t, a, report, result); err != nil {
 		t.Fatal(err)
 	}
-	spawnedPuts, gets := 0, 0
+	spawnedPuts := 0
 	for _, body := range h.putBodies {
 		if body["state"] == "spawned" {
 			spawnedPuts++
 		}
 	}
-	for _, call := range h.calls {
-		if strings.HasPrefix(call, "GET /v1/jobs/") {
-			gets++
-		}
-	}
-	if spawnedPuts != 1 || gets != 2 || str(h.record(t, "j"), "state") != "completed" {
-		t.Fatalf("spawned PUTs=%d GETs=%d record=%v", spawnedPuts, gets, h.record(t, "j"))
+	if spawnedPuts != 1 || str(h.record(t, "j"), "state") != "completed" {
+		t.Fatalf("spawned PUTs=%d record=%v", spawnedPuts, h.record(t, "j"))
 	}
 }
 

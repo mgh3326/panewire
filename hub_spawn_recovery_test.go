@@ -133,7 +133,12 @@ func TestAsyncSpawnLostEventRetriesWithStableJobIdentity(t *testing.T) {
 	if err = h.inbox.store.db.QueryRow(`SELECT delivered FROM spawn_notifications`).Scan(&delivered); err != nil || delivered != 1 {
 		t.Fatalf("recovery not ACKed: %d %v", delivered, err)
 	}
+	// A lost ACK: the event was sent, and the mark and the outbox delete never
+	// committed (hk 5298).
 	if _, err = h.inbox.store.db.Exec(`UPDATE spawn_notifications SET delivered=0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.inbox.store.db.Exec(`INSERT INTO spawn_notice_outbox(event_id) SELECT event_id FROM spawn_notifications`); err != nil {
 		t.Fatal(err)
 	}
 	h.flushSpawnNotifications(t.Context())
