@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"math"
 	"regexp"
 	"strings"
 	"sync"
@@ -49,6 +50,8 @@ type Reading struct {
 	Buckets     []Bucket
 	// Free is the free-tier state of a pool that has one (Flow.LocalFree set).
 	Free *FreeBucket
+	// Balance is the reading's remaining provider credits, nil when unknown.
+	Balance *float64
 }
 
 // Measurer takes one fresh measurement. A failure must be a *quota.Error.
@@ -201,7 +204,7 @@ func currentWith(o *Observation, key string, now time.Time, ttl time.Duration, f
 			return Reading{}, false
 		}
 	}
-	return Reading{Key: key, Source: quota.SourceHandoffkeep, MeasuredAt: o.MeasuredAt, ConfirmedAt: o.ConfirmedAt, Plan: o.Plan, Buckets: o.Buckets, Free: free}, true
+	return Reading{Key: key, Source: quota.SourceHandoffkeep, MeasuredAt: o.MeasuredAt, ConfirmedAt: o.ConfirmedAt, Plan: o.Plan, Buckets: o.Buckets, Free: free, Balance: o.Balance}, true
 }
 
 // freeOnlyObservation is the observation to publish when the stored reading is
@@ -521,6 +524,12 @@ func Convert(observed quota.Observation, at time.Time) (Observation, error) {
 // a pool whose reading carries a free-tier state.
 func convert(observed quota.Observation, at time.Time, allowEmpty bool) (Observation, error) {
 	stored := Observation{Kind: KindAuto, MeasuredAt: at, Plan: observed.Plan, Buckets: []Bucket{}}
+	// A balance outside the field's contract is unknown, not a measurement
+	// failure: the windows still decide (decision 403).
+	if observed.Balance != nil && !math.IsNaN(*observed.Balance) && !math.IsInf(*observed.Balance, 0) && *observed.Balance >= 0 {
+		balance := *observed.Balance
+		stored.Balance = &balance
+	}
 	for _, b := range observed.Buckets {
 		if b.UsedPct == nil {
 			continue

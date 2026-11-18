@@ -46,9 +46,17 @@ func (e poolExhaustion) fromQuota() bool {
 }
 
 // poolWide reports a cause that speaks for the whole pool rather than one
-// account: every job on the pool draws on it.
+// account: every job on the pool draws on it. A credit rejection is pool-wide
+// only when it names no account; a multi-account pool's rejection marks one
+// account (hk 5138).
 func (e poolExhaustion) poolWide() bool {
-	return e.Cause == poolCauseRetired || e.Cause == poolCauseCreditExhausted
+	return e.Cause == poolCauseRetired || e.Cause == poolCauseCreditExhausted && e.Account == ""
+}
+
+// accountCredit reports a commandcode credit rejection scoped to one account
+// (hk 5138). It is the only cause a reading of that account lifts.
+func (e poolExhaustion) accountCredit() bool {
+	return e.Cause == poolCauseCreditExhausted && e.Account != ""
 }
 
 // key identifies the pool event: the same exhaustion seen again has the same key.
@@ -65,7 +73,7 @@ func (e poolExhaustion) expired(now time.Time) bool {
 // with no recorded profile cannot be told apart, so it is left alone. A
 // pool-level cause covers every profile.
 func (e poolExhaustion) covers(profile string) bool {
-	if e.poolWide() {
+	if e.poolWide() || e.accountCredit() {
 		return true
 	}
 	if profile == "" {
@@ -272,10 +280,13 @@ func (h *HubServer) startPoolSweep(exhaustion poolExhaustion) {
 	}()
 }
 
-// poolEventGone reports whether an event has ended: its reset passed, or a
-// newer quota reading cleared it. A pool-level cause is cleared only by the
-// pool coming back (poolSweep.forget).
+// poolEventGone reports whether an event has ended: its reset passed, a newer
+// quota reading cleared it, or an account's credit mark lifted. A pool-level
+// cause is cleared only by the pool coming back (poolSweep.forget).
 func (h *HubServer) poolEventGone(exhaustion poolExhaustion, now time.Time) bool {
+	if exhaustion.accountCredit() && !h.accountCreditMarkHeld(exhaustion.Account, now) {
+		return true
+	}
 	return exhaustion.expired(now) || exhaustion.fromQuota() && h.exhaustionSuperseded(exhaustion, now)
 }
 
@@ -362,6 +373,10 @@ func poolExhaustionText(exhaustion poolExhaustion, job string) string {
 	case poolCauseRetired:
 		return fmt.Sprintf("Pool %s has no live catalog row left for job %s; hand it over or end it and respawn it on another pool.", exhaustion.Pool, job)
 	case poolCauseCreditExhausted:
+		if exhaustion.Account != "" {
+			// The pool's other accounts still spend their credits (hk 5138).
+			return fmt.Sprintf("Account %s has no provider credit left for job %s; hand it over or end it and respawn it on another account.", exhaustion.Account, job)
+		}
 		return fmt.Sprintf("Pool %s has no provider credit left for job %s; hand it over or end it and respawn it on another pool.", exhaustion.Pool, job)
 	}
 	return fmt.Sprintf("Pool %s is exhausted for job %s; hand it over or end it and respawn it on another pool.", exhaustion.Pool, job)
@@ -430,6 +445,11 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(owner, eventID), OwnerLane: owner, NotifyType: "info", Text: text, Host: "hub", Epoch: 1}, nil)
 		if result.ID == 0 || result.PersistFailed {
 			return poolJobSkip(role, "owner_not_notified")
+		}
+		if role == "implementer" && exhaustion.accountCredit() {
+			// A commandcode account out of credit is handed over exactly as a
+			// quota stop is: the quota-stop flow's successor (hk 5138).
+			h.handOffAccountCreditStopped(ctx, task, exhaustion)
 		}
 		return poolJobResult{action: poolJobNotified, role: role}
 	default:

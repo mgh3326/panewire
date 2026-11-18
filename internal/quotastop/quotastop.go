@@ -63,6 +63,12 @@ var (
 	// credit_rejection.go reads from a session).
 	creditAnthropic = regexp.MustCompile(`(?i)credit balance is too low`)
 	creditOpenAI    = regexp.MustCompile(`(?i)insufficient_quota|exceeded your current quota`)
+	// creditCommandcode is the Command Code provider's rejection as omp renders
+	// it as the status row ("400 You have insufficient credits to make this
+	// request. Please purchase more credits to continue using the service.
+	// (type=invalid_request_error", hk 5138). It anchors on the provider's own
+	// sentence, never on the bare "400": any request may fail with that status.
+	creditCommandcode = regexp.MustCompile(`(?i)you have insufficient credits to make this request`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen when the
@@ -120,6 +126,9 @@ func classifyStatus(screen string, now time.Time, local *time.Location) (Stop, b
 		out.CreditExhaustedAt = now.UTC()
 	case creditOpenAI.MatchString(screen):
 		out.Pool = "openai-api"
+		out.CreditExhaustedAt = now.UTC()
+	case creditCommandcode.MatchString(screen):
+		out.Pool = "commandcode"
 		out.CreditExhaustedAt = now.UTC()
 	default:
 		return out, false
@@ -362,7 +371,7 @@ func CreditExhausted(screen string) (string, bool) {
 	for _, provider := range []struct {
 		pool string
 		line *regexp.Regexp
-	}{{"anthropic-api", creditAnthropic}, {"openai-api", creditOpenAI}} {
+	}{{"anthropic-api", creditAnthropic}, {"openai-api", creditOpenAI}, {"commandcode", creditCommandcode}} {
 		if provider.line.MatchString(line) {
 			return provider.pool, true
 		}
@@ -373,7 +382,7 @@ func CreditExhausted(screen string) (string, bool) {
 // creditRow reports a row that is a provider credit-exhausted rejection.
 func creditRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
-	return creditAnthropic.MatchString(line) || creditOpenAI.MatchString(line)
+	return creditAnthropic.MatchString(line) || creditOpenAI.MatchString(line) || creditCommandcode.MatchString(line)
 }
 
 // creditDiagnosticRow reports omp's diagnostic line under a provider

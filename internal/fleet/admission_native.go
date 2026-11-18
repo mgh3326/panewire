@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"slices"
@@ -415,6 +416,10 @@ func admissionAuto(x *shared.Observation, pool, key string, now time.Time, ttl t
 	reading := admissionReading{Plan: x.Plan, FP: fp}
 	if free != nil {
 		reading.Free = &admissionFree{State: free.State, Reset: free.ResetsAt}
+	}
+	if x.Balance != nil && !math.IsNaN(*x.Balance) && !math.IsInf(*x.Balance, 0) && *x.Balance >= 0 {
+		balance := *x.Balance
+		reading.Balance = &balance
 	}
 	for _, b := range x.Buckets {
 		if !WindowRead(pool, b.Window) {

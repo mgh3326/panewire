@@ -351,6 +351,11 @@ type selPlan struct {
 	admPolicy      admissionPolicy
 	runningJobs    map[string]string
 	runningJobsErr error
+	// accountCredit maps an account key to when the hub read a provider
+	// credit rejection on it (FleetSnapshot.AccountCreditExhausted, hk 5138).
+	// A commandcode candidate on that account is dropped credit_exhausted
+	// until the mark lifts, as a 7d-exhausted account is.
+	accountCredit map[string]time.Time
 }
 
 func (p *selPlan) poolCutoff(pool string) float64 {
@@ -954,6 +959,8 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	snapshot, coolingState := a.fleetSnapshot(ctx)
 	if snapshot == nil {
 		p.degraded = append(p.degraded, "pool_cooling_"+coolingState)
+	} else {
+		p.accountCredit = snapshot.AccountCreditExhausted
 	}
 	var rows []CatalogRow
 	if detailed, ok := a.Quota.(interface {

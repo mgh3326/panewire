@@ -413,7 +413,7 @@ func (s *nativeQuotaSource) measureDirect(ctx context.Context, measure shared.Me
 	if err != nil {
 		return shared.Reading{}, err
 	}
-	reading := shared.Reading{Source: observed.Source, MeasuredAt: at, Plan: observed.Plan, Buckets: stored.Buckets}
+	reading := shared.Reading{Source: observed.Source, MeasuredAt: at, Plan: observed.Plan, Buckets: stored.Buckets, Balance: stored.Balance}
 	if observed.AccountFP != "" {
 		reading.Key = s.Pool + ":" + observed.AccountFP
 	}

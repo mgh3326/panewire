@@ -414,6 +414,25 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 		}
 	} else {
 		if c.row.Pool == "commandcode" {
+			// A credit stop keeps this account off placement while the pool's
+			// other accounts stay candidates (hk 5138). The reading's own
+			// balance decides first: below one credit the provider refuses the
+			// next request (decision 403), at one credit or more the reading
+			// has lifted the pane rejection's mark. A reading with no balance
+			// says nothing, so the mark holds.
+			if v.Balance != nil {
+				if *v.Balance < 1 {
+					c.reason = fmt.Sprintf("credit_exhausted balance=%g", *v.Balance)
+					c.code, c.outcome = outcomeQuotaExhausted, "dropped:"+c.reason
+					c.tier = -1
+					return
+				}
+			} else if at, held := p.creditExhaustedAccount(c.accountKey); held {
+				c.reason = fmt.Sprintf("credit_exhausted account=%s", c.accountKey)
+				c.code, c.outcome = outcomeQuotaExhausted, "dropped:credit_exhausted account="+c.accountKey
+				c.tier, c.creditSince = -1, at
+				return
+			}
 			cutoff := p.poolCutoff(c.row.Pool)
 			if v.Blocking != nil && *v.Blocking >= cutoff {
 				c.reason = fmt.Sprintf("window_exhausted cutoff=%g", cutoff)
@@ -464,6 +483,17 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	if c.reason != "" {
 		c.outcome = "dropped:" + c.reason
 	}
+}
+
+// creditExhaustedAccount reports the hub's provider credit mark on key while
+// it holds: the hub lifts it at the first reading taken after the mark, and
+// this side lifts it after AccountCreditMarkTTL at the latest.
+func (p *selPlan) creditExhaustedAccount(key string) (time.Time, bool) {
+	at, held := p.accountCredit[key]
+	if !held || key == "" || !p.at.Before(at.Add(AccountCreditMarkTTL)) {
+		return time.Time{}, false
+	}
+	return at.UTC(), true
 }
 
 // freeLimitHeld reports a free-tier reading at its limit: the shared bucket is

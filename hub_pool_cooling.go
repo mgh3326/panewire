@@ -24,6 +24,20 @@ func quotaStopReasonFields(reason string) (pool, reset string) {
 	return strings.TrimPrefix(fields[1], "pool="), reset
 }
 
+// quotaStopReasonAccount returns the account a quota_stop reason names
+// ("quota_stop pool=<p> account=<key>"), or "" when it names none. A
+// commandcode credit stop is scoped to one account, so its successor excludes
+// no pool: the account mark keeps it off the spent account while the pool's
+// other accounts stay placeable (hk 5138).
+func quotaStopReasonAccount(reason string) string {
+	for _, field := range strings.Fields(reason) {
+		if account, ok := strings.CutPrefix(field, "account="); ok {
+			return account
+		}
+	}
+	return ""
+}
+
 // Pool cooling is held in hub memory and is lost on hub restart.
 func (h *HubServer) observePoolCooling(reason string, now time.Time) bool {
 	pool, reset := quotaStopReasonFields(reason)
@@ -64,6 +78,7 @@ func (h *HubServer) observePoolCooling(reason string, now time.Time) bool {
 
 func (h *HubServer) fleetSnapshot(now time.Time) fleetStateSnapshot {
 	snap := h.stateStore().snapshot(now)
+	snap.AccountCreditExhausted = h.snapshotAccountCreditMarks(now)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for pool, until := range h.poolCooling {

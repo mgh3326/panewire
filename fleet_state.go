@@ -91,6 +91,9 @@ type FleetStateQuota struct {
 	// Free is a pool's free-tier state (devin's SWE-2 bucket), the shared
 	// reading's free_bucket. A free-only reading may carry no paid bucket.
 	Free *FleetStateFree `json:"free_bucket,omitempty"`
+	// Balance is a credit pool's remaining provider credits, nil when the
+	// reading carries none (commandcode, decision 403).
+	Balance *float64 `json:"balance,omitempty"`
 }
 
 // FleetStateFree is the free-tier state of a pool that has one. State is
@@ -401,6 +404,10 @@ type fleetStateSnapshot struct {
 	At      time.Time            `json:"at"`
 	States  []FleetStateMessage  `json:"states"`
 	Cooling map[string]time.Time `json:"pool_cooling,omitempty"`
+	// AccountCreditExhausted maps an account key to when the hub read a
+	// provider credit rejection on it (hk 5138). Placement skips that account
+	// until the mark lifts.
+	AccountCreditExhausted map[string]time.Time `json:"account_credit_exhausted,omitempty"`
 }
 
 func (s *fleetStateStore) snapshot(now time.Time) fleetStateSnapshot {

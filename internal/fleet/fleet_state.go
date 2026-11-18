@@ -49,12 +49,21 @@ type FleetStateReader interface {
 	Snapshot(ctx context.Context) (FleetSnapshot, error)
 }
 
+// AccountCreditMarkTTL is how long the hub holds a provider credit rejection
+// on one account when no reading of that account arrives: one day (hk 5138).
+// The mark lifts earlier at the first reading taken after it.
+const AccountCreditMarkTTL = 24 * time.Hour
+
 // FleetSnapshot is the subset of GET /v1/state panewire reads.
 type FleetSnapshot struct {
 	V       int                  `json:"v"`
 	At      time.Time            `json:"at"`
 	States  []FleetStateMessage  `json:"states"`
 	Cooling map[string]time.Time `json:"pool_cooling,omitempty"`
+	// AccountCreditExhausted maps an account key to when the hub read a
+	// provider credit rejection on it (hk 5138). Placement skips that account
+	// until the mark lifts, so other accounts of the pool stay usable.
+	AccountCreditExhausted map[string]time.Time `json:"account_credit_exhausted,omitempty"`
 }
 
 // cools reports whether a candidate row's quota is held by a stop: a stop of
@@ -85,6 +94,9 @@ type FleetStateMessage struct {
 		AccountKey string             `json:"account_key"`
 		Buckets    []accountBucket    `json:"buckets"`
 		FreeBucket *shared.FreeBucket `json:"free_bucket,omitempty"`
+		// Balance is a credit pool's remaining provider credits, nil when the
+		// reading carries none (commandcode, decision 403).
+		Balance *float64 `json:"balance,omitempty"`
 	} `json:"quota,omitempty"`
 	Load *struct {
 		LoadRatio float64 `json:"load_ratio"`
@@ -228,6 +240,10 @@ func (a *App) hubSharedAccount(ctx context.Context, key string) (SharedAccount, 
 	quota := withFree(accountPoolView(readableBuckets(accountPool(key), best.Quota.Buckets), now), best.Quota.FreeBucket, now)
 	if quota == nil {
 		return SharedAccount{}, stateStale
+	}
+	if best.Quota.Balance != nil {
+		balance := *best.Quota.Balance
+		quota.Balance = &balance
 	}
 	return SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: best.validAt(), Quota: quota}, ""
 }
