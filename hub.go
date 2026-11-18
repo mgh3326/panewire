@@ -1568,6 +1568,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
+			h.observeNodeLoops(machineID, heartbeat.Loops, received)
 			h.sendHeartbeatDirectives(machineID, agent)
 		}
 		if message.Kind == "job.completed" {
@@ -1798,6 +1799,11 @@ type hubHeartbeatPayload struct {
 	EndedPanes *int `json:"ended_panes,omitempty"`
 	// Checkouts is the node's allow-listed checkout revisions (node_checkout_pull.go).
 	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
+	// Loops is the node's current-day loop ledger bucket (node_loop_ledger.go,
+	// hubFeatureNodeLoops). It is nil when the node has not measured one or
+	// predates the ledger: null must never read as zero activity, which is
+	// what clears a machine's row to idle.
+	Loops *hubNodeLoopsPayload `json:"loops,omitempty"`
 }
 
 // hubEndedPanesMax bounds the ended-pane count a node may report: a sweep's
@@ -1847,7 +1853,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" && name != "ended_panes" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" && name != "ended_panes" && name != "loops" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1969,6 +1975,13 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.Checkouts = checkouts
+	}
+	if rawLoops, exists := fields["loops"]; exists {
+		loops, valid := decodeHubNodeLoops(rawLoops)
+		if !valid {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.Loops = loops
 	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {

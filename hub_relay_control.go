@@ -55,10 +55,10 @@ type clientRelayControlState struct {
 	// cmd pane's screen must stay frozen to count as stale (hk 3517). Zero
 	// reads the default.
 	cmdStaleAfter time.Duration
-	// sessionMessageLanes is the PANEWIRE_CLAUDE_SESSION_MESSAGE_LANES trial
-	// switch (hk 4258): the lanes whose inbox wake line goes to their Claude
-	// Code session as a session message. Empty is off.
-	sessionMessageLanes []string
+	// sessionMessageLanes are the PANEWIRE_{CLAUDE,CODEX,OMP}_SESSION_MESSAGE_LANES
+	// trial switches (hk 4258, hk 4261): the lanes whose inbox wake line goes to
+	// their session as a message. Empty is off.
+	sessionMessageLanes sessionMessageLanes
 }
 
 func newHubRelayControlState(config HubServerConfig, overrides map[string]acceptingOverride) hubRelayControlState {
@@ -69,5 +69,5 @@ func newHubRelayControlState(config HubServerConfig, overrides map[string]accept
 }
 
 func newClientRelayControlState(config HubClientConfig) clientRelayControlState {
-	return clientRelayControlState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout), cmdHoldMax: relayCmdHoldMaxFromEnv(), cmdStaleAfter: relayCmdStaleAfterFromEnv(), sessionMessageLanes: claudeSessionMessageLanesFromEnv()}
+	return clientRelayControlState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout), cmdHoldMax: relayCmdHoldMaxFromEnv(), cmdStaleAfter: relayCmdStaleAfterFromEnv(), sessionMessageLanes: sessionMessageLanesFromEnv()}
 }

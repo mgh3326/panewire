@@ -41,7 +41,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, escalate-author, consult, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, placement-requeue, node, prompt, deliveries, jobs, lanes, fleet-census, relay, emit, claude-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, escalate-author, consult, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, placement-requeue, node, prompt, deliveries, jobs, lanes, fleet-census, relay, emit, claude-socket, codex-thread, omp-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -96,6 +96,12 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "claude-socket" {
 		return runClaudeSocketCLI(args[1:], os.Stdout, os.Stderr, time.Now)
+	}
+	if args[0] == "codex-thread" {
+		return runCodexThreadCLI(args[1:], hookStdin(os.Stdin), os.Stdout, os.Stderr, time.Now)
+	}
+	if args[0] == "omp-socket" {
+		return runOmpSocketCLI(args[1:], os.Stdout, os.Stderr, time.Now)
 	}
 	if args[0] == "emit" {
 		return runEmitCLI(args[1:], os.Stdout, os.Stderr, cfg)
@@ -490,3 +496,12 @@ func hubFlagsProvided(args []string) bool {
 func joinArgs(a []string) string { return strings.Join(a, " ") }
 
 var _ = joinArgs
+
+// hookStdin is stdin when something is piped into the command, as a hook's input
+// is, and nil when stdin is a terminal, which would block a read.
+func hookStdin(stdin *os.File) io.Reader {
+	if info, err := stdin.Stat(); err != nil || info.Mode()&os.ModeCharDevice != 0 {
+		return nil
+	}
+	return stdin
+}
