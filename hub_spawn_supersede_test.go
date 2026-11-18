@@ -629,23 +629,37 @@ func TestSupersedeLandingAcceptedWhileOffNeverBecomesAClose(t *testing.T) {
 	})
 }
 
-// TestHubCLISupersedeOffWithTheKillSwitchIsRefused (review round 4): the
-// inbox kill switch never opens the database, so an off start there cannot
-// record the revocation and does not run.
-func TestHubCLISupersedeOffWithTheKillSwitchIsRefused(t *testing.T) {
+// TestHubCLISupersedeOffWithoutTheInboxIsRefused (review rounds 4 and 5): a
+// start that runs without the inbox database cannot record the revocation
+// --supersede-close=false promises, whether the kill switch or an empty
+// store path caused it, so it does not run.
+func TestHubCLISupersedeOffWithoutTheInboxIsRefused(t *testing.T) {
+	t.Setenv(hubDatabaseURLEnv, "")
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "hub-auth.env")
 	if err := os.WriteFile(authPath, []byte("HUB_TOKEN_operator="+r6OperatorToken+"\nHUB_TOKEN_node-a="+r6NodeAToken+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	store := filepath.Join(dir, "inbox.sqlite3")
-	base := []string{"--hub-auth", authPath, "--delivery-policy", "off", "--inbox-store", store}
-	if _, _, code, err := newHubServerForCLI(append(base, "--supersede-close=false"), nil); err == nil || code != ExitUsage {
-		t.Fatalf("code=%d err=%v, want a usage refusal", code, err)
+	for name, args := range map[string][]string{
+		"kill switch":            {"--delivery-policy", "off", "--inbox-store", store},
+		"kill switch, no store":  {"--delivery-policy", "off", "--inbox-store", ""},
+		"no store and no db url": {"--inbox-store", ""},
+	} {
+		if _, _, code, err := newHubServerForCLI(append([]string{"--hub-auth", authPath, "--supersede-close=false"}, args...), nil); err == nil || code != ExitUsage {
+			t.Fatalf("%s: code=%d err=%v, want a usage refusal", name, code, err)
+		}
+		// The same configuration with the switch left on still starts.
+		hub, _, code, err := newHubServerForCLI(append([]string{"--hub-auth", authPath}, args...), nil)
+		if err != nil || code != ExitOK || hub == nil {
+			t.Fatalf("%s: without the off switch it starts: code=%d err=%v", name, code, err)
+		}
+		_ = hub.Close()
 	}
-	hub, _, code, err := newHubServerForCLI(base, nil)
+	// With the inbox, the off start is accepted and records the fence.
+	hub, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--supersede-close=false", "--inbox-store", store}, nil)
 	if err != nil || code != ExitOK || hub == nil {
-		t.Fatalf("the kill switch alone still starts: code=%d err=%v", code, err)
+		t.Fatalf("an off start with the inbox must run: code=%d err=%v", code, err)
 	}
 	_ = hub.Close()
 }

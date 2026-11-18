@@ -1185,9 +1185,11 @@ cancellation-only: its node is asked for status, a request that is `none` or
 retires it, so an offline node leaves it pending across restarts; a request
 the node already began closing is settled as usual. A cancelled row creates no
 replacement request. An enabled start only reads the fence, and keeps supersede
-dispatch closed when it cannot. `--supersede-close=false` together with
-`--delivery-policy off` is refused at startup: the kill switch never opens the
-inbox database, so that start could not record the fence. The fence lives in the hub's inbox database
+dispatch closed when it cannot. `--supersede-close=false` is refused at startup
+whenever the hub would run without its inbox database (`--delivery-policy off`,
+which never opens it, or an empty `--inbox-store` with no database URL): such a
+start could not record the fence, and a later start on the same store would
+resume what it meant to revoke. The fence lives in the hub's inbox database
 (the one durable store every hub of this deployment shares), not in a separate
 file. A retry of a refused close stays bound to the attempt the refused
 request named. The one gap: a hub that dies between the node's result and the

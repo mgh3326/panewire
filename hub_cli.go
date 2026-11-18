@@ -214,11 +214,14 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
 		}
 	}
-	if !*supersedeClose && *deliveryPolicyPath == "off" && (*inboxStorePath != "" || os.Getenv(hubDatabaseURLEnv) != "") {
-		// The kill switch never opens the inbox database, so this start could
-		// not record the revocation that --supersede-close=false promises
-		// (supersede_fence, hk 5195). Start once without the kill switch.
-		return nil, "", ExitUsage, errors.New("--supersede-close=false cannot be recorded with --delivery-policy=off, which never opens the inbox database; start once without the kill switch")
+	if !*supersedeClose && (*deliveryPolicyPath == "off" || (*inboxStorePath == "" && os.Getenv(hubDatabaseURLEnv) == "")) {
+		// A start that runs without the inbox (the kill switch never opens
+		// the database; an empty --inbox-store with no database URL opens
+		// none) could not record the revocation that --supersede-close=false
+		// promises (supersede_fence, hk 5195), and a later start on the same
+		// store would resume what it meant to revoke. Start once with the
+		// inbox.
+		return nil, "", ExitUsage, errors.New("--supersede-close=false cannot be recorded when the hub runs without its inbox database (--delivery-policy=off, or an empty --inbox-store with no " + hubDatabaseURLEnv + "); start once with the inbox")
 	}
 	if *paneSweepInterval < 0 || (*paneSweepInterval > 0 && *paneSweepInterval < minTaskPaneSweepInterval) || *paneSweepAge < 0 || *paneSweepAge > time.Duration(nodePaneSweepMaxAgeSeconds)*time.Second {
 		return nil, "", ExitConditionInvalid, errors.New("hub pane sweep flags are invalid")
