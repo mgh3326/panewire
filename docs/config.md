@@ -88,6 +88,7 @@ local_delete_at = "drive_confirmed"
 | `clinepass` | `false` | Operator-configured capability required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). Unlike a harness flag, the node cannot measure the proxy, so this boolean is the whole answer (see [Capability flags](#capability-flags)). |
 | `omp_commandcode` | `false` | Explicit override for the `omp` harness capability required by `omp-dsflash41`, `omp-musespark13`, `omp-musespark13c`, `omp-inkling2s`, `omp-museember`, `omp-argon4`, `omp-mimo26pro`, `omp-cc-opus55`, `omp-cc-sonnet55`, and `omp-cc-sol61`: the host's omp has the Command Code provider configured (`omp models` lists the selected model). With no boolean here, the executing node's readiness decides (see [Capability flags](#capability-flags)). Unrated rows admit only with `PANEWIRE_E6_ARM`; Command Code rules are in [quota](quota.md#command-code-seats). |
 | `report_user_idle` | `false` | Literal boolean, read on each heartbeat. `true` makes a macOS node report whole seconds since the last keyboard or pointer input, as `host_activity.user_idle_s`, to a hub that accepts `host_activity`. Linux never sends it. The node reads no app names, window titles, input content or process lists. See [placement telemetry](placement.md#telemetry). |
+| `go_trimpath` | `true` | Literal boolean. Every spawned pane gets `-trimpath` in `GOFLAGS` (appended to the spawner's own value, never replacing it), so builds in different worktrees of one commit hit each other's Go build-cache entries. Set `false` on a host whose tests need absolute source paths. See [Go build cache across worktrees](#go-build-cache-across-worktrees). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
 | `roles`, `grades` | unset | Light-host limits, as for [`[hosts.NAME]`](#hostsname): the spawn roles and task grades this machine accepts. |
 | `presence_id` | `machine_id` | Identity this host uses in pacelever host-presence records. |
@@ -95,6 +96,26 @@ local_delete_at = "drive_confirmed"
 | `brief_preamble` | selected policy block | Explicit named preamble block for this host. |
 | `pool_policy` | embedded pool-order policy | Path to the versioned pool-order JSON used by automatic model selection. |
 | `fleet_usage_alert_gb` | legacy/read-only | Retained config key; standalone disk alerts are not emitted in v0.1. |
+
+### Go build cache across worktrees
+
+Each fleet session works in its own worktree directory, and the go command puts a
+package's directory into its action id unless `-trimpath` is set. Two worktrees
+of one commit therefore shared no cache entry for the repository's own packages:
+measured on one commit checked out at two paths, the second worktree reused 274
+of 296 actions (everything outside the module) and recompiled all of its Go
+packages; with `-trimpath` it reused 295 of 296, the remaining miss being the
+test-binary link. The differing hash input is `modroot <dir>` / `package go
+index v2 <dir>/<pkg>` for the main module.
+
+Spawn passes `GOFLAGS=<the spawner's flags> -trimpath` to the pane when
+`[local].go_trimpath` is on (the default), so the flag reaches every `go build`,
+`go test` and `go vet` run inside it. It changes no build result, only the
+recorded source paths (and, for test failures and panics, they name the package
+rather than the worktree). On a host whose tests resolve `runtime.Caller` paths
+against absolute source paths, set `go_trimpath = false`. The go command trims
+cache entries unused for five days itself (`GOCACHE/trim.txt`); this key sets
+no bound of its own.
 
 ### Capability flags
 

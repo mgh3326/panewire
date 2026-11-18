@@ -1352,6 +1352,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	// The pane's hub lane is its label (registered below). Naming it here lets
 	// the pane's `panewire inbox` commands default to their own lane.
 	env = append(env, "PANEWIRE_LANE="+s.Label)
+	// Each session works in its own worktree directory, and without -trimpath
+	// that directory is part of every package's action id: two worktrees of one
+	// commit then share nothing (hk 5160). The spawner's own GOFLAGS is kept.
+	if boolean(a.Config.Local, "go_trimpath", true) {
+		env = append(env, "GOFLAGS="+goFlagsForPane(os.Getenv("GOFLAGS")))
+	}
 	if seat.Kind == "claude" && s.Purpose != "director" {
 		env = append(env, "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")
 	}
