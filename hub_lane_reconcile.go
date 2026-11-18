@@ -83,6 +83,19 @@ func (client *HubClient) runLaneReconcile(ctx context.Context) {
 	if client.laneReconcileList != nil {
 		list = client.laneReconcileList
 	}
+	// The lane list read is swallowed by the pass (nil lanes still reconcile
+	// the pending jobs), so its failure would vanish without the ledger: it
+	// counts as a silent error, once per streak per day.
+	inner := list
+	list = func(ctx context.Context) (map[string]hubLaneProjection, error) {
+		lanes, err := inner(ctx)
+		if err != nil {
+			client.nodeLoopNoteSilentError(nodeLaneReconcile, "hub_lane_reconcile.go:list", err)
+		} else {
+			client.nodeLoopClearSilent("hub_lane_reconcile.go:list")
+		}
+		return lanes, err
+	}
 	r := laneReconciler{list: list, pending: func(job HubActiveJob) bool {
 		return pendingLaneRegistration(filepath.Join(client.jobsInboxRoot, "jobs", job.JobID, "events"))
 	}, register: func(ctx context.Context, job HubActiveJob) error {
@@ -99,6 +112,16 @@ func (client *HubClient) runLaneReconcile(ctx context.Context) {
 		}
 		return err
 	}}
+	// A failed registration stays in the pass's retry set; it counts in the
+	// day's errors so a stuck lane still shows.
+	innerRegister := r.register
+	r.register = func(ctx context.Context, job HubActiveJob) error {
+		if err := innerRegister(ctx, job); err != nil {
+			client.nodeLoopNoteError(nodeLaneReconcile)
+			return err
+		}
+		return nil
+	}
 	ticks := client.laneReconcileTicks
 	if ticks == nil {
 		ticker := time.NewTicker(laneReconcileInterval)
@@ -110,6 +133,7 @@ func (client *HubClient) runLaneReconcile(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticks:
+			client.nodeLoopTick(nodeLaneReconcile)
 			jobs := scanHubActiveJobsForLimit(ctx, client.jobsInboxRoot, client.panesAliveHook(), 0)
 			if client.laneReconcileJobs != nil {
 				jobs = client.laneReconcileJobs(ctx)

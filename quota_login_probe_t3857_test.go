@@ -334,8 +334,9 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 			t.Fatal("screen text left the node")
 		}
 
-		// The hub tells the desk once while the host keeps reporting it.
-		h, _, destination := spawnNotifyHubLane(t, "", "operator-desk")
+		// The hub tells the operator once while the host keeps reporting it.
+		h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+		transport := oneTimeSentry(t, h)
 		start := time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC)
 		for i := range 3 {
 			at := start.Add(time.Duration(i) * 45 * time.Second)
@@ -343,15 +344,10 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 			copied.CheckedAt = at
 			h.noteReadinessActions("mac-dev", &copied, at)
 		}
-		var notices []string
-		eventually(t, 5*time.Second, "desk notice", func() bool {
-			notices = append(notices, deskNotices(t, h, destination)...)
-			return len(notices) > 0
-		})
-		if len(notices) != 1 || notices[0] != "[mac-dev] agy needs a one-time action: log in" {
+		if notices := oneTimeMessages(transport); len(notices) != 1 || notices[0] != "ACTION NEEDED: mac-dev agy — log in" {
 			t.Fatalf("notices = %q", notices)
 		}
-		if more := deskNotices(t, h, destination); len(more) != 0 {
+		if more := oneTimeMessages(transport); len(more) != 1 {
 			t.Fatalf("an uncleared need was told again: %q", more)
 		}
 

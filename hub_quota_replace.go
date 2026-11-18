@@ -106,6 +106,9 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude
 	}
 	next := old
 	next.RequestID = id
+	// A hub-built successor was never typed by a submitter: it must not
+	// arm its parent's close, whatever the replaced request carried (hk 5195).
+	next.ParentJobExplicit = false
 	if next.DeadlineSeconds < 1 || next.DeadlineSeconds > int(quotaReplaceDeadline/time.Second) {
 		next.DeadlineSeconds = int(quotaReplaceDeadline / time.Second)
 	}

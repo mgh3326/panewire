@@ -40,6 +40,15 @@ const (
 	sweepCheckoutJobUnreadable = "job_unreadable"
 )
 
+// CheckoutSweepLiveKeep reports whether a checkout sweep keep reason means a
+// live user still needs the worktree: the job or pane it was prepared for is
+// still running, so it leaves on its own when that work ends. The node's
+// worktree flow (hk 5117) never counts such a row as made: live inventory is
+// not a stuck remover.
+func CheckoutSweepLiveKeep(reason string) bool {
+	return reason == sweepCheckoutJobLive || reason == sweepCheckoutPaneOpen
+}
+
 // CheckoutSweep holds what one pass needs. OrphanOwner names the job a
 // *-checkout directory belonged to when no local job record claims it — the
 // node's spawn journal on the hub path — and returns "" when nothing

@@ -635,10 +635,10 @@ func TestIdleWakeActiveJobFallbackComesFromClaimAndSpawnScanner(t *testing.T) {
 		t.Fatal(err)
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339)
-	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(`{"type":"job.claimed","created_at":"`+stamp+`","agent_label":"worker-active","owner_lane":"owner","epoch":1}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(`{"kind":"job.claimed","type":"job.claimed","created_at":"`+stamp+`","agent_label":"worker-active","owner_lane":"owner","epoch":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(events, "00002-job.spawned.json"), []byte(`{"type":"job.spawned","created_at":"`+stamp+`","pane_id":"workspace:pane-active"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(events, "00002-job.spawned.json"), []byte(`{"kind":"job.spawned","type":"job.spawned","created_at":"`+stamp+`","pane_id":"workspace:pane-active"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	active := scanHubActiveJobsWithPanes(context.Background(), root, func(context.Context) (map[string]bool, error) {

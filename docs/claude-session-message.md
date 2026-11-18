@@ -3,6 +3,9 @@
 hk 4258. Operator decisions 139 and 141. Claude Code 2.1.322, checked on
 home-desktop (Linux) on 2026-11-12.
 
+The codex and omp receivers and the common trial procedure are in
+[session-message-receivers.md](session-message-receivers.md).
+
 ## Session names
 
 `panewire spawn` starts every Claude session

@@ -102,7 +102,12 @@ type HubServerConfig struct {
 	// the queue, before a rollback past parking (hk 4661,
 	// docs/hub-spawn-operations.md#rolling-back-past-parking).
 	SpawnRollbackDrain bool
-	Logger             *slog.Logger
+	// SupersedeClose lets a landed implementer successor that named its parent
+	// with --parent-job close that parent's pane through a durable pool
+	// action (hk 5140, hk 5195). The hub command line defaults it on; a
+	// config built in code leaves it off unless it asks.
+	SupersedeClose bool
+	Logger         *slog.Logger
 	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
 	// never changes pressure thresholds or dispatches work.
 	PlacementPolicyPath string
@@ -699,27 +704,19 @@ type HubServer struct {
 	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
 	// reads each hk record once while the job stays in its window.
 	reviewerEndSettled map[string]bool
-	// supersededParents records a parent job a landed successor replaced but
-	// whose pane was still working: parent job id to its deferred close. The
-	// hub closes each entry at the first sweep where its pane is no longer
-	// working, through the jobs-close reap path. Guarded by mu.
-	supersededParents map[string]supersededEntry
-	// supersededChecked names the hub jobs whose hk record the deferred
-	// rebuild already read once. A job is checked on the first sweep that
-	// sees it live, so parents that appear after a restart (their nodes
-	// report later) are still re-armed. Guarded by mu.
-	supersededChecked map[string]bool
-	// supersededSweepMu keeps at most one deferred-parent pass in flight;
-	// the Sweep ticker never waits out a hung node (see
-	// startSupersededSweep).
-	supersededSweepMu  sync.Mutex
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool
 	spawnRollbackDrain bool
-	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
-	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
-	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	supersedeClose     bool
+	// supersedeWarned keeps a retried landing from repeating its warn. In
+	// memory only; the durable intent is the supersede_landings row.
+	supersedeWarned sync.Map
+	// supersedeKick wakes the landing loop (wakeSupersedeLandings).
+	supersedeKick    chan struct{}
+	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.
 
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
@@ -779,11 +776,18 @@ type HubServer struct {
 	placementCounts map[string]placementCount
 	// placementGate admits one spawn decision at a time (placement_count.go).
 	placementGate decisionGate
-	// oneTimeActions is the first-run needs already told to the desk, guarded
-	// by mu (hub_one_time_action.go).
-	oneTimeActions map[oneTimeActionKey]time.Time
-	fleetLoadMu    sync.Mutex
-	fleetLoadAt    time.Time // guarded by fleetLoadMu
+	// oneTimeActions are the first-run needs already told to the operator, kept
+	// durable in the hub store, and guarded by oneTimeMu
+	// (hub_one_time_action.go, hub_one_time_action_store.go).
+	oneTimeMu      sync.Mutex
+	oneTimeActions map[oneTimeActionKey]oneTimeActionState
+	// oneTimeDSN is the panewire Sentry DSN the ACTION NEEDED events go to; ""
+	// when reporting is not configured. oneTimeNotify, when set, replaces the
+	// Sentry send (tests only; hub_one_time_action.go).
+	oneTimeDSN    string
+	oneTimeNotify oneTimeNotifier
+	fleetLoadMu   sync.Mutex
+	fleetLoadAt   time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
 	// handoff; closed makes every call after the first return nil at once.
 	closeMu    sync.Mutex
@@ -959,15 +963,17 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
-		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
+		inbox: inbox, supersedeKick: make(chan struct{}, 1), spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, consultTimeout: config.ConsultTimeout, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, spawnRollbackDrain: config.SpawnRollbackDrain, alertObservations: defaultHubAlertObservations, logger: config.Logger,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, spawnRollbackDrain: config.SpawnRollbackDrain, supersedeClose: config.SupersedeClose, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
 		poolTriggerInterval: defaultPoolTriggerInterval,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
+	hub.oneTimeDSN = os.Getenv(crashReportDSNEnv)
+	hub.loadOneTimeActions()
 	hub.fleetStatusInterval = config.FleetStatusInterval
 	hub.fleetStatusPublish = config.FleetStatusPublish
 	hub.fleetStatusPlanFn = config.FleetStatusPlans
@@ -987,6 +993,16 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		if cleared > 0 {
 			hub.logger.Info("hub cleared reviewer role reservations", "rows", cleared)
 		}
+	}
+	if err := hub.initSupersedeFence(); err != nil {
+		hub.closeCancel()
+		if hub.inbox != nil {
+			_ = hub.inbox.store.close()
+		}
+		return nil, err
+	}
+	if hub.inbox != nil {
+		hub.inbox.store.landingIntent = hub.supersedeLandingOf
 	}
 	hub.prepareInbox()
 	if hub.inbox != nil {
@@ -1561,6 +1577,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
+			h.observeNodeLoops(machineID, heartbeat.Loops, received)
 			h.sendHeartbeatDirectives(machineID, agent)
 		}
 		if message.Kind == "job.completed" {
@@ -1791,6 +1808,11 @@ type hubHeartbeatPayload struct {
 	EndedPanes *int `json:"ended_panes,omitempty"`
 	// Checkouts is the node's allow-listed checkout revisions (node_checkout_pull.go).
 	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
+	// Loops is the node's current-day loop ledger bucket (node_loop_ledger.go,
+	// hubFeatureNodeLoops). It is nil when the node has not measured one or
+	// predates the ledger: null must never read as zero activity, which is
+	// what clears a machine's row to idle.
+	Loops *hubNodeLoopsPayload `json:"loops,omitempty"`
 }
 
 // hubEndedPanesMax bounds the ended-pane count a node may report: a sweep's
@@ -1840,7 +1862,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" && name != "ended_panes" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" && name != "ended_panes" && name != "loops" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1962,6 +1984,13 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.Checkouts = checkouts
+	}
+	if rawLoops, exists := fields["loops"]; exists {
+		loops, valid := decodeHubNodeLoops(rawLoops)
+		if !valid {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.Loops = loops
 	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {
@@ -2705,7 +2734,6 @@ func (h *HubServer) Sweep() {
 	h.startFleetLoadPublish(now)
 	h.logRouteHits(now)
 	h.sweepOrphanedJobs(now)
-	h.startSupersededSweep()
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)

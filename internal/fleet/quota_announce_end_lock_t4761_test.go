@@ -168,19 +168,6 @@ func TestQuotaStopAnnounceReapIsStickyAcrossReprompt_t4761(t *testing.T) {
 	}
 }
 
-// A tied revocation stays an end even after a later-numbered spawn: with the
-// revocation's sequence allocated outside the ledger lock, the order cannot
-// show the spawn came after it (#690 review r4).
-func TestQuotaStopAnnounceTieStaysAnEnd_t4761(t *testing.T) {
-	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
-	writeLedgerFile(t, a, "00090-job.brief_sent.json", `{"created_at":"2026-01-01T00:00:02Z","job_id":"j","kind":"job.brief_sent","payload":{},"seq":90}`)
-	writeLedgerFile(t, a, "00090-job.revoked.json", `{"created_at":"2026-01-01T00:00:03Z","job_id":"j","kind":"job.revoked","payload":{"pane_id":"w:p1"},"seq":90}`)
-	writeLedgerFile(t, a, "00091-job.spawned.json", `{"created_at":"2026-01-01T00:00:01Z","job_id":"j","kind":"job.spawned","payload":{"pane_id":"w:p1","label":"agent-a","role":"reviewer"},"seq":91}`)
-	if ended, err := a.attemptEndedBeforeAnnouncement("j", "w:p1"); err != nil || !ended {
-		t.Fatalf("tied revocation then spawn: ended=%v err=%v, want ended", ended, err)
-	}
-}
-
 // A revocation survives a re-prompt: it restores no ownership (#690 review r4).
 func TestQuotaStopAnnounceRevokeIsStickyAcrossReprompt_t4761(t *testing.T) {
 	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
@@ -212,8 +199,8 @@ func TestQuotaStopAnnounceListedEventUnreadable_t4761(t *testing.T) {
 	if err := os.Symlink(filepath.Join(a.Jobs, "j", "missing"), filepath.Join(a.Jobs, "j", "events", "00090-job.revoked.json")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.attemptEndedBeforeAnnouncement("j", "w:p1"); err == nil {
-		t.Fatal("unreadable listed event: want an error")
+	if err := a.quotaStopAnnounce(context.Background(), Job{ID: "j", Pane: "w:p1"}, quotastop.Stop{Pool: "claude"}); err == nil || errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("announce with an unreadable listed event: %v, want a read error", err)
 	}
 }
 

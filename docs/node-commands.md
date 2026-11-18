@@ -361,6 +361,19 @@ first and exits when it is held.
   the re-read ledger already holds another end (a revoke, a completion, a
   reap): as the newest end it would read as a live hand-over and mask that
   end. Both lock waits end when the caller's context does.
+- The announcement is appended under the job's `.wrk-events.lock` (the lock a
+  hub revocation and every sequence allocation take), and only if the ledger's
+  current attempt is still the one it observed (the attempt is the newest
+  claim, reclaim, spawn or re-prompt; the quota-stop manager records it with
+  its decision); otherwise it is dropped. The watcher's `job.reprompted` resume
+  marker is appended the same way and is void after a reap, a revocation or an
+  end of that attempt (hk 5224).
+- Every reader of the current attempt (`watch`, the watcher re-arm,
+  `announcedQuotaStop`, the `Reassigned` flag) folds the ledger once, in
+  numeric sequence order and never by timestamp (`ledgerView`,
+  `internal/fleet/ledger_view.go`). Events that share a sequence number are
+  one group in which a revocation is applied last; a claim, reclaim or spawn at
+  a strictly greater sequence clears it.
 - When no intent is open any more (settled, cancelled, or made stale by a
   new attempt), the fence is released and the node re-arms the watchers of
   live jobs, since a watcher that met the fence exited.
@@ -476,7 +489,9 @@ defers. Its rules, which the hub issuer (hk 4745) relies on:
    `job.mark_lost` bound). The planned terminal reason and any successor
    pointer live there, as the last `key=value` token
    (`replaced_by=<job>` for a reviewer, `handed_over_to=<job>` for an
-   implementer; `QuotaStopEndReason`). On a new, bound registration the
+   implementer; `QuotaStopEndReason`). A successor closing its parent
+   (`supersede_close` rows, hk 5195, docs/config.md "--parent-job") uses
+   `superseded_by=<job>`. On a new, bound registration the
    node appends `job.hub_close_intent` to the job's ledger — `request_id`,
    `attempt`, `pane_id`, `label` (the request's `name`) and `end_reason` —
    *before* it writes `registered`, and fsyncs the events directory. A

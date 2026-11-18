@@ -13,7 +13,8 @@ import (
 // harness can run only on that host (hk 4614); the desk still gets its notice.
 func TestLoginScreenAuthUnavailablePinsTheHostT3891(t *testing.T) {
 	nodeResult, _, _ := t3891RunHubSpawn(t, "agy-flash38-medium", true, t3891AgyLoginScreen)
-	h, _, destination := spawnNotifyHubLane(t, "", "operator-desk")
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	sentryEvents := oneTimeSentry(t, h)
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
 	node := t14Node(t, h, server, true)
@@ -54,10 +55,10 @@ func TestLoginScreenAuthUnavailablePinsTheHostT3891(t *testing.T) {
 	}
 	var notices []string
 	eventually(t, 5*time.Second, "agy login notice", func() bool {
-		notices = append(notices, deskNotices(t, h, destination)...)
+		notices = oneTimeMessages(sentryEvents)
 		return len(notices) > 0
 	})
-	want := "[machine-a] agy needs a one-time action: log in"
+	want := "ACTION NEEDED: machine-a agy — log in"
 	if len(notices) != 1 || notices[0] != want {
 		t.Fatalf("notices=%q want exactly %q", notices, want)
 	}

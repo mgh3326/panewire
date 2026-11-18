@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,7 +34,7 @@ type Job struct {
 	Owner, Parent, Role, Label, Pane, Tab, Task, Family, Profile, Effort, Report, HubLane, Machine, T string
 	Keep, Terminal, Reaped                                                                            bool
 	// Reassigned is whether a hub revocation record (hubRevocation) stands in
-	// the job's current attempt, in ledger sequence order (reassignedInLedger):
+	// the job's current attempt, in ledger sequence order (viewLedger):
 	// the hub gave the job to another node, so the shared hk record is that
 	// node's. It outlives a later local end or reprompt of this node's pane and
 	// is cleared only by a new claim or spawn. A writer of that record asks
@@ -66,28 +67,6 @@ func (j *Job) revive() { j.Terminal, j.Ended, j.Outcome, j.At = false, "", "", t
 // node must not write the shared hk record (#662 review, hk 5062).
 func hubRevocation(ev Event) bool {
 	return ev.Kind == "job.revoked" && ev.Kind == ev.Type && ev.Epoch > 0
-}
-
-// reassignedInLedger reports whether a hub revocation stands in the current
-// attempt: the newest one in ledger sequence order follows the last claim or
-// spawn. Sequence, not timestamp, orders it: a node clock stepped backwards
-// gives the revocation record an mtime before the spawn it followed, and the
-// timestamp fold would then clear the reassignment.
-func reassignedInLedger(evs []Event) bool {
-	reassigned := false
-	for _, ev := range ledgerOrder(evs) {
-		switch {
-		case hubRevocation(ev):
-			reassigned = true
-		case ev.Kind == "job.spawned" && str(ev.Payload, "adopted_from") != "":
-			// A spawn receipt `done` adopted from job.brief_sent (adoptBriefSent)
-			// is this node's own late bookkeeping, not a new claim: it must not
-			// clear a revocation the hub wrote meanwhile (hk 5174).
-		case ev.Kind == "job.claim" || ev.Kind == "job.claimed" || ev.Kind == "job.reclaim" || ev.Kind == "job.spawned":
-			reassigned = false
-		}
-	}
-	return reassigned
 }
 
 // hubReassigned reports whether the hub reassigned the job, by the ledger as
@@ -189,11 +168,14 @@ func (a *App) job(id string) (Job, error) {
 	return foldJob(id, evs)
 }
 
-// foldJob builds the job from its events in the order given: timestamp order
-// for a.job, ledger sequence order for a hub close (watch_hub_close.go).
+// foldJob builds the job from its events in ledger sequence order, never in
+// timestamp order (ledgerView).
 func foldJob(id string, evs []Event) (Job, error) {
 	j := Job{ID: id, Events: evs}
-	for _, ev := range evs {
+	// The fields the attempt decides (pane, receipt, report, role, end) are
+	// folded in the view's sequence order, so a respawn stamped earlier by a
+	// stepped clock is still the current attempt (hk 5224).
+	for _, ev := range sequenceGroups(evs) {
 		p := ev.Payload
 		switch ev.Kind {
 		case "job.claim", "job.claimed", "job.reclaim":
@@ -252,7 +234,7 @@ func foldJob(id string, evs []Event) (Job, error) {
 			j.Keep = true
 		}
 	}
-	j.Reassigned = reassignedInLedger(evs)
+	j.Reassigned = viewLedger(evs).Reassigned
 	if j.Receipt == nil && j.Task == "" {
 		return j, fail(exitStateConflict, "no claim or receipt for job %s", id)
 	}
@@ -268,6 +250,44 @@ func scalar(v any) string {
 	}
 	return ""
 }
+
+// ledgerEvents is events for a ledger that may not exist yet: only an absent
+// events directory reads as empty. A listed event that vanished or cannot be
+// read is missing evidence and an error.
+func (a *App) ledgerEvents(id string) ([]Event, error) {
+	if validID(id) {
+		if _, err := os.Lstat(filepath.Join(a.Jobs, id, "events")); errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+	}
+	return a.events(id)
+}
+
+// eventIf appends kind to the job's ledger only if check accepts the ledger as
+// it is under the job's events lock, the lock every sequence allocation and
+// hub revocation takes: the view check reads sees exactly what the append
+// numbers after. A check error appends nothing and is returned as it is, so a
+// caller recognizes errQuotaStopSuperseded; so is a ledger that cannot be
+// read, which is never permission to append. A nil check appends as event does.
+func (a *App) eventIf(ctx context.Context, id, kind string, p map[string]any, check func(ledgerView) error) error {
+	if check == nil {
+		return a.event(ctx, id, kind, p)
+	}
+	var refused error
+	_, e := a.ledger().AppendEventIf(ctx, id, kind, p, nil, func() error {
+		evs, err := a.ledgerEvents(id)
+		if err == nil {
+			err = check(viewLedger(evs))
+		}
+		refused = err
+		return err
+	})
+	if refused != nil {
+		return refused
+	}
+	return ledgerFail(e, "event")
+}
+
 func (a *App) event(ctx context.Context, id, kind string, p map[string]any) error {
 	// No local claim is needed: a job claimed on another host (a remote
 	// placement) still has its events recorded here.

@@ -41,7 +41,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, escalate-author, consult, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, placement-requeue, node, prompt, deliveries, jobs, lanes, fleet-census, relay, emit, claude-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, escalate-author, consult, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, place, placement-requeue, node, prompt, deliveries, jobs, lanes, fleet-census, relay, emit, claude-socket, codex-thread, omp-socket, inbox, job, pr, wait, version, quota, catalog, reps, manual")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -96,6 +96,12 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "claude-socket" {
 		return runClaudeSocketCLI(args[1:], os.Stdout, os.Stderr, time.Now)
+	}
+	if args[0] == "codex-thread" {
+		return runCodexThreadCLI(args[1:], hookStdin(os.Stdin), os.Stdout, os.Stderr, time.Now)
+	}
+	if args[0] == "omp-socket" {
+		return runOmpSocketCLI(args[1:], os.Stdout, os.Stderr, time.Now)
 	}
 	if args[0] == "emit" {
 		return runEmitCLI(args[1:], os.Stdout, os.Stderr, cfg)
@@ -361,6 +367,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	hubAccepting := fs.Bool("hub-accepting", false, "advertise readiness for paper or standby jobs to the hub")
 	hubJobsRoot := fs.String("hub-jobs-root", "", "local inbox root containing jobs/*/events for metadata-only heartbeats")
 	quotaStopAct := fs.Bool("quota-stop-act", false, "enable quota-stop actions (default shadow)")
+	quotaPoolReconcile := fs.Bool("quota-pool-reconcile", false, "reconcile local quota_pool ledger against Herdr agents (opt-in)")
 	idleWakeSettle := fs.Duration("idle-wake-settle", defaultIdleWakeSettle, "stable idle/done interval before owner notification")
 	stallSafetyLimit := fs.Duration("stall-safety-limit", 30*time.Minute, "inactive time before examining an active job")
 	failoverWakeOn := fs.String("failover-wake-on", "", "fixed failover machine ID that may receive one Wake-on-LAN packet")
@@ -448,6 +455,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 			return nil, ExitConditionInvalid, fmt.Errorf("task pane sweep flags are invalid")
 		}
 		configuredHub.taskPaneSweepInterval, configuredHub.taskPaneSweepGrace = *taskPaneSweepInterval, *taskPaneSweepGrace
+		configuredHub.quotaPoolReconcile = *quotaPoolReconcile
 		hubClient = configuredHub
 		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
 	}
@@ -474,7 +482,7 @@ func (values *hubURLValues) Set(raw string) error {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval", "task-pane-sweep-interval", "task-pane-sweep-grace"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval", "task-pane-sweep-interval", "task-pane-sweep-grace", "quota-pool-reconcile"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
@@ -488,3 +496,12 @@ func hubFlagsProvided(args []string) bool {
 func joinArgs(a []string) string { return strings.Join(a, " ") }
 
 var _ = joinArgs
+
+// hookStdin is stdin when something is piped into the command, as a hook's input
+// is, and nil when stdin is a terminal, which would block a read.
+func hookStdin(stdin *os.File) io.Reader {
+	if info, err := stdin.Stat(); err != nil || info.Mode()&os.ModeCharDevice != 0 {
+		return nil
+	}
+	return stdin
+}

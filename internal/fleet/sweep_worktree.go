@@ -70,8 +70,18 @@ func (s *TaskPaneSweeper) sweepWorktree(ctx context.Context, a *App, j Job, end 
 		keep(reason)
 		return
 	}
+	// A cleared worktree enters the node's worktree flow; a successful
+	// removal exits it (hk 5117). A keep after clearing is made without done,
+	// which is what the progress rule reads.
+	if s.NoteWorktreeSeen != nil {
+		s.NoteWorktreeSeen(j.ID)
+	}
 	if reason := s.removeWorktree(ctx, a, j, end, clone, branch, cwd, base, owned); reason != "" {
 		keep(reason)
+		return
+	}
+	if s.NoteWorktreeRemoved != nil {
+		s.NoteWorktreeRemoved(j.ID)
 	}
 }
 
