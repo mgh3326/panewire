@@ -174,3 +174,7 @@ func checkoutWorktreeName(job string) string {
 	}
 	return job + "-checkout"
 }
+
+// CheckoutWorktreeName is the checkout directory a spec spawn of job gets, for
+// the hub when it builds a successor's checkout itself (hk 4633).
+func CheckoutWorktreeName(job string) string { return checkoutWorktreeName(job) }
