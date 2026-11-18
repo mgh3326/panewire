@@ -544,7 +544,9 @@ past the commit after the brief, and `checkout_refused:branch_in_use:
 worktree=<dir>` when another worktree of the node's clone holds the branch.
 `GET /v1/spawns/features` lists `checkout_branch_v1`; the CLI checks it before
 submitting, and the hub names it in the `hub.features` frame so a node sends
-`checkout_mode: branch` only to a hub that reads the value.
+`checkout_mode: branch` and the `: want=… origin=…` / `: worktree=…` detail
+only to a hub that reads them — an older hub's strict parsers drop the whole
+answer for either.
 
 The response is HTTP 202 with `job_id`, `request_id`, `operation_url`, `status`
 and `claim: durable_hub_reservation`. This is a hub DB reservation; the immutable

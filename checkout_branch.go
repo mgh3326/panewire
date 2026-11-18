@@ -14,9 +14,10 @@ package panewire
 //     does not list it refuses the mode, so the submitter states the cause
 //     instead of reading a generic invalid_request.
 //   - The hub names it in the once-per-connection hub.features frame too: a
-//     node sends checkout_mode "branch" only to a hub that listed it, because
-//     an older hub's strict result parser drops the whole answer for one
-//     unknown value.
+//     node sends checkout_mode "branch" — and the bounded `: want=… origin=…`
+//     or `: worktree=…` detail of a successor refusal — only to a hub that
+//     listed it, because an older hub's strict result parser drops the whole
+//     answer for one unknown value.
 //   - A node from before the feature refuses the unknown mode as invalid_args,
 //     so a request that reaches one is a visible refusal, never a detached
 //     spawn that cannot push.

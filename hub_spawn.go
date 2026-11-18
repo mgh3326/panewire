@@ -27,7 +27,16 @@ var (
 	hubSpawnRequestIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	hubSpawnMachinePattern   = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	hubSpawnCWDKeyPattern    = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+	// hubCheckoutRefusalPattern is the closed refusal-error shape: an outcome
+	// alone, or the bounded detail a successor refusal names for a hub that
+	// listed checkout_branch_v1 — the wanted and origin commits, or the
+	// worktree that holds the branch (hk 5118).
+	hubCheckoutRefusalPattern       = regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]{1,64}$`)
+	hubCheckoutRefusalDetailPattern = regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]{1,64}: (?:want=[0-9a-f]{40} origin=(?:[0-9a-f]{40}|none)|worktree=[^\x00-\x1f\x7f]{1,200})$`)
 )
+
+// hubCheckoutRefusalMaxBytes bounds a detailed checkout refusal the hub reads.
+const hubCheckoutRefusalMaxBytes = 320
 
 type hubSpawnBrief struct {
 	Inline    string `json:"inline,omitempty"`
@@ -287,7 +296,10 @@ func validHubSpawnResultError(value string) bool {
 	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "launch_proof_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request":
 		return true
 	default:
-		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]+$`).MatchString(value)
+		if !strings.HasPrefix(value, "checkout_refused:") || len(value) > hubCheckoutRefusalMaxBytes {
+			return false
+		}
+		return hubCheckoutRefusalPattern.MatchString(value) || hubCheckoutRefusalDetailPattern.MatchString(value)
 	}
 }
 

@@ -246,6 +246,10 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		return
 	}
 	defer client.endHubSpawn(message.RequestID)
+	// A hub that listed checkout_branch_v1 reads the bounded detail a
+	// successor refusal names in its error; an older hub's strict parser
+	// would drop the whole answer for it (hk 5118).
+	message.checkoutBranchReply = peer.acceptsCheckoutBranch.Load()
 	result := client.runClaimedHubSpawn(admissionCtx, message)
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
@@ -623,10 +627,10 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			name := "git-failed"
 			if ok && outcome.Outcome != "" {
 				name = outcome.Outcome
-				if outcome.Reason != "" {
-					// A prepare that names what it refused (a successor's stale
-					// commit, a branch another worktree holds) says it in the
-					// answer the submitter reads (hk 5118).
+				// A successor refusal names what it refused — the wanted and
+				// origin commits, or the worktree that holds the branch — in
+				// the answer the submitter reads (hk 5118).
+				if message.checkoutBranchReply && (outcome.Outcome == nodePrepareSuccessorStale || outcome.Outcome == nodePrepareBranchInUse) {
 					name += ": " + outcome.Reason
 				}
 			}

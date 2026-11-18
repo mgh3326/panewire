@@ -100,17 +100,60 @@ func TestNodePrepareSuccessorBranchInUse5118(t *testing.T) {
 	}
 }
 
-// The refusal reaches the submitter with the reason the node gave: the hub
-// answers checkout_refused:<outcome>: <reason>.
+// The refusal reaches the submitter with the reason the node gave, as
+// checkout_refused:<outcome>: <reason>, but only to a hub that listed
+// checkout_branch_v1: an older hub's strict parser drops the whole answer for
+// a value it does not know (hk 5118).
 func TestSuccessorRefusalCarriesTheNodeReason5118(t *testing.T) {
 	config := t3482SpawnConfig(t, filepath.Join(t.TempDir(), "work"))
-	want := "want=" + strings.Repeat("a", 40) + " origin=" + strings.Repeat("b", 40)
-	client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
-		return nodeWorktreePrepareResult{Outcome: nodePrepareSuccessorStale, Reason: want}, ""
-	}}
-	result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(118), CWDKey: "repo-a", BriefInline: "brief", Checkout: t3482Checkout(), WaitSeconds: 1})
-	if result.RC != 81 || result.Error != "checkout_refused:"+nodePrepareSuccessorStale+": "+want {
-		t.Fatalf("rc=%d error=%q, want the stale refusal with its reason", result.RC, result.Error)
+	stale := "want=" + strings.Repeat("a", 40) + " origin=" + strings.Repeat("b", 40)
+	for _, test := range []struct {
+		name, outcome, reason string
+		detail                bool
+		want                  string
+	}{
+		{"a branch-capable hub reads the stale detail", nodePrepareSuccessorStale, stale, true, "checkout_refused:" + nodePrepareSuccessorStale + ": " + stale},
+		{"a branch-capable hub reads the worktree that holds the branch", nodePrepareBranchInUse, "worktree=/work/repo.parent", true, "checkout_refused:" + nodePrepareBranchInUse + ": worktree=/work/repo.parent"},
+		{"an older hub gets the outcome alone", nodePrepareSuccessorStale, stale, false, "checkout_refused:" + nodePrepareSuccessorStale},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
+				return nodeWorktreePrepareResult{Outcome: test.outcome, Reason: test.reason}, ""
+			}}
+			result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(118), CWDKey: "repo-a", BriefInline: "brief", Checkout: t3482Checkout(), WaitSeconds: 1, checkoutBranchReply: test.detail})
+			if result.RC != 81 || result.Error != test.want {
+				t.Fatalf("rc=%d error=%q, want %q", result.RC, result.Error, test.want)
+			}
+		})
+	}
+}
+
+// The hub's result parser reads the detailed refusal from a branch-capable
+// node and still refuses anything outside the bounded shape, so a frame it
+// cannot trust is dropped whole.
+func TestHubParsesTheSuccessorRefusalDetail5118(t *testing.T) {
+	for _, test := range []struct {
+		name, err string
+		accepted  bool
+	}{
+		{"plain outcome", "checkout_refused:successor_stale", true},
+		{"plain outcome with a dash", "checkout_refused:branch-elsewhere", true},
+		{"stale detail", "checkout_refused:successor_stale: want=" + strings.Repeat("a", 40) + " origin=" + strings.Repeat("b", 40), true},
+		{"stale with no origin branch", "checkout_refused:successor_stale: want=" + strings.Repeat("a", 40) + " origin=none", true},
+		{"in-use detail", "checkout_refused:branch_in_use: worktree=/work/repo.parent", true},
+		{"a short commit", "checkout_refused:successor_stale: want=abc origin=" + strings.Repeat("b", 40), false},
+		{"an unknown detail", "checkout_refused:successor_stale: local=x expected=y relation=ahead", false},
+		{"a control byte", "checkout_refused:branch_in_use: worktree=/work/a\x00b", false},
+		{"a text refusal", "checkout refused: successor_stale", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := hubSpawnResult{RequestID: t14RequestID(121), RC: 81, Error: test.err}
+			wire := hubSpawnResultWire(t, result)
+			parsed, ok := parseHubSpawnResult(wire)
+			if ok != test.accepted || (ok && parsed.Error != test.err) {
+				t.Fatalf("accepted=%v parsed=%+v wire=%s", ok, parsed, wire)
+			}
+		})
 	}
 }
 
