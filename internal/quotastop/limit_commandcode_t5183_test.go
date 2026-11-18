@@ -86,3 +86,46 @@ func TestCommandcodeLimitResetReading(t *testing.T) {
 		t.Fatalf("offset reset: Classify = (%+v, %t), want reset %v", stop, ok, want)
 	}
 }
+
+// wrapScreen breaks every row of text at width, at a space (word wrap) or at
+// the edge, inside a word or a timestamp (hard wrap).
+func wrapScreen(text string, width int, hard bool) string {
+	var out []string
+	for _, row := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		for len(row) > width {
+			cut := width
+			if !hard {
+				if i := strings.LastIndex(row[:width+1], " "); i > 0 {
+					cut = i
+				}
+			}
+			out = append(out, strings.TrimSpace(row[:cut]))
+			row = strings.TrimSpace(row[cut:])
+		}
+		out = append(out, row)
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+// The captured screen wraps at any pane width: the limit row and the retry
+// notice may break at a word or inside one (a timestamp included), and the
+// stop must survive with its reset (review of hk 5183).
+func TestCommandcodeLimitScreenWrapsAtAnyWidth(t *testing.T) {
+	b, err := os.ReadFile("../../testdata/quota-stop/omp-commandcode-limit-2026-11-18.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 18, 4, 56, 0, 0, time.UTC)
+	for _, hard := range []bool{false, true} {
+		for width := 36; width <= 200; width++ {
+			screen := wrapScreen(string(b), width, hard) + "\n❯ \n"
+			stop, ok := Classify(screen, now, time.UTC)
+			if !ok || stop.Pool != "commandcode" || !stop.Reset.Equal(commandcodeLimitReset) {
+				t.Fatalf("hard=%t width=%d: Classify = (%+v, %t), want a commandcode stop resetting %v\n%s", hard, width, stop, ok, commandcodeLimitReset, screen)
+			}
+			if _, ok := Classify(wrapScreen(string(b), width, hard)+"I will retry in a while.\n", now, time.UTC); ok {
+				t.Fatalf("hard=%t width=%d: output after the wrapped rows still read as a stop", hard, width)
+			}
+		}
+	}
+}
