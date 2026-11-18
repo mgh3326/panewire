@@ -780,3 +780,30 @@ func TestLoopLedgerEndWaitingReportsTransition(t *testing.T) {
 		t.Fatalf("repeated endWaitingSpawn reported a transition")
 	}
 }
+
+// An outage that spans UTC midnight counts on the new date too: the streak
+// suppresses repeats within a day, not across days.
+func TestLoopLedgerStreakSpanningMidnightCountsAgain(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	var logs bytes.Buffer
+	h := loopLedgerTestHub(t, &now, &logs)
+	h.loopNoteSilentError(loopInbox, "hub_inbox.go:persistDisabled", nil)
+	now = time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
+	h.loopNoteSilentError(loopInbox, "hub_inbox.go:persistDisabled", nil)
+	snap := h.loopSnapshot()
+	if snap[loopInbox].SilentErrors != 1 || snap[loopInbox].Errors != 1 {
+		t.Fatalf("day-2 silent=%d errors=%d, want 1 and 1", snap[loopInbox].SilentErrors, snap[loopInbox].Errors)
+	}
+	found := false
+	for _, m := range h.loopsSilentHits() {
+		if m == loopInbox {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no silent hit on day 2 of an ongoing outage")
+	}
+	if got := loopLedgerCountLines(&logs, "hub loop skipped"); got != 2 {
+		t.Fatalf("silent log lines=%d, want 2 (one per date)", got)
+	}
+}

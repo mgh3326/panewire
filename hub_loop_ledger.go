@@ -150,9 +150,13 @@ type loopDayBucket struct {
 // never by HubServer.mu, so a ledger call inside a store callback cannot
 // deadlock a Sweep that already holds mu.
 type loopLedgerState struct {
-	mu            sync.Mutex
-	days          map[string]map[loopMechanism]*loopDayBucket
-	silentStreak  map[string]bool
+	mu   sync.Mutex
+	days map[string]map[loopMechanism]*loopDayBucket
+	// silentStreak records the date each silent path last counted on.
+	// Streaks are per date: an outage that is still failing after UTC
+	// midnight counts and logs again on the new date, so no day goes
+	// dark while its failures continue.
+	silentStreak  map[string]string
 	noticeSent    map[string]string
 	rowRetryAfter time.Time
 	// lastTick is each mechanism's most recent tick across process
@@ -165,7 +169,7 @@ type loopLedgerState struct {
 func newLoopLedgerState() *loopLedgerState {
 	return &loopLedgerState{
 		days:         make(map[string]map[loopMechanism]*loopDayBucket),
-		silentStreak: make(map[string]bool),
+		silentStreak: make(map[string]string),
 		noticeSent:   make(map[string]string),
 		lastTick:     make(map[loopMechanism]time.Time),
 	}
@@ -305,26 +309,29 @@ func (h *HubServer) loopNoteError(m loopMechanism) {
 	st.bucketFor(loopDateOf(now), m).Errors++
 }
 
-// loopNoteSilentError counts a previously silent error path when its failure
-// streak starts, and logs one line per streak: every later failure with the
-// same key counts and logs nothing until loopClearSilent retires the streak
-// with a success, so a latched outage cannot flood the ledger's counters.
+// loopNoteSilentError counts a previously silent error path once per UTC
+// date per failure streak, and logs one line per date per streak: every
+// later failure with the same key counts and logs nothing until the date
+// changes or loopClearSilent retires the streak with a success, so a
+// latched outage cannot flood one day's counters while no later day goes
+// dark while its failures continue.
 func (h *HubServer) loopNoteSilentError(m loopMechanism, key string, err error) {
 	now, ok := h.loopNow()
 	if !ok {
 		return
 	}
+	today := loopDateOf(now)
 	st := h.loopLedger()
 	st.mu.Lock()
-	streak := st.silentStreak[key]
-	if !streak {
-		st.silentStreak[key] = true
-		b := st.bucketFor(loopDateOf(now), m)
+	counted := st.silentStreak[key] == today
+	if !counted {
+		st.silentStreak[key] = today
+		b := st.bucketFor(today, m)
 		b.Errors++
 		b.SilentErrors++
 	}
 	st.mu.Unlock()
-	if streak {
+	if counted {
 		return
 	}
 	if err != nil {

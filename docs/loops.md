@@ -32,7 +32,7 @@ the first tick of the next date, then the bucket is dropped.
 | `consult_coordinator` | flow | active consult (consult id) | first sighting in the reconcile pass that day | answered and notified, timed out, or failed (recoveries, respawns and live-job settles are not exits) |
 | `lane_stall_drain_wake` | flow | owed drain line (lane) | the sweep edge into owed (`pending` false → true) | the line sent (`last_sent` moves) or cleared (`pending` true → false) |
 | `inbox` | flow | batch (batch id), inbox wake (lane) | batch listed for flush; wake lane due at a window end | batch marked sent; wake line sent |
-| `quota_ladder` | flow | quota successor (job), expired ladder stage (request id) | successor or expired stage seen | hk record written with `replaced_by`; stage activated, discarded or cancelled |
+| `quota_ladder` | flow | quota successor (job), expired ladder stage (request id) | successor or expired stage seen that day | hk record with `replaced_by`; stage activated, discarded or cancelled |
 | `pool_triggers` | scan | — | — | — |
 | `pool_exhausted_sweep` | flow | job on an exhausted pool (job) | first listing on an exhausted pool that day | job notified or queued |
 | `pool_actions` | flow | `pool_actions` row (action id) | first listing in the reconcile pass that day | action reconciled to final |
@@ -50,9 +50,9 @@ mechanisms report 0 until they observe backlog.
 
 Every error path counts in the current date's bucket. The paths that were
 silent before this change also log, rate-limited to one line per failure
-streak, and count once per streak (a latched outage counts one error no
-matter how many sweeps it spans; the next failure after a success counts
-and logs again):
+streak per date, and count once per streak per date (a latched outage
+counts one error per day it keeps failing, no matter how many sweeps it
+spans; the next failure after a success counts and logs again):
 
 - `hub_spawn_async.go`: the pending-scan page read, and the ordinary pending read
 - `hub_spawn_start_conditions.go`: the waiting-rows read
