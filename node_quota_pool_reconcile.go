@@ -213,12 +213,39 @@ func (client *HubClient) nodeJobsBoundToPane(jobs []string, pane string) ([]stri
 		if err != nil {
 			return nil, err
 		}
-		for _, event := range events {
-			if event.pane == pane && (nodeJobClaimKind(event.kind) || event.kind == "job.spawned") {
-				owners = append(owners, job)
-				break
-			}
+		if nodeJobHoldsPane(events, pane) {
+			owners = append(owners, job)
 		}
 	}
 	return owners, nil
+}
+
+// nodeJobHoldsPane reports whether a job's current attempt is bound to pane:
+// its latest binding names pane, and no end marker follows that binding. A
+// pane ID can be reused, so an ended attempt's old binding holds nothing, and a
+// later attempt on another pane is not bound to this one.
+func nodeJobHoldsPane(events []nodeJobLedgerEvent, pane string) bool {
+	boundPane, ended := "", false
+	for _, event := range events {
+		switch {
+		case event.kind == "job.spawned" || nodeJobClaimKind(event.kind):
+			if event.pane != "" {
+				boundPane = event.pane
+			}
+			ended = false
+		case nodeJobEndKind(event.kind):
+			ended = true
+		}
+	}
+	return boundPane == pane && !ended
+}
+
+// nodeJobEndKind is a ledger event that ends a job's attempt, as the pane
+// index reads it.
+func nodeJobEndKind(kind string) bool {
+	switch kind {
+	case "job.completed", "job.lost", "job.revoked", "job.handed_off", "job.joined":
+		return true
+	}
+	return false
 }
