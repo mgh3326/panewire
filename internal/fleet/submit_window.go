@@ -63,3 +63,13 @@ func (a *App) launchBudgetSpent(launch, node context.Context, e error) error {
 	}
 	return e
 }
+
+// launchCutoff refuses a launch step the reserved launch deadline has already
+// passed, while the node budget is still live: the brief is unsent and the
+// window is intact, so the spawn stops with the named refusal.
+func (a *App) launchCutoff(launch, node context.Context, where string) error {
+	if launch.Err() != nil && node.Err() == nil {
+		return fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: the launch cutoff passed %s; no brief was sent, raise hub_wait for this host", where)
+	}
+	return nil
+}

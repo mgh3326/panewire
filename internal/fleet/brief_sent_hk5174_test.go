@@ -111,6 +111,11 @@ func TestDoneRefusesBriefReceiptThatIsNotThisAttemptsOwn(t *testing.T) {
 			spawnFailed(t, a)
 			putEvent(t, a, "j", "job.reclaim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "role": "reviewer"})
 		}},
+		{"retry claimed after", func(t *testing.T, a *App) {
+			putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
+			spawnFailed(t, a)
+			putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "role": "reviewer"})
+		}},
 		{"duplicate respawn after", func(t *testing.T, a *App) {
 			putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
 			putEvent(t, a, "j", "job.cleanup_pending", map[string]any{"reason": "pane_or_resources_unverified"})

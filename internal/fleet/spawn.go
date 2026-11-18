@@ -1219,6 +1219,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = claimJobDirIdentity(a.Jobs, s.Job); e != nil {
 		return e
 	}
+	// The job's operation lock is the one hand-off between this spawn and a
+	// `done` from its pane: held from before the claim that starts the attempt
+	// until the spawn is published and its watcher started, or its failure
+	// cleanup has recorded the attempt's end. A fast pane's `done` waits here and
+	// then sees the spawn's own job.spawned, never a half-finished attempt
+	// (hk 5174). It is released before any --wait.
+	unlockOperation, e := a.holdJobOperation(ctx, s.Job)
+	if e != nil {
+		return e
+	}
+	defer unlockOperation()
 	startedClaim := time.Now()
 	if e = a.claimJobRecord(ctx, s); e != nil {
 		a.stage("claim", startedClaim)
@@ -1389,9 +1400,21 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// start refuses on the expired launch context.
 		return a.call(ctx, "herdr", args...)
 	}
+	// A create the node cannot account for (it timed out, or answered with
+	// something unusable) may have made a tab: keep the claim and record cleanup
+	// pending instead of calling the spawn safe to retry.
+	createOutcomeUnknown := func(r Result) {
+		if ctx.Err() != nil || r.Code == 0 {
+			retrySafe = false
+		}
+	}
+	if e = a.launchCutoff(launchCtx, ctx, "before tab create"); e != nil {
+		return e
+	}
 	s.placement.started = true
 	r := createTab(s.Workspace)
 	if e = check(r, "herdr tab create"); e != nil {
+		createOutcomeUnknown(Result{Code: 1})
 		// Another spawn's failed cleanup may close a workspace this spawn
 		// adopted before the tab exists. A label can be recreated; an id cannot.
 		if !workspaceGone(r) || herdrWorkspaceID.MatchString(configuredWorkspace) {
@@ -1405,13 +1428,18 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			createdWorkspaces = append(createdWorkspaces, retryCreated)
 		}
 		s.Workspace = retryWorkspace
+		if e = a.launchCutoff(launchCtx, ctx, "before the second tab create"); e != nil {
+			return e
+		}
 		r = createTab(s.Workspace)
 		if e = check(r, "herdr tab create"); e != nil {
+			createOutcomeUnknown(Result{Code: 1})
 			return e
 		}
 	}
 	var created map[string]any
 	if e = json.Unmarshal([]byte(r.Out), &created); e != nil {
+		retrySafe = false
 		return e
 	}
 	created = unwrap(created)
@@ -1421,7 +1449,22 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	s.placement.execution.Kind = seat.Kind
 	tab := str(created, "tab_id")
 	if pane == "" {
+		retrySafe = false
 		return fail(exitConfig, "tab create omitted pane_id")
+	}
+	// The create came back after the launch cutoff: no harness is started, so
+	// the failed-agent cleanup (which needs an agent identity) cannot close this
+	// shell. Close the exact tab this attempt created, and forget the pane once
+	// it is gone; a close that fails leaves the pane for cleanup_pending.
+	if e = a.launchCutoff(launchCtx, ctx, "after tab create"); e != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer closeCancel()
+		if closeErr := a.closeCreatedWorkspace(closeCtx, &createdWorkspace{workspace: s.Workspace, tab: tab, rootPane: pane}); closeErr == nil {
+			pane = ""
+		} else {
+			a.warn("tab %s left open after the launch cutoff: %v", tab, closeErr)
+		}
+		return e
 	}
 	if e = a.start(launchCtx, s, seat, launch, pane, argv); e != nil {
 		return a.launchBudgetSpent(launchCtx, ctx, e)
@@ -1533,6 +1576,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.laneUnregistered && a.envOr("PANEWIRE_LANE_STRICT", "WRK_LANE_STRICT") == "1" {
 		return fail(exitLaneUnregistered, "%s pane exists but lane is UNREGISTERED", s.Role)
 	}
+	unlockOperation()
 	return a.afterSpawn(ctx, s, false)
 }
 
