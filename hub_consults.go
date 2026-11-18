@@ -181,9 +181,15 @@ func (h *HubServer) handleConsultRequest(w http.ResponseWriter, r *http.Request)
 	}
 	c.Updated = now
 	c.ClaimUntil = now.Add(consultLease(now, c.Deadline))
-	// The owner is fixed here, once: the respawn and recovery paths read the
-	// stored owner, so a consult's notices never move between attempts.
-	c.Owner = h.consultOwnerFor(ctx, request)
+	// The owner is fixed for the row (decision 421): a new consult takes it
+	// from its author job; a retry keeps the owner the row already has, even
+	// when its new evidence resolves to another lane. Respawn and recovery
+	// read the stored owner, so notices never move between attempts.
+	if replace {
+		c.Owner = existing.ownerLane()
+	} else {
+		c.Owner = h.consultOwnerFor(ctx, request)
+	}
 	plan, reason := h.planConsultRequest(ctx, request, c.Owner)
 	if reason != "" {
 		c.State = consultRefused

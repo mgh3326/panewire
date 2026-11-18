@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"fmt"
+	"io/fs"
 	"net/http"
 	"strings"
 	"testing"
@@ -90,6 +91,46 @@ func TestConsultRespawnKeepsStoredOwner(t *testing.T) {
 	}
 }
 
+// A retry replaces the refused row under the same key but keeps the owner the
+// row has: its new evidence would resolve to the requesting lane, which must
+// not take the consult from the author job's owner.
+func TestConsultRetryKeepsStoredOwner(t *testing.T) {
+	f := newConsultFixture(t)
+	f.claimAuthorJob(t, "design-author", "panewire-design")
+	f.err = failConsultSeat()
+	first := consultRequestBody("42", "example/project#7", strings.Repeat("a", 40))
+	first["author_job"] = "design-author"
+	first["requester"] = "mergewake/example/project#7"
+	code, out := f.post(t, "", t14OperatorToken, first)
+	if code != http.StatusCreated || out["state"] != consultRefused {
+		t.Fatalf("first = %d %v, want refused", code, out)
+	}
+	stored, err := f.hub.inbox.store.consultByID(t.Context(), fmt.Sprint(out["id"]))
+	if err != nil || stored.Owner != "panewire-design" {
+		t.Fatalf("refused row = %+v err=%v, want owner panewire-design", stored, err)
+	}
+
+	f.err = nil
+	retry := consultRequestBody("42", "example/project#7", strings.Repeat("a", 40))
+	delete(retry, "author_job")
+	retry["requester"] = "parent"
+	code, out = f.post(t, "", t14OperatorToken, retry)
+	if code != http.StatusCreated || out["state"] != consultQueued || out["id"] != stored.ID {
+		t.Fatalf("retry = %d %v, want queued under %s", code, out, stored.ID)
+	}
+	row, err := f.hub.inbox.store.consultByID(t.Context(), stored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.hub.inbox.store.spawnTask(t.Context(), row.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Owner != "panewire-design" || task.Owner != "panewire-design" {
+		t.Fatalf("retry owner = row %q spawn %q, want panewire-design for both", row.Owner, task.Owner)
+	}
+}
+
 // A lane requester with no author job owns its consult.
 func TestConsultLaneRequesterOwnsItself(t *testing.T) {
 	f := newConsultFixture(t)
@@ -158,4 +199,25 @@ func TestConsultRowWithoutStoredOwnerReadsRequesterRule(t *testing.T) {
 	if got := stored.ownerLane(); got != "panewire-design" {
 		t.Fatalf("stored owner = %q, want panewire-design", got)
 	}
+}
+
+// The PostgreSQL hub skips ensureConsults and reads consult_requests.owner in
+// every consult query, so a versioned migration must add the column. The
+// migration applies in CI's PostgreSQL contract test; this keeps the guard in
+// the local run too.
+func TestConsultOwnerHasPostgresMigration(t *testing.T) {
+	names, err := fs.Glob(hubPostgresMigrations, "hub_postgres_migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		body, err := hubPostgresMigrations.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), "ALTER TABLE consult_requests ADD COLUMN owner TEXT NOT NULL DEFAULT ''") {
+			return
+		}
+	}
+	t.Fatal("no PostgreSQL migration adds consult_requests.owner")
 }
