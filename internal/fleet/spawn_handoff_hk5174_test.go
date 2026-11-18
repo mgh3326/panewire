@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -160,5 +161,45 @@ func TestSpawnKeepsClaimWhenTabCreateOutcomeIsUnknown(t *testing.T) {
 	kinds := eventKindsOf(t, a, s.Job)
 	if !slices.Contains(kinds, "job.cleanup_pending") || slices.Contains(kinds, "job.spawn_retryable") {
 		t.Fatalf("an ambiguous create must not be marked retryable: %v", kinds)
+	}
+}
+
+// A retry claim cannot land between `done` validating a brief receipt and
+// appending the adopted job.spawned: done holds the operation lock for the
+// whole of it, and a spawn takes the same lock before its claim.
+func TestSpawnWaitsForOperationLockBeforeClaiming(t *testing.T) {
+	a, s, f, _ := cmdFixture(t)
+	if e := os.MkdirAll(filepath.Join(a.Jobs, s.Job), 0700); e != nil {
+		t.Fatal(e)
+	}
+	unlock, err := TryLockJobOperation(filepath.Join(a.Jobs, s.Job))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- a.Spawn(context.Background(), s) }()
+	// Window that proves nothing more happens: while the lock is held the
+	// spawn must make no claim and launch nothing.
+	select {
+	case e := <-finished:
+		t.Fatalf("spawn ran under a held operation lock: %v", e)
+	case <-time.After(400 * time.Millisecond):
+	}
+	if _, err := os.Stat(filepath.Join(a.Jobs, s.Job, "events")); err == nil {
+		t.Fatalf("events written while another command held the job: %v", eventKindsOf(t, a, s.Job))
+	}
+	for _, c := range callsOf(f) {
+		if strings.HasPrefix(c, "tab create") {
+			t.Fatal("pane launched while another command held the job")
+		}
+	}
+	unlock()
+	select {
+	case e := <-finished:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("spawn did not proceed after the lock was released")
 	}
 }

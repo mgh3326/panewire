@@ -597,6 +597,9 @@ const (
 	// briefSubmitReserve leaves the node time to capture the pane and finish
 	// cleanup (10s bound plus the 2s settle) inside its spawn budget.
 	briefSubmitReserve = 20 * time.Second
+	// briefCaptureNeed is the part of the reserve capture and cleanup really
+	// use: the 10s bound plus the 2s settle. A window may run into the rest.
+	briefCaptureNeed = 12 * time.Second
 )
 
 // deliver sends the brief and waits for the pane to take it up.
@@ -651,9 +654,18 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 	// A node runs the spawn under its hub_wait budget. Refuse with 76 and the
 	// capture before that budget expires, or the node reports a bare timeout.
 	// requireSubmitWindow held at least the minimum window when the brief was
-	// sent; the floor below keeps a slow send from cutting it to nothing.
-	if left, bounded := a.submitBudgetLeft(ctx); bounded && left < timeout {
-		timeout, clamped = max(left, a.submitFloor()), true
+	// sent. The send can take seconds of it, so the floor may use the slack of
+	// the reserve but never the time the capture and cleanup need: the window
+	// ends before the node deadline however long the send took (hk 5174).
+	if left, bounded := a.submitBudgetLeft(ctx); bounded {
+		hard := left + briefSubmitReserve - briefCaptureNeed
+		if left < timeout {
+			timeout, clamped = max(left, min(a.submitFloor(), hard)), true
+		}
+		if hard < timeout {
+			timeout, clamped = hard, true
+		}
+		timeout = max(timeout, 0)
 	}
 	deadline := a.Now().Add(timeout)
 	polls := int(timeout / time.Second)

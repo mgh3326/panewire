@@ -220,3 +220,28 @@ func (d *deadlineSpy) Run(ctx context.Context, c Command) Result {
 	}
 	return d.Runner.Run(ctx, c)
 }
+
+// The send can take seconds of the floor. Confirmation then ends before the
+// node deadline minus what the capture needs, and refuses with 76 and its
+// capture, not with the node's context error.
+func TestConfirmBriefEndsBeforeNodeDeadlineWhenSendSpentTheFloor(t *testing.T) {
+	a, d := claudeDeliveryApp(t, func(*claudeDelivery) string { return claudeScreenBriefInComposer() }, idleStatus)
+	// 14 s remain: the 20 s reserve is gone and the floor no longer fits.
+	remaining := briefCaptureNeed + 2*time.Second
+	ctx, cancel := context.WithTimeout(t.Context(), remaining)
+	defer cancel()
+	err := a.confirmBrief(ctx, "claude", "w:p1", claudeTestBrief, claudeScreenEmpty())
+	m := windowCutRE.FindStringSubmatch(errText(err))
+	if code(err) != exitSubmitUnconfirmed || !strings.Contains(errText(err), "BRIEF_SUBMISSION_UNCONFIRMED") || m == nil {
+		t.Fatalf("err=%v", err)
+	}
+	// The window must end where the capture's time begins, not run to the
+	// node deadline: at most remaining minus briefCaptureNeed.
+	if secs, _ := strconv.Atoi(m[1]); time.Duration(secs)*time.Second > remaining-briefCaptureNeed {
+		t.Fatalf("window of %ds runs into the %v the capture needs (budget %v)", secs, briefCaptureNeed, remaining)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the node budget expired under the confirmation")
+	}
+	_ = d
+}
