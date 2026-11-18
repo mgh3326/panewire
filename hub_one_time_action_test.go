@@ -1,9 +1,11 @@
 package panewire
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,11 +33,15 @@ func firstRunNodeRequest(request fleet.Submission, id int, profile string) fleet
 	return node
 }
 
-// oneTimeSentry points h's Sentry client at a recording transport.
+// oneTimeSentry makes h's notifier record each ACTION NEEDED event and accept
+// it, and answers the recording transport.
 func oneTimeSentry(t *testing.T, h *HubServer) *spawnSentryTransport {
 	t.Helper()
 	transport := &spawnSentryTransport{}
-	h.spawnSentry = spawnReasonSentryClient(t, transport)
+	h.oneTimeNotify = func(event *sentry.Event) (bool, error) {
+		transport.SendEvent(event)
+		return true, nil
+	}
 	return transport
 }
 
@@ -440,5 +446,95 @@ func TestOneTimeActionUntoldWhenSentryIsNotConfigured(t *testing.T) {
 	h.noteOneTimeAction("oci", "codex", fleet.DialogCodexHooksReview, now.Add(5*time.Minute))
 	if got := oneTimeMessages(transport); len(got) != 1 || got[0] != "ACTION NEEDED: oci codex — run codex once and choose Trust all and continue" {
 		t.Fatalf("the need was not told once reporting is configured: %q", got)
+	}
+}
+
+// oneTimeSentryServer is a Sentry stand-in answering each event with status and
+// counting the requests it received. It returns the DSN that reaches it.
+func oneTimeSentryServer(t *testing.T, status *atomic.Int32, requests *atomic.Int32) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(int(status.Load()))
+	}))
+	t.Cleanup(server.Close)
+	return strings.Replace(server.URL, "http://", "http://public@", 1) + "/1"
+}
+
+// A need is told only when Sentry answers its notice with a 2xx. A rejected
+// notice (403 here) is not recorded and the next report sends it again; once
+// Sentry accepts it, the need is told and not sent again.
+func TestOneTimeActionNeedsSentryAcceptance(t *testing.T) {
+	var status atomic.Int32
+	status.Store(http.StatusForbidden)
+	var requests atomic.Int32
+	t.Setenv(crashReportDSNEnv, oneTimeSentryServer(t, &status, &requests))
+	h := newOneTimeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	now := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	toldCount := func() int {
+		h.oneTimeMu.Lock()
+		defer h.oneTimeMu.Unlock()
+		return len(h.oneTimeActions)
+	}
+
+	h.noteOneTimeAction("oci", "codex", fleet.DialogCodexHooksReview, now)
+	if requests.Load() == 0 {
+		t.Fatal("the notice never reached Sentry")
+	}
+	if n := toldCount(); n != 0 {
+		t.Fatalf("a notice Sentry rejected was recorded as told: %d", n)
+	}
+
+	status.Store(http.StatusOK)
+	h.noteOneTimeAction("oci", "codex", fleet.DialogCodexHooksReview, now.Add(time.Minute))
+	if n := toldCount(); n != 1 {
+		t.Fatalf("a notice Sentry accepted was not recorded as told: %d", n)
+	}
+	sent := requests.Load()
+	h.noteOneTimeAction("oci", "codex", fleet.DialogCodexHooksReview, now.Add(2*time.Minute))
+	if requests.Load() != sent {
+		t.Fatal("a told need was sent to Sentry again")
+	}
+}
+
+// The notice goes only to the panewire DSN. With SENTRY_DSN_PANEWIRE unset, the
+// SDK's SENTRY_DSN fallback must not carry it, and the need is not told.
+func TestOneTimeActionIgnoresAmbientSentryDSN(t *testing.T) {
+	var status atomic.Int32
+	status.Store(http.StatusOK)
+	var requests atomic.Int32
+	t.Setenv("SENTRY_DSN", oneTimeSentryServer(t, &status, &requests))
+	t.Setenv(crashReportDSNEnv, "")
+	h := newOneTimeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	h.noteOneTimeAction("oci", "codex", fleet.DialogCodexHooksReview, time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC))
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("the ambient SENTRY_DSN received %d notices", n)
+	}
+	h.oneTimeMu.Lock()
+	defer h.oneTimeMu.Unlock()
+	if len(h.oneTimeActions) != 0 {
+		t.Fatal("a need with no panewire DSN was recorded as told")
+	}
+}
+
+// An unmeasured login (the probe failed or was rate limited) is neither gone nor
+// a clear: a need that the node last saw present stays told through it, and
+// the login coming back missing is not a second notice.
+func TestOneTimeActionUnmeasuredLoginDoesNotClear(t *testing.T) {
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+	claude := func(at time.Time, login string) *fleet.Readiness {
+		return readinessWith(at, "claude", fleet.HarnessReadiness{Installed: true, Login: login})
+	}
+	h.noteReadinessActions("oci", claude(start, fleet.ReadinessLoginMissing), start)
+	h.noteReadinessActions("oci", claude(start.Add(time.Minute), fleet.ReadinessLoginPresent), start.Add(time.Minute))
+	unknownAt := start.Add(time.Minute + cycle)
+	h.noteReadinessActions("oci", claude(unknownAt, fleet.ReadinessLoginUnknown), unknownAt)
+	missingAt := start.Add(2*time.Minute + cycle)
+	h.noteReadinessActions("oci", claude(missingAt, fleet.ReadinessLoginMissing), missingAt)
+	if got := oneTimeMessages(transport); len(got) != 1 {
+		t.Fatalf("an unmeasured login cleared the need and it was told again: %q", got)
 	}
 }

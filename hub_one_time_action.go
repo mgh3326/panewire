@@ -3,6 +3,7 @@ package panewire
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -99,24 +100,55 @@ func (h *HubServer) noteOneTimeAction(machine, kind, need string, at time.Time) 
 	h.logger.Warn("host needs a one-time action", "host", machine, "kind", kind, "need", need)
 }
 
-// sendOneTimeAction hands the ACTION NEEDED event to the Sentry transport and
-// waits, bounded, for it to flush. It answers an error when reporting is not
-// configured or the event was not accepted.
+// oneTimeNotifier sends one ACTION NEEDED event and answers whether Sentry
+// accepted it: a 2xx for that event, not a drained queue.
+type oneTimeNotifier func(event *sentry.Event) (accepted bool, err error)
+
+// newOneTimeNotifier builds the notifier on a Sentry client of its own, so the
+// flush and the delivery counts cover only these events and never the spawn
+// trace client that Close flushes. It is nil when no DSN is configured. The DSN
+// is the panewire one, never the SDK's SENTRY_DSN fallback.
+func newOneTimeNotifier(dsn string) oneTimeNotifier {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return nil
+	}
+	delivery := &crashDelivery{base: http.DefaultTransport}
+	options := spawnSentryOptions(dsn)
+	options.HTTPTransport = delivery
+	client, err := sentry.NewClient(options)
+	if err != nil {
+		return nil
+	}
+	return func(event *sentry.Event) (bool, error) {
+		delivery.take()
+		if client.CaptureEvent(event, nil, sentry.NewScope()) == nil {
+			return false, errors.New("sentry dropped the action-needed event")
+		}
+		if !client.Flush(oneTimeSentryFlushTimeout) {
+			return false, errors.New("sentry did not flush the action-needed event in time")
+		}
+		accepted, rejected := delivery.take()
+		return accepted > 0 && rejected == 0, nil
+	}
+}
+
+// sendOneTimeAction hands the ACTION NEEDED event to the notifier. It answers
+// an error when reporting is not configured or Sentry did not accept the event.
 func (h *HubServer) sendOneTimeAction(machine, kind, need, action string) error {
-	client := h.spawnSentryClient()
-	if client == nil || client.Options().Dsn == "" {
+	if h.oneTimeNotify == nil {
 		return errOneTimeSentryUnconfigured
 	}
-	hub := sentry.NewHub(client, sentry.NewScope())
 	// The title and fingerprint carry the action without its quotes, so one
 	// issue is one host and action and the Discord rule posts it once.
 	plain := strings.ReplaceAll(action, `"`, "")
 	event := &sentry.Event{Level: sentry.LevelWarning, Message: fmt.Sprintf("ACTION NEEDED: %s %s — %s", machine, kind, plain), Fingerprint: []string{"action-needed", machine, kind, plain}, Tags: map[string]string{"host": machine, "kind": kind, "need": need}}
-	if hub.CaptureEvent(event) == nil {
-		return errors.New("sentry dropped the action-needed event")
+	accepted, err := h.oneTimeNotify(event)
+	if err != nil {
+		return err
 	}
-	if !client.Flush(oneTimeSentryFlushTimeout) {
-		return errors.New("sentry did not flush the action-needed event in time")
+	if !accepted {
+		return errors.New("sentry did not accept the action-needed event")
 	}
 	return nil
 }
@@ -174,6 +206,11 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 		// need, so it can neither show it gone nor clear it.
 		harness, covered := report.Harnesses[key.kind]
 		if key.machine != machine || !covered || !report.CheckedAt.After(state.ToldAt) {
+			continue
+		}
+		// An unmeasured login (the probe failed or was rate limited) says nothing
+		// about the need: it is neither gone nor cleared.
+		if key.need == oneTimeLoginMissing && harness.Login == fleet.ReadinessLoginUnknown {
 			continue
 		}
 		shows := readinessShowsNeed(harness, key.need)
