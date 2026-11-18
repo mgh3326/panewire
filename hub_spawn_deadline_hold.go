@@ -112,6 +112,14 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	if !spawnRecordMatchesRequest(task, record) {
 		return false
 	}
+	// Job ids are reusable once a request ends, and hk never rewrites a terminal
+	// record, so an older completed record can carry this job's id. Only a
+	// completion at or after this request's creation is its landing (mergewake
+	// review, hk 5267). A missing or unparseable stamp fails closed, and is logged.
+	if !spawnRecordCompletedSince(record, task.Created) {
+		h.logger.Warn("hub did not settle a spawn from a completed job without a usable completion time", "request_id", task.Request.RequestID, "job", task.Job)
+		return false
+	}
 	outcome := hubSpawnOutcome{RC: 0, Stage: "landing", Host: task.Node.Machine, Pane: pane, Profile: spawnRecordString(record, "profile"), Model: spawnRecordString(record, "model"), E6Arm: task.Request.E6Arm}
 	changed, err := h.inbox.store.completeSpawn(parent, task, outcome, h.now())
 	if err != nil || !changed {
@@ -120,6 +128,13 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	h.recordSpawnTrace(task, outcome)
 	h.logger.Info("hub settled a spawn from its completed job", "request_id", task.Request.RequestID, "job", task.Job, "host", task.Node.Machine, "pane", pane)
 	return true
+}
+
+// spawnRecordCompletedSince reports whether the record's completion stamp is
+// at or after created. A missing or unparseable stamp reports false.
+func spawnRecordCompletedSince(record map[string]any, created time.Time) bool {
+	at, err := time.Parse(time.RFC3339Nano, spawnRecordString(record, "completed_at"))
+	return err == nil && !at.Before(created)
 }
 
 // spawnRecordMatchesRequest reports whether a completed job record is this

@@ -338,7 +338,7 @@ func (c *completedJobStore) Get(ctx context.Context, id string) (map[string]any,
 // completedJobRecord is hk's record of the stranded job once it finished on
 // machine-a, pane w9:p4, under the request's task 42.
 func completedJobRecord(host string) map[string]any {
-	return map[string]any{"state": "completed", "host": host, "pane_id": "w9:p4", "label": "test-job", "profile": "codex-sol", "model": "codex-sol-model", "task_id": 42}
+	return map[string]any{"state": "completed", "completed_at": time.Now().UTC().Format(time.RFC3339Nano), "host": host, "pane_id": "w9:p4", "label": "test-job", "profile": "codex-sol", "model": "codex-sol-model", "task_id": 42}
 }
 
 // useJobStore points the stranded hub's spawn app at store.
@@ -600,5 +600,30 @@ func TestStrandedCompletedJobUnsafeTaskIDRefuses_5267(t *testing.T) {
 	s.run(t)()
 	if got := s.status(t); got.Status != "deadline_exceeded" {
 		t.Fatalf("an unsafe task id settled the request: status=%s", got.Status)
+	}
+}
+
+// A completed record older than the request is a previous incarnation of a
+// reused job id, not this landing; a record with no usable completion time is
+// refused too (mergewake review, hk 5267).
+func TestStrandedCompletedJobCompletionTimeGuards_5267(t *testing.T) {
+	cases := map[string]func(map[string]any, time.Time){
+		"completed before the request": func(r map[string]any, created time.Time) {
+			r["completed_at"] = created.Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+		},
+		"no completion time":          func(r map[string]any, _ time.Time) { delete(r, "completed_at") },
+		"unparseable completion time": func(r map[string]any, _ time.Time) { r["completed_at"] = "yesterday" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
+			record := completedJobRecord("machine-a")
+			mutate(record, s.task.Created)
+			useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: record})
+			s.run(t)()
+			if got := s.status(t); got.Status != "deadline_exceeded" {
+				t.Fatalf("settled from an unusable completion time: status=%s", got.Status)
+			}
+		})
 	}
 }
