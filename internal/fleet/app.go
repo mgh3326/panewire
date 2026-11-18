@@ -144,6 +144,10 @@ type App struct {
 	// own App reads its operations; nil skips the check (a node-local
 	// selection has no fleet-wide launch record).
 	LivePlacedByAccount func(context.Context, string) (map[string]map[string]int, error)
+	// LiveAccountJobs returns running jobs by account key, leaving out the hub
+	// request named by its second argument. Used by the commandcode weekly
+	// window gate (hk 5113).
+	LiveAccountJobs func(context.Context, string) (map[string]string, error)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	DecisionReply func(context.Context, string, string, time.Time) (bool, error)

@@ -150,6 +150,9 @@ func (a *App) requestVerdict(ctx context.Context, r QuotaRequest) (req admission
 		return req, in, invalidVerdict(req).refuse(gateInvalid, "bench catalog unavailable"), true
 	}
 	in = admissionInputs{Now: a.Now(), Rows: admissionRows(rows), Policy: policy, Seats: a.Policy.Profiles}
+	if a.LiveAccountJobs != nil {
+		in.RunningJobs, in.RunningJobsErr = a.LiveAccountJobs(ctx, a.RequestID)
+	}
 	d = in.admit(req)
 	if !d.OK && d.Exit != gateUnmeasurable {
 		d.GateCode = gateReasonCode(d.Reason)
@@ -224,6 +227,7 @@ func (a *App) nativeVerdict(ctx context.Context, r QuotaRequest, live bool) (adm
 		// so the previous account's reading and operator entries must not linger.
 		delete(in.Readings, d.Pool)
 		delete(in.Manual, d.Pool)
+		in.AccountKey = k
 		if why := a.loadAccount(ctx, &in, k, live, r.AccountKey == ""); why != "" {
 			verdict, unread = base.refuse(gateUnmeasurable, why), true
 		} else {

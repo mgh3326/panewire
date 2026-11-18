@@ -308,6 +308,9 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 		if c.stale {
 			line += " stale"
 		}
+		if c.reason != "" {
+			line += " " + c.reason
+		}
 		fmt.Fprintln(a.Out, line)
 	}
 	for _, c := range sel.ranked {

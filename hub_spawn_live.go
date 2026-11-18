@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
@@ -93,6 +94,64 @@ func (h *HubServer) liveProfilesByAccount(ctx context.Context, exceptRequest str
 		}
 	}
 	return counts, nil
+}
+
+// liveAccountJobs returns running jobs by account key, leaving out the hub
+// request named by its second argument (hk 5113).
+func (h *HubServer) liveAccountJobs(ctx context.Context, exceptRequest string) (map[string]string, error) {
+	if h.inbox == nil {
+		return map[string]string{}, nil
+	}
+	tasks, err := h.liveSpawnTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	type liveCandidate struct {
+		accountKey string
+		jobID      string
+		jobName    string
+	}
+	var candidates []liveCandidate
+	for _, task := range tasks {
+		if task.Request.RequestID == exceptRequest {
+			continue
+		}
+		if task.Status == "failed" || task.Status == "given_up" || task.Status == "cancelled" {
+			continue
+		}
+		jobID := task.Job
+		if jobID == "" {
+			jobID = task.Request.RequestID
+		}
+		accountKey := task.Outcome.AccountKey
+		if accountKey == "" && h.inbox != nil {
+			if payload, _, _, err := h.inbox.store.spawnPlacementSnapshot(ctx, task.Request.RequestID, task.Attempt); err == nil && len(payload) > 0 {
+				var tr fleet.PlacementTrace
+				if json.Unmarshal(payload, &tr) == nil {
+					accountKey = tr.AccountKey
+				}
+			}
+		}
+		if accountKey != "" {
+			candidates = append(candidates, liveCandidate{
+				accountKey: accountKey,
+				jobID:      jobID,
+				jobName:    task.Job,
+			})
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	jobs := map[string]string{}
+	for _, c := range candidates {
+		if c.jobName != "" {
+			if rec := h.jobs[c.jobName]; rec != nil && rec.Completed {
+				continue
+			}
+		}
+		jobs[c.accountKey] = c.jobID
+	}
+	return jobs, nil
 }
 
 // liveSpawnTasks lists the operations that are live by the rule above: every

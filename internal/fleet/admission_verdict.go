@@ -126,6 +126,11 @@ type admissionInputs struct {
 	// AccountScoped judges a named account: a free rung needs the account's
 	// stored free-bucket state.
 	AccountScoped bool
+	// RunningJobs maps account keys to running job IDs, used by the
+	// commandcode weekly window limit (hk 5113).
+	RunningJobs    map[string]string
+	RunningJobsErr error
+	AccountKey     string
 }
 
 // admissionVerdict is the gate's decision, in the fields its receipt carries.
@@ -173,8 +178,32 @@ const gateCodeMax = 48
 // the whole reason as a code when it has no colon ("rung is retired in the
 // catalog" -> "rung_is_retired_in_the_catalog").
 func gateReasonCode(reason string) string {
+	if strings.HasPrefix(reason, "account_busy_near_weekly_limit") {
+		return "account_busy_near_weekly_limit"
+	}
 	head, _, _ := strings.Cut(reason, ":")
 	return textbound.PrefixWithin(fleetevent.Code(head), gateCodeMax)
+}
+
+func (in admissionInputs) commandcodeBusyRefusal(pool string, buckets []admissionBucket) string {
+	if pool != "commandcode" {
+		return ""
+	}
+	for _, b := range buckets {
+		if b.Window == "7d" && b.ScopeKind == "account" && b.Used != nil && *b.Used >= 75.0 {
+			if in.RunningJobsErr != nil {
+				return "running_jobs_lookup_failed"
+			}
+			accountKey := in.AccountKey
+			if accountKey == "" && in.Readings["commandcode"].FP != "" {
+				accountKey = "commandcode:" + in.Readings["commandcode"].FP
+			}
+			if job := in.RunningJobs[accountKey]; job != "" {
+				return fmt.Sprintf("account_busy_near_weekly_limit account=%s job=%s", accountKey, job)
+			}
+		}
+	}
+	return ""
 }
 
 func admissionNormalize(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
@@ -658,6 +687,15 @@ func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) adm
 			return d.refuse(gateBlocked, fmt.Sprintf("quota exhausted window=%s cutoff=%g", b.Window, cutoff))
 		}
 	}
+	if why := in.commandcodeBusyRefusal(row.Pool, buckets); why != "" {
+		for _, b := range buckets {
+			if b.Window == "7d" {
+				d.UsedPct = b.Used
+				break
+			}
+		}
+		return d.refuse(gateBlocked, why)
+	}
 	if !observed || len(buckets) == 0 {
 		manual := in.validManual(row.Pool)
 		covered := map[string]bool{}
@@ -691,6 +729,15 @@ func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) adm
 			d.UsedPct = b.Used
 			return d.refuse(gateBlocked, fmt.Sprintf("quota exhausted window=%s cutoff=%g", b.Window, cutoff))
 		}
+	}
+	if why := in.commandcodeBusyRefusal(row.Pool, buckets); why != "" {
+		for _, b := range buckets {
+			if b.Window == "7d" {
+				d.UsedPct = b.Used
+				break
+			}
+		}
+		return d.refuse(gateBlocked, why)
 	}
 	if maxUsed < 0 {
 		return d.refuse(gateUnmeasurable, "no measured matching quota windows")

@@ -413,9 +413,44 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 			c.reason, c.code = "free_limit", outcomeQuotaExhausted
 		}
 	} else {
-		c.reason = p.policy.exhaustReason(v, c.risk)
-		if c.reason == "" && v.Blocking != nil && *v.Blocking >= 100 {
-			c.reason = "window_exhausted"
+		if c.row.Pool == "commandcode" {
+			cutoff := p.poolCutoff(c.row.Pool)
+			if v.Blocking != nil && *v.Blocking >= cutoff {
+				c.reason = fmt.Sprintf("window_exhausted cutoff=%g", cutoff)
+			} else {
+				var used7d *float64
+				for _, w := range v.Windows {
+					if w.Window == "7d" {
+						val := w.UsedPct
+						used7d = &val
+						break
+					}
+				}
+				if used7d == nil {
+					for _, w := range c.windows {
+						if w.Window == "7d" {
+							val := w.UsedPct
+							used7d = &val
+							break
+						}
+					}
+				}
+				if used7d != nil && *used7d >= 75.0 {
+					if p.runningJobsErr != nil {
+						c.reason = "running_jobs_lookup_failed"
+					} else if job := p.runningJob(c.accountKey); job != "" {
+						c.reason = fmt.Sprintf("account_busy_near_weekly_limit account=%s job=%s", c.accountKey, job)
+					}
+				}
+				if c.reason == "" {
+					c.reason = p.policy.exhaustReason(v, c.risk)
+				}
+			}
+		} else {
+			c.reason = p.policy.exhaustReason(v, c.risk)
+			if c.reason == "" && v.Blocking != nil && *v.Blocking >= 100 {
+				c.reason = "window_exhausted"
+			}
 		}
 	}
 	if c.reason != "" {

@@ -197,7 +197,7 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
     fresh로 유지해도 30분 안에 placement에서 빠지고, 30분 넘게 잠든 host는 깨어나 announce하면 다시
     묶입니다); 다른 pool은 지금처럼 가장 최근 key
     하나입니다. 계정마다 binding과 candidate가 따로이고 자기 window로 판정합니다. 한 계정이
-    소진(또는 5h가 cutoff)이면 그 계정만 drop되고, **한 계정이라도 room이 있으면 pool은 usable**,
+    소진(또는 cutoff 90)이거나 75% 이상 주간 한도 바쁨(`account_busy_near_weekly_limit`)이면 그 계정만 drop되고, **한 계정이라도 room이 있으면 pool은 usable**,
     모두 소진이면 pool은 drop됩니다. 정렬은 다른 구독 pool의 7일 window와 같은 규칙입니다: 주가
     사용 안 된 채 끝날 위험(waste risk)이 큰 계정이 먼저, 그렇지 않으면 room이 많은 계정.
   - **Which account omp uses.** omp는 세션을 시작할 때 계정을 자기 usage ranking으로 고르고
@@ -212,12 +212,12 @@ OAuth 계정만 resolve하므로 API-key 계정인 Command Code에는 "no OAuth 
     omp도 그 계정을 씁니다)이며, omp의 launch 시점 선택과 일치한다는 보장은 없는 **예측**입니다.
     launch 후 실제 계정을 읽는 길은 없습니다(omp의 세션 고정 기록은 credential 저장소에 있어
     panewire가 읽지 않습니다).
+- **Default cutoff 90 and one-seat-in-flight rule.** `commandcode` pool의 기본 cutoff는 90(설정 `pools.commandcode.cutoff`가 없을 때 두 window 모두 적용, 명시적 설정이 우선)이며, 계정의 7d window 사용량이 75% 이상일 때는 해당 계정에서 실행 중인 다른 commandcode seat이 없을 때만 새 seat을 admit합니다(2026-11-17 7d 95.5% 사용 계정에 두 implementer가 동시에 안착되어 주간 잔여 약 1.6 크레딧이 2시간 만에 조기 소진된 문제를 방지, hk 5113).
 - **Credentials** are never read: no key, token or auth file is read, copied or sent; omp
   uses its own login, and its stderr (which can name an account) is discarded.
 - **Plan and status.** `panewire quota status`는 이 호스트가 아는 계정마다 pool/window 행을
   보여 주며 FRESHNESS 열에 omp report의 나이(`fresh 2m`)가 붙습니다. `panewire plan`은 계정마다
-  `account commandcode:<fp> host=<h> 5h=<x>% 7d=<y>% age=<n>` 줄을 출력하고, JSON의 candidate
-  row에는 `windows`가 있습니다. `panewire quota refresh commandcode`는 계정마다 JSON 한 줄을
+  `account commandcode:<fp> host=<h> 5h=<x>% 7d=<y>% age=<n>` 줄을 출력하며 거부된 계정은 거부 사유(`window_exhausted cutoff=90` 또는 `account_busy_near_weekly_limit account=… job=…`)를 덧붙이고, candidate outcome에도 이유가 기록됩니다. `panewire quota refresh commandcode`는 계정마다 JSON 한 줄을
   출력합니다.
 
 ## Native measurement: devin
