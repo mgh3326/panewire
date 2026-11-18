@@ -569,6 +569,44 @@ func TestGCStaleQuotaRecordAndOrphanRelease(t *testing.T) {
 	}
 }
 
+func TestGCWithJobsUnverifiedSkipsJob(t *testing.T) {
+	s, clk := newStore(t)
+	quotaJob(t, s, "unverified-job", "unverified-label")
+	quotaJob(t, s, "gone-job", "gone-label")
+	clk.advance(11 * time.Minute)
+	r, e := s.GCWithJobs(ctx, func(_ context.Context, _ []string) (AgentSnapshot, error) {
+		return AgentSnapshot{
+			Agents:     []Agent{},
+			Unverified: map[string]string{"unverified-job": "evidence unverified"},
+		}, nil
+	})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(r.StaleQuota) != 1 || r.StaleQuota[0].Job != "gone-job" {
+		t.Fatalf("stale quota %v, want only gone-job", r.StaleQuota)
+	}
+	if len(r.OrphanReleased) != 1 || r.OrphanReleased[0].Job != "gone-job" {
+		t.Fatalf("orphan released %v, want only gone-job", r.OrphanReleased)
+	}
+	foundSkip := false
+	for _, sk := range r.Skipped {
+		if sk.Job == "unverified-job" && sk.Reason == "evidence unverified" {
+			foundSkip = true
+			break
+		}
+	}
+	if !foundSkip {
+		t.Fatalf("skipped %v, want unverified-job skipped with reason", r.Skipped)
+	}
+	if pools, _ := s.QuotaPools(ctx, "unverified-job"); len(pools) != 1 {
+		t.Fatalf("unverified-job pools %v, want preserved", pools)
+	}
+	if jv, _ := s.JobGet(ctx, "unverified-job"); jv.State != "leased" {
+		t.Fatalf("unverified-job state %s, want leased", jv.State)
+	}
+}
+
 func TestGCReleasesRowlessLeasedJobsOnlyWhenAgentIsAbsent(t *testing.T) {
 	s, clk := newStore(t)
 	for _, j := range []string{"a", "b"} {
