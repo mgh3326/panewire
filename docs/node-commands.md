@@ -270,8 +270,12 @@ it). The hub sends it only for an action it has already stored `guarded`, so
 the ack means "the hub durably stored your `intent_cancelled`": the node
 records a synced `job.hub_close_acked` event for the request, once, and
 answers the same status. An ack for a request that is not `intent_cancelled`
-records nothing. The hub repeats it on every 10 s pass over the guarded action,
-including the pass that finishes the action, until it gets an answer.
+records nothing. The hub repeats it on every 10 s pass over the guarded action until the
+node answers, and stores that the ack landed (`Acked`) so it asks no more. A
+terminal hk record does not finish the guarded action before the node has
+confirmed the ack: a node error, a lost command or a disconnected node leaves
+it guarded and retried. Only a node that rejects the argument (`invalid_args`,
+a build older than hk 5073, which never owed an ack) does not hold it.
 A node that cancels a close in a rollback drain because the pane is still
 present (`job.hub_close_cancelled`, reason `rollback_unproven`) marks the
 event `hub_ack:true`: that is the one cancel the hub learns from this answer
