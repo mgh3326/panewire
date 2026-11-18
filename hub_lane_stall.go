@@ -114,7 +114,6 @@ func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	var notifications []hubNotification
 	candidates := h.laneStallCandidates(routes)
-	h.loopAddMade(loopLaneStallDrainWake, len(candidates))
 	for _, lane := range candidates {
 		if ctx.Err() != nil {
 			// Budget spent: lanes not yet evaluated are unobserved — the same
@@ -157,7 +156,6 @@ func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 		}
 		h.mu.Unlock()
 		if activated {
-			h.loopAddDone(loopLaneStallDrainWake, 1)
 			// One Warn and one broadcast per stall episode, at the moment the
 			// dampened alert activates.
 			h.logger.Warn("relay lane stalled", "lane", obs.lane, "oldest_event_id", obs.oldestEventID, "oldest_received_at", obs.oldestReceivedAt, "undelivered_count", obs.undelivered, "held_count", obs.heldCount, "active_jobs", obs.activeJobs)

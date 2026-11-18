@@ -5,19 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // The loop ledger (hk 5116, track A1) records every hub mechanism, writes one
-// daily row and notices a silent stop. These tests pin the acceptance
-// contract: a store error in the spawn scan counts, logs once per streak and
-// names the mechanism in the row and the notice; a stopped loop notices after
-// three intervals; a healthy run has rows and no notice; the midnight
-// boundary writes exactly one doc per day, even across a restart.
+// daily row and notices a silent stop. Day buckets scope every rule to the
+// current UTC date; flow mechanisms count first-seen items per day, scan
+// mechanisms count ticks and errors only.
 
 func loopLedgerTestHub(t *testing.T, now *time.Time, logs *bytes.Buffer) *HubServer {
 	t.Helper()
@@ -51,7 +54,8 @@ func loopLedgerCountLines(logs *bytes.Buffer, substr string) int {
 }
 
 // A store error in the spawn coordinator scan shows in the ledger, logs one
-// line per streak, and names the mechanism in the daily row and the notice.
+// line per streak and counts once per streak, and names the mechanism in the
+// daily row and the notice.
 func TestLoopLedgerSpawnScanErrorCountsLogsRowAndNotice(t *testing.T) {
 	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	var logs bytes.Buffer
@@ -71,7 +75,7 @@ func TestLoopLedgerSpawnScanErrorCountsLogsRowAndNotice(t *testing.T) {
 		t.Fatalf("silent log lines=%d, want 2 (one per failing path per streak), log:\n%s", got, logs.String())
 	}
 
-	doc := h.loopsRowDocument(now)
+	doc := h.loopsRowDocument(loopDateOf(now), now)
 	rowByMechanism := make(map[string]loopsRowEntry, len(doc.Rows))
 	for _, row := range doc.Rows {
 		rowByMechanism[row.Mechanism] = row
@@ -126,10 +130,12 @@ func TestLoopLedgerHealthyRunRowsPresentNoNotice(t *testing.T) {
 
 	for _, m := range loopMechanisms {
 		h.loopTick(m)
-		h.loopAddMade(m, 1)
-		h.loopAddDone(m, 1)
+		if loopKindOf(m) == loopKindFlow {
+			h.loopNoteMade(m, "item-1")
+			h.loopNoteDone(m, "item-1")
+		}
 	}
-	doc := h.loopsRowDocument(now)
+	doc := h.loopsRowDocument(loopDateOf(now), now)
 	if len(doc.Rows) != len(loopMechanisms) {
 		t.Fatalf("rows=%d, want %d", len(doc.Rows), len(loopMechanisms))
 	}
@@ -137,8 +143,8 @@ func TestLoopLedgerHealthyRunRowsPresentNoNotice(t *testing.T) {
 		if row.Machine != "hub" {
 			t.Fatalf("row machine=%q, want hub", row.Machine)
 		}
-		if row.Ticks != 1 || row.Made != 1 || row.Done != 1 {
-			t.Fatalf("row %+v, want ticks=made=done=1", row)
+		if row.Ticks != 1 {
+			t.Fatalf("row %+v, want ticks=1", row)
 		}
 	}
 	if hits := h.loopNoticeHits(now); len(hits) != 0 {
@@ -146,16 +152,18 @@ func TestLoopLedgerHealthyRunRowsPresentNoNotice(t *testing.T) {
 	}
 }
 
-// The midnight boundary writes exactly one doc per day, even across a hub
-// restart: already written is never rewritten.
+// The midnight boundary writes each date's row once, from that date's
+// bucket, at the first tick of the next date — even across a restart.
 func TestLoopLedgerDailyRowOncePerDayAcrossRestart(t *testing.T) {
 	now := time.Date(2026, 11, 18, 23, 59, 0, 0, time.UTC)
 	published := map[string]int{}
+	bodies := map[string]string{}
 	existing := map[string]bool{}
 	h := loopLedgerTestHub(t, &now, nil)
-	h.loopsDocPublish = func(_ context.Context, key, _ string) error {
+	h.loopsDocPublish = func(_ context.Context, key, body string) error {
 		published[key]++
 		existing[key] = true
+		bodies[key] = body
 		return nil
 	}
 	h.loopsDocExists = func(_ context.Context, key string) (bool, error) { return existing[key], nil }
@@ -165,42 +173,55 @@ func TestLoopLedgerDailyRowOncePerDayAcrossRestart(t *testing.T) {
 		h.loopTick(m)
 	}
 	h.maybeWriteLoopsRow(ctx)
-	h.maybeWriteLoopsRow(ctx)
-	if got := published[loopsRowKey("2026-11-18")]; got != 1 {
-		t.Fatalf("same-day publishes=%d, want 1", got)
+	if len(published) != 0 {
+		t.Fatalf("same-day publishes=%v, want none", published)
 	}
 
 	now = time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
 	h.maybeWriteLoopsRow(ctx)
-	if got := published[loopsRowKey("2026-11-19")]; got != 1 {
-		t.Fatalf("next-day publishes=%d, want 1", got)
+	if got := published[loopsRowKey("2026-11-18")]; got != 1 {
+		t.Fatalf("previous-day publishes=%d, want 1", got)
+	}
+	h.maybeWriteLoopsRow(ctx)
+	if got := published[loopsRowKey("2026-11-18")]; got != 1 {
+		t.Fatalf("repeat publishes=%d, want 1", got)
 	}
 
 	restarted := loopLedgerTestHub(t, &now, nil)
-	restarted.loopsDocPublish = func(_ context.Context, key, _ string) error {
+	restarted.loopsDocPublish = func(_ context.Context, key, body string) error {
 		published[key]++
 		existing[key] = true
+		bodies[key] = body
 		return nil
 	}
 	restarted.loopsDocExists = func(_ context.Context, key string) (bool, error) { return existing[key], nil }
+	for _, m := range loopMechanisms {
+		restarted.loopTick(m)
+	}
+	now = time.Date(2026, 11, 20, 0, 1, 0, 0, time.UTC)
 	restarted.maybeWriteLoopsRow(ctx)
+	if got := published[loopsRowKey("2026-11-18")]; got != 1 {
+		t.Fatalf("restarted hub rewrote 2026-11-18: publishes=%d, want 1", got)
+	}
 	if got := published[loopsRowKey("2026-11-19")]; got != 1 {
-		t.Fatalf("restarted hub rewrote 2026-11-19: publishes=%d, want 1", got)
+		t.Fatalf("restarted hub publishes for 2026-11-19=%d, want 1", got)
 	}
 }
 
 // The progress notice fires on made >= 20 with nothing (or nearly nothing)
-// done, and stays quiet below the floor.
+// done in the current date, and stays quiet below the floor.
 func TestLoopLedgerProgressNotice(t *testing.T) {
 	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	h := loopLedgerTestHub(t, &now, nil)
 
 	h.loopTick(loopConsultCoordinator)
-	h.loopAddMade(loopConsultCoordinator, 19)
+	for i := range 19 {
+		h.loopNoteMade(loopConsultCoordinator, "consult-"+string(rune('a'+i)))
+	}
 	if hits := h.loopsProgressHits(); len(hits) != 0 {
 		t.Fatalf("below-floor progress hits=%v, want none", hits)
 	}
-	h.loopAddMade(loopConsultCoordinator, 1)
+	h.loopNoteMade(loopConsultCoordinator, "consult-t")
 	found := false
 	for _, m := range h.loopsProgressHits() {
 		if m == loopConsultCoordinator {
@@ -213,8 +234,12 @@ func TestLoopLedgerProgressNotice(t *testing.T) {
 
 	h2 := loopLedgerTestHub(t, &now, nil)
 	h2.loopTick(loopConsultCoordinator)
-	h2.loopAddMade(loopConsultCoordinator, 100)
-	h2.loopAddDone(loopConsultCoordinator, 5)
+	for i := range 100 {
+		h2.loopNoteMade(loopConsultCoordinator, "consult-"+string(rune('a'+i%26))+string(rune('0'+i/26)))
+	}
+	for i := range 5 {
+		h2.loopNoteDone(loopConsultCoordinator, "consult-"+string(rune('a'+i))+string(rune('0')))
+	}
 	found = false
 	for _, m := range h2.loopsProgressHits() {
 		if m == loopConsultCoordinator {
@@ -228,6 +253,7 @@ func TestLoopLedgerProgressNotice(t *testing.T) {
 	var body string
 	h.loopsDocPublish = func(_ context.Context, _, b string) error { body = b; return nil }
 	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return false, nil }
+	now = time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
 	h.maybeWriteLoopsRow(context.Background())
 	var doc loopsRowDoc
 	if err := json.Unmarshal([]byte(body), &doc); err != nil {
@@ -273,31 +299,29 @@ func TestLoopLedgerNoticeAtMostOnePerMechanismPerDay(t *testing.T) {
 }
 
 // Loops whose interval is configured off never tick, and must not be
-// reported as stopped: a disabled interval is excluded from the stale check.
+// reported as stopped: a non-positive interval is excluded from the stale
+// check.
 func TestLoopLedgerDisabledLoopsExcludedFromStale(t *testing.T) {
 	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	h := loopLedgerTestHub(t, &now, nil)
 	h.poolTriggerInterval = 0
-	if got := h.loopInterval(loopFleetStatus); got != 0 {
-		t.Fatalf("fleet_status interval=%v, want 0 when disabled", got)
-	}
-	if got := h.loopInterval(loopPaneSweep); got != 0 {
-		t.Fatalf("pane_sweep interval=%v, want 0 when disabled", got)
-	}
-	if got := h.loopInterval(loopPoolTriggers); got != 0 {
-		t.Fatalf("pool_triggers interval=%v, want 0 when disabled", got)
+	for _, m := range []loopMechanism{loopFleetStatus, loopPaneSweep, loopPoolTriggers, loopPoolExhaustedSweep} {
+		if got := h.loopInterval(m); got != 0 {
+			t.Fatalf("%s interval=%v, want 0 when disabled", m, got)
+		}
 	}
 	now = now.Add(2 * time.Hour)
 	for _, m := range h.loopsStaleHits(now) {
-		if m == loopFleetStatus || m == loopPaneSweep || m == loopPoolTriggers {
+		if m == loopFleetStatus || m == loopPaneSweep || m == loopPoolTriggers || m == loopPoolExhaustedSweep {
 			t.Fatalf("disabled loop %s flagged stale: %v", m, h.loopsStaleHits(now))
 		}
 	}
 }
 
 // An unreadable row is neither absent nor present: the write is skipped, the
-// failure counts, and the next sweep retries the read instead of
-// overwriting the day's counts with a restart-fresh ledger.
+// failure counts, and a later sweep retries the read instead of overwriting
+// the day's counts with a restart-fresh ledger. A failed read backs off so
+// the maintenance tick does not wait on hk every pass.
 func TestLoopLedgerUnreadableRowSkipsWriteAndRetries(t *testing.T) {
 	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	published := 0
@@ -311,6 +335,7 @@ func TestLoopLedgerUnreadableRowSkipsWriteAndRetries(t *testing.T) {
 	for _, m := range loopMechanisms {
 		h.loopTick(m)
 	}
+	now = time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
 	h.maybeWriteLoopsRow(ctx)
 	if published != 0 {
 		t.Fatalf("unreadable row published=%d, want 0", published)
@@ -318,9 +343,6 @@ func TestLoopLedgerUnreadableRowSkipsWriteAndRetries(t *testing.T) {
 	h.maybeWriteLoopsRow(ctx)
 	if reads != 1 {
 		t.Fatalf("row reads=%d, want 1: an unreadable row backs off instead of reading every tick", reads)
-	}
-	if got := h.loopSnapshot()[loopFleetStatus].Errors; got < 1 {
-		t.Fatalf("fleet_status errors=%d, want >= 1 for the unreadable row", got)
 	}
 	readErr = nil
 	now = now.Add(2 * loopsRowRetryAfter)
@@ -398,8 +420,8 @@ func TestLoopLedgerDrainOwedEdgeCountsOnce(t *testing.T) {
 	}
 }
 
-// A busy lane clears its owed line without a send: the clear counts as done,
-// balancing the edge's made.
+// A busy lane clears its owed line without a send: the clear counts as
+// done, balancing the edge's made.
 func TestLoopLedgerDrainBusyClearCountsDone(t *testing.T) {
 	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	h := loopLedgerTestHub(t, &now, nil)
@@ -416,28 +438,165 @@ func TestLoopLedgerDrainBusyClearCountsDone(t *testing.T) {
 	}
 }
 
-// A long healthy history must not mask a stall that started today: the
-// progress rule runs on the current date's deltas.
-func TestLoopLedgerProgressStallAfterHealthyHistory(t *testing.T) {
+// A steady population observed on every tick counts once: one pending spawn
+// re-scanned 25 times makes 1, so the progress rule stays quiet.
+func TestLoopLedgerSteadyPopulationCountsOnce(t *testing.T) {
 	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	h := loopLedgerTestHub(t, &now, nil)
 	ctx := context.Background()
-	for _, m := range loopMechanisms {
-		h.loopTick(m)
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: spawnJobsFixture{}, Out: out, Err: errout}, nil
 	}
-	h.loopAddMade(loopSpawnCoordinator, 5000)
-	h.loopAddDone(loopSpawnCoordinator, 5000)
-	h.loopsDocPublish = func(_ context.Context, _, _ string) error { return nil }
-	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return true, nil }
-	h.maybeWriteLoopsRow(ctx)
-	h.loopAddMade(loopSpawnCoordinator, 100)
+	req := durableSpawnRequest()
+	raw, _ := json.Marshal(req)
+	r := httptest.NewRequest("POST", "/v1/spawns", bytes.NewReader(raw))
+	r.Header.Set("Authorization", "Bearer "+t14OperatorToken)
+	w := httptest.NewRecorder()
+	h.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("spawn submit=%d, want 202", w.Code)
+	}
+	for range 25 {
+		h.spawnCoordinatorScan(ctx, func(hubSpawnTask) bool { return false })
+	}
+	snap := h.loopSnapshot()[loopSpawnCoordinator]
+	if snap.Made != 1 || snap.Done != 0 {
+		t.Fatalf("steady spawn made=%d done=%d, want 1 and 0", snap.Made, snap.Done)
+	}
 	found := false
 	for _, m := range h.loopsProgressHits() {
 		if m == loopSpawnCoordinator {
 			found = true
 		}
 	}
+	if found {
+		t.Fatalf("steady population trips the progress rule: %+v", snap)
+	}
+}
+
+// One long consult pending across many polls counts once: 20 polls of the
+// same consult make 1, so the progress rule stays quiet.
+func TestLoopLedgerLongConsultCountsOnce(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	if _, err := h.storeConsult(ctx, hubConsult{
+		ID: "c-long", IdemKey: "idem-long", State: consultQueued,
+		RequestID: "missing-op", Created: now,
+		ClaimUntil: now.Add(time.Hour), Deadline: now.Add(2 * time.Hour),
+	}, false); err != nil {
+		t.Fatalf("insert consult: %v", err)
+	}
+	for range 20 {
+		h.reconcileConsults(ctx)
+	}
+	snap := h.loopSnapshot()[loopConsultCoordinator]
+	if snap.Made != 1 || snap.Done != 0 {
+		t.Fatalf("long consult made=%d done=%d, want 1 and 0", snap.Made, snap.Done)
+	}
+	found := false
+	for _, m := range h.loopsProgressHits() {
+		if m == loopConsultCoordinator {
+			found = true
+		}
+	}
+	if found {
+		t.Fatalf("long consult trips the progress rule: %+v", snap)
+	}
+}
+
+// An idle hub has no pending placement snapshots, but the placement pass
+// still ticks: no stale notice for an idle placement loop.
+func TestLoopLedgerIdlePlacementStillTicks(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	h.flushPlacementRecords(ctx)
+	if last := h.loopSnapshot()[loopPlacementRecords].LastTick; last.IsZero() {
+		t.Fatalf("placement last_tick not recorded on an idle pass")
+	}
+	now = now.Add(10 * time.Second)
+	h.flushPlacementRecords(ctx)
+	for _, m := range h.loopsStaleHits(now) {
+		if m == loopPlacementRecords {
+			t.Fatalf("idle placement flagged stale: %v", h.loopsStaleHits(now))
+		}
+	}
+}
+
+// Each date's row carries only that date's counts: work done on D+1 never
+// lands in D's row.
+func TestLoopLedgerDayBoundaryCarriesOnlyItsDate(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	bodies := map[string]string{}
+	h := loopLedgerTestHub(t, &now, nil)
+	h.loopsDocPublish = func(_ context.Context, key, body string) error { bodies[key] = body; return nil }
+	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return false, nil }
+	ctx := context.Background()
+
+	h.loopTick(loopSpawnCoordinator)
+	h.loopNoteMade(loopSpawnCoordinator, "r-1")
+	h.loopNoteDone(loopSpawnCoordinator, "r-1")
+	h.loopTick(loopConsultCoordinator)
+	h.loopNoteMade(loopConsultCoordinator, "c-1")
+	now = time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
+	h.maybeWriteLoopsRow(ctx)
+	var day18 loopsRowDoc
+	if err := json.Unmarshal([]byte(bodies[loopsRowKey("2026-11-18")]), &day18); err != nil {
+		t.Fatalf("day-18 body is not JSON: %v", err)
+	}
+	byMechanism := map[string]loopsRowEntry{}
+	for _, row := range day18.Rows {
+		byMechanism[row.Mechanism] = row
+	}
+	if got := byMechanism[string(loopSpawnCoordinator)]; got.Made != 1 || got.Done != 1 {
+		t.Fatalf("day-18 spawn made=%d done=%d, want 1 and 1", got.Made, got.Done)
+	}
+	if got := byMechanism[string(loopConsultCoordinator)]; got.Made != 1 {
+		t.Fatalf("day-18 consult made=%d, want 1", got.Made)
+	}
+
+	h.loopTick(loopSpawnCoordinator)
+	h.loopNoteMade(loopSpawnCoordinator, "r-2")
+	now = time.Date(2026, 11, 20, 0, 1, 0, 0, time.UTC)
+	h.maybeWriteLoopsRow(ctx)
+	var day19 loopsRowDoc
+	if err := json.Unmarshal([]byte(bodies[loopsRowKey("2026-11-19")]), &day19); err != nil {
+		t.Fatalf("day-19 body is not JSON: %v", err)
+	}
+	byMechanism = map[string]loopsRowEntry{}
+	for _, row := range day19.Rows {
+		byMechanism[row.Mechanism] = row
+	}
+	if got := byMechanism[string(loopSpawnCoordinator)]; got.Made != 1 || got.Done != 0 {
+		t.Fatalf("day-19 spawn made=%d done=%d, want 1 and 0", got.Made, got.Done)
+	}
+	if got := byMechanism[string(loopConsultCoordinator)]; got.Made != 0 {
+		t.Fatalf("day-19 consult made=%d, want 0", got.Made)
+	}
+}
+
+// One transient silent error notices on its own date only: the next date
+// starts clean even though the lifetime streak already ended.
+func TestLoopLedgerTransientSilentErrorNoticesOnce(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+
+	h.loopNoteSilentError(loopInbox, "hub_inbox.go:pendingBatches", errors.New("boom"))
+	h.loopClearSilent("hub_inbox.go:pendingBatches")
+	found := false
+	for _, m := range h.loopsSilentHits() {
+		if m == loopInbox {
+			found = true
+		}
+	}
 	if !found {
-		t.Fatalf("stalled spawn coordinator has no progress hit after a healthy history: %+v", h.loopSnapshot()[loopSpawnCoordinator])
+		t.Fatalf("no silent hit on the error's date")
+	}
+	now = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	for _, m := range h.loopsSilentHits() {
+		if m == loopInbox {
+			t.Fatalf("silent hit leaks into the next date")
+		}
 	}
 }

@@ -8,32 +8,51 @@ stopped ticking, stopped finishing work, or hit a previously silent error
 path. Contract: `ops/panewire-loops/<YYYY-MM-DD>`; machine is `hub` here —
 hk 5117 adds per-node rows beside these.
 
-## Mechanisms, made and done
+## One counting discipline: flow and scan
 
-| Mechanism | Interval | Made: items picked up | Done: items finished |
-|---|---|---|---|
-| `spawn_coordinator` | 2 s | pending `spawn_operations` rows seen in the scan (plus waiting rows released by the start-condition check) | rows handed to a worker or a node dispatch (a start-condition release, give-up, refusal or cancellation also counts) |
-| `consult_coordinator` | 5 s | active consult rows read | consults answered, timed out, failed, respawned or settled |
-| `lane_stall_drain_wake` | keepalive (10 s) | stall candidates observed, plus drain lines newly owed (one per owed edge, not per sweep) | stall alarms activated, plus owed drain lines sent or cleared |
-| `inbox` | 100 ms | batches listed for flush, plus inbox-wake lanes due at a window end | batches handed to the relay (marked sent), plus wake lines sent |
-| `quota_ladder` | 2 m | quota successor rows plus expired ladder stages seen | hk records written with `replaced_by`, plus ladder stages activated, discarded or cancelled |
-| `pool_triggers_exhausted` | 10 m | live pools checked | exhausted-pool sweeps started (retired or credit-exhausted) |
-| `pool_actions` | 10 s | active `pool_actions` rows read | actions reconciled to final |
-| `placement_records` | 2 s | placement snapshots pending | hk placement records delivered (spool flush or `deliverPlacementRecord`, sealed or quarantined) |
-| `fleet_status` | 3 m (`--fleet-status-interval`) | snapshot ticks | snapshots written to hk |
-| `pane_sweep` | 10 m (`--pane-sweep-interval`) | nodes swept | panes a node closed |
-| `reviewer_end` | 5 m | succeeded reviewer operations seen in the window | reviewer jobs ended (`mark_lost` written) |
+Each mechanism is one of two kinds. The progress rule applies to flow
+mechanisms only.
+
+- **flow:** items with an identity enter and leave. `made` = an item seen
+  for the first time that day (its entry edge, deduped by id within the
+  day); `done` = the item's exit transition that day (terminal, sent or
+  cleared). A steady population observed on every pass counts once.
+- **scan:** a periodic pass with no item lifecycle. Ticks and errors only;
+  no progress rule.
+
+Every rule reads the current UTC date's bucket. Each date's bucket starts
+empty at midnight; the previous date's row is written from its bucket at
+the first tick of the next date, then the bucket is dropped.
+
+## Mechanisms, kind, item, and edges
+
+| Mechanism | Kind | Item (one per) | Entry edge (made) | Exit edge (done) |
+|---|---|---|---|---|
+| `spawn_coordinator` | flow | pending `spawn_operations` row (request id) | first sighting in the scan or the start-condition check that day | handed to a worker or a node dispatch; or a start-condition release, give-up, refusal or cancellation |
+| `consult_coordinator` | flow | active consult (consult id) | first sighting in the reconcile pass that day | answered, timed out, failed, respawned or settled |
+| `lane_stall_drain_wake` | flow | owed drain line (lane) | the sweep edge into owed (`pending` false → true) | the line sent (`last_sent` moves) or cleared (`pending` true → false) |
+| `inbox` | flow | batch (batch id), inbox wake (lane) | batch listed for flush; wake lane due at a window end | batch marked sent; wake line sent |
+| `quota_ladder` | flow | quota successor (job), expired ladder stage (request id) | successor or expired stage seen | hk record written with `replaced_by`; stage activated, discarded or cancelled |
+| `pool_triggers` | scan | — | — | — |
+| `pool_exhausted_sweep` | flow | job on an exhausted pool (job) | first listing on an exhausted pool that day | job notified or queued |
+| `pool_actions` | flow | `pool_actions` row (action id) | first listing in the reconcile pass that day | action reconciled to final |
+| `placement_records` | flow | placement snapshot (request id and attempt) | snapshot listed as pending | hk placement record delivered, sealed or quarantined |
+| `fleet_status` | scan | — | — | — |
+| `pane_sweep` | scan | — | — | — |
+| `reviewer_end` | scan | — | — | — |
 
 `last_tick` is the hub clock (`HubServer.now`); no `time.Now()` inline.
+Every pass ticks at its top, including passes that find nothing to do.
 `oldest_pending` is the oldest pending spawn's age on the spawn scan; other
 mechanisms report 0 until they observe backlog.
 
 ## Silent error paths
 
-Every error path counts in the ledger. The paths that were silent before this
-change also log, rate-limited to one line per failure streak, and count once
-per streak (a latched outage counts one error no matter how many sweeps it
-spans; the next failure after a success counts and logs again):
+Every error path counts in the current date's bucket. The paths that were
+silent before this change also log, rate-limited to one line per failure
+streak, and count once per streak (a latched outage counts one error no
+matter how many sweeps it spans; the next failure after a success counts
+and logs again):
 
 - `hub_spawn_async.go`: the pending-scan page read, and the ordinary pending read
 - `hub_spawn_start_conditions.go`: the waiting-rows read
@@ -47,33 +66,33 @@ spans; the next failure after a success counts and logs again):
 
 ## Daily row
 
-At each UTC midnight the hub writes `ops/panewire-loops/<YYYY-MM-DD>` through
-the hub's hk document writer (the same path the fleet status writer uses):
+At the first tick after each UTC midnight the hub writes the previous
+date's row, `ops/panewire-loops/<YYYY-MM-DD>`, from that date's bucket
+through the hub's hk document writer (the same path the fleet status
+writer uses):
 
 ```json
-{"v":1,"at":"2026-11-18T00:00:00Z","machine":"hub","rows":[
+{"v":1,"at":"2026-11-19T00:00:01Z","machine":"hub","rows":[
   {"machine":"hub","mechanism":"spawn_coordinator","interval_s":2,"ticks":1,
    "made":0,"done":0,"errors":0,"silent_errors":0,
    "last_tick":"2026-11-18T00:00:00Z","oldest_pending_s":0}]}
 ```
 
-One document per day: the writer records the date it wrote, skips a date it
-already wrote, and treats an existing document (for example after a hub
-restart) as written — already written is never rewritten. A failed write
-or an unreadable row counts against `fleet_status` in the ledger and is
-retried; an unreadable row is re-read at most once a minute so a hk outage
-cannot hold the maintenance tick on every pass.
+One document per date: already written is never rewritten (an existing
+document counts as written), and each date's bucket is dropped after its
+row is written. A failed write or an unreadable row counts against
+`fleet_status` in the ledger and backs off for a minute before the next
+attempt, so an hk outage cannot hold the maintenance tick on every pass.
 
 ## Notice
 
 The notice goes to `--loops-notice-lane` (default `panewire-design`), one
-lane.event line per hit mechanism. It fires when any of these holds:
+lane.event line per hit mechanism. It fires when any of these holds on the
+current date's bucket:
 
 - `last_tick` is older than three intervals for the mechanism;
-- `made` ≥ 20 and `done` = 0, or `done/made` < 10%, counted over the current
-  UTC date (the counters re-baseline at midnight, so a long healthy history
-  cannot mask a stall that started today);
-- a previously silent error path counted ≥ 1.
+- `made` ≥ 20 and `done` = 0, or `done/made` < 10% (flow mechanisms only);
+- a previously silent error path counted ≥ 1 today.
 
 Thresholds (`3`, `20`, `10%`) live in `hub_loop_ledger.go` (`loopStaleIntervals`,
 `loopMadeFloor`, `loopDoneRatio`). At most one notice per mechanism per day;

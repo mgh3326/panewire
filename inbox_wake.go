@@ -214,10 +214,10 @@ func (h *HubServer) flushInboxWakes() {
 			continue
 		}
 		state.class = class
-		h.loopAddMade(loopInbox, 1)
+		h.loopNoteMade(loopInbox, "wake:"+lane)
 		h.attemptInboxWake(lane, state, now)
 		if _, owed := w.lanes[lane]; !owed || !w.lanes[lane].pending {
-			h.loopAddDone(loopInbox, 1)
+			h.loopNoteDone(loopInbox, "wake:"+lane)
 		}
 	}
 }

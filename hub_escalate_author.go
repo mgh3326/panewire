@@ -410,6 +410,7 @@ func setEscalateAuthorHost(next *fleet.Submission, host string) {
 func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 	h.ladderMu.Lock()
 	defer h.ladderMu.Unlock()
+	h.loopTick(loopQuotaLadder)
 	tasks, err := h.inbox.store.expiredStagedSpawns(ctx, h.now().UTC())
 	if err != nil {
 		h.loopNoteSilentError(loopQuotaLadder, "hub_escalate_author.go:expiredStagedSpawns", err)
@@ -422,8 +423,9 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		return
 	}
 	h.loopClearSilent("hub_escalate_author.go:newSpawnApp")
-	h.loopTick(loopQuotaLadder)
-	h.loopAddMade(loopQuotaLadder, len(tasks))
+	for _, task := range tasks {
+		h.loopNoteMade(loopQuotaLadder, task.Request.RequestID)
+	}
 	for _, task := range tasks {
 		id := task.Request.LadderStep
 		if id == nil {
@@ -444,7 +446,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		state := escalateAuthorStr(record, "state")
 		if state == "lost" && escalateAuthorStr(record, "end_reason") == fleet.LadderStepEndReason(id.Round, task.Job) {
 			if h.inbox.store.activateStagedSpawn(ctx, task.Request.RequestID, h.now().UTC(), task.Request.DeadlineSeconds) == nil {
-				h.loopAddDone(loopQuotaLadder, 1)
+				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 				select {
 				case h.spawnKick <- struct{}{}:
 				default:
@@ -454,7 +456,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		}
 		if hkTerminalState(state) {
 			if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
-				h.loopAddDone(loopQuotaLadder, 1)
+				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 				request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 				h.escalateAuthorParentEnded(ctx, request, task.Owner)
 			}
@@ -469,7 +471,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		if err := h.inbox.store.cancelStagedSpawn(ctx, task.Request.RequestID, holder.Request.RequestID, spawn.RoleKey()); err != nil {
 			continue
 		}
-		h.loopAddDone(loopQuotaLadder, 1)
+		h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 		request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 		_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 	}

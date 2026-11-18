@@ -283,6 +283,7 @@ func (h *HubServer) poolEventGone(exhaustion poolExhaustion, now time.Time) bool
 // account, all at once: each owner's notice is recorded independently. A
 // pool-level cause (Account empty) acts on every live job on the pool.
 func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhaustion) {
+	h.loopTick(loopPoolExhaustedSweep)
 	if h.poolEventGone(exhaustion, h.now()) {
 		h.logger.Debug("pool exhausted sweep superseded by a newer reading", "pool", exhaustion.Pool, "account", exhaustion.Account, "cause", exhaustion.Cause)
 		return
@@ -297,8 +298,12 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 	isNew := h.poolSweep.seen(exhaustion.key(), exhaustion.Reset, h.now())
 	onPool, err := h.poolExhaustionJobs(ctx, exhaustion)
 	if err != nil {
+		h.loopNoteError(loopPoolExhaustedSweep)
 		h.logger.Warn("pool exhausted sweep could not list its jobs", "pool", exhaustion.Pool, "account", exhaustion.Account, "error", err)
 		return
+	}
+	for _, task := range onPool {
+		h.loopNoteMade(loopPoolExhaustedSweep, task.Job)
 	}
 	results := make([]poolJobResult, len(onPool))
 	var wg sync.WaitGroup
@@ -327,10 +332,11 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 	wg.Wait()
 
 	notified, skipped := 0, map[string]int{}
-	for _, result := range results {
+	for i, result := range results {
 		switch result.action {
 		case poolJobNotified, poolJobQueued:
 			notified++
+			h.loopNoteDone(loopPoolExhaustedSweep, onPool[i].Job)
 		default:
 			skipped[result.why]++
 		}

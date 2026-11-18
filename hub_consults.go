@@ -462,28 +462,28 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 	if h.inbox == nil {
 		return
 	}
+	h.loopTick(loopConsultCoordinator)
 	active, err := h.inbox.store.activeConsults(ctx)
 	if err != nil {
 		h.loopNoteSilentError(loopConsultCoordinator, "hub_consults.go:activeConsults", err)
 		return
 	}
 	h.loopClearSilent("hub_consults.go:activeConsults")
-	h.loopTick(loopConsultCoordinator)
-	h.loopAddMade(loopConsultCoordinator, len(active))
 	var app *fleet.App
 	for _, c := range active {
+		h.loopNoteMade(loopConsultCoordinator, c.ID)
 		if ctx.Err() != nil {
 			return
 		}
 		if c.State == consultAnswered {
 			// The answer is saved; only its one lane event may still be owed.
 			h.notifyConsultAnswered(ctx, c)
-			h.loopAddDone(loopConsultCoordinator, 1)
+			h.loopNoteDone(loopConsultCoordinator, c.ID)
 			continue
 		}
 		if !h.now().Before(c.Deadline) {
 			h.failConsult(ctx, c, "timeout: the consult passed its time limit")
-			h.loopAddDone(loopConsultCoordinator, 1)
+			h.loopNoteDone(loopConsultCoordinator, c.ID)
 			continue
 		}
 		task, err := h.inbox.store.spawnTask(ctx, c.RequestID)
@@ -497,14 +497,14 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 					continue
 				}
 				h.recoverConsult(ctx, c)
-				h.loopAddDone(loopConsultCoordinator, 1)
+				h.loopNoteDone(loopConsultCoordinator, c.ID)
 			case consultRunning:
 				if c.Respawns == 0 {
 					h.respawnConsult(ctx, c, "spawn_operation_missing")
 				} else {
 					h.failConsult(ctx, c, "spawn_operation_missing")
 				}
-				h.loopAddDone(loopConsultCoordinator, 1)
+				h.loopNoteDone(loopConsultCoordinator, c.ID)
 			}
 			continue
 		}
@@ -519,16 +519,19 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 			app, _ = h.newSpawnApp(io.Discard, io.Discard)
 		}
 		if h.settleConsult(ctx, app, c) {
+			h.loopNoteDone(loopConsultCoordinator, c.ID)
 			continue
 		}
 		switch task.Status {
 		case "failed", "retryable":
 			h.consultJobFailed(ctx, c, firstNonEmptyString(task.Outcome.Reason, task.Status))
+			h.loopNoteDone(loopConsultCoordinator, c.ID)
 		case "reconciling", "deadline_exceeded", "accepted", "bound", "dispatching", "succeeded", "waiting":
 			// Ownership or the job itself is still live; the row's deadline
 			// ends the wait.
 		default:
 			h.consultJobFailed(ctx, c, firstNonEmptyString(task.Outcome.Reason, task.Status))
+			h.loopNoteDone(loopConsultCoordinator, c.ID)
 		}
 	}
 }

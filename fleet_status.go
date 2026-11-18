@@ -121,7 +121,6 @@ func (h *HubServer) runFleetStatus(ctx context.Context) {
 func (h *HubServer) publishFleetStatus(ctx context.Context) {
 	now := h.now().UTC()
 	h.loopTick(loopFleetStatus)
-	h.loopAddMade(loopFleetStatus, 1)
 	body, err := h.fleetStatusDocument(ctx, now).body()
 	if err == nil {
 		writeCtx, cancel := context.WithTimeout(ctx, fleetStatusWriteTimeout)
@@ -133,7 +132,6 @@ func (h *HubServer) publishFleetStatus(ctx context.Context) {
 		h.logger.Warn("fleet status snapshot not written; retrying next cycle", "key", fleetStatusDocKey, "error", err)
 		return
 	}
-	h.loopAddDone(loopFleetStatus, 1)
 }
 
 // fleetStatusWrite writes the body with the hub's hk credential, unless a test

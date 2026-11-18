@@ -18,25 +18,41 @@ import (
 // mechanism, and a lane.event notice names a mechanism that stopped ticking,
 // stopped finishing work, or hit a previously silent error path.
 //
-// Made and done per mechanism (the design's table, §Track A):
-//   - spawn_coordinator: pending spawn_operations rows seen -> rows scheduled
-//     onto workers (terminal outcomes arrive through the workers).
-//   - consult_coordinator: active consult rows read -> consults answered,
-//     timed out, failed or respawned (a state transition).
-//   - lane_stall_drain_wake: backlog lanes observed in a sweep -> drain lines
-//     queued to a design lane's pane.
-//   - inbox: flush passes -> inbox batches/digests sent.
-//   - quota_ladder: quota successor rows plus expired ladder stages seen ->
-//     hk records written plus ladder stages expired.
-//   - pool_triggers_exhausted: live pools checked -> exhausted-pool sweeps
-//     started.
-//   - pool_actions: active pool_actions rows read -> actions reconciled to
-//     final.
-//   - placement_records: placement flush passes -> hk placement records
-//     delivered.
-//   - fleet_status: snapshot ticks -> snapshots written to hk.
-//   - pane_sweep: pane-sweep ticks -> panes a node closed.
-//   - reviewer_end: succeeded reviewer operations seen -> reviewer jobs ended.
+// One counting discipline (per panewire-design decision on PR #675): each
+// mechanism is flow or scan.
+//   - flow: items with an identity enter and leave. made = an item seen for
+//     the first time that day (its entry edge, deduped by id within the
+//     day); done = the item's exit transition that day (terminal, sent or
+//     cleared). The progress rule applies only to flow mechanisms.
+//   - scan: a periodic pass with no item lifecycle. Ticks and errors only;
+//     no progress rule.
+// Every rule reads the current UTC date's bucket. Lifetime counters are not
+// kept: at each date change the new day starts empty.
+//
+// Made and done per mechanism:
+//   - spawn_coordinator (flow): pending spawn_operations rows (by request
+//     id, first sighting per day) -> rows handed to a worker or a node
+//     dispatch, or a start-condition release, give-up, refusal or
+//     cancellation.
+//   - consult_coordinator (flow): active consults (by consult id) ->
+//     answered, timed out, failed or respawned.
+//   - lane_stall_drain_wake (flow): owed drain lines (by lane, on the edge
+//     into owed) -> lines sent or cleared.
+//   - inbox (flow): batches (by batch id) and wake lanes (by lane) ->
+//     batches marked sent, wake lines sent.
+//   - quota_ladder (flow): quota successors (by job) and expired ladder
+//     stages (by request id) -> hk records written, stages activated,
+//     discarded or cancelled.
+//   - pool_triggers (scan): ticks and errors only.
+//   - pool_exhausted_sweep (flow): jobs on an exhausted pool (by job) ->
+//     jobs notified or queued.
+//   - pool_actions (flow): pool_actions rows (by action id) -> actions
+//     reconciled to final.
+//   - placement_records (flow): placement snapshots (by request and
+//     attempt) -> hk placement records delivered, sealed or quarantined.
+//   - fleet_status (scan): ticks and errors only.
+//   - pane_sweep (scan): ticks and errors only.
+//   - reviewer_end (scan): ticks and errors only.
 //
 // Docs: docs/loops.md. The row format leaves room for per-node rows: every
 // row carries its own machine ("hub" here; hk 5117 adds node rows).
@@ -49,7 +65,8 @@ const (
 	loopLaneStallDrainWake loopMechanism = "lane_stall_drain_wake"
 	loopInbox              loopMechanism = "inbox"
 	loopQuotaLadder        loopMechanism = "quota_ladder"
-	loopPoolTriggers       loopMechanism = "pool_triggers_exhausted"
+	loopPoolTriggers       loopMechanism = "pool_triggers"
+	loopPoolExhaustedSweep loopMechanism = "pool_exhausted_sweep"
 	loopPoolActions        loopMechanism = "pool_actions"
 	loopPlacementRecords   loopMechanism = "placement_records"
 	loopFleetStatus        loopMechanism = "fleet_status"
@@ -66,6 +83,7 @@ var loopMechanisms = []loopMechanism{
 	loopInbox,
 	loopQuotaLadder,
 	loopPoolTriggers,
+	loopPoolExhaustedSweep,
 	loopPoolActions,
 	loopPlacementRecords,
 	loopFleetStatus,
@@ -73,13 +91,31 @@ var loopMechanisms = []loopMechanism{
 	loopReviewerEnd,
 }
 
+type loopKind int
+
+const (
+	loopKindFlow loopKind = iota
+	loopKindScan
+)
+
+// loopKindOf reports whether the mechanism counts items (flow) or only
+// passes (scan). The progress rule applies to flow mechanisms only.
+func loopKindOf(m loopMechanism) loopKind {
+	switch m {
+	case loopPoolTriggers, loopFleetStatus, loopPaneSweep, loopReviewerEnd:
+		return loopKindScan
+	default:
+		return loopKindFlow
+	}
+}
+
 // Notice thresholds live here and nowhere else.
 const (
 	// loopStaleIntervals fires when last_tick is older than this many
 	// intervals for the mechanism.
 	loopStaleIntervals = 3
-	// loopMadeFloor and loopDoneRatio fire when made >= floor and
-	// (done == 0 or done/made < ratio).
+	// loopMadeFloor and loopDoneRatio fire when the day's made >= floor
+	// and (done == 0 or done/made < ratio).
 	loopMadeFloor = 20
 	loopDoneRatio = 0.1
 	// defaultLoopsNoticeLane is the lane the silent-stop notice goes to
@@ -102,31 +138,35 @@ type loopStat struct {
 	OldestPending time.Duration
 }
 
+// loopDayBucket is one UTC date's counts for one mechanism. seen dedupes
+// flow items within the day, so a steady population counts once no matter
+// how many passes observe it.
+type loopDayBucket struct {
+	loopStat
+	seen map[string]bool
+}
+
 // loopLedgerState is the HubServer's loop bookkeeping. Guarded by loopsMu,
 // never by HubServer.mu, so a ledger call inside a store callback cannot
 // deadlock a Sweep that already holds mu.
 type loopLedgerState struct {
-	mu           sync.Mutex
-	stats        map[loopMechanism]*loopStat
-	silentStreak map[string]bool
-	noticeSent   map[string]string
-	rowDate      string
-	// progressBase holds each mechanism's cumulative made/done at the
-	// start of progressDate; the progress rule runs on the current
-	// date's deltas so a long healthy history cannot mask a new stall.
-	progressBase  map[loopMechanism][2]int64
-	progressDate  string
+	mu            sync.Mutex
+	days          map[string]map[loopMechanism]*loopDayBucket
+	silentStreak  map[string]bool
+	noticeSent    map[string]string
 	rowRetryAfter time.Time
 }
 
 func newLoopLedgerState() *loopLedgerState {
 	return &loopLedgerState{
-		stats:        make(map[loopMechanism]*loopStat),
+		days:         make(map[string]map[loopMechanism]*loopDayBucket),
 		silentStreak: make(map[string]bool),
 		noticeSent:   make(map[string]string),
-		progressBase: make(map[loopMechanism][2]int64),
 	}
 }
+
+// loopDateOf names the UTC date a timestamp belongs to.
+func loopDateOf(t time.Time) string { return t.UTC().Format("2006-01-02") }
 
 func (h *HubServer) loopLedger() *loopLedgerState {
 	h.loopsMu.Lock()
@@ -137,49 +177,82 @@ func (h *HubServer) loopLedger() *loopLedgerState {
 	return h.loops
 }
 
-func (s *loopLedgerState) statFor(m loopMechanism) *loopStat {
-	st, ok := s.stats[m]
+func (s *loopLedgerState) bucketFor(date string, m loopMechanism) *loopDayBucket {
+	byDate, ok := s.days[date]
 	if !ok {
-		st = &loopStat{}
-		s.stats[m] = st
+		byDate = make(map[loopMechanism]*loopDayBucket)
+		s.days[date] = byDate
 	}
-	return st
+	b, ok := byDate[m]
+	if !ok {
+		b = &loopDayBucket{seen: make(map[string]bool)}
+		byDate[m] = b
+	}
+	return b
 }
 
-// loopTick records one pass of a mechanism at the hub's clock.
+func (s *loopLedgerState) bucketAt(date string, m loopMechanism) loopStat {
+	if byDate, ok := s.days[date]; ok {
+		if b, ok := byDate[m]; ok {
+			return b.loopStat
+		}
+	}
+	return loopStat{}
+}
+
+// loopTick records one pass of a mechanism at the hub's clock. Every pass
+// ticks at its top, including passes that find nothing to do: the tick is
+// the liveness signal.
 func (h *HubServer) loopTick(m loopMechanism) {
 	if h == nil {
 		return
 	}
-	st := h.loopLedger()
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	s := st.statFor(m)
 	now := h.now().UTC()
-	s.Ticks++
-	s.LastTick = now
-}
-
-// loopAddMade records items a pass picked up.
-func (h *HubServer) loopAddMade(m loopMechanism, n int) {
-	if h == nil || n <= 0 {
-		return
-	}
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.statFor(m).Made += int64(n)
+	b := st.bucketFor(loopDateOf(now), m)
+	b.Ticks++
+	b.LastTick = now
 }
 
-// loopAddDone records items a pass finished.
-func (h *HubServer) loopAddDone(m loopMechanism, n int) {
-	if h == nil || n <= 0 {
+// loopNoteMade records a flow item's entry edge once per UTC date, deduped
+// by id within the day. A steady population observed on every pass counts
+// once no matter how many passes observe it.
+func (h *HubServer) loopNoteMade(m loopMechanism, id string) {
+	if h == nil || id == "" {
 		return
 	}
+	now := h.now().UTC()
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.statFor(m).Done += int64(n)
+	b := st.bucketFor(loopDateOf(now), m)
+	key := "m:" + id
+	if b.seen[key] {
+		return
+	}
+	b.seen[key] = true
+	b.Made++
+}
+
+// loopNoteDone records a flow item's exit transition once per UTC date,
+// deduped by id within the day.
+func (h *HubServer) loopNoteDone(m loopMechanism, id string) {
+	if h == nil || id == "" {
+		return
+	}
+	now := h.now().UTC()
+	st := h.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	b := st.bucketFor(loopDateOf(now), m)
+	key := "d:" + id
+	if b.seen[key] {
+		return
+	}
+	b.seen[key] = true
+	b.Done++
 }
 
 // loopSetOldestPending records the oldest pending age a pass observed.
@@ -187,21 +260,23 @@ func (h *HubServer) loopSetOldestPending(m loopMechanism, age time.Duration) {
 	if h == nil || age < 0 {
 		return
 	}
+	now := h.now().UTC()
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.statFor(m).OldestPending = age
+	st.bucketFor(loopDateOf(now), m).OldestPending = age
 }
 
-// loopNoteError counts a visible error for a mechanism.
+// loopNoteError counts a visible error for a mechanism in today's bucket.
 func (h *HubServer) loopNoteError(m loopMechanism) {
 	if h == nil {
 		return
 	}
+	now := h.now().UTC()
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.statFor(m).Errors++
+	st.bucketFor(loopDateOf(now), m).Errors++
 }
 
 // loopNoteSilentError counts a previously silent error path when its failure
@@ -212,13 +287,15 @@ func (h *HubServer) loopNoteSilentError(m loopMechanism, key string, err error) 
 	if h == nil {
 		return
 	}
+	now := h.now().UTC()
 	st := h.loopLedger()
 	st.mu.Lock()
 	streak := st.silentStreak[key]
 	if !streak {
 		st.silentStreak[key] = true
-		st.statFor(m).Errors++
-		st.statFor(m).SilentErrors++
+		b := st.bucketFor(loopDateOf(now), m)
+		b.Errors++
+		b.SilentErrors++
 	}
 	st.mu.Unlock()
 	if streak {
@@ -232,7 +309,7 @@ func (h *HubServer) loopNoteSilentError(m loopMechanism, key string, err error) 
 }
 
 // loopClearSilent retires one silent streak after a success, so the next
-// failure logs again.
+// failure counts and logs again.
 func (h *HubServer) loopClearSilent(key string) {
 	if h == nil {
 		return
@@ -243,24 +320,24 @@ func (h *HubServer) loopClearSilent(key string) {
 	delete(st.silentStreak, key)
 }
 
-// loopSnapshot copies the ledger for the row writer and the notice check.
+// loopSnapshot copies today's bucket for the row writer and the notice
+// check. Tests assert on it.
 func (h *HubServer) loopSnapshot() map[loopMechanism]loopStat {
+	now := h.now().UTC()
+	date := loopDateOf(now)
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	out := make(map[loopMechanism]loopStat, len(loopMechanisms))
 	for _, m := range loopMechanisms {
-		if s, ok := st.stats[m]; ok {
-			out[m] = *s
-		} else {
-			out[m] = loopStat{}
-		}
+		out[m] = st.bucketAt(date, m)
 	}
 	return out
 }
 
-// loopInterval is the mechanism's expected tick interval. Stale detection
-// compares now-last_tick against three intervals.
+// loopInterval is the mechanism's expected tick interval. A non-positive
+// interval means the loop is configured off; loopsStaleHits skips it.
+// Stale detection compares now-last_tick against three intervals.
 func (h *HubServer) loopInterval(m loopMechanism) time.Duration {
 	switch m {
 	case loopSpawnCoordinator:
@@ -284,6 +361,8 @@ func (h *HubServer) loopInterval(m loopMechanism) time.Duration {
 			return 0
 		}
 		return h.poolTriggerInterval
+	case loopPoolExhaustedSweep:
+		return 0
 	case loopPoolActions:
 		return poolActionInterval
 	case loopPlacementRecords:
@@ -330,13 +409,16 @@ type loopsRowDoc struct {
 	Rows    []loopsRowEntry `json:"rows"`
 }
 
-// loopsRowDocument builds the daily row at now. Every row carries its own
-// machine so hk 5117 can append per-node rows beside these.
-func (h *HubServer) loopsRowDocument(now time.Time) loopsRowDoc {
-	snap := h.loopSnapshot()
+// loopsRowDocument builds the row for date from that date's bucket. Every
+// row carries its own machine so hk 5117 can append per-node rows beside
+// these.
+func (h *HubServer) loopsRowDocument(date string, now time.Time) loopsRowDoc {
+	st := h.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	rows := make([]loopsRowEntry, 0, len(loopMechanisms))
 	for _, m := range loopMechanisms {
-		s := snap[m]
+		s := st.bucketAt(date, m)
 		last := ""
 		if !s.LastTick.IsZero() {
 			last = s.LastTick.UTC().Format(time.RFC3339)
@@ -389,73 +471,77 @@ func (h *HubServer) loopsRowState(ctx context.Context, key string) (exists, unkn
 	return false, true
 }
 
-// loopsRowRetryAfter bounds how often an unreadable row is re-read: the
-// synchronous hk GET must not hold the maintenance tick on every pass while
-// hk is unreachable.
+// loopsRowRetryAfter bounds how often an unwritten row is retried: neither
+// an unreadable row nor a failed write may hold the maintenance tick on
+// every pass while hk is unreachable.
 const loopsRowRetryAfter = time.Minute
 
-// maybeWriteLoopsRow writes exactly one daily row per UTC date. It is called
-// from the hub's slow sweeps; a failed write or an unreadable row counts in
-// the ledger (against fleet_status, the hub's other hk writer) and is
-// retried on the next sweep (an unreadable row at most once a minute).
-// Rolling into a new date also re-baselines the progress rule to the
-// cumulative counters, so the rule always runs on the current date's deltas.
+// maybeWriteLoopsRow writes one row per UTC date, each from that date's
+// bucket, at the first tick of the next date. It is called from the hub's
+// slow sweeps. A failed write or an unreadable row counts in the ledger
+// (against fleet_status, the hub's other hk writer) and backs off for a
+// minute before the next attempt.
 func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 	if h == nil {
 		return
 	}
 	now := h.now().UTC()
-	date := now.Format("2006-01-02")
+	today := loopDateOf(now)
 	st := h.loopLedger()
 	st.mu.Lock()
-	if st.rowDate == date {
-		st.mu.Unlock()
-		return
-	}
-	if st.progressDate != date {
-		st.progressDate = date
-		for m, s := range st.stats {
-			st.progressBase[m] = [2]int64{s.Made, s.Done}
+	var pending []string
+	for date := range st.days {
+		if date >= today {
+			continue
 		}
+		pending = append(pending, date)
 	}
-	if now.Before(st.rowRetryAfter) {
+	sort.Strings(pending)
+	if len(pending) == 0 || now.Before(st.rowRetryAfter) {
 		st.mu.Unlock()
 		return
 	}
 	st.mu.Unlock()
-	exists, unknown := h.loopsRowState(ctx, loopsRowKey(date))
-	if unknown {
-		h.loopNoteError(loopFleetStatus)
-		h.logger.Warn("hub loops row unreadable; retrying", "key", loopsRowKey(date))
+	for _, date := range pending {
+		exists, unknown := h.loopsRowState(ctx, loopsRowKey(date))
+		if unknown {
+			h.loopNoteError(loopFleetStatus)
+			h.logger.Warn("hub loops row unreadable; retrying", "key", loopsRowKey(date))
+			h.loopBackoffRowRetry(now)
+			return
+		}
+		if !exists {
+			body, err := json.Marshal(h.loopsRowDocument(date, now))
+			if err != nil {
+				h.loopNoteError(loopFleetStatus)
+				return
+			}
+			if err := h.loopsPublish(ctx, loopsRowKey(date), string(body)); err != nil {
+				h.loopNoteError(loopFleetStatus)
+				h.logger.Warn("hub loops row not written; retrying", "key", loopsRowKey(date), "error", err)
+				h.loopBackoffRowRetry(now)
+				return
+			}
+		}
 		st.mu.Lock()
-		st.rowRetryAfter = now.Add(loopsRowRetryAfter)
+		delete(st.days, date)
 		st.mu.Unlock()
-		return
 	}
-	if exists {
-		st.mu.Lock()
-		st.rowDate = date
-		st.mu.Unlock()
-		return
-	}
-	body, err := json.Marshal(h.loopsRowDocument(now))
-	if err != nil {
-		h.loopNoteError(loopFleetStatus)
-		return
-	}
-	if err := h.loopsPublish(ctx, loopsRowKey(date), string(body)); err != nil {
-		h.loopNoteError(loopFleetStatus)
-		h.logger.Warn("hub loops row not written; retrying", "key", loopsRowKey(date), "error", err)
-		return
-	}
+}
+
+// loopBackoffRowRetry holds the next row read and write until now plus one
+// minute, so an hk outage cannot hold the maintenance tick on every pass.
+func (h *HubServer) loopBackoffRowRetry(now time.Time) {
+	st := h.loopLedger()
 	st.mu.Lock()
-	st.rowDate = date
-	st.mu.Unlock()
+	defer st.mu.Unlock()
+	st.rowRetryAfter = now.Add(loopsRowRetryAfter)
 }
 
 // loopsStaleHits returns the mechanisms whose last_tick is older than three
 // intervals at now. A mechanism that never ticked is stale once the hub has
-// been up longer than three intervals.
+// been up longer than three intervals. A disabled interval (<= 0) is never
+// stale.
 func (h *HubServer) loopsStaleHits(now time.Time) []loopMechanism {
 	snap := h.loopSnapshot()
 	var hits []loopMechanism
@@ -479,26 +565,22 @@ func (h *HubServer) loopsStaleHits(now time.Time) []loopMechanism {
 	return hits
 }
 
-// loopsProgressHits returns mechanisms with made >= floor that finished
-// nothing or nearly nothing since the current UTC date began: done == 0, or
-// done/made < ratio. The window is the date's deltas off the cumulative
-// counters, so a long healthy history cannot mask a stall that started today.
+// loopsProgressHits returns the flow mechanisms whose current date counts
+// show made >= floor with nothing or nearly nothing finished: done == 0,
+// or done/made < ratio. Scan mechanisms have no item lifecycle and are
+// never judged by this rule.
 func (h *HubServer) loopsProgressHits() []loopMechanism {
-	st := h.loopLedger()
-	st.mu.Lock()
-	defer st.mu.Unlock()
+	snap := h.loopSnapshot()
 	var hits []loopMechanism
 	for _, m := range loopMechanisms {
-		s, ok := st.stats[m]
-		var made, done int64
-		if ok {
-			base := st.progressBase[m]
-			made, done = s.Made-base[0], s.Done-base[1]
-		}
-		if made < loopMadeFloor {
+		if loopKindOf(m) != loopKindFlow {
 			continue
 		}
-		if done == 0 || float64(done)/float64(made) < loopDoneRatio {
+		s := snap[m]
+		if s.Made < loopMadeFloor {
+			continue
+		}
+		if s.Done == 0 || float64(s.Done)/float64(s.Made) < loopDoneRatio {
 			hits = append(hits, m)
 		}
 	}
@@ -506,13 +588,17 @@ func (h *HubServer) loopsProgressHits() []loopMechanism {
 	return hits
 }
 
-// loopsSilentHits returns mechanisms with at least one previously silent
-// error counted.
+// loopsSilentHits returns the mechanisms with at least one previously
+// silent error counted today.
 func (h *HubServer) loopsSilentHits() []loopMechanism {
-	snap := h.loopSnapshot()
+	now := h.now().UTC()
+	date := loopDateOf(now)
+	st := h.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	var hits []loopMechanism
 	for _, m := range loopMechanisms {
-		if snap[m].SilentErrors >= 1 {
+		if st.bucketAt(date, m).SilentErrors >= 1 {
 			hits = append(hits, m)
 		}
 	}
@@ -556,13 +642,14 @@ func (h *HubServer) loopsNoticeLane() string {
 
 // maybeSendLoopsNotice sends one lane.event line per hit mechanism, at most
 // one notice per mechanism per day; several reasons for one mechanism share
-// its one line.
+// its one line. A failed persist is not marked sent, so the next sweep
+// retries it.
 func (h *HubServer) maybeSendLoopsNotice(ctx context.Context) {
 	if h == nil {
 		return
 	}
 	now := h.now().UTC()
-	date := now.Format("2006-01-02")
+	date := loopDateOf(now)
 	byMechanism := map[loopMechanism][]string{}
 	for _, hit := range h.loopNoticeHits(now) {
 		byMechanism[hit.Mechanism] = append(byMechanism[hit.Mechanism], hit.Reason)

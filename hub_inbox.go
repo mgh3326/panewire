@@ -635,7 +635,9 @@ func (h *HubServer) flushInbox() {
 		return
 	}
 	h.loopClearSilent("hub_inbox.go:pendingBatches")
-	h.loopAddMade(loopInbox, len(batches))
+	for _, b := range batches {
+		h.loopNoteMade(loopInbox, b.ID)
+	}
 	// A held batch that cannot be prepared (no document store, or the PUT keeps
 	// failing) stays retained and blocks only its own lane; other lanes flush.
 	blockedLanes := map[string]bool{}
@@ -713,7 +715,7 @@ func (h *HubServer) flushInbox() {
 				failed = true
 				return
 			}
-			h.loopAddDone(loopInbox, 1)
+			h.loopNoteDone(loopInbox, b.ID)
 			continue
 		}
 		if !result.PersistFailed {

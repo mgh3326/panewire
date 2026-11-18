@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -54,7 +55,7 @@ func (h *HubServer) reportPlacementDelivery(requestID, job string, attempt int, 
 		h.notePlacementStall(requestID, job, attempt, d.Reason)
 		return false
 	}
-	h.loopAddDone(loopPlacementRecords, 1)
+	h.loopNoteDone(loopPlacementRecords, requestID+"/"+strconv.Itoa(attempt))
 	h.clearPlacementStall(requestID, attempt)
 	switch {
 	case d.Quarantined:

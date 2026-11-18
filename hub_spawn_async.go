@@ -516,9 +516,9 @@ func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubS
 		for _, task := range tasks {
 			if !seen[task.Request.RequestID] {
 				seen[task.Request.RequestID] = true
-				h.loopAddMade(loopSpawnCoordinator, 1)
+				h.loopNoteMade(loopSpawnCoordinator, task.Request.RequestID)
 				if schedule(task) {
-					h.loopAddDone(loopSpawnCoordinator, 1)
+					h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 				}
 			}
 		}
@@ -543,9 +543,9 @@ func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubS
 				oldest = task.Created
 			}
 			if task.Status == "deadline_exceeded" {
-				h.loopAddMade(loopSpawnCoordinator, 1)
+				h.loopNoteMade(loopSpawnCoordinator, task.Request.RequestID)
 				if schedule(task) {
-					h.loopAddDone(loopSpawnCoordinator, 1)
+					h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 				}
 			}
 		}

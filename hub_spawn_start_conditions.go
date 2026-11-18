@@ -51,7 +51,9 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 	if len(requests) == 0 {
 		return
 	}
-	h.loopAddMade(loopSpawnCoordinator, len(requests))
+	for _, task := range requests {
+		h.loopNoteMade(loopSpawnCoordinator, task.Request.RequestID)
+	}
 	// Expiry needs no hk data: a waiting row is given up at its limit even
 	// while the condition read is failing.
 	conditions := make([][]fleet.StartCondition, 0, len(requests))
@@ -61,7 +63,7 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 			if _, err := h.inbox.store.giveUpWaitingSpawn(ctx, task, now); err != nil {
 				h.logger.Warn("hub spawn waiting expiry not recorded", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
 			} else {
-				h.loopAddDone(loopSpawnCoordinator, 1)
+				h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 			}
 			continue
 		}
@@ -86,7 +88,7 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 			if err != nil {
 				h.logger.Warn("hub spawn start condition not released", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
 			} else if changed {
-				h.loopAddDone(loopSpawnCoordinator, 1)
+				h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 			}
 			released = released || changed
 		case "waiting":
@@ -95,10 +97,10 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 			}
 		case "refused":
 			h.endWaitingSpawn(ctx, task, "refused", result.Reason, 78)
-			h.loopAddDone(loopSpawnCoordinator, 1)
+			h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 		case "cancelled":
 			h.endWaitingSpawn(ctx, task, "cancelled", result.Reason, 84)
-			h.loopAddDone(loopSpawnCoordinator, 1)
+			h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 		}
 	}
 	if released {
