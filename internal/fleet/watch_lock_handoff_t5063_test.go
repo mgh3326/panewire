@@ -13,10 +13,11 @@ import (
 // not private), the watcher continues to watch the job without lock-lending
 // or hub-close awareness rather than aborting.
 func TestWatcherRunsWhenLockLendingSocketFails_t5063(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "base")
-	if err := os.MkdirAll(base, 0o700); err != nil {
+	base, err := os.MkdirTemp("/tmp", "pw-sock-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	// Make the base dir non-private (0755) so watchLockSocketDir fails on long paths.
 	if err := os.Chmod(base, 0o755); err != nil {
 		t.Fatal(err)
@@ -53,10 +54,11 @@ func TestWatcherRunsWhenLockLendingSocketFails_t5063(t *testing.T) {
 
 // F3 (hk 5063): serveWatchLock cleans up its socket directory on stop.
 func TestServeWatchLockCleansUpSocketDir_t5063(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "base")
-	if err := os.MkdirAll(base, 0o700); err != nil {
+	base, err := os.MkdirTemp("/tmp", "pw-sock-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	prev := watchLockBaseDirHook
 	watchLockBaseDirHook = func() string { return base }
 	t.Cleanup(func() { watchLockBaseDirHook = prev })
@@ -116,10 +118,11 @@ func TestPrivateDirOwnerAndPrivacyGuards_t5063(t *testing.T) {
 	}
 
 	// M4c: watchLockSocketDir must fail when base dir is group/other accessible.
-	base := filepath.Join(t.TempDir(), "base")
-	if err := os.MkdirAll(base, 0o700); err != nil {
+	base, err := os.MkdirTemp("/tmp", "pw-sock-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	if err := os.Chmod(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -137,10 +140,11 @@ func TestPrivateDirOwnerAndPrivacyGuards_t5063(t *testing.T) {
 // must not spin on an open hub-close intent; it exits immediately so the node
 // can take the fence without stalling.
 func TestWatcherExitsOnOpenIntentWhenLendingDisabled_t5063(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "base")
-	if err := os.MkdirAll(base, 0o700); err != nil {
+	base, err := os.MkdirTemp("/tmp", "pw-sock-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	if err := os.Chmod(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
