@@ -177,8 +177,13 @@ decides with the §Implementer rule (the job's start, the task's priority and
      If the attempt remains unreadable or release cannot be proved for 30
      minutes, the hub sends the owner one notice naming the job, host, reason
      and row. The row stays pending and keeps the job fenced; the owner can
-     check the host and hand the job over by hand. Missing-job finality is
-     tracked in hk 5296.
+     check the host and hand the job over by hand. The one exception is a job
+     whose directory the node proves gone (hk 5296): a node that advertises
+     `close_missing_v1` fences the request with a durable tombstone and
+     answers `missing_epoch`, and the row then ends `handover_failed` (reason
+     `job_missing`) with the owner's notice and the fence released
+     ([node-commands.md](node-commands.md#close-operations), "A missing
+     job"). A node without it keeps the hold and the notice.
   4. **Submit.** Once the close is settled and the record reads `lost` with
      that reason, the stored successor is claimed with the same request id on
      every retry. A crash between the claim and saving that fact replays the

@@ -264,6 +264,49 @@ dropped when rechecked under that lock (see the stale-decision rule below).
 intent was cancelled. The operation journal remains unchanged. A cancelled
 intent alone does not prove that its pane or watcher has stopped writing hk.
 
+**A missing job** (hk 5296). The close journal lives in the job's directory,
+so a directory the job-dir TTL removed takes its release tombstone with it,
+and a bare "no such directory" answer is not proof: a delayed `pane.close_op`
+could meet a directory recreated for a later attempt under the same id, and an
+unmounted or unreadable jobs root looks the same. `pane.close_status` takes an
+optional `epoch` (the hub's ownership epoch of the action) and a node that
+advertises `close_missing_v1` (with `close_ops_v1`) answers a job whose
+directory is gone with `missing_epoch` set, only when it can prove the
+absence: the jobs root is a readable directory, no entry of that name exists
+(letter case included), and the job's identity record (`jobs/.job-ids/<id>`,
+which outlives the directory) names exactly that job, so the job was claimed
+on this node and its directory has since gone. Before it answers, the node
+writes a durable tombstone for the request, outside every job directory
+(`jobs/.close-missing/<request_id>.json`, mode 0600, fsynced), naming the job
+and the epoch. The answer is `{"state":"none","released":false,"settled":false,"attempt":"","missing_epoch":<epoch>}`;
+`missing_epoch` is the highest epoch recorded for the request and is never
+lowered.
+
+**Invariant.** From the moment `missing_epoch` is answered for a request, a
+`pane.close_op` under that `request_id` never acts: it answers `cancelled`,
+`replayed:true`, before any journal or herdr read, whether the directory is
+still missing or has been recreated for a later attempt (even with the same
+attempt token, pane and epoch), and across a node restart, since the tombstone
+is a file. Naming another job, or a later epoch than the tombstone's, under a
+fenced id is `invalid_args`. So a delayed close for that epoch can never act on
+a later job with the same id; a later job is closed only by a new request id
+the hub issues for its own epoch.
+
+**What the hub does with it.** The hub sends `epoch` only to a node that
+advertises `close_missing_v1`, and finishes a pool close or hand-over row from
+a missing-job answer only when the answer is plain `none` with no attempt and a
+`missing_epoch` no lower than the row's epoch. The row ends refused: the fence
+is released, the owner is told (a hand-over ends `handover_failed` with reason
+`job_missing`, by the finality rule I2 of [quota-stop.md](quota-stop.md); any
+other pool close sends one `pool-action-missing:<row>` info line), and nothing
+is closed. Everything else keeps today's behaviour: a node without the
+capability, a bare `none` (no proof), a proof below the row's epoch, an
+unreadable job ledger (the directory is there, so the node never answers it as
+missing) and an unreadable identity record or jobs root all leave the row
+pending, the job fenced, and the 30-minute owner notice (`pool-action-stuck:`).
+`supersede_close` rows are unchanged. `pane.close_release` takes no `epoch`
+and answers a missing job as before.
+
 **The hub's acknowledgement** (hk 5073). `pane.close_status` also takes
 `ack:true` (`{"request_id","job","ack":true}`; `pane.close_release` refuses
 it). The hub sends it only for an action it has already stored `guarded`, so
@@ -622,7 +665,8 @@ ends the old action without a notice and permits a later sweep of the new
 attempt. `intent_cancelled` stops the close action without a notice or role
 release but keeps its reassignment fence until hk is terminal or the node
 reports synced settlement. A mismatch or `not-a-job` stays pending until release
-provides a durable tombstone. `reassignJob` refuses while any action for the
+provides a durable tombstone, or, for a job whose directory is gone, until the
+node's missing-job answer (above) fences the request. `reassignJob` refuses while any action for the
 job remains pending or guarded; a configured store error fails closed. An
 inbox-less hub allows reassignment and logs that it cannot check close-action
 finality. Do not remove an inbox store with unresolved actions: disabling it
