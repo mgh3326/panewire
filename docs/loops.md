@@ -97,3 +97,79 @@ current date's bucket:
 Thresholds (`3`, `20`, `10%`) live in `hub_loop_ledger.go` (`loopStaleIntervals`,
 `loopMadeFloor`, `loopDoneRatio`). At most one notice per mechanism per day;
 several reasons for one mechanism share its one line.
+
+## Node mechanisms (hk 5117, track A2)
+
+Each node keeps the same discipline: flow or scan, one bucket per UTC date,
+ticks at the top of every pass, silent errors counted. The node sends its
+current-day bucket on the heartbeat, as the optional `loops` field
+(`node_loops` in `hub.features`): the heartbeat is a closed payload, so an
+older hub rejects an unknown field and the node sends the ledger only to a
+hub that advertised it. Which carrier was chosen: the heartbeat, because it
+already runs on a short cadence and already gates optional fields on hub
+features (`ended_panes` is the precedent).
+
+| Mechanism | Kind | Item (one per) | Entry edge (made) | Exit edge (done) |
+|---|---|---|---|---|
+| `task_pane_sweep` | scan | — | — | — |
+| `worktree_flow` | flow | worktree of an ended job (job id) | worktreePlan clears it for removal; the daily revisit attempts its removal | guarded removal takes it |
+| `quota_measure` | scan | — | — | — |
+| `job_dir_ttl` | scan | — | — | — |
+| `quota_pool_reconcile` | flow | stale quota record or orphan job (job) | first listing that day | orphan released |
+| `lane_reconcile` | scan | — | — | — |
+| `spawn_settle` | flow | executing spawn row (request id) | first listing that day | row settled |
+| `credit_rearm` | scan | — | — | — |
+| `hub_close_settle` | flow | job with an open hub-close intent (job) | pass lists it | close settled |
+
+`last_tick` is the node clock (`HubClient.nowUTC()`); no `time.Now()` inline.
+Every pass ticks at its top, including passes that find nothing to do.
+`spawn_settle` runs at node start and while rows remain, so it carries no
+interval and the stale rule skips it; `quota_measure` carries an interval
+only while `--state-publish` sets pools. The node clock skews against the
+hub's; the hub files each report under the date the report names.
+
+### Silent error paths (node)
+
+Every error path counts in the current date's bucket. The paths that were
+silent before this change also log, rate-limited to one line per failure
+streak per date, and count once per streak per date:
+
+- `hub_lane_reconcile.go`: the swallowed lane-list read (`lanes` stays nil);
+- `hub_spawn_settle.go`: the silent spawn-journal acquire failure;
+- `node_pane_close_op.go`: the silent pending-close listing read.
+
+### Merge into the daily row
+
+The hub files each node's bucket under the report's date and merges it into
+the same document, `ops/panewire-loops/<YYYY-MM-DD>`: hub rows first, then
+one row set per machine in machine-id order. A node that was disconnected
+for the whole day writes no row. One document per date still holds when node
+rows arrive late in the day: reports buffer in memory and merge at the
+midnight write, and an already written document is never rewritten.
+A node restart keeps the day's ticks, errors and silent errors across process
+epochs; made, done and oldest_pending restart with the process, as the hub's
+own ledger does on a hub restart.
+
+An older node sends heartbeats with no `loops` field. Its row reads
+`mechanism: "unknown"`, with no ticks and no counts — never zeros, which
+would clear a live machine to idle — and the hub raises no notice for it.
+
+### Notice (per machine)
+
+The hub applies the same three rules to every machine's rows, through the
+same `--loops-notice-lane`, one line per machine and mechanism:
+`loop <mechanism>: <reasons> (machine <id>, day <date>)`. A fresh node gets
+the same grace a fresh hub gets: a never-ticked loop is stale only once the
+node has been seen longer than three intervals. A known machine with no
+heartbeat at all on a closed date gets one `no_report` line when that date's
+row is written, and no row.
+
+### Daily kept-worktree revisit
+
+Once a day the node runs the `node sweep-checkouts` logic itself (hk 5091)
+over the worktrees the sweep tail kept, through the same guarded removal —
+including the in-use guard — and never touches a worktree in use. The revisit
+holds `nodeCommandMu`, so its git mutations never interleave with a pane
+close. A checkout kept for a live user leaves on its own and never enters the
+flow; every other judged checkout does, out when the guarded removal takes
+it. The manual command stays.

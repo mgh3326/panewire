@@ -209,8 +209,18 @@ type HubClient struct {
 	// zero leaves the sweep off, as in every fixture.
 	taskPaneSweepInterval time.Duration
 	taskPaneSweepGrace    time.Duration
-	taskPaneSweepTicks    <-chan time.Time      // fixture seam; nil uses a ticker.
-	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
+	// Node loop ledger (node_loop_ledger.go, docs/loops.md): one in-memory
+	// ledger per node process. Guarded by nodeLoopsMu, never by
+	// nodeCommandMu, so a ledger call inside a sweep that holds the command
+	// lock cannot deadlock it.
+	nodeLoopsMu sync.Mutex
+	nodeLoops   *nodeLoopLedgerState
+	// Checkout revisit loop (node_checkout_sweep.go): daily, over the
+	// worktrees the sweep tail kept.
+	checkoutRevisitTicks <-chan time.Time      // fixture seam; nil uses a ticker.
+	checkoutRevisitPass  func(context.Context) // fixture seam; nil runs the real pass.
+	taskPaneSweepTicks   <-chan time.Time      // fixture seam; nil uses a ticker.
+	taskPaneSweepPass    func(context.Context) // fixture seam; nil runs the real pass.
 	// Job dir TTL loop (node_pane_sweep.go): hourly and independent of the
 	// pane sweep interval, so a node without a sweep still expires dirs.
 	jobDirTTLTicks     <-chan time.Time      // fixture seam; nil uses a ticker.
@@ -550,6 +560,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	go client.runLaneReconcile(ctx)
 	go client.runTaskPaneSweep(ctx)
 	go client.runJobDirTTL(ctx)
+	go client.runCheckoutRevisit(ctx)
 	go client.runQuotaPoolReconcile(ctx)
 	go client.runHubCloseSettle(ctx)
 	if client.statePublish {
@@ -596,25 +607,32 @@ func (client *HubClient) Run(ctx context.Context) {
 	}
 }
 
+// creditRearmInterval paces the credit publication re-arm pass: the retry
+// loop (runCreditRejectionRecovery) and the node ledger's credit_rearm stale
+// rule share it.
+const creditRearmInterval = 5 * time.Minute
+
 // A failed shared-store write is retained in the job ledger. Retry bounded
 // watcher runs independently of the pane and the fleet-state publisher.
 func (client *HubClient) runCreditRejectionRecovery(ctx context.Context) {
 	if client.jobsInboxRoot == "" {
 		return
 	}
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(creditRearmInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			client.nodeLoopTick(nodeCreditRearm)
 			config, _, err := client.resolveHubSpawnConfig()
 			if err == nil {
 				err = fleet.RearmPendingCreditWatchers(filepath.Join(client.jobsInboxRoot, "jobs"), config.HERDRSession, client.rearmStart, func(id string) { slog.Info("credit publication re-armed", "job", id) })
 			}
 			if err != nil {
 				slog.Warn("credit publication re-arm failed", "error", err)
+				client.nodeLoopNoteError(nodeCreditRearm)
 			}
 		}
 	}
@@ -720,8 +738,11 @@ type hubClientConnection struct {
 	// acceptsCheckoutBranch is the same for hubFeatureCheckoutBranch
 	// (checkout_branch.go): the spawn result may carry checkout_mode "branch".
 	acceptsCheckoutBranch atomic.Bool
-	connection            *websocket.Conn
-	writeMu               hubWriteMutex
+	// acceptsNodeLoops is the same for hubFeatureNodeLoops
+	// (node_loop_ledger.go): the heartbeat may carry the node's loop ledger.
+	acceptsNodeLoops atomic.Bool
+	connection       *websocket.Conn
+	writeMu          hubWriteMutex
 	// closed is closed when the session on this connection ends; a nil
 	// channel (a test peer) never ends.
 	closed chan struct{}
@@ -2223,6 +2244,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				peer.acceptsCheckoutSparse.Store(slices.Contains(message.Features, hubFeatureCheckoutSparse))
 				peer.acceptsCheckoutBranch.Store(slices.Contains(message.Features, hubFeatureCheckoutBranch))
+				peer.acceptsNodeLoops.Store(slices.Contains(message.Features, hubFeatureNodeLoops))
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
@@ -2618,6 +2640,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	}
 	if open := client.endedPanesForHeartbeat(); open != nil {
 		heartbeat.EndedPanes = open
+	}
+	if loops := client.nodeLoopsForPeer(); loops != nil {
+		heartbeat.Loops = loops
 	}
 	collectLoad := client.hostLoadCollector
 	if collectLoad == nil {
