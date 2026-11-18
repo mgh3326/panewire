@@ -61,39 +61,62 @@ func Assign(jobs, id string, epoch uint64) error {
 	})
 }
 
-// Revoke appends the same local revocation record as a hub job.revoked frame.
+// Revoke appends a hub revocation unless a later local grant superseded it.
 func Revoke(jobs, id string, epoch uint64) error {
 	if epoch == 0 {
 		return errors.New("invalid job revocation")
 	}
 	return withLock(jobs, id, func(dir string) error {
-		events := filepath.Join(dir, "events")
-		if err := os.MkdirAll(events, 0700); err != nil {
+		current, err := Epoch(jobs, id)
+		if err != nil || current >= epoch {
 			return err
 		}
-		entries, err := os.ReadDir(events)
-		if err != nil {
-			return err
-		}
-		var highest uint64
-		for _, entry := range entries {
-			prefix, _, found := strings.Cut(entry.Name(), "-")
-			seq, err := strconv.ParseUint(prefix, 10, 64)
-			if found && err == nil && seq > highest {
-				highest = seq
-			}
-		}
-		body, err := json.Marshal(struct {
-			Type  string `json:"type"`
-			JobID string `json:"job_id"`
-			Epoch uint64 `json:"epoch"`
-		}{"job.revoked", id, epoch})
-		if err != nil {
-			return err
-		}
-		path := filepath.Join(events, fmt.Sprintf("%05d-job.revoked.json", highest+1))
-		return durable.ReplaceFileAtomically(path, ".revocation-*", body, 0600)
+		return appendRevocation(dir, id, epoch)
 	})
+}
+
+// RevokeIfEpoch only revokes the grant that made the refused write. Assignment
+// and revocation share this lock, so an old response cannot revoke a new grant.
+func RevokeIfEpoch(jobs, id string, writerEpoch, revocationEpoch uint64) error {
+	if writerEpoch == 0 || revocationEpoch == 0 {
+		return errors.New("invalid job revocation")
+	}
+	return withLock(jobs, id, func(dir string) error {
+		current, err := Epoch(jobs, id)
+		if err != nil || current != writerEpoch {
+			return err
+		}
+		return appendRevocation(dir, id, revocationEpoch)
+	})
+}
+
+func appendRevocation(dir, id string, epoch uint64) error {
+	events := filepath.Join(dir, "events")
+	if err := os.MkdirAll(events, 0700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(events)
+	if err != nil {
+		return err
+	}
+	var highest uint64
+	for _, entry := range entries {
+		prefix, _, found := strings.Cut(entry.Name(), "-")
+		seq, err := strconv.ParseUint(prefix, 10, 64)
+		if found && err == nil && seq > highest {
+			highest = seq
+		}
+	}
+	body, err := json.Marshal(struct {
+		Type  string `json:"type"`
+		JobID string `json:"job_id"`
+		Epoch uint64 `json:"epoch"`
+	}{"job.revoked", id, epoch})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(events, fmt.Sprintf("%05d-job.revoked.json", highest+1))
+	return durable.ReplaceFileAtomically(path, ".revocation-*", body, 0600)
 }
 
 func withLock(jobs, id string, fn func(string) error) error {

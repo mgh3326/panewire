@@ -22,6 +22,10 @@ func hkJobUpdateContract(t *testing.T) (*hkJobs, func() []string) {
 	var mu sync.Mutex
 	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/") {
+			_, _ = w.Write([]byte(`{"state":"spawned"}`))
+			return
+		}
 		raw, _ := io.ReadAll(r.Body)
 		if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/v1/jobs/") {
 			w.WriteHeader(http.StatusNotFound)

@@ -15,8 +15,33 @@ import (
 func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, epoch uint64) error {
 	old := fleet.JobOwner{Node: from, Epoch: epoch}
 	next := fleet.JobOwner{Node: to, Epoch: epoch + 1}
-	var supported bool
-	var err error
+	current, supported, exists, err := h.readJobOwner(ctx, id)
+	if err != nil {
+		return fmt.Errorf("job %s cannot be reassigned: %w", id, err)
+	}
+	if !exists {
+		return fmt.Errorf("job %s cannot be reassigned: job not_found", id)
+	}
+	if !supported {
+		h.noteJobFenceSupport(false)
+		return nil
+	}
+	intent := hubOwnerTransfer{Job: id, From: from, To: to, Epoch: epoch}
+	known, err := h.hasOwnerTransfer(intent)
+	if err != nil {
+		return fmt.Errorf("job %s cannot be reassigned: %w", id, err)
+	}
+	if known && current == next {
+		h.noteJobFenceSupport(true)
+		return nil
+	}
+	if current == old || (current == (fleet.JobOwner{}) && epoch == 1) {
+		if !known {
+			if err := h.saveOwnerTransfer(intent); err != nil {
+				return fmt.Errorf("job %s cannot be reassigned: transfer journal unavailable", id)
+			}
+		}
+	}
 	switch {
 	case h.spawnNewApp != nil || h.handoffkeep == nil:
 		var app *fleet.App
@@ -33,6 +58,10 @@ func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, e
 		}
 	}
 	if err != nil {
+		var backend *fleet.BackendError
+		if fleet.IsJobOwnerMismatch(err) || (errors.As(err, &backend) && backend.Code == "job_state_conflict") {
+			_ = h.removeOwnerTransfer(intent)
+		}
 		return fmt.Errorf("job %s cannot be reassigned: %w", id, err)
 	}
 	h.noteJobFenceSupport(supported)
@@ -63,7 +92,7 @@ func poolActionOwnerMoved(action poolAction, record map[string]any) (bool, error
 // firstSeenJobOwned admits a restarted hub's first observation only when hk
 // confirms the owner. Older servers and absent job records retain epoch-1
 // registration; a supporting server's stored grant is authoritative.
-func (h *HubServer) firstSeenJobOwned(ctx context.Context, id, node string, epoch uint64) bool {
+func (h *HubServer) readJobOwner(ctx context.Context, id string) (fleet.JobOwner, bool, bool, error) {
 	var record map[string]any
 	var exists bool
 	var err error
@@ -88,19 +117,23 @@ func (h *HubServer) firstSeenJobOwned(ctx context.Context, id, node string, epoc
 		}
 	}
 	if err != nil {
-		// A hub with no explicit hk client historically tracked epoch-1
-		// jobs even without the optional default credential. Reassignment
-		// still fails closed unless the owner record can be read.
-		return h.spawnNewApp == nil && h.handoffkeep == nil && epoch == 1
+		return fleet.JobOwner{}, false, false, err
 	}
 	if !exists {
-		return epoch == 1
+		return fleet.JobOwner{}, false, false, nil
 	}
 	owner, supported, err := fleet.JobOwnerFromRecord(record)
+	return owner, supported, true, err
+}
+
+func (h *HubServer) firstSeenJobOwned(ctx context.Context, id, node string, epoch uint64) bool {
+	owner, supported, exists, err := h.readJobOwner(ctx, id)
 	if err != nil {
-		return false
+		// Without an explicit hk client the historical epoch-1 fallback is
+		// retained; reassignment itself still requires the owner record.
+		return h.spawnNewApp == nil && h.handoffkeep == nil && epoch == 1
 	}
-	if !supported || owner.Node == "" {
+	if !exists || !supported || owner.Node == "" {
 		return epoch == 1
 	}
 	return owner.Node == node && owner.Epoch == epoch

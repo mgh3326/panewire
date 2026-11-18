@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/jobowner"
 )
@@ -168,9 +169,12 @@ func PutOwnedJob(ctx context.Context, store JobStore, jobs, node, id string, fie
 		update[key] = value
 	}
 	expected := JobOwner{Node: node, Epoch: epoch}
-	// Landing establishes the initial fence with spawned. A pre-landing
-	// abort also claims the unfenced record in its conditional lost update.
-	if current == (JobOwner{}) && str(record, "state") == "claimed" && epoch == 1 {
+	// A job may have landed before hk acquired fencing. Adopt an unfenced
+	// non-terminal record in the same conditional write as its first update.
+	if current == (JobOwner{}) {
+		if state := str(record, "state"); state != "claimed" && state != "spawned" {
+			return errors.New("job owner unavailable for terminal record")
+		}
 		update["owner"] = expected
 		update["expected_owner"] = JobOwner{}
 	} else {
@@ -179,18 +183,14 @@ func PutOwnedJob(ctx context.Context, store JobStore, jobs, node, id string, fie
 	err = store.Put(ctx, id, update)
 	if IsJobOwnerMismatch(err) {
 		var backend *BackendError
-		if errors.As(err, &backend) {
-			// This in-flight operation may predate a later grant back to the
-			// same node. Do not revoke that newly authorized attempt.
-			if latest, readErr := jobowner.Epoch(jobs, id); readErr == nil && latest > epoch && backend.OwnerNode == node && backend.OwnerEpoch == latest {
-				return err
-			}
+		if errors.As(err, &backend) && backend.OwnerNode == "" && backend.OwnerEpoch == 0 {
+			return errors.New("job owner unavailable")
 		}
 		revocationEpoch := epoch + 1
 		if backend != nil && backend.OwnerEpoch > revocationEpoch {
 			revocationEpoch = backend.OwnerEpoch
 		}
-		if markerErr := jobowner.Revoke(jobs, id, revocationEpoch); markerErr != nil {
+		if markerErr := jobowner.RevokeIfEpoch(jobs, id, epoch, revocationEpoch); markerErr != nil {
 			return errors.Join(errJobReassigned, fmt.Errorf("local revocation unavailable: %w", markerErr))
 		}
 	}
@@ -204,24 +204,41 @@ func TransferJobOwner(ctx context.Context, store JobStore, id string, from, to J
 	if err != nil {
 		return false, err
 	}
-	_, supported, err := JobOwnerFromRecord(record)
+	current, supported, err := JobOwnerFromRecord(record)
 	if err != nil || !supported {
 		return supported, err
 	}
-	err = store.Put(ctx, id, map[string]any{"expected_owner": from, "owner": to})
+	expected := from
+	if current == (JobOwner{}) && from.Epoch == 1 {
+		expected = JobOwner{}
+	}
+	err = store.Put(ctx, id, map[string]any{"expected_owner": expected, "owner": to})
+	var backend *BackendError
+	ambiguous := !errors.As(err, &backend) || backend.Status >= http.StatusInternalServerError
+	if err != nil && ambiguous && current == expected {
+		// The request may have committed even if its reply or deadline was
+		// lost. Give the confirming read its own bounded context.
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		confirmed, readErr := store.Get(checkCtx, id)
+		cancel()
+		if readErr == nil {
+			owner, available, ownerErr := JobOwnerFromRecord(confirmed)
+			if ownerErr == nil && available && owner == to {
+				return true, nil
+			}
+		}
+	}
 	if IsJobOwnerMismatch(err) {
-		var backend *BackendError
 		if errors.As(err, &backend) {
 			node := backend.OwnerNode
 			if node != "" && !nodeIDRE.MatchString(node) {
 				node = "unknown"
 			}
-			return true, fmt.Errorf("job_owner_mismatch: current owner %s epoch %d", node, backend.OwnerEpoch)
+			return true, fmt.Errorf("job_owner_mismatch: current owner %s epoch %d: %w", node, backend.OwnerEpoch, err)
 		}
 	}
-	var backend *BackendError
 	if errors.As(err, &backend) && backend.Code == "job_state_conflict" {
-		return true, fmt.Errorf("job_state_conflict: terminal record refuses ownership transfer")
+		return true, fmt.Errorf("job_state_conflict: terminal record refuses ownership transfer: %w", err)
 	}
 	return true, err
 }

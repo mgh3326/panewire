@@ -85,6 +85,7 @@ func ownerFenceHub(t *testing.T, hk *ownerFenceHK) (*HubServer, *hubAgent) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = hub.Close() })
+	hub.ownerTransferDir = t.TempDir()
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		return &fleet.App{JobStore: hk, Out: out, Err: errout}, nil
 	}
@@ -127,6 +128,153 @@ func TestJobOwnerFenceTransferRejectsOldNode_t5067(t *testing.T) {
 	}
 	if len(hk.updates) != 2 {
 		t.Fatalf("updates=%v, want one transfer and one rejected write", hk.updates)
+	}
+}
+
+func TestJobOwnerFenceTransfersUnfencedOrphan_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "", "owner_epoch": float64(0)}}
+	hub, agent := ownerFenceHub(t, hk)
+	result, err := hub.reassignJob("fenced-job", "machine-b")
+	if err != nil || result.Epoch != 2 || len(agent.assignments) != 1 {
+		t.Fatalf("unfenced reassignment=%+v err=%v assignments=%d", result, err, len(agent.assignments))
+	}
+	if hk.record["owner_node"] != "machine-b" || hk.record["owner_epoch"] != float64(2) {
+		t.Fatalf("owner after transfer=%v", hk.record)
+	}
+}
+
+type committedTransferLostAnswer struct {
+	*ownerFenceHK
+	lost bool
+}
+
+func (s *committedTransferLostAnswer) Put(ctx context.Context, id string, fields map[string]any) error {
+	err := s.ownerFenceHK.Put(ctx, id, fields)
+	if err == nil && fields["owner"] != nil && !s.lost {
+		s.lost = true
+		return errors.New("transfer response lost")
+	}
+	return err
+}
+
+func TestJobOwnerFenceRecoversLostTransferAnswer_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "machine-a", "owner_epoch": float64(1)}}
+	hub, agent := ownerFenceHub(t, hk)
+	store := &committedTransferLostAnswer{ownerFenceHK: hk}
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: store, Out: out, Err: errout}, nil
+	}
+	result, err := hub.reassignJob("fenced-job", "machine-b")
+	if err != nil || result.Epoch != 2 || len(agent.assignments) != 1 {
+		t.Fatalf("committed transfer not recovered: result=%+v err=%v assignments=%d", result, err, len(agent.assignments))
+	}
+}
+
+type transferAnswerAndReadLost struct {
+	*committedTransferLostAnswer
+	unavailable bool
+}
+
+func (s *transferAnswerAndReadLost) Get(ctx context.Context, id string) (map[string]any, error) {
+	if s.unavailable {
+		return nil, errors.New("confirmation unavailable")
+	}
+	return s.ownerFenceHK.Get(ctx, id)
+}
+
+func (s *transferAnswerAndReadLost) Put(ctx context.Context, id string, fields map[string]any) error {
+	err := s.committedTransferLostAnswer.Put(ctx, id, fields)
+	if err != nil {
+		s.unavailable = true
+	}
+	return err
+}
+
+func TestJobOwnerFenceRetriesUnconfirmedTransfer_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "machine-a", "owner_epoch": float64(1)}}
+	hub, agent := ownerFenceHub(t, hk)
+	store := &transferAnswerAndReadLost{committedTransferLostAnswer: &committedTransferLostAnswer{ownerFenceHK: hk}}
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: store, Out: out, Err: errout}, nil
+	}
+	if _, err := hub.reassignJob("fenced-job", "machine-b"); err == nil {
+		t.Fatal("transfer with unavailable confirmation should report an error")
+	}
+	store.unavailable = false
+	result, err := hub.reassignJob("fenced-job", "machine-b")
+	if err != nil || result.Epoch != 2 || len(agent.assignments) != 1 {
+		t.Fatalf("retry did not recover committed transfer: result=%+v err=%v assignments=%d", result, err, len(agent.assignments))
+	}
+}
+
+func TestJobOwnerFenceRedeliversAfterHubRestart_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "machine-a", "owner_epoch": float64(1)}}
+	hub, agent := ownerFenceHub(t, hk)
+	if _, err := hub.reassignJob("fenced-job", "machine-b"); err != nil {
+		t.Fatal(err)
+	}
+	<-agent.assignments // The hub can stop before the node receives this frame.
+	journal := hub.ownerTransferDir
+	if err := hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, newAgent := ownerFenceHub(t, hk)
+	restarted.ownerTransferDir = journal
+	restarted.mu.Lock()
+	delete(restarted.jobs, "fenced-job")
+	restarted.mu.Unlock()
+	restarted.sendHeartbeatDirectives("machine-b", newAgent)
+	select {
+	case assignment := <-newAgent.assignments:
+		if assignment.JobID != "fenced-job" || assignment.Epoch != 2 {
+			t.Fatalf("recovered assignment=%+v", assignment)
+		}
+	default:
+		t.Fatal("hub restart lost the successor assignment")
+	}
+}
+
+func TestJobOwnerFenceDoesNotRedeliverUncommittedTransfer_t5067(t *testing.T) {
+	for _, owner := range []struct {
+		node    string
+		epoch   float64
+		retains bool
+	}{{"machine-a", 1, true}, {"machine-c", 3, false}} {
+		t.Run(owner.node, func(t *testing.T) {
+			hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": owner.node, "owner_epoch": owner.epoch}}
+			hub, agent := ownerFenceHub(t, hk)
+			if err := hub.saveOwnerTransfer(hubOwnerTransfer{Job: "fenced-job", From: "machine-a", To: "machine-b", Epoch: 1}); err != nil {
+				t.Fatal(err)
+			}
+			delete(hub.jobs, "fenced-job")
+			hub.sendHeartbeatDirectives("machine-b", agent)
+			if len(agent.assignments) != 0 || hub.jobs["fenced-job"] != nil {
+				t.Fatalf("journal without matching hk owner granted a job: %+v", hub.jobs["fenced-job"])
+			}
+			found, err := hub.hasOwnerTransfer(hubOwnerTransfer{Job: "fenced-job", From: "machine-a", To: "machine-b", Epoch: 1})
+			if err != nil || found != owner.retains {
+				t.Fatalf("journal retained=%v err=%v, want %v", found, err, owner.retains)
+			}
+		})
+	}
+}
+
+func TestJobOwnerFenceClearsTransferAfterGrantHeartbeat_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "machine-a", "owner_epoch": float64(1)}}
+	hub, agent := ownerFenceHub(t, hk)
+	if _, err := hub.reassignJob("fenced-job", "machine-b"); err != nil {
+		t.Fatal(err)
+	}
+	intent := hubOwnerTransfer{Job: "fenced-job", From: "machine-a", To: "machine-b", Epoch: 1}
+	if found, err := hub.hasOwnerTransfer(intent); err != nil || !found {
+		t.Fatalf("pending transfer journal found=%v err=%v", found, err)
+	}
+	hub.mu.Lock()
+	hub.nodes["machine-b"].activeJobs = map[string]HubActiveJob{"fenced-job": {JobID: "fenced-job", Epoch: 2}}
+	hub.mu.Unlock()
+	hub.sendHeartbeatDirectives("machine-b", agent)
+	if found, err := hub.hasOwnerTransfer(intent); err != nil || found {
+		t.Fatalf("acknowledged transfer journal found=%v err=%v", found, err)
 	}
 }
 
@@ -290,6 +438,33 @@ func TestJobOwnerFenceRestartRecognizesOnlyStoredOwner_t5067(t *testing.T) {
 	hub.observeActiveJobs("machine-b", []HubActiveJob{newOwner}, hub.now())
 	if job := hub.jobs["fenced-job"]; job == nil || job.Node != "machine-b" || job.Epoch != 2 {
 		t.Fatalf("stored owner not restored after restart: %+v", job)
+	}
+}
+
+// An old epoch-1 heartbeat cannot become authoritative while hk is down:
+// doing so would make the real epoch-2 owner's next heartbeat look stale.
+func TestJobOwnerFenceRestartWaitsForOwnerRead_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "machine-b", "owner_epoch": float64(2)}}
+	hub, _ := ownerFenceHub(t, hk)
+	hub.mu.Lock()
+	delete(hub.jobs, "fenced-job")
+	hub.nodes["machine-a"] = &hubNodeRecord{}
+	hub.mu.Unlock()
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: unavailableOwnerStore{hk}, Out: out, Err: errout}, nil
+	}
+	old := HubActiveJob{JobID: "fenced-job", AgentLabel: "worker-a", Epoch: 1}
+	hub.observeActiveJobs("machine-a", []HubActiveJob{old}, hub.now())
+	if hub.jobs["fenced-job"] != nil {
+		t.Fatal("unreadable hk let an old owner claim the job")
+	}
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: hk, Out: out, Err: errout}, nil
+	}
+	current := HubActiveJob{JobID: "fenced-job", AgentLabel: "worker-b", Epoch: 2}
+	hub.observeActiveJobs("machine-b", []HubActiveJob{current}, hub.now())
+	if job := hub.jobs["fenced-job"]; job == nil || job.Node != "machine-b" || job.Epoch != 2 {
+		t.Fatalf("stored owner was not admitted after hk recovered: %+v", job)
 	}
 }
 

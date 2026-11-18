@@ -641,18 +641,28 @@ completion, escalation, usage, model, quota-stop, sweep, reap, and report-pin wr
 condition their updates on that local grant. The node persists later hub
 assignments, so a restarted node keeps the issued epoch. Each operation keeps
 the grant it started with, even if the job is later assigned back to the same
-node at a newer epoch. Before delivering a reassignment, the hub atomically transfers the hk owner with the old owner as
-`expected_owner`; a stale transfer is refused and names the current owner.
-A node that receives `409 job_owner_mismatch` records the same local revocation
-as a hub notice: it makes no further job-record writes for that attempt and the
-existing pane sweep closes the local pane. The hub checks the durable hk owner
-before finishing an old pool action, including after restart.
+node at a newer epoch. Before delivering a reassignment, the hub atomically
+transfers the hk owner with the old owner as `expected_owner`; a stale transfer
+is refused and names the current owner.
+A node whose current grant receives `409 job_owner_mismatch` records the same
+local revocation as a hub notice: it makes no further job-record writes for that
+attempt and the existing pane sweep closes the local pane. A delayed refusal or
+hub revocation cannot revoke a newer local grant. The hub checks the durable hk
+owner before finishing an old pool action, including after restart.
 
 An older hk omits both owner fields from a job read. Panewire sends no fence
 fields to that server and logs once per streak while retaining legacy behavior.
+When hk gains fence support, the first write adopts an unfenced, non-terminal
+job with a conditional empty-owner update. Reassignment of an unfenced
+epoch-1 job also conditions its transfer on the empty owner.
 If the hub cannot read the job record, it refuses reassignment until it can
-establish whether fencing is supported. If hk rejects a terminal ownership transfer with `job_state_conflict`, the hub
-refuses the reassignment and names the reason; it does not bypass the fence.
+establish whether fencing is supported. If hk rejects a terminal ownership
+transfer with `job_state_conflict`, the hub refuses the reassignment and names
+the reason; it does not bypass the fence.
+Before a fenced transfer, the hub stores an intent under its panewire state
+directory. Keep that directory across hub restarts: the successor's heartbeat
+redelivers the assignment only after hk confirms its node and epoch. Once the
+node reports the granted epoch, the intent is removed.
 
 Rollout order: deploy the hub with this guard, upgrade the node binaries,
 run `panewire node close-ops enable` on each node, then run

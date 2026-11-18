@@ -7,6 +7,7 @@ func (h *HubServer) sendHeartbeatDirectives(machineID string, agent *hubAgent) {
 	if agent == nil {
 		return
 	}
+	h.recoverOwnerTransfers(machineID)
 	h.mu.Lock()
 	assignments := make([]hubJobAssignedEvent, 0)
 	for _, job := range h.jobs {

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -135,6 +137,83 @@ func TestJobOwnerFenceClaimAndLanding_t5067(t *testing.T) {
 	record := store.record(t, "j")
 	if record["state"] != "spawned" || record["owner_node"] != "test-host" || record["owner_epoch"] != float64(1) {
 		t.Fatalf("landed record=%v, want spawned owned by test-host epoch 1", record)
+	}
+}
+
+// A job can already be running when an older hk is upgraded to the fence API.
+func TestJobOwnerFenceAdoptsRunningLegacyJob_t5067(t *testing.T) {
+	for _, epoch := range []uint64{1, 3} {
+		t.Run(strconv.FormatUint(epoch, 10), func(t *testing.T) {
+			jobs := filepath.Join(t.TempDir(), "jobs")
+			base := newFakeJobStore()
+			if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
+				t.Fatal(err)
+			}
+			base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "", float64(0)
+			if epoch > 1 {
+				if err := jobowner.Assign(jobs, "j", epoch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store := &fenceJobStore{fakeJobStore: base}
+			if err := PutOwnedJob(t.Context(), store, jobs, "test-host", "j", map[string]any{"model": "continued"}, nil); err != nil {
+				t.Fatalf("running job was not adopted: %v", err)
+			}
+			if record := base.record(t, "j"); record["owner_node"] != "test-host" || record["owner_epoch"] != float64(epoch) || record["model"] != "continued" {
+				t.Fatalf("record=%v, want adopted owner and update", record)
+			}
+		})
+	}
+}
+
+func TestJobOwnerFenceTransferRefusesDifferentOwner_t5067(t *testing.T) {
+	base := newFakeJobStore()
+	if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
+		t.Fatal(err)
+	}
+	base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "machine-c", float64(1)
+	store := &fenceJobStore{fakeJobStore: base}
+	supported, err := TransferJobOwner(t.Context(), store, "j", JobOwner{Node: "machine-a", Epoch: 1}, JobOwner{Node: "machine-b", Epoch: 2})
+	if !supported || err == nil || !strings.Contains(err.Error(), "machine-c epoch 1") {
+		t.Fatalf("stale transfer supported=%v err=%v, want current owner machine-c epoch 1", supported, err)
+	}
+	if record := base.record(t, "j"); record["owner_node"] != "machine-c" || record["owner_epoch"] != float64(1) {
+		t.Fatalf("stale transfer changed current owner: %v", record)
+	}
+}
+
+type mismatchThenRegrant struct {
+	*fenceJobStore
+	jobs string
+}
+
+func (s mismatchThenRegrant) Put(ctx context.Context, id string, fields map[string]any) error {
+	err := s.fenceJobStore.Put(ctx, id, fields)
+	if IsJobOwnerMismatch(err) {
+		if grantErr := jobowner.Assign(s.jobs, id, 3); grantErr != nil {
+			return grantErr
+		}
+		s.mu.Lock()
+		s.records[id]["owner_node"], s.records[id]["owner_epoch"] = "test-host", float64(3)
+		s.mu.Unlock()
+	}
+	return err
+}
+
+// The response still describes B/2 even though A has already been granted 3.
+func TestJobOwnerFenceDelayedMismatchDoesNotRevokeNewGrant_t5067(t *testing.T) {
+	a := testApp(t)
+	base := a.JobStore.(*fakeJobStore)
+	if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
+		t.Fatal(err)
+	}
+	base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "machine-b", float64(2)
+	store := mismatchThenRegrant{fenceJobStore: &fenceJobStore{fakeJobStore: base}, jobs: a.Jobs}
+	if err := PutOwnedJob(t.Context(), store, a.Jobs, "test-host", "j", map[string]any{"model": "old"}, nil); !IsJobOwnerMismatch(err) {
+		t.Fatalf("old write error=%v, want owner mismatch", err)
+	}
+	if err := PutOwnedJob(t.Context(), store.fenceJobStore, a.Jobs, "test-host", "j", map[string]any{"model": "new"}, nil); err != nil {
+		t.Fatalf("delayed mismatch revoked the new grant: %v", err)
 	}
 }
 

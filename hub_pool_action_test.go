@@ -211,6 +211,7 @@ func TestPoolActionReassignWithoutStoreWarnsOnce(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	logs := captureHubLog(h)
+	useLegacyOwnerStore(h)
 	for _, id := range []string{"job-a", "job-b"} {
 		h.jobs[id] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: id, Epoch: 1}, Node: "machine-a", Orphaned: true}
 		if _, err := h.reassignJob(id, "machine-b"); err != nil {
