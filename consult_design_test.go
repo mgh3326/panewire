@@ -129,7 +129,14 @@ func TestConsultLocalDaemonForwardsAndRefusesJob(t *testing.T) {
 		}}
 	daemon := NewDaemon(Config{})
 	daemon.cfg.Hub.Client = client
-	path := filepath.Join(t.TempDir(), "sock")
+	// A unix socket path is capped at 104 bytes on macOS, and the t.TempDir()
+	// path there is longer than that, so the socket lives in a short dir (hk 5282).
+	sockets, err := os.MkdirTemp("", "pwcd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockets) })
+	path := filepath.Join(sockets, "sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)

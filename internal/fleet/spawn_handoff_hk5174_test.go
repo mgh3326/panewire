@@ -22,7 +22,11 @@ func operationLockHeld(a *App, job string) bool {
 	return errors.Is(err, ErrJobOperationBusy)
 }
 
+// callsOf reads the calls under the fake's lock: a spawn goroutine may still
+// be appending to them (hk 5282: a DATA RACE under -race).
 func callsOf(f *fakeRunner) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []string
 	for _, c := range f.Calls {
 		out = append(out, strings.Join(c.Args, " "))
