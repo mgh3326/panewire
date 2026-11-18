@@ -81,7 +81,22 @@ func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusi
 	if current.Repo == "" {
 		current.Repo = previous.Repo
 	}
-	candidates := append([]fleet.PlacementCandidateRecord(nil), previous.Candidates...)
+	// An earlier pass's hub skip of a host whose refusals have all expired is no
+	// longer a skip: the host is placed again, so its carried-over row goes (hk
+	// 5214). A row no exclusion of this request explains is kept as it was. The
+	// prune runs on the carry-over only, so a row this pass evaluated itself stays.
+	live := liveExclusions(exclusions, now)
+	liveHosts := make(map[string]bool, len(live))
+	for _, excluded := range live {
+		liveHosts[excluded.Machine] = true
+	}
+	refused := make(map[string]bool, len(exclusions))
+	for _, excluded := range exclusions {
+		refused[excluded.Machine] = true
+	}
+	candidates := slices.DeleteFunc(append([]fleet.PlacementCandidateRecord(nil), previous.Candidates...), func(candidate fleet.PlacementCandidateRecord) bool {
+		return candidate.Outcome == "skipped" && strings.HasPrefix(candidate.Reason, "hub_") && refused[candidate.Host] && !liveHosts[candidate.Host]
+	})
 	positions := make(map[string]int, len(candidates))
 	for i, candidate := range candidates {
 		positions[candidate.Host] = i
@@ -93,25 +108,6 @@ func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusi
 			positions[candidate.Host] = len(candidates)
 			candidates = append(candidates, candidate)
 		}
-	}
-	// An earlier pass's hub skip of a host whose refusals have all expired is no
-	// longer a skip: the host is placed again, so its row goes (hk 5214). A row
-	// no exclusion of this request explains is kept as it was.
-	live := liveExclusions(exclusions, now)
-	liveHosts := make(map[string]bool, len(live))
-	for _, excluded := range live {
-		liveHosts[excluded.Machine] = true
-	}
-	refused := make(map[string]bool, len(exclusions))
-	for _, excluded := range exclusions {
-		refused[excluded.Machine] = true
-	}
-	candidates = slices.DeleteFunc(candidates, func(candidate fleet.PlacementCandidateRecord) bool {
-		return candidate.Outcome == "skipped" && strings.HasPrefix(candidate.Reason, "hub_") && refused[candidate.Host] && !liveHosts[candidate.Host]
-	})
-	positions = make(map[string]int, len(candidates))
-	for i, candidate := range candidates {
-		positions[candidate.Host] = i
 	}
 	for _, excluded := range live {
 		if excluded.Machine == current.Chosen {

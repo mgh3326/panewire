@@ -277,3 +277,29 @@ func TestPlacementTraceDropsExpiredRefusalAndShowsRemaining_t5214(t *testing.T) 
 		t.Fatalf("engine's own candidate row was touched: %+v", got)
 	}
 }
+
+// A row this pass evaluated itself is not a stale carry-over: an expired refusal
+// does not remove a fresh hub-transport skip of the same host (mergewake finding,
+// hk 5214).
+func TestPlacementTraceKeepsFreshSkipOfExpiredRefusalHost_t5214(t *testing.T) {
+	now := time.UnixMilli(1_700_000_000_000)
+	previous := fleet.PlacementTrace{Source: "auto", Candidates: []fleet.PlacementCandidateRecord{
+		{Host: "laptop", Outcome: "skipped", Reason: "hub_checkout_refused:dirty"},
+	}}
+	current := fleet.PlacementTrace{Candidates: []fleet.PlacementCandidateRecord{
+		{Host: "laptop", Outcome: "skipped", Reason: "hub_unavailable"},
+	}}
+	exclusions := []hubSpawnExclusion{
+		{Machine: "laptop", Reason: "checkout_refused:dirty", ExpiresMS: now.Add(-time.Second).UnixMilli()},
+	}
+	trace := continueSpawnPlacementTrace(previous, current, exclusions, now)
+	for _, candidate := range trace.Candidates {
+		if candidate.Host == "laptop" {
+			if candidate.Outcome != "skipped" || candidate.Reason != "hub_unavailable" {
+				t.Fatalf("fresh skip of the host was replaced: %+v", candidate)
+			}
+			return
+		}
+	}
+	t.Fatal("fresh skip of the host was dropped from the trace")
+}
