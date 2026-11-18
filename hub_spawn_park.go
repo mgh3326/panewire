@@ -261,7 +261,18 @@ func (h *HubServer) wakeParkedSpawns(ctx context.Context, ticked bool) {
 	batch := h.placementPolicy.spawnWakeBatch()
 	h.mu.Unlock()
 	woken, err := h.inbox.store.wakeParkedSpawns(ctx, reasons, batch, h.now().UTC())
-	if err != nil || woken >= batch {
+	if err != nil {
+		h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_park.go:wakeParkedSpawns", err)
+		h.spawnWakeMu.Lock()
+		for _, reason := range reasons {
+			h.markSpawnWakeLocked(false, reason)
+		}
+		h.spawnWakeHeld = true
+		h.spawnWakeMu.Unlock()
+		return
+	}
+	h.loopClearSilent("hub_spawn_park.go:wakeParkedSpawns")
+	if woken >= batch {
 		h.spawnWakeMu.Lock()
 		for _, reason := range reasons {
 			h.markSpawnWakeLocked(false, reason)

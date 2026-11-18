@@ -437,7 +437,7 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 				}
 				if used7d != nil && *used7d >= 75.0 {
 					if p.runningJobsErr != nil {
-						c.reason = "running_jobs_lookup_failed"
+						c.reason = "account_busy_unknown"
 					} else if job := p.runningJob(c.accountKey); job != "" {
 						c.reason = fmt.Sprintf("account_busy_near_weekly_limit account=%s job=%s", c.accountKey, job)
 					}

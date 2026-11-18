@@ -275,7 +275,7 @@ func TestHubPlacementRecordDeliveredAfterRefusalClears_t4691(t *testing.T) {
 // and forgets an attempt once its record is delivered.
 func TestHubPlacementStallLogsOncePerReason_t4691(t *testing.T) {
 	logs := &lockedBuffer{}
-	h := &HubServer{logger: slog.New(slog.NewTextHandler(logs, nil))}
+	h := &HubServer{logger: slog.New(slog.NewTextHandler(logs, nil)), now: time.Now}
 	count := func() int { return strings.Count(logs.String(), "placement record not delivered") }
 	h.notePlacementStall("req", "job", 1, "hk_unreachable")
 	h.notePlacementStall("req", "job", 1, "hk_unreachable")

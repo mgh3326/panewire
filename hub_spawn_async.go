@@ -365,9 +365,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			}
 		}()
 	}
-	schedule := func(task hubSpawnTask) {
+	schedule := func(task hubSpawnTask) bool {
 		if task.Status == "bound" && task.Node != nil && h.handleQueuedBinding(ctx, task) {
-			return
+			return true
 		}
 		slots := 1
 		if task.Node != nil {
@@ -414,7 +414,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		}
 		mu.Unlock()
 		if busy {
-			return
+			return false
 		}
 		if task.Node != nil {
 			h.spawnWorkers.Add(1)
@@ -444,14 +444,16 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 					h.kickSpawnPlacement()
 				}
 			}(task)
-			return
+			return true
 		}
 		select {
 		case work <- task:
+			return true
 		default:
 			mu.Lock()
 			delete(active, task.Request.RequestID)
 			mu.Unlock()
+			return false
 		}
 	}
 	tick := time.NewTicker(2 * time.Second)
@@ -477,40 +479,14 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			h.logSpawnRollbackRows(ctx)
 		}
 		if h.drain.admit() {
+			h.loopTick(loopSpawnCoordinator)
 			// Start conditions are checked first so a row released in this
 			// tick is scheduled by the scan below rather than the next one.
 			h.checkWaitingSpawns(ctx)
 			// A request parked too long tells its owner once (hk 4662); the
 			// pass is rate-limited, so most ticks skip it.
 			h.checkParkedSpawnNotices(ctx)
-			// Work claimed during a scan may move later in the ordering. Do not
-			// schedule the same row twice in one pass, even if it reappears.
-			seen := map[string]bool{}
-			position := spawnScanPosition{}
-			for {
-				tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position, h.now().UTC())
-				if err != nil {
-					break
-				}
-				for _, task := range tasks {
-					if !seen[task.Request.RequestID] {
-						seen[task.Request.RequestID] = true
-						schedule(task)
-					}
-				}
-				if len(tasks) < 32 {
-					break
-				}
-				position = next
-			}
-			// Deadline-exceeded replays retain their existing bounded backoff.
-			now := h.now().UTC()
-			ordinary, _ := h.inbox.store.pendingSpawns(ctx, now)
-			for _, task := range ordinary {
-				if task.Status == "deadline_exceeded" {
-					schedule(task)
-				}
-			}
+			h.spawnCoordinatorScan(ctx, schedule)
 		}
 		h.flushSpawnNotifications(ctx)
 		// Terminal spawn failures with --task owe their hk task one comment (hk
@@ -522,6 +498,65 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		case <-tick.C:
 			ticked = true
 		case <-h.spawnKick:
+		}
+	}
+}
+
+// spawnCoordinatorScan pages the pending spawn rows and hands each new row to
+// schedule, recording made/done in the loop ledger. A store failure counts a
+// silent ledger error (one log line per streak) and keeps the pass's other
+// half: a failed page read still tries the ordinary pending read below.
+func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubSpawnTask) bool) {
+	// Work claimed during a scan may move later in the ordering. Do not
+	// schedule the same row twice in one pass, even if it reappears.
+	seen := map[string]bool{}
+	position := spawnScanPosition{}
+	scanFailed := false
+	for {
+		tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position, h.now().UTC())
+		if err != nil {
+			h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:pendingSpawnPage", err)
+			scanFailed = true
+			break
+		}
+		for _, task := range tasks {
+			if !seen[task.Request.RequestID] {
+				seen[task.Request.RequestID] = true
+				h.loopNoteMade(loopSpawnCoordinator, task.Request.RequestID)
+				if schedule(task) {
+					h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
+				}
+			}
+		}
+		if len(tasks) < 32 {
+			break
+		}
+		position = next
+	}
+	if !scanFailed {
+		h.loopClearSilent("hub_spawn_async.go:pendingSpawnPage")
+	}
+	// Deadline-exceeded replays retain their existing bounded backoff.
+	now := h.now().UTC()
+	ordinary, err := h.inbox.store.pendingSpawns(ctx, now)
+	if err != nil {
+		h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:pendingSpawns", err)
+	} else {
+		h.loopClearSilent("hub_spawn_async.go:pendingSpawns")
+		var oldest time.Time
+		for _, task := range ordinary {
+			if oldest.IsZero() || task.Created.Before(oldest) {
+				oldest = task.Created
+			}
+			if task.Status == "deadline_exceeded" {
+				h.loopNoteMade(loopSpawnCoordinator, task.Request.RequestID)
+				if schedule(task) {
+					h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
+				}
+			}
+		}
+		if !oldest.IsZero() {
+			h.loopSetOldestPending(loopSpawnCoordinator, now.Sub(oldest))
 		}
 	}
 }
@@ -684,15 +719,14 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			transport.snapshotHost = tr.Chosen
 			transport.snapshotProfile = tr.Profile
 			transport.snapshotReady = false
+			// The bind writes the chosen account in its own UPDATE: stash it
+			// here so the bind sees the seat this pass counted (hk 5124).
+			transport.snapshotPool = tr.Pool
+			transport.snapshotAccountKey = tr.AccountKey
 			if err == nil {
 				payload, _, recorded, readErr := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt)
 				var saved fleet.PlacementTrace
 				transport.snapshotReady = readErr == nil && !recorded && json.Unmarshal(payload, &saved) == nil && saved.Chosen == tr.Chosen && saved.Profile == tr.Profile
-			}
-			if h.inbox != nil {
-				if recordErr := h.inbox.store.recordPlacedAccount(parent, task.Request.RequestID, task.Attempt, tr.Pool, tr.AccountKey); recordErr != nil {
-					h.logger.Warn("hub spawn placed account could not be recorded", "request_id", task.Request.RequestID, "attempt", task.Attempt, "pool", tr.Pool, "account_key", tr.AccountKey, "error", recordErr)
-				}
 			}
 		}
 	}
@@ -1021,6 +1055,15 @@ type directSpawnTransport struct {
 	snapshotReady   bool
 	snapshotHost    string
 	snapshotProfile string
+	// snapshotPool and snapshotAccountKey are the seat the placement pass
+	// chose: the bind stores them in the placed columns, holding the
+	// per-account lock across the re-check and the bind (hk 5124).
+	snapshotPool       string
+	snapshotAccountKey string
+	// snapshotWeeklyUsed is the chosen account's 7d used share, carried from
+	// the selection that chose it. Nil when the selection held no reading:
+	// like the gate, an unknown reading is not a nearly spent one.
+	snapshotWeeklyUsed *float64
 	// probeWait is how long dispatch keeps asking its node after the landing
 	// wait ran out, before it settles the request as a timeout. Zero skips the
 	// probe (the coordinator's replay pass, whose own 5 s window is the probe).
@@ -1187,10 +1230,28 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	node.DeadlineMS = t.task.Deadline.UnixMilli()
 	node.GrantRequired = grantRequired
 	node.WaitSeconds = max(1, min(3600, int(time.Until(t.task.Deadline).Seconds())+1))
+	// The request carries the selection's 7d reading for the chosen account.
+	t.snapshotWeeklyUsed = req.AccountWeeklyUsed
 	// The bind can commit even when its response is lost. From this point a
 	// placement caller must not release ownership or fall through to a host.
+	// A commandcode seat binds under its account's lock: the busy re-check and
+	// the bind are one critical section, so two concurrent admissions on one
+	// nearly spent account admit exactly one (hk 5124). Every pool's bind
+	// records its account in the placed columns; only commandcode re-checks
+	// under the lock.
+	accountKey := t.snapshotAccountKey
+	if t.snapshotPool == commandcodePoolName && accountKey != "" {
+		release, lockErr := t.h.commandcodeSeatLocks.lock(ctx, accountKey)
+		if lockErr != nil {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: accountBusyUnknown}
+		}
+		defer release()
+		if busyErr := t.refuseBusyCommandcodeSeat(ctx); busyErr != nil {
+			return fleet.HubSpawnReply{}, busyErr
+		}
+	}
 	t.bound = true
-	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node, t.h.now().UTC())
+	task, err := t.h.inbox.store.bindSpawnPlaced(ctx, t.task.Request.RequestID, t.task.Attempt, node, accountKey, t.h.now().UTC())
 	if err != nil {
 		return fleet.HubSpawnReply{}, fleet.ErrHubPlacementBound
 	}
@@ -1582,12 +1643,6 @@ func spawnNodeOutcome(task hubSpawnTask, node hubSpawnRequest, result hubSpawnRe
 		outcome.AccountKey = result.Receipt.AccountKey
 		outcome.Role = result.Receipt.Role
 		outcome.LaneUnregistered = result.Receipt.LaneUnregistered
-	}
-	if outcome.AccountKey == "" {
-		outcome.AccountKey = task.Outcome.AccountKey
-	}
-	if outcome.Pool == "" {
-		outcome.Pool = task.Outcome.Pool
 	}
 	if outcome.RC != 0 {
 		outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))

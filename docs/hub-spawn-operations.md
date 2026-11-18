@@ -1307,7 +1307,7 @@ That is the line the wake skill asks sessions to write by hand; the hub
 writing it keeps the stuck-work wait accurate without a session in the loop.
 The comment posts once per request id in every path the hub can observe: the
 operation carries a posted-at mark (`task_fail_notice_ms`, migration
-`0022_spawn_task_fail_notice.sql`) that survives a hub restart, and failed
+`0023_spawn_task_fail_notice.sql`) that survives a hub restart, and failed
 and refused rows that predate the mark are stamped judged at migration time
 and never post. A post hk refuses for good is dropped loudly, while any other
 failure stays pending and retries with the hub's backoff (bounded per sweep,

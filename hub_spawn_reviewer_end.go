@@ -115,12 +115,15 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 	seen := map[string]bool{}
 	var app *fleet.App
 	var cursor reviewerEndCursor
+	h.loopTick(loopReviewerEnd)
 	for {
 		tasks, err := h.inbox.store.succeededSpawns(ctx, since, cursor, reviewerEndPage)
 		if err != nil {
+			h.loopNoteSilentError(loopReviewerEnd, "hub_spawn_reviewer_end.go:succeededSpawns", err)
 			h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
 			return
 		}
+		h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawns")
 		for _, holder := range tasks {
 			if holder.Status != "succeeded" || !validNodeJobName(holder.Job) {
 				continue

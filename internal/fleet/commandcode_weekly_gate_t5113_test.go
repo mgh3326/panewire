@@ -272,8 +272,8 @@ func TestCommandcodeRunningJobsLookupErrorRefused_t5113(t *testing.T) {
 	}
 	cands := ccCandidates(sel)
 	candA := cands[ccKeyA]
-	if candA.outcome != "dropped:running_jobs_lookup_failed" {
-		t.Fatalf("Account A outcome = %q, want %q", candA.outcome, "dropped:running_jobs_lookup_failed")
+	if candA.outcome != "dropped:account_busy_unknown" {
+		t.Fatalf("Account A outcome = %q, want %q", candA.outcome, "dropped:account_busy_unknown")
 	}
 
 	// Also verify native gate with lookup error on near-limit account
@@ -296,7 +296,7 @@ func TestCommandcodeRunningJobsLookupErrorRefused_t5113(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.Out), &receipt); err != nil {
 		t.Fatalf("unmarshal receipt: %v", err)
 	}
-	if !strings.Contains(receipt.Reason, "running_jobs_lookup_failed") {
-		t.Fatalf("native gate receipt reason %q, want running_jobs_lookup_failed", receipt.Reason)
+	if !strings.Contains(receipt.Reason, "account_busy_unknown") {
+		t.Fatalf("native gate receipt reason %q, want account_busy_unknown", receipt.Reason)
 	}
 }

@@ -173,6 +173,12 @@ minutes with host presence, per-host account quota and the plan per grade, for
 the console fleet-status page; `--fleet-status-interval` sets the period (`0`
 turns it off). See [docs/fleet-status.md](docs/fleet-status.md).
 
+The hub also keeps a loop ledger over its maintenance loops (ticks, made,
+done, errors per mechanism), writes one daily row
+(`ops/panewire-loops/<YYYY-MM-DD>`) and notices a silent stop on a
+configurable lane (`--loops-notice-lane`, default `panewire-design`). See
+[docs/loops.md](docs/loops.md).
+
 The node closes a worker's pane once its hk task is merged, done or dropped, or the job was closed, and the pane has stayed not working past a grace; a worker that reported READY keeps its pane while its PR is open. The same pass republishes a report whose `done` upload failed, once its file still holds the bytes the completion announced. See [the task pane sweep](docs/pane-sweep.md). Job directories hk has confirmed can expire after a TTL, off by default; see [the job dir TTL](docs/job-dir-ttl.md).
 
 The daemon's hot paths (heartbeat, relay outbox, quota-stop and pane-to-session lookups) read job and lane events through an in-process index refreshed by directory mtime, so a pass costs a stat per job directory plus the directories that changed; see [the job event index](docs/job-event-index.md).

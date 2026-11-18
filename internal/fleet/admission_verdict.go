@@ -192,7 +192,7 @@ func (in admissionInputs) commandcodeBusyRefusal(pool string, buckets []admissio
 	for _, b := range buckets {
 		if b.Window == "7d" && b.ScopeKind == "account" && b.Used != nil && *b.Used >= 75.0 {
 			if in.RunningJobsErr != nil {
-				return "running_jobs_lookup_failed"
+				return "account_busy_unknown"
 			}
 			accountKey := in.AccountKey
 			if accountKey == "" && in.Readings["commandcode"].FP != "" {
