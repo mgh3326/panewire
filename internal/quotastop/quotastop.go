@@ -63,6 +63,13 @@ var (
 	// credit_rejection.go reads from a session).
 	creditAnthropic = regexp.MustCompile(`(?i)credit balance is too low`)
 	creditOpenAI    = regexp.MustCompile(`(?i)insufficient_quota|exceeded your current quota`)
+	// creditCommandcode is the Command Code provider's rejection as omp renders
+	// it as the status row ("400 You have insufficient credits to make this
+	// request. Please purchase more credits to continue using the service.
+	// (type=invalid_request_error", hk 5138). It anchors on the rendered error
+	// row — the status, omp's "API Error:" prefix and the "⏺" mark — never on
+	// the sentence anywhere in ordinary output, and never on a bare "400".
+	creditCommandcode = regexp.MustCompile(`(?i)^(?:⏺\s*)?(?:api error:\s*)?400\s+you have insufficient credits to make this request`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen when the
@@ -120,6 +127,9 @@ func classifyStatus(screen string, now time.Time, local *time.Location) (Stop, b
 		out.CreditExhaustedAt = now.UTC()
 	case creditOpenAI.MatchString(screen):
 		out.Pool = "openai-api"
+		out.CreditExhaustedAt = now.UTC()
+	case creditCommandcode.MatchString(screen):
+		out.Pool = "commandcode"
 		out.CreditExhaustedAt = now.UTC()
 	default:
 		return out, false
@@ -318,10 +328,12 @@ func statusBlockOf(screen string, isStatus func(string) bool) (string, string, b
 			if isStatus(line) {
 				status, tail, found, later, open = line, nil, true, false, false
 				limitOpen, limitIndent = (devin.MatchString(line) || devinRequest.MatchString(line)) && !requestLimitComplete(line), indent
-			} else if found && creditRow(status) && creditDiagnosticRow(line) {
+			} else if found && creditRow(status) && (creditDiagnosticRow(line) || creditContinuationRow(line)) {
 				// omp writes its own diagnostic path under the rejection
-				// ("raw-http-request=<file>", hk 4982). It is the harness's
-				// chrome, not output: the rejection stays the last activity.
+				// ("raw-http-request=<file>", hk 4982) and the rejection itself
+				// may wrap onto a continuation row (hk 5138). Both are the
+				// harness's chrome, not output: the rejection stays the last
+				// activity.
 				tail = append(tail, line)
 			} else {
 				later = true
@@ -362,7 +374,7 @@ func CreditExhausted(screen string) (string, bool) {
 	for _, provider := range []struct {
 		pool string
 		line *regexp.Regexp
-	}{{"anthropic-api", creditAnthropic}, {"openai-api", creditOpenAI}} {
+	}{{"anthropic-api", creditAnthropic}, {"openai-api", creditOpenAI}, {"commandcode", creditCommandcode}} {
 		if provider.line.MatchString(line) {
 			return provider.pool, true
 		}
@@ -373,7 +385,7 @@ func CreditExhausted(screen string) (string, bool) {
 // creditRow reports a row that is a provider credit-exhausted rejection.
 func creditRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
-	return creditAnthropic.MatchString(line) || creditOpenAI.MatchString(line)
+	return creditAnthropic.MatchString(line) || creditOpenAI.MatchString(line) || creditCommandcode.MatchString(line)
 }
 
 // creditDiagnosticRow reports omp's diagnostic line under a provider
@@ -382,6 +394,16 @@ func creditRow(line string) bool {
 func creditDiagnosticRow(line string) bool {
 	_, ok := strings.CutPrefix(line, "raw-http-request=")
 	return ok
+}
+
+// creditContinuationRow reports a wrapped continuation of a credit rejection:
+// omp renders the error's tail ("(type=invalid_request_error",
+// "Please purchase more credits…") on the next row when the message wraps.
+// Ordinary output does not start with these fragments, so it still cancels.
+func creditContinuationRow(line string) bool {
+	line = strings.TrimLeft(line, statusPrefixes)
+	lower := strings.ToLower(line)
+	return strings.HasPrefix(lower, "(type=") || strings.HasPrefix(lower, "please purchase more credits") || strings.HasPrefix(lower, "purchase more credits")
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,

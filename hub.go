@@ -581,35 +581,51 @@ type HubServer struct {
 	// constructor succeeds and Close releases it.
 	logFile *os.File
 
-	mu                               sync.Mutex
-	nodes                            map[string]*hubNodeRecord
-	lastNotes                        map[string]*HubLastNote
-	subscribers                      map[*hubEventSubscriber]struct{}
-	alerts                           map[string]*hubAlertState
-	unknownMessages                  uint64
-	unfencedCompletions              uint64
-	startedAt                        time.Time
-	uiAllowCFOnly                    bool
-	cfAccess                         *hubCFAccessVerifier
-	uiEvents                         []hubUIEvent
-	jobs                             map[string]*hubJobRecord
-	pendingRevocations               map[string]map[string]hubJobRevokedEvent
-	placementPolicyPath              string
-	placementPolicy                  PlacementPolicy
-	placementPolicyModTime           time.Time
-	placementPolicyObservedModTime   time.Time
-	placementPolicyLoaded            bool
-	placementPolicyStatus            string
-	placementPolicyLastFailure       string
-	routeHits                        hubRouteHits
-	prometheusURL                    string
-	prometheusClient                 *http.Client
-	prometheusBearer                 string
-	prometheusBasicUser              string
-	prometheusBasicPass              string
-	placementCache                   placementCache
-	poolCooling                      map[string]time.Time
-	poolSweep                        poolSweepState
+	mu                             sync.Mutex
+	nodes                          map[string]*hubNodeRecord
+	lastNotes                      map[string]*HubLastNote
+	subscribers                    map[*hubEventSubscriber]struct{}
+	alerts                         map[string]*hubAlertState
+	unknownMessages                uint64
+	unfencedCompletions            uint64
+	startedAt                      time.Time
+	uiAllowCFOnly                  bool
+	cfAccess                       *hubCFAccessVerifier
+	uiEvents                       []hubUIEvent
+	jobs                           map[string]*hubJobRecord
+	pendingRevocations             map[string]map[string]hubJobRevokedEvent
+	placementPolicyPath            string
+	placementPolicy                PlacementPolicy
+	placementPolicyModTime         time.Time
+	placementPolicyObservedModTime time.Time
+	placementPolicyLoaded          bool
+	placementPolicyStatus          string
+	placementPolicyLastFailure     string
+	routeHits                      hubRouteHits
+	prometheusURL                  string
+	prometheusClient               *http.Client
+	prometheusBearer               string
+	prometheusBasicUser            string
+	prometheusBasicPass            string
+	placementCache                 placementCache
+	poolCooling                    map[string]time.Time
+	poolSweep                      poolSweepState
+	// accountCreditMarks holds the provider credit rejections read on one
+	// account (hk 5138). accountCreditLoadMu guards the one-time (retrying)
+	// load from the hub store, accountCreditLoaded marks a successful read,
+	// and accountCreditRead is a test seam for that read.
+	accountCreditMarks      map[string]accountCreditMark
+	accountCreditLoadMu     sync.Mutex
+	accountCreditLoaded     bool
+	accountCreditLoadFailed bool
+	accountCreditLoadErr    error
+	accountCreditRetryAt    time.Time
+	accountCreditLoadRetry  time.Duration
+	accountCreditRead       func(context.Context) (map[string]accountCreditMark, error)
+	accountCreditDelete     func(context.Context, string, time.Time) error
+	// accountCreditPending holds lifted marks whose durable delete failed; it
+	// is retried without making the mark active again (hk 5138 review).
+	accountCreditPending             []accountCreditMark
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -1048,6 +1064,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
+	mux.HandleFunc("GET /v1/state/account-credit", h.handleAccountCreditMarks)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/mine", h.handleMyJobs)
 	mux.HandleFunc("POST /v1/jobs/reap", h.handleJobReap)

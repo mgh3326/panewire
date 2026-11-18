@@ -91,6 +91,9 @@ type FleetStateQuota struct {
 	// Free is a pool's free-tier state (devin's SWE-2 bucket), the shared
 	// reading's free_bucket. A free-only reading may carry no paid bucket.
 	Free *FleetStateFree `json:"free_bucket,omitempty"`
+	// Balance is a credit pool's remaining provider credits, nil when the
+	// reading carries none (commandcode, decision 403).
+	Balance *float64 `json:"balance,omitempty"`
 }
 
 // FleetStateFree is the free-tier state of a pool that has one. State is
@@ -401,6 +404,10 @@ type fleetStateSnapshot struct {
 	At      time.Time            `json:"at"`
 	States  []FleetStateMessage  `json:"states"`
 	Cooling map[string]time.Time `json:"pool_cooling,omitempty"`
+	// AccountCreditExhausted maps an account key to when the hub read a
+	// provider credit rejection on it (hk 5138). Placement skips that account
+	// until the mark lifts.
+	AccountCreditExhausted map[string]time.Time `json:"account_credit_exhausted,omitempty"`
 }
 
 func (s *fleetStateStore) snapshot(now time.Time) fleetStateSnapshot {
@@ -547,6 +554,26 @@ func (h *HubServer) handleFleetStateSnapshot(writer http.ResponseWriter, request
 		return
 	}
 	writeJSON(writer, http.StatusOK, h.fleetSnapshot(h.now().UTC()))
+}
+
+// handleAccountCreditMarks serves the durable account credit marks alone, so
+// selection reads them even when the fleet-state snapshot is off or
+// unavailable (hk 5138).
+func (h *HubServer) handleAccountCreditMarks(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeFleetStateRead(writer, request) {
+		return
+	}
+	now := h.now().UTC()
+	marks, err := h.snapshotAccountCreditMarks(now)
+	if err != nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "account_credit_marks_unavailable"})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"v":                        fleetStateVersion,
+		"at":                       now,
+		"account_credit_exhausted": marks,
+	})
 }
 
 // utcPtr copies an optional time in UTC.
