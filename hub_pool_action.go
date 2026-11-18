@@ -501,7 +501,7 @@ func (h *HubServer) refusePoolAction(ctx context.Context, action poolAction) err
 		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
 			return err
 		}
-		eventID := "pool-handover:" + action.Job
+		eventID := handoverNoticeID(action)
 		owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
 		if err != nil {
 			return err

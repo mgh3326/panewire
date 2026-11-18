@@ -44,6 +44,12 @@ const (
 	handoverFailed = "handover_failed"
 )
 
+// handoverNoticeID identifies one logical hand-over. Close retries share its
+// successor request id; a later hand-over after a refusal gets a new one.
+func handoverNoticeID(action poolAction) string {
+	return "pool-handover:" + action.Job + ":" + action.Data.Handover.Successor.RequestID
+}
+
 // poolHandover is the hand-over half of a pool action row.
 type poolHandover struct {
 	// Successor is the complete submission, request id included; it is
@@ -484,7 +490,7 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 	if handover.Outcome == handoverFailed {
 		text = fmt.Sprintf("[panewire] hand-over of %s failed (%s): %s", action.Job, strings.TrimSpace(handover.Reason), action.Data.Text)
 	}
-	eventID := "pool-handover:" + action.Job
+	eventID := handoverNoticeID(action)
 	owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
 	if err != nil {
 		return err

@@ -296,6 +296,31 @@ func TestPoolHandoverReportsAWorktreeDirtiedBeforeClose(t *testing.T) {
 	}
 }
 
+func TestPoolHandoverNotifiesAfterAnEarlierRefusedAttempt(t *testing.T) {
+	const job, next = "retry-notice-job", "retry-notice-job-q1"
+	f := handoverFixture(t, job, 1, 0)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	if err := runPoolActionStep(t, f.hub, f.node, readOnlyPoolAction(t, f.hub),
+		poolStatus(nodeCloseOpNone, false, false),
+		idlePane(job, "/work/project.checkout", "idle"),
+		idlePane(job, "/work/project.checkout", "idle"),
+		poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpRefused, "replayed": false, "reason": handoverDirty}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if result := sweepHandover(t, f, window5h(), handoverReadReply(job)); result.action != poolJobQueued {
+		t.Fatalf("second sweep=%+v", result)
+	}
+	closeHandover(t, f, readOnlyPoolAction(t, f.hub))
+	finishSettled(t, f)
+	placeSuccessor(t, f, next)
+	finishSettled(t, f)
+	lines := ownerLines(t, f.hub, "pool-handover:")
+	if len(lines) != 2 || !strings.Contains(strings.Join(lines, "\n"), "handed "+job+" over to "+next) {
+		t.Fatalf("owner notices=%q, want the refusal and the later hand-over", lines)
+	}
+}
+
 func TestPoolHandoverWaitsWhenTheResetIsWithinExpected(t *testing.T) {
 	const job = "wait-job"
 	f := handoverFixture(t, job, 3, 3*time.Hour)
@@ -360,6 +385,39 @@ func TestPoolHandoverSurvivesHubRestartAtEveryStep(t *testing.T) {
 	}
 	if lines := ownerLines(t, f.hub, "pool-handover:"); len(lines) != 1 {
 		t.Fatalf("owner lines=%q", lines)
+	}
+}
+
+// A retryable placement result releases the job reservation. If the hub
+// crashed after the claim but before saving Submitted, a newly minted id
+// could otherwise create a second operation for the same successor.
+func TestPoolHandoverReplaysTheRequestAfterRetryablePlacement(t *testing.T) {
+	const job, next = "retryable-job", "retryable-job-q1"
+	f := handoverFixture(t, job, 1, 0)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	closeHandover(t, f, readOnlyPoolAction(t, f.hub))
+	finishSettled(t, f)
+	action := readOnlyPoolAction(t, f.hub)
+	requestID := action.Data.Handover.Successor.RequestID
+	task, err := f.hub.inbox.store.spawnTask(t.Context(), requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := f.hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:dirty", Retryable: true}, time.Now()); err != nil || !ok {
+		t.Fatalf("complete retryable placement: ok=%v err=%v", ok, err)
+	}
+	task, err = f.hub.inbox.store.spawnTask(t.Context(), requestID)
+	if err != nil || task.Status != "retryable" {
+		t.Fatalf("task=%+v err=%v, want retryable", task, err)
+	}
+	action.Data.Handover.Submitted = false // crash before that flag was saved
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	restartPoolActionHub(t, f)
+	finishSettled(t, f)
+	if ids := spawnOperations(t, f.hub, next); len(ids) != 1 || ids[0] != requestID {
+		t.Fatalf("successor operations=%v, want only stored request %s", ids, requestID)
 	}
 }
 

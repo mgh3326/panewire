@@ -194,8 +194,9 @@ job over or end it and respawn it on another pool. On a capable node, the hub
 instead stores a close intent for a reviewer or consult, closes and settles it
 through the node, confirms the planned hk `lost` record, then notifies the
 owner to respawn it. A refused or unconfirmed close holds the notice. A job
-whose id starts `mwr-` is reported to the `mergewake` lane. Both notice kinds
-have fixed producer ids per job, so a restart cannot publish another copy.
+whose id starts `mwr-` is reported to the `mergewake` lane. Notice producer
+ids stay fixed across retries; a later hand-over after a refused attempt has
+its own id, so its result is reported too.
 The action reconciler runs independently of pane liveness and heartbeats.
 The node and ownership contracts are in [node-commands.md](node-commands.md),
 "Hub close protocol".
