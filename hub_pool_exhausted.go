@@ -407,7 +407,10 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 	if h.poolEventGone(exhaustion, h.now()) {
 		return poolJobSkip(role, "superseded")
 	}
-	if exhaustion.Cause == poolCauseFreeLimit && !exhaustion.Reset.After(h.now().Add(poolFreeLimitWaitableWithin)) {
+	// A capable implementer is decided by the policy itself (its max_wait),
+	// not by the legacy one-hour shortcut below (hk 4633).
+	capableImplementer := role == "implementer" && h.nodeHasCapability(spawnHolderHost(task), hubCapabilityCloseOps) && h.nodeHasCapability(spawnHolderHost(task), hubCapabilityHandoverPatch)
+	if !capableImplementer && exhaustion.Cause == poolCauseFreeLimit && !exhaustion.Reset.After(h.now().Add(poolFreeLimitWaitableWithin)) {
 		// The pane waits out a reset inside max_wait and retries on it (hk 569):
 		// no hand-over instruction leaves the hub (hk 4765).
 		return poolJobSkip(role, "waitable_reset")

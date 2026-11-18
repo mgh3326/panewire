@@ -20,7 +20,14 @@ import (
 func handoverGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid", "GIT_CONFIG_NOSYSTEM=1")
+	var env []string
+	for _, value := range os.Environ() {
+		// A fixture git must never act on the caller's repository or index.
+		if name, _, _ := strings.Cut(value, "="); !nodeGitLocationEnv[name] {
+			env = append(env, value)
+		}
+	}
+	cmd.Env = append(env, "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid", "GIT_CONFIG_NOSYSTEM=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -162,7 +169,7 @@ func TestNodeHandoverPatchAppliesOnTheSuccessorCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, patch, ok := strings.Cut(string(body), "## patch: apply everything below with git apply\n")
+	_, patch, ok := strings.Cut(string(body), "## patch: apply everything below with git apply at the checkout's top level\n")
 	if !ok {
 		t.Fatalf("no patch heading:\n%s", body)
 	}
@@ -257,4 +264,116 @@ func TestCloseOpKeepsTheQuestionGuardForAnImplementer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// applyHandoverPatch captures from cwd, applies the saved patch at the top of
+// a fresh checkout of the pushed commit, and checks the files there.
+func applyHandoverPatch(t *testing.T, work, cwd, pushed string, want map[string]string) map[string]any {
+	t.Helper()
+	inbox := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	result, code := nodeRun(t, &HubClient{jobsInboxRoot: inbox}, nodeCommandHandoverPatch, map[string]any{"job": "job-a", "cwd": cwd, "branch": "wk/task"})
+	if code != "" || result["outcome"] != nodeHandoverPatchSaved {
+		t.Fatalf("result=%v code=%q", result, code)
+	}
+	body, err := os.ReadFile(filepath.Join(inbox, "jobs", "job-a", fleet.HandoverPatchFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, patch, _ := strings.Cut(string(body), "## patch: apply everything below with git apply at the checkout's top level\n")
+	successor := filepath.Join(t.TempDir(), "successor")
+	handoverGit(t, filepath.Dir(successor), "clone", handoverGit(t, work, "remote", "get-url", "origin"), successor)
+	handoverGit(t, successor, "checkout", "-B", "wk/task", pushed)
+	file := filepath.Join(t.TempDir(), "p.patch")
+	if err := os.WriteFile(file, []byte(patch), 0600); err != nil {
+		t.Fatal(err)
+	}
+	handoverGit(t, successor, "apply", file)
+	for name, content := range want {
+		if got, _ := os.ReadFile(filepath.Join(successor, name)); string(got) != content {
+			t.Fatalf("%s=%q, want %q", name, got, content)
+		}
+	}
+	return result
+}
+
+// Review round 2: the patch applies at the top level whatever the pane's
+// directory, the user's diff config or the inherited git environment.
+func TestNodeHandoverPatchIsMachineApplicable(t *testing.T) {
+	t.Run("pane in a subdirectory", func(t *testing.T) {
+		captureDocHK(t, 0, "")
+		work, pushed := handoverRepo(t, true)
+		if err := os.MkdirAll(filepath.Join(work, "live"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(work, "live", "lane.txt"), []byte("lane\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		result := applyHandoverPatch(t, work, filepath.Join(work, "live"), pushed, map[string]string{"live/lane.txt": "lane\n", "new.txt": "new\n", "a.txt": "three\n"})
+		if result["top"] != work {
+			t.Fatalf("top=%v, want %s", result["top"], work)
+		}
+	})
+	t.Run("color, prefix and textconv config", func(t *testing.T) {
+		captureDocHK(t, 0, "")
+		work, pushed := handoverRepo(t, true)
+		for _, kv := range [][2]string{{"color.ui", "always"}, {"color.diff", "always"}, {"diff.noprefix", "true"}, {"diff.mnemonicPrefix", "true"}, {"diff.upper.textconv", "tr a-z A-Z"}} {
+			handoverGit(t, work, "config", kv[0], kv[1])
+		}
+		if err := os.WriteFile(filepath.Join(work, ".gitattributes"), []byte("*.txt diff=upper\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		applyHandoverPatch(t, work, work, pushed, map[string]string{"a.txt": "three\n", "new.txt": "new\n", ".gitattributes": "*.txt diff=upper\n"})
+	})
+	t.Run("inherited repository variables", func(t *testing.T) {
+		captureDocHK(t, 0, "")
+		work, pushed := handoverRepo(t, true)
+		t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "elsewhere-index"))
+		t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "elsewhere"))
+		applyHandoverPatch(t, work, work, pushed, map[string]string{"a.txt": "three\n", "new.txt": "new\n"})
+	})
+	t.Run("untracked files hidden from status", func(t *testing.T) {
+		captureDocHK(t, 0, "")
+		work, pushed := handoverRepo(t, true)
+		handoverGit(t, work, "checkout", "--", "a.txt")
+		handoverGit(t, work, "config", "status.showUntrackedFiles", "no")
+		result := applyHandoverPatch(t, work, work, pushed, map[string]string{"new.txt": "new\n"})
+		if result["dirty"] != true || result["doc"] != fleet.HandoverPatchDocKey("job-a") {
+			t.Fatalf("untracked-only work must be dirty and uploaded: %v", result)
+		}
+	})
+}
+
+func TestNodeHandoverPatchRefusesSubmoduleAndHugeTrackedWork(t *testing.T) {
+	t.Run("changed submodule", func(t *testing.T) {
+		captureDocHK(t, 0, "")
+		work, _ := handoverRepo(t, true)
+		lib := filepath.Join(t.TempDir(), "lib")
+		handoverGit(t, filepath.Dir(lib), "init", "-b", "main", lib)
+		if err := os.WriteFile(filepath.Join(lib, "l.txt"), []byte("l\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		handoverGit(t, lib, "add", "l.txt")
+		handoverGit(t, lib, "commit", "-m", "lib")
+		handoverGit(t, work, "-c", "protocol.file.allow=always", "submodule", "add", lib, "deps/lib")
+		handoverGit(t, work, "commit", "-m", "submodule")
+		if err := os.WriteFile(filepath.Join(work, "deps", "lib", "l.txt"), []byte("edited\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if result, _ := handoverPatchRun(t, work); result["outcome"] != nodeHandoverPatchSubmodule {
+			t.Fatalf("result=%v, want submodule_changed", result)
+		}
+	})
+	t.Run("tracked diff over the cap", func(t *testing.T) {
+		captureDocHK(t, 0, "")
+		work, _ := handoverRepo(t, true)
+		if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte(strings.Repeat("y\n", fleet.PaneScreenDocMaxBytes)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if result, _ := handoverPatchRun(t, work); result["outcome"] != nodeHandoverPatchTooLarge {
+			t.Fatalf("result=%v, want too_large", result)
+		}
+	})
 }

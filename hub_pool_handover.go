@@ -2,10 +2,12 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -145,7 +147,7 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 		if reset == exhaustion.Reset.Unix() {
 			// This stop is the one already waited out; its notice is replayed
 			// until the inbox owns it.
-			return h.notifyPoolWait(ctx, exhaustion, task, "waiting")
+			return h.notifyPoolWait(ctx, exhaustion, task, poolWaitReason)
 		}
 		waits++
 	}
@@ -238,7 +240,7 @@ func (h *HubServer) notifyPoolWait(ctx context.Context, exhaustion poolExhaustio
 	if owned, err := h.inbox.store.poolNoticeOwned(ctx, task.Owner, eventID); err != nil {
 		return poolJobSkip(role, "store_unavailable")
 	} else if owned {
-		return poolJobSkip(role, why)
+		return poolJobSkip(role, "waiting")
 	}
 	text := fmt.Sprintf("[panewire] %s waits for the %s reset at %s (%s %s); a later stop hands it over.", task.Job, exhaustion.Pool, exhaustion.Reset.UTC().Format(time.RFC3339), exhaustion.Pool, exhaustion.Cause)
 	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(task.Owner, eventID), OwnerLane: task.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
@@ -253,6 +255,9 @@ func (h *HubServer) notifyPoolWait(ctx context.Context, exhaustion poolExhaustio
 func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, record map[string]any, newJob string) (*poolHandover, string) {
 	if _, err := h.inbox.store.latestSpawnForJob(ctx, newJob); err == nil {
 		// A quota-stop replacement already placed this job's successor.
+		return nil, "already_replaced"
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		// Only a definite absence lets a hand-over start.
 		return nil, "already_replaced"
 	}
 	old := task.Request
@@ -269,7 +274,9 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 		return nil, "end_reason_too_long"
 	}
 	checkout := old.Repository.Checkout
-	if checkout == nil || checkout.Branch == "" || checkout.Origin == "" {
+	// A successor that started detached (a never-pushed branch) has no
+	// branch in its checkout; the node then reports the branch it made.
+	if checkout == nil || checkout.Origin == "" || checkout.Branch == "" && checkout.Mode != "detached" {
 		return nil, "no_branch"
 	}
 	host, label := spawnHolderHost(task), heldAgentName(task, record)
@@ -288,6 +295,10 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 	if patch.Outcome != nodeHandoverPatchSaved {
 		return nil, "patch_" + patch.Outcome
 	}
+	if base := filepath.Base(patch.Top); base != checkout.Dir && base != old.Repository.Worktree {
+		// The pane sits in another checkout than the job's own.
+		return nil, "worktree_mismatch"
+	}
 	request, err := handoverSuccessorRequest(old, task.Job, newJob, handoverExclude(exhaustion), exhaustion, patch)
 	if err != nil {
 		return nil, "invalid_successor"
@@ -305,7 +316,7 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 		reset = exhaustion.Reset.Unix()
 	}
 	return &poolHandover{Successor: request, Job: newJob, Pool: exhaustion.Pool, Cause: exhaustion.Cause, Reset: reset, Account: exhaustion.Account,
-		Cwd: probe.row.Cwd, Branch: checkout.Branch, Digest: patch.Digest}, ""
+		Cwd: probe.row.Cwd, Branch: patch.Branch, Digest: patch.Digest}, ""
 }
 
 // handoverExclude is the pool the successor excludes: the band a quota
@@ -356,15 +367,19 @@ func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude stri
 		}
 	}
 	next.Args = append(next.Args, "--parent-job", oldJob)
-	if hubSpawnArg(next.Args, "--report-relative") == "" {
-		// A --parent-job spawn requires a report; it lives in the successor's
-		// own job directory.
+	if !strings.HasPrefix(hubSpawnArg(next.Args, "--report-relative"), newJob+"/") {
+		// A --parent-job spawn requires a report under its own job or its
+		// parent's: it lives in the successor's own job directory, whatever
+		// the stopped job inherited.
+		for i := slices.Index(next.Args, "--report-relative"); i >= 0 && i+1 < len(next.Args); i = slices.Index(next.Args, "--report-relative") {
+			next.Args = slices.Delete(next.Args, i, i+2)
+		}
 		next.Args = append(next.Args, "--report-relative", newJob+"/report.md")
 	}
 	// The old job already passed its start gate; its conditions name the task
 	// the successor no longer carries.
 	next.StartConditions = nil
-	branch := old.Repository.Checkout.Branch
+	branch := patch.Branch
 	dir := fleet.CheckoutWorktreeName(newJob)
 	checkout := &fleet.HubCheckout{Origin: old.Repository.Checkout.Origin, Mode: fleet.HubCheckoutSuccessor, Branch: branch, Sha: patch.Pushed, Dir: dir}
 	if patch.Pushed == "" {
@@ -409,6 +424,17 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 			// its own end): no successor may name it.
 			handover.Outcome, handover.Reason = handoverFailed, "old record ended "+state
 		case !handover.Submitted:
+			// The pane is closed now: capture once more, so the document the
+			// note names holds the worktree's final state, and refuse when
+			// the branch moved since the successor was stored.
+			var final nodeHandoverPatchResult
+			if !h.nodeCall(ctx, action.Node, nodeCommandHandoverPatch, nodeHandoverPatchArgs{Job: action.Job, Cwd: handover.Cwd, Branch: handover.Branch}, hubNodeCommandWait, &final) {
+				return errors.New("final hand-over patch unavailable")
+			}
+			if final.Outcome != nodeHandoverPatchSaved || handover.Successor.Repository.Checkout == nil || handoverStartsAt(final) != handover.Successor.Repository.Checkout.Sha {
+				handover.Outcome, handover.Reason = handoverFailed, "final capture "+final.Outcome+" no longer matches the stored successor"
+				break
+			}
 			if _, _, err := h.inbox.store.claimSpawn(ctx, handover.Successor, handover.Job, action.Data.Owner, h.now().UTC()); err != nil {
 				if !errors.Is(err, errSpawnClaimed) {
 					return err
@@ -492,7 +518,10 @@ func (h *HubServer) handoverStillDue(ctx context.Context, action poolAction) (bo
 	if handover == nil {
 		return false, nil
 	}
-	if h.poolEventGone(handover.exhaustion(), h.now()) {
+	exhaustion := handover.exhaustion()
+	if h.poolEventGone(exhaustion, h.now()) || exhaustion.poolWide() && !h.poolSweep.held(exhaustion.key()) {
+		// A pool-wide cause is held until the pool comes back (or a hub
+		// restart forgets it; the next sweep then decides afresh).
 		h.logger.Info("pool hand-over withdrawn: the stop no longer holds", "job", action.Job, "action", action.ID)
 		return false, nil
 	}
@@ -505,4 +534,13 @@ func (h *HubServer) handoverStillDue(ctx context.Context, action poolAction) (bo
 		return false, nil
 	}
 	return true, nil
+}
+
+// handoverStartsAt is the commit a successor starts from: the pushed commit,
+// or the base when nothing was pushed.
+func handoverStartsAt(patch nodeHandoverPatchResult) string {
+	if patch.Pushed != "" {
+		return patch.Pushed
+	}
+	return patch.Base
 }

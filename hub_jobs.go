@@ -583,6 +583,11 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, error) {
 		if id != "" {
 			return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action %s is pending or awaiting terminal job state or pane release", jobID, id)
 		}
+		// A settled hand-over still owes its successor: the job stays fenced
+		// until the row is final (hk 4633).
+		if handing, err := h.inbox.store.activeHandover(ctx, jobID); err != nil || handing {
+			return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: a pool hand-over is in progress or its store is unavailable", jobID)
+		}
 	}
 	h.mu.Lock()
 	job = h.jobs[jobID]

@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -85,8 +86,10 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 		if active, err := h.inbox.store.activePoolActionFor(ctx, task.Job); err != nil || active {
 			return errors.New("job already has a pool action")
 		}
-		if _, err := h.inbox.store.latestSpawnForJob(ctx, handover.Job); err == nil {
-			return errors.New("successor already exists")
+		if _, err := h.inbox.store.latestSpawnForJob(ctx, handover.Job); !errors.Is(err, sql.ErrNoRows) {
+			// Only a definite absence admits the row; an unreadable store
+			// is not one.
+			return errors.New("successor already exists or unreadable")
 		}
 	}
 	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
@@ -219,23 +222,24 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		// An hk lost read is not settlement: the node may still retry the write.
 		return nil
 	case nodeCloseOpNone:
+		if action.Data.Kind == poolActionKindHandover && status.Attempt != "" {
+			// The node has registered no close yet, even when Args were saved
+			// before a restart: the last point the hand-over can still be
+			// withdrawn without a trace (hk 4633).
+			due, err := h.handoverStillDue(ctx, action)
+			if err != nil {
+				return err
+			}
+			if !due {
+				return h.releasePoolAction(ctx, action)
+			}
+		}
 		if action.Data.Args == nil {
 			if status.Attempt == "" {
 				return h.releasePoolAction(ctx, action)
 			}
 			if action.Data.TargetAttempt != "" && status.Attempt != action.Data.TargetAttempt {
 				return h.releasePoolAction(ctx, action)
-			}
-			if action.Data.Kind == poolActionKindHandover {
-				// No close command was sent yet: the last point the hand-over
-				// can still be withdrawn without a trace (hk 4633).
-				due, err := h.handoverStillDue(ctx, action)
-				if err != nil {
-					return err
-				}
-				if !due {
-					return h.releasePoolAction(ctx, action)
-				}
 			}
 			probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
 			if probe.state == heldPaneAbsent || probe.state == heldPanePresent && probe.row.PaneID != action.Data.Pane {
@@ -245,6 +249,10 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			}
 			if probe.state != heldPanePresent {
 				return errors.New("pane unavailable")
+			}
+			if handover := action.Data.Handover; action.Data.Kind == poolActionKindHandover && handover != nil && probe.row.Cwd != handover.Cwd {
+				// The close must act on the worktree whose patch was checked.
+				return h.releasePoolAction(ctx, action)
 			}
 			args := &nodePaneCloseOpArgs{RequestID: action.ID, Job: action.Job, Epoch: action.Epoch, Attempt: status.Attempt,
 				PaneID: action.Data.Pane, Name: action.Data.Label, AgentStatus: probe.row.AgentStatus, Cwd: probe.row.Cwd,
@@ -412,14 +420,25 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	moved := job != nil && (job.Node != action.Node || job.Epoch != action.Epoch)
 	h.mu.Unlock()
 	if moved && action.Data.Kind == poolActionKindHandover {
-		// The old job moved after its close settled. A successor already
-		// claimed is finished as usual; one not yet submitted is not placed
-		// beside the moved job, and the row ends handover_failed with the
-		// owner's notice instead of vanishing (hk 4633).
-		if handover := action.Data.Handover; handover != nil && !handover.Submitted && handover.Outcome == "" {
-			handover.Outcome, handover.Reason = handoverFailed, "old job moved to another owner"
+		// Reassignment is fenced while the row is active, so this is a move
+		// the fence did not see. A successor already claimed (even when the
+		// flag was not yet saved) is tracked to its own outcome; one never
+		// claimed is not placed beside the moved job, and the row ends
+		// handover_failed with the owner's notice (hk 4633).
+		handover := action.Data.Handover
+		if handover != nil && handover.Outcome == "" && !handover.Submitted {
+			if _, err := h.inbox.store.spawnTask(ctx, handover.Successor.RequestID); err == nil {
+				handover.Submitted = true
+				if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			} else {
+				handover.Outcome, handover.Reason = handoverFailed, "old job moved to another owner"
+			}
 		}
-		return h.finishHandover(ctx, action, "", "")
+		return h.finishHandover(ctx, action, "lost", action.Data.EndReason)
 	}
 	if moved {
 		// Settlement permits reassignment. Once another owner has the job,

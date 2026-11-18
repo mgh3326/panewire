@@ -131,21 +131,25 @@ cause: window, free limit past `max_wait`, credit, retired and account credit.
 - **Hand over:** a pool action row of kind `handover` (`pool_actions`, the
   #669 store). One row per job: any non-final row for the job, or an existing
   `<old>-q<n>` spawn, means do nothing. The steps are, in this order:
-  1. **Patch.** The old node runs `worktree.handover_patch` on the pane's
-     worktree: `git ls-remote origin refs/heads/<branch>` for the last pushed
+  1. **Patch.** The old node runs `worktree.handover_patch` from the top
+     level of the pane's worktree, which must be the job's own checkout: `git ls-remote origin refs/heads/<branch>` for the last pushed
      commit, then `git status --porcelain`, the untracked file list and
      `git diff --binary` against that commit (against the merge-base with
      origin's default branch when nothing was pushed), plus a new-file diff
-     with the contents of every untracked file, into
+     with the contents of every untracked file — no color, textconv or
+     external driver, standard `a/` `b/` prefixes, inherited `GIT_DIR`-style
+     variables ignored — into
      `jobs/<old>/handover-patch.txt` (mode 0600) and, whole and byte for
      byte, to hk as evidence `handover/<old>/handover-patch.txt`. The
      worktree is only read, so a dirty worktree never blocks the hand-over.
      The pane must be idle. The node refuses, and the owner gets the
      fallback notice, when the pushed tip is not in the worktree's history
      (`diverged`), the patch is over hk's document cap or has more than 500
-     untracked files (`too_large`), it is not UTF-8 (`unportable`), or hk
-     did not store it (`upload_failed`): no hand-over rests on a cut, rewritten
-     or host-local copy.
+     untracked files (`too_large`, enforced while git output is read), it is
+     not UTF-8 (`unportable`), a submodule has changes (`submodule_changed`),
+     or hk did not store it (`upload_failed`): no hand-over rests on a cut,
+     rewritten or host-local copy. The document is uploaded even for a clean
+     worktree, so the note always names it.
   2. **Saved successor.** The row stores the complete successor submission
      with a fixed request id before anything is closed: same role, owner and
      brief; job `<old>-q<n>` (at most two replacements); `--parent-job <old>`
@@ -162,15 +166,19 @@ cause: window, free limit past `max_wait`, credit, retired and account credit.
   3. **Close.** Before its first close command the reconciler checks the stop
      still holds and captures the patch again; a changed digest or a cleared
      stop releases the row unclosed, and a later pass prepares a fresh one.
-     During a spawn rollback or grant drain it neither opens a row nor
-     closes. The close keeps `pane.close`'s open-question guard for an
+     A retired pool that came back also releases it. The close must act on
+     the directory whose patch was checked. During a spawn rollback or grant
+     drain it neither opens a row nor closes. The close keeps `pane.close`'s open-question guard for an
      implementer. The reconciler then closes the old pane through `pane.close_op` to
      the job's node at its epoch. The node writes the old record `lost` with
      `end_reason="quota_stop pool=<pool> replaced_by=<new job>"`, the pinned
      format (`TestQuotaStopEndReasonFormatIsPinned`). It is written with the
      close, before the submit, because the spawn refuses a task still bound to
      a job that is not lost.
-  4. **Submit.** Once the close is settled and the record reads `lost` with
+  4. **Submit.** Once the close is settled the node captures the patch once
+     more, so the document holds the worktree's final state; a capture that
+     no longer starts at the stored successor's commit ends the row
+     `handover_failed`. Then, and the record reads `lost` with
      that reason, the stored successor is claimed with the same request id on
      every retry (a replay of the same id is the same operation).
   5. **Final.** The row stays non-final (I2) until the successor settles.
@@ -179,7 +187,8 @@ cause: window, free limit past `max_wait`, credit, retired and account credit.
      record ended another way: the row ends `handover_failed` and the owner
      gets the hand-over-or-respawn notice with the reason.
 
-  A hub restart at any step resumes from the row and never places a second
+  Until the row is final the job cannot be reassigned. A hub restart at any
+  step resumes from the row and never places a second
   successor. The row also fences the screen-triggered quota-stop replacement
   (`replaceQuotaStopped`, also the account-credit path of hk 5138) and
   `reconcileQuotaReplacements` for the job until it is final; in reverse, a

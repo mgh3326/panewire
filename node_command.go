@@ -627,11 +627,19 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 // nodeGitCommand builds the invocation every node git call shares: the C locale
 // (so parsed porcelain and error text do not depend on the host) and a wait
 // delay that ends a pipe a git helper still holds.
+// nodeGitLocationEnv are the variables that point git at a repository, index
+// or object store other than the one -C names.
+var nodeGitLocationEnv = map[string]bool{"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_INDEX_FILE": true, "GIT_OBJECT_DIRECTORY": true,
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_COMMON_DIR": true, "GIT_NAMESPACE": true, "GIT_PREFIX": true}
+
 func nodeGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, value := range os.Environ() {
-		if !strings.HasPrefix(value, "LC_ALL=") {
+		name, _, _ := strings.Cut(value, "=")
+		// -C names the repository: an inherited repository-location
+		// variable must not redirect a node command to another one.
+		if name != "LC_ALL" && !nodeGitLocationEnv[name] {
 			env = append(env, value)
 		}
 	}
