@@ -1552,7 +1552,7 @@ func spawnNodeOutcome(task hubSpawnTask, node hubSpawnRequest, result hubSpawnRe
 	if stage == "" {
 		stage = "placement"
 	}
-	outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: task.Request.E6Arm}
+	outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: task.Request.E6Arm, CheckoutMode: result.CheckoutMode}
 	if outcome.StageMS == nil {
 		outcome.StageMS = map[string]int64{}
 	}
