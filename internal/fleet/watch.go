@@ -203,21 +203,25 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		return nil
 	}
 	// The lending socket is up before the capability lock, so a watcher the
-	// node probes as aware can always lend its watch lock.
+	// node probes as aware can always lend its watch lock. If the socket
+	// cannot be served (e.g. its directory is not private), the watcher
+	// continues without lock-lending or hub-close awareness rather than
+	// abandoning the job.
 	stopLending, e := serveWatchLock(filepath.Join(a.Jobs, id), lock)
 	if e != nil {
-		return e
-	}
-	defer stopLending()
-	// Held for the watcher's life: it tells the node this watcher defers to
-	// hub-close intents (watch_hub_close.go ProbeHubCloseWatcher).
-	hubCloseLock, e := secureOpen(filepath.Join(a.Jobs, id, hubCloseWatchLock), true, a.warn)
-	if e != nil {
-		return e
-	}
-	defer hubCloseLock.Close()
-	if e := syscall.Flock(int(hubCloseLock.Fd()), syscall.LOCK_EX); e != nil {
-		return e
+		a.warn("watch-lock lending disabled for job %s: %v", id, e)
+	} else {
+		defer stopLending()
+		// Held for the watcher's life: it tells the node this watcher defers to
+		// hub-close intents (watch_hub_close.go ProbeHubCloseWatcher).
+		hubCloseLock, e := secureOpen(filepath.Join(a.Jobs, id, hubCloseWatchLock), true, a.warn)
+		if e != nil {
+			return e
+		}
+		defer hubCloseLock.Close()
+		if e := syscall.Flock(int(hubCloseLock.Fd()), syscall.LOCK_EX); e != nil {
+			return e
+		}
 	}
 	timeout := time.Hour
 	if v := a.envOr("PANEWIRE_COMPLETION_TIMEOUT_S", "WRK_COMPLETION_TIMEOUT_S"); v != "" {

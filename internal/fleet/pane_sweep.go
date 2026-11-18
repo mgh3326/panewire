@@ -1057,19 +1057,10 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	swept := SweptPane{Job: j.ID, Pane: j.Pane, Role: paneSweepRole(j), Reason: end.reason}
 	key := paneSweepKey(j)
 	if reason := paneOwnershipProof(j, agents); reason != "" {
-		if reason == "pane_unlisted" && s.Exclusive != nil {
-			defer s.Exclusive()()
-		}
 		return s.paneUnlisted(ctx, a, j, task, end, swept, reason)
 	}
 	if err := a.savePaneScreen(ctx, j, task); err != nil {
 		return paneSweepKept("screen_save_failed")
-	}
-	// Reading and uploading the last screen may wait on herdr or handoffkeep.
-	// Keep both outside the node-command lock; the job and the pane are
-	// re-read below after taking it, immediately before close.
-	if s.Exclusive != nil {
-		defer s.Exclusive()()
 	}
 	latest, err := a.job(j.ID)
 	if err != nil {
@@ -1098,6 +1089,13 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 		return paneSweepKept(refusal)
 	}
 	defer endUnlock()
+	// Reading and uploading the last screen may wait on herdr or handoffkeep,
+	// and lockUnchangedEnd waits on the job's end lock: both run outside
+	// the node-command lock. Exclusive is taken once the end lock is held
+	// and verified, immediately before the close.
+	if s.Exclusive != nil {
+		defer s.Exclusive()()
+	}
 	if !s.closeStillEnded(ctx, j, current, task, end) || (paneSweepWaitsOnPR(current) && !paneSweepWaitsOnPR(j)) {
 		return paneSweepKept("job_changed")
 	}
@@ -1162,6 +1160,9 @@ func (s *TaskPaneSweeper) paneUnlisted(ctx context.Context, a *App, j Job, task 
 		return paneSweepKept(refusal)
 	}
 	defer unlock()
+	if s.Exclusive != nil {
+		defer s.Exclusive()()
+	}
 	if !s.closeStillEnded(ctx, j, current, task, end) || (paneSweepWaitsOnPR(current) && !paneSweepWaitsOnPR(j)) {
 		return paneSweepKept("job_changed")
 	}

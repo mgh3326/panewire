@@ -2253,8 +2253,8 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	if sameAgent && len(capabilitySet) == 0 {
 		// The capability-free hello is a compatibility retry for a hub that
 		// did not acknowledge the capable hello. On this live session it must
-		// retain the registration's features while still resetting its job
-		// state; a first hello without features remains an old-node record.
+		// retain the registration's features; a first hello without features
+		// remains an old-node record.
 		for capability := range previousCapabilities {
 			capabilitySet[capability] = true
 		}

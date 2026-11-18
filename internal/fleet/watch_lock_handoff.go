@@ -63,8 +63,12 @@ func privateDir(dir string) error {
 	if err != nil {
 		return err
 	}
+	return verifyPrivateDir(dir, info, os.Getuid())
+}
+
+func verifyPrivateDir(dir string, info fs.FileInfo, uid int) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 || !ok || int(st.Uid) != os.Getuid() {
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 || !ok || int(st.Uid) != uid {
 		return fmt.Errorf("watch-lock socket directory %s is not private", dir)
 	}
 	return nil
@@ -75,17 +79,21 @@ func privateDir(dir string) error {
 // listening before the watcher takes its capability lock, so a watcher the
 // node probes as aware can always lend.
 func serveWatchLock(jobDir string, lock *os.File) (stop func(), err error) {
-	path, err := watchLockSocket(jobDir)
+	dir, err := watchLockSocketDir(jobDir)
 	if err != nil {
 		return nil, err
 	}
+	path := filepath.Join(dir, "watch.sock")
 	_ = os.Remove(path)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
+		_ = os.Remove(dir)
 		return nil, err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		listener.Close()
+		_ = os.Remove(path)
+		_ = os.Remove(dir)
 		return nil, err
 	}
 	done := make(chan struct{})
@@ -105,6 +113,7 @@ func serveWatchLock(jobDir string, lock *os.File) (stop func(), err error) {
 		listener.Close()
 		<-done
 		_ = os.Remove(path)
+		_ = os.Remove(dir)
 	}, nil
 }
 

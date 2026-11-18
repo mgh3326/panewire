@@ -616,6 +616,9 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 			out = append(out, entry.Name())
 			continue
 		}
+		if hubPlacementOnly(evs) {
+			continue
+		}
 		// Reaped is folded in ledger sequence order, as settlement folds it.
 		j, err := foldJob(entry.Name(), ledgerOrder(evs))
 		if err != nil {

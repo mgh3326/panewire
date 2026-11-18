@@ -311,8 +311,11 @@ first and exits when it is held.
   `/tmp/panewire-<uid>/<hash>/watch.sock` when that path is too long. Its
   directory is created 0700 before the socket binds, and is refused unless it
   is a real directory owned by the user with no group or other access. So no
-  other local user can connect. flock stays held until every reference closes, so the watcher
-  exiting or being killed mid-close cannot free the lock.
+  other local user can connect. If the lending socket cannot be served, the
+  watcher still runs and watches the job, but without lock-lending or hub-close
+  awareness, and any created socket directory is removed. flock stays held
+  until every reference closes, so the watcher exiting or being killed
+  mid-close cannot free the lock.
 
 - The fence is reconciled under the job's end lock, which admission also
   holds. So a release can never drop the fence of a close admitted
@@ -368,7 +371,8 @@ while any close is open: its process-held watcher fence must remain held.
 2. Repeat the same command until it prints `close ops drained; no pending
    jobs` and exits 0. Exit 5 lists pending jobs; the running node's settlement
    pass retries them. An unreadable ledger is pending, so repair storage and
-   retry rather than treating an incomplete scan as an empty drain.
+   retry rather than treating an incomplete scan as an empty drain (a hub-side
+   placement-only directory is not pending).
 3. Keep the new node binary running for at least 30 seconds. If the inbox kill
    switch (`--delivery-policy off`) is active with a configured store, the
    hub does not open that store or emit inventory logs. Restore a non-off
