@@ -2,44 +2,85 @@ package panewire
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// Successor-closes-parent (hk 5140): when an implementer spawn with
-// --parent-job P lands, the hub ends P itself through the jobs-close reap
-// path. Only implementer successors take over; reviewer and consult children
-// never close their parent, and the successor must own the parent's lane.
+// Successor-closes-parent (hk 5140, hk 5195): when an implementer spawn that
+// named its parent with a typed --parent-job lands, the hub ends the parent's
+// pane through a durable action. Rule and rationale: docs/config.md,
+// "--parent-job".
 //
-//   - Reap's safety holds: never a pane that is not P's, never a job spawned
-//     with --keep, and never a worktree removal (reap closes the pane only).
-//   - An idle, done or blocked parent closes at landing; a working parent is
-//     recorded as superseded and closed at the first sweep where it is no
-//     longer working. Force is never aimed at a working pane: a blocked pane
-//     is proven blocked first and the forced close carries that proof, which
-//     the node re-reads just before closing. The recheck narrows the race to
-//     the close call itself; herdr's pane close takes only the pane id, so a
-//     pane answered between the recheck and the close is still closed.
-//   - The hub writes job.superseded (successor id) on P and sends one info
-//     lane.event to P's owner lane once the pane is closed. Deferred parents
-//     are rebuilt from hk after a hub restart, so no recorded parent is
-//     lost with the in-memory map.
-//   - An unknown or already-ended parent is a no-op. A close failure never
-//     fails the successor's spawn; it logs one warn and retries on the sweep.
-//
-// P's hk task is untouched; the successor carries it.
+//   - Explicit only. The submitter's own command line carried --parent-job
+//     (Submission.ParentJobExplicit). A parent filled from ARBITER_JOB, a
+//     hub-built successor and an older client's request close nothing.
+//   - Only an implementer successor takes over, and only a successor that
+//     owns the parent's lane. A reviewer or consult child, a parent spawned
+//     with --keep, and a parent this hub holds no spawn record for are never
+//     closed.
+//   - The intent is a pool_actions row of kind supersede_close, one per
+//     parent (successor, node and epoch). The pool action reconciler
+//     (hub_pool_action.go) drives it, so it survives a hub restart and a
+//     failed hk write is retried.
+//   - The close is the close-op path (pane.close_op) to the parent's node at
+//     its epoch. The hub sends it only while the parent's pane is idle or
+//     done; a working or blocked pane leaves the row pending for a later
+//     pass. The node then re-checks inside the same operation that the pane
+//     is still the parent's job and still in the status the hub saw, so a
+//     pane that changed hands or resumed work is refused, never closed.
+//   - The worktree is never removed and the parent's hk task is untouched:
+//     the successor carries it. The parent's hk record ends lost with
+//     end_reason superseded_by=<successor>, and the owner lane hears one
+//     info line.
+
+const (
+	// poolActionKindSupersedeClose is the pool action kind of a successor
+	// closing its parent.
+	poolActionKindSupersedeClose = "supersede_close"
+	// supersedeMaxGenerations bounds how often a close the node refused while
+	// the pane was still the parent's is asked again under a new request id.
+	supersedeMaxGenerations = 5
+)
+
+// poolSupersede is the kind-specific data of a supersede_close row.
+type poolSupersede struct {
+	// Successor is the job that replaced the parent.
+	Successor string
+	// Generation counts the requests the node refused for a pane that was
+	// still the parent's (a close racing a state change); each starts a new
+	// row, so a refusal is not final while the pane remains.
+	Generation uint8 `json:",omitempty"`
+	// Recorded is set once job.superseded is confirmed in hk; a failed write
+	// leaves it false so the next pass retries.
+	Recorded bool `json:",omitempty"`
+}
 
 // supersededParentOf names the parent a landed successor replaces, or "".
 func supersededParentOf(task hubSpawnTask) string {
 	return hubSpawnFlagArg(task.Request.Args, "--parent-job")
 }
 
-// maybeSupersedeParent starts the successor-closes-parent close after a
-// landed spawn. It never fails the spawn: every failure is one warn.
+// supersedeEndReason is the hk end_reason of the parent's lost record.
+func supersedeEndReason(successor string) string {
+	return "superseded_by=" + successor
+}
+
+// supersedeCloseStatus reports whether a parent pane in this herdr status may
+// be closed: only a pane that has stopped. A working pane is never forced, and
+// a blocked one may be waiting for an answer.
+func supersedeCloseStatus(status string) bool {
+	return status == "idle" || status == "done"
+}
+
+// maybeSupersedeParent queues the parent's close after a landed spawn. It
+// never fails the spawn: every failure is one warn.
 func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
-	if !h.supersedeClose {
+	if !h.supersedeClose || h.inbox == nil {
 		return
 	}
 	parent := supersededParentOf(task)
@@ -47,190 +88,76 @@ func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
 	if parent == "" || successor == "" || parent == successor {
 		return
 	}
-	// Only an implementer successor takes over: a reviewer or consult
-	// child must never close its parent's pane (docs/config.md).
+	// An implicit parent (ARBITER_JOB) never closes anything: nobody asked
+	// for a replacement.
+	if !task.Request.ParentJobExplicit {
+		return
+	}
+	// Only an implementer successor takes over: a reviewer or consult child
+	// must never close its parent's pane (docs/config.md).
 	if hubSpawnFlagArg(task.Request.Args, "--role") != "implementer" {
 		return
 	}
-	h.mu.Lock()
-	job := h.jobs[parent]
-	var node, owner string
-	completed := true
-	if job != nil {
-		node, owner = job.Node, job.OwnerLane
-		completed = job.Completed
-	}
-	h.mu.Unlock()
-	if job == nil || completed || node == "" || owner == "" {
-		return
-	}
-	// The successor may only end a parent it owns: the forced path could
-	// otherwise close another lane's blocked pane, which is usually an
-	// open operator decision.
 	succOwner := task.Owner
 	if succOwner == "" {
 		succOwner = hubSpawnFlagArg(task.Request.Args, "--owner")
 	}
-	if succOwner != owner {
-		h.logger.Warn("successor close refused: successor owner differs", "parent", parent, "successor", successor, "owner", owner, "successor_owner", succOwner)
-		return
+	ctx, cancel := context.WithTimeout(h.closeCtx, 30*time.Second)
+	defer cancel()
+	if err := h.createSupersedeAction(ctx, parent, successor, succOwner); err != nil {
+		h.logger.Warn("successor close not queued", "parent", parent, "successor", successor, "reason", err.Error())
 	}
-	h.supersedeParent(parent, successor, owner, node)
 }
 
-// supersedeParent records P as superseded and closes its pane through reap.
-// Working defers to the sweep; every other unclosed outcome that is not an
-// expected no-op logs exactly one warn.
-func (h *HubServer) supersedeParent(parent, successor, owner, node string) {
-	if parent == "" || successor == "" || owner == "" || node == "" {
-		return
+// createSupersedeAction stores the durable close intent for parent. A nil
+// error with no row is an expected no-op (unknown or ended parent, --keep, a
+// row already exists); an error is one warn for the caller.
+func (h *HubServer) createSupersedeAction(ctx context.Context, parent, successor, succOwner string) error {
+	unlock, err := h.poolActionLocks.lock(ctx, parent)
+	if err != nil {
+		return err
 	}
+	defer unlock()
 	h.mu.Lock()
 	job := h.jobs[parent]
-	completed := true
-	if job != nil {
-		completed = job.Completed
+	var node, owner, pane string
+	var epoch uint64
+	live := false
+	if job != nil && !job.Completed && !job.Orphaned {
+		node, owner, pane, epoch, live = job.Node, job.OwnerLane, job.Pane, job.Epoch, true
 	}
+	record := h.nodes[node]
+	closeOps := record != nil && record.agent != nil && record.capabilities[hubCapabilityCloseOps]
 	h.mu.Unlock()
-	if job == nil || completed {
-		h.clearSuperseded(parent)
-		return
+	if !live || node == "" || owner == "" {
+		return nil
 	}
-	if h.supersededParentTerminal(parent) {
-		h.clearSuperseded(parent)
-		return
+	// The successor may only end a parent it owns: a blocked pane of another
+	// lane is usually an open operator decision.
+	if succOwner != owner {
+		return fmt.Errorf("successor owner %q differs from the parent's lane %q", succOwner, owner)
 	}
-	reaped, transportErr := h.reapParentOnce(node, parent, owner, false, "")
-	if transportErr != "" {
-		h.recordSuperseded(parent, successor)
-		h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor, "reason", transportErr)
-		return
+	if epoch == 0 || !closeOps {
+		return errors.New("close ops unavailable on the parent's node")
 	}
-	switch reaped.Outcome {
-	case nodeJobReapClosed, nodeJobReapPaneGone:
-		hkErr := h.writeSupersededBestEffort(parent, successor)
-		notifyErr := h.notifySuperseded(parent, successor, owner, node)
-		h.clearSuperseded(parent)
-		if hkErr != nil || notifyErr != nil {
-			h.logger.Warn("successor close failed", "parent", parent, "successor", successor)
-		}
-	case nodeJobReapJobWorking:
-		if h.recordSuperseded(parent, successor) {
-			h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor)
-		}
-	case nodeJobReapPaneBlocked:
-		// The forced close carries what the proof saw (blocked): the node
-		// re-reads the pane just before closing and refuses a pane that
-		// resumed working or otherwise left the proven state. The recheck
-		// narrows the race to the close call itself; it cannot close the
-		// gap between that read and herdr's pane close, which takes only
-		// the pane id.
-		forced, forcedErr := h.reapParentOnce(node, parent, owner, true, "blocked")
-		if forcedErr != "" {
-			h.recordSuperseded(parent, successor)
-			h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor, "reason", forcedErr)
-			return
-		}
-		switch forced.Outcome {
-		case nodeJobReapClosed, nodeJobReapPaneGone:
-			hkErr := h.writeSupersededBestEffort(parent, successor)
-			notifyErr := h.notifySuperseded(parent, successor, owner, node)
-			h.clearSuperseded(parent)
-			if hkErr != nil || notifyErr != nil {
-				h.logger.Warn("successor close failed", "parent", parent, "successor", successor)
-			}
-		case nodeJobReapProtected, nodeJobReapNotAJob, nodeJobReapOwnerMismatch:
-			h.clearSuperseded(parent)
-		case nodeJobReapJobWorking:
-			// The pane resumed after the blocked proof; wait for the sweep
-			// like any other working pane. The recheck narrowed the race
-			// to the close call itself; it cannot close the gap between
-			// that read and herdr's pane close, which takes only the pane
-			// id.
-			if h.recordSuperseded(parent, successor) {
-				h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor)
-			}
-		default:
-			h.recordSuperseded(parent, successor)
-			h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor, "reason", forced.Outcome)
-		}
-	case nodeJobReapProtected, nodeJobReapNotAJob, nodeJobReapOwnerMismatch:
-		h.clearSuperseded(parent)
-	default:
-		h.recordSuperseded(parent, successor)
-		h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor, "reason", reaped.Outcome)
+	// Only a parent this hub spawned is known not to be --keep: the flag
+	// lives in its spawn request, not in the node's heartbeat.
+	parentSpawn, err := h.inbox.store.latestSpawnForJob(ctx, parent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("parent has no spawn record on this hub")
 	}
-}
-
-// supersededParentTerminal reports whether P is unknown or already ended in
-// hk. A transport failure reads as unknown (false) so the reap still runs and
-// the sweep retries; only a proven missing or terminal record stops the close.
-func (h *HubServer) supersededParentTerminal(parent string) bool {
-	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
-		return false
+		return err
 	}
-	if err := app.CheckTrust(); err != nil {
-		return false
+	if hubSpawnHasBoolFlag(parentSpawn.Request.Args, "--keep") {
+		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	record, found, err := app.ExistingJob(ctx, parent)
-	if err != nil || !found {
-		return err == nil
+	if spawnHolderHost(parentSpawn) != node {
+		return errors.New("parent's node differs from its spawn record")
 	}
-	state, _ := record["state"].(string)
-	return hkTerminalState(state)
-}
-
-// reapParentOnce runs one jobs-close reap against the parent's node and
-// retires the lane rows the node verified, exactly as handleJobReap does. A
-// non-empty transport error means the pane was not proven anything about.
-func (h *HubServer) reapParentOnce(node, job, lane string, force bool, expect string) (nodeJobReapResult, string) {
-	args, _ := json.Marshal(nodeJobReapArgs{Job: job, Lane: lane, Force: force, Expect: expect})
-	commandStart := h.now().UTC()
-	pending, requestID, state, sent := h.sendNodeCommand(node, nodeCommandJobReap, args)
-	if !sent {
-		if state == "send_failed" {
-			return nodeJobReapResult{}, "close_unconfirmed"
-		}
-		return nodeJobReapResult{}, "node_offline"
+	if parentSpawn.Outcome.Pane != "" {
+		pane = parentSpawn.Outcome.Pane
 	}
-	timer := time.NewTimer(hubNodeWait(h.nodeCommandWait, hubNodeCommandWait))
-	defer timer.Stop()
-	var result hubNodeCommandResult
-	select {
-	case result = <-pending.done:
-	case <-timer.C:
-		h.forgetNodeCommand(requestID)
-		return nodeJobReapResult{}, "close_unconfirmed"
-	}
-	if result.Error == "node_lost" || result.Error == "node_timeout" {
-		return nodeJobReapResult{}, "close_unconfirmed"
-	}
-	if result.Error != "" {
-		return nodeJobReapResult{}, result.Error
-	}
-	var reaped nodeJobReapResult
-	if json.Unmarshal(result.Result, &reaped) != nil {
-		return nodeJobReapResult{}, "invalid_node_response"
-	}
-	switch reaped.Outcome {
-	case nodeJobReapClosed, nodeJobReapPaneGone:
-		if reaped.Pane != "" {
-			h.releasePaneLanes(node, reaped.Pane, commandStart)
-		}
-		h.logger.Info("job reaped", "client", "successor", "lane", lane, "job", job, "machine", node, "pane", reaped.Pane, "outcome", reaped.Outcome)
-		return reaped, ""
-	default:
-		h.logger.Info("job reap refused", "client", "successor", "lane", lane, "job", job, "machine", node, "pane", reaped.Pane, "outcome", reaped.Outcome)
-		return reaped, ""
-	}
-}
-
-// writeSupersededBestEffort writes job.superseded on P. A missing hk client
-// or write failure is the caller's one warn, never a spawn failure.
-func (h *HubServer) writeSupersededBestEffort(parent, successor string) error {
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
 		return err
@@ -238,189 +165,148 @@ func (h *HubServer) writeSupersededBestEffort(parent, successor string) error {
 	if err := app.CheckTrust(); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return app.MarkJobSuperseded(ctx, parent, successor)
-}
-
-// notifySuperseded sends the one info lane.event to P's owner lane. A
-// duplicate event id means the close was already told, which still counts as
-// told.
-func (h *HubServer) notifySuperseded(parent, successor, owner, host string) error {
-	text := fmt.Sprintf("[panewire] closed %s on %s: superseded by %s", parent, host, successor)
-	event := hubJobEventPayload{
-		EventID:    "superseded:" + parent,
-		JobID:      parent,
-		OwnerLane:  owner,
-		NotifyType: "info",
-		Text:       utf8PrefixWithin(text, laneEventTextLimit),
-		Host:       "hub",
-		Epoch:      1,
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	hkRecord, exists, err := app.ExistingJob(readCtx, parent)
+	cancel()
+	state, _ := hkRecord["state"].(string)
+	if err != nil {
+		return err
 	}
-	result := h.relayLaneEventContext(context.Background(), event, nil)
-	if result.ID == 0 || result.PersistFailed {
-		return fmt.Errorf("owner not notified")
+	if !exists || (state != "claimed" && state != "spawned") {
+		return nil
 	}
+	label := heldAgentName(parentSpawn, hkRecord)
+	endReason := supersedeEndReason(successor)
+	if !validNodeEndReason(endReason) || !validNodePaneName(label) || !nodeCommandPaneIDPattern.MatchString(pane) || !validLaneReference(owner) {
+		return errors.New("invalid close target")
+	}
+	if rows, err := h.inbox.store.supersedeActionsOf(ctx, parent); err != nil {
+		return err
+	} else if len(rows) > 0 {
+		return nil
+	}
+	if pending, err := h.inbox.store.pendingPoolAction(ctx, parent); err != nil || pending != "" {
+		if err == nil {
+			err = errors.New("parent already has a pending close action")
+		}
+		return err
+	}
+	id, err := fleet.NewRequestID()
+	if err != nil {
+		return err
+	}
+	action := poolAction{ID: id, Job: parent, Node: node, Epoch: epoch, Phase: poolActionPending, Data: poolActionData{
+		Owner: owner, Pane: pane, Label: label, EndReason: endReason,
+		Text: fmt.Sprintf("[panewire] closed %s on %s: superseded by %s", parent, node, successor),
+		Kind: poolActionKindSupersedeClose, Supersede: &poolSupersede{Successor: successor},
+	}}
+	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
+		return err
+	}
+	h.poolActionObserved.Store(action.ID, struct{}{})
+	h.logger.Info("successor close action created", "node", node, "job", parent, "successor", successor, "action", action.ID)
 	return nil
 }
 
-// supersededEntry is one deferred parent close: who replaces the parent, and
-// whether job.superseded is confirmed in hk. A failed hk write leaves
-// recorded false so later ticks retry until it succeeds; a confirmed write
-// suppresses repeats.
-type supersededEntry struct {
-	successor string
-	recorded  bool
-}
-
-// noteSuperseded records parent as replaced by successor. It reports whether
-// job.superseded still lacks a confirmed write: a new or changed pair, or a
-// pair whose write has not succeeded yet. Callers write only then, and mark
-// the write, so a working parent held across ticks costs one hk write on
-// success while a failed write is retried.
-func (h *HubServer) noteSuperseded(parent, successor string) bool {
+// prepareSupersedeClose runs the supersede-specific steps of a pending row
+// before the shared close protocol: a parent that ended or moved needs no
+// close, and job.superseded is recorded once. It reports stop when the row is
+// finished or waiting; an error leaves the row pending for the next pass.
+func (h *HubServer) prepareSupersedeClose(ctx context.Context, action *poolAction) (stop bool, err error) {
+	data := action.Data.Supersede
+	if data == nil || data.Successor == "" {
+		return true, h.refusePoolAction(ctx, *action)
+	}
+	if action.Data.Args != nil {
+		// A close request exists: the protocol, not this check, decides.
+		return false, nil
+	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.supersededParents == nil {
-		h.supersededParents = map[string]supersededEntry{}
-	}
-	if e, ok := h.supersededParents[parent]; !ok || e.successor != successor {
-		h.supersededParents[parent] = supersededEntry{successor: successor}
-		return true
-	}
-	return !h.supersededParents[parent].recorded
-}
-
-// markSupersededWritten confirms the hk write for the pair, unless a newer
-// successor replaced it meanwhile.
-func (h *HubServer) markSupersededWritten(parent, successor string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if e, ok := h.supersededParents[parent]; ok && e.successor == successor {
-		e.recorded = true
-		h.supersededParents[parent] = e
-	}
-}
-
-// recordSuperseded notes the pair and writes job.superseded unless a
-// confirmed write already covers it. It reports whether the pair still lacks
-// confirmation, so the caller warns only then.
-func (h *HubServer) recordSuperseded(parent, successor string) bool {
-	if !h.noteSuperseded(parent, successor) {
-		return false
-	}
-	if err := h.writeSupersededBestEffort(parent, successor); err != nil {
-		return true
-	}
-	h.markSupersededWritten(parent, successor)
-	return false
-}
-
-func (h *HubServer) clearSuperseded(parent string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.supersededParents, parent)
-}
-
-// rebuildSupersededFromHK re-arms deferred parents recorded before a hub
-// restart. job.superseded survives in hk while the in-memory map does not.
-// Every sweep checks each live hub job it has not checked before, so a job
-// whose node reports after the restart is still re-armed when it appears. A
-// successful hk read marks the job checked; a missing record or a read
-// failure leaves it unchecked so a later sweep retries.
-func (h *HubServer) rebuildSupersededFromHK() {
-	var ids []string
-	h.mu.Lock()
-	if h.supersededChecked == nil {
-		h.supersededChecked = map[string]bool{}
-	}
-	for id, job := range h.jobs {
-		if job == nil || job.Completed || h.supersededChecked[id] {
-			continue
-		}
-		ids = append(ids, id)
-	}
+	job := h.jobs[action.Job]
+	gone := job != nil && (job.Completed || job.Node != action.Node || job.Epoch != action.Epoch)
 	h.mu.Unlock()
-	if len(ids) == 0 {
-		return
+	if gone {
+		// Nothing was sent, so there is nothing to release: the parent ended
+		// or another owner holds it now.
+		return true, h.refusePoolAction(ctx, *action)
+	}
+	if data.Recorded {
+		return false, nil
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
-		return
+		return true, err
 	}
 	if err := app.CheckTrust(); err != nil {
-		return
+		return true, err
 	}
-	for _, id := range ids {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		record, found, err := app.ExistingJob(ctx, id)
-		cancel()
-		if err != nil || !found {
-			continue
-		}
-		if state, _ := record["state"].(string); hkTerminalState(state) {
-			h.markSupersededChecked(id)
-			continue
-		}
-		if succ, _ := record["superseded"].(string); succ != "" {
-			h.noteSuperseded(id, succ)
-			h.markSupersededWritten(id, succ)
-		}
-		h.markSupersededChecked(id)
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	err = app.MarkJobSuperseded(writeCtx, action.Job, data.Successor)
+	cancel()
+	if err != nil {
+		return true, fmt.Errorf("job.superseded not recorded: %w", err)
 	}
+	data.Recorded = true
+	if err := h.inbox.store.savePoolAction(ctx, *action); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
-func (h *HubServer) markSupersededChecked(id string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.supersededChecked == nil {
-		h.supersededChecked = map[string]bool{}
+// refuseCloseAction ends a row whose close the node refused. A supersede row
+// whose pane is still the parent's was refused by a race with a state change
+// (the pane resumed work, or its composer filled), so it moves to a new
+// request id instead of ending, up to supersedeMaxGenerations; a pane that
+// changed hands or is gone ends the row for good.
+func (h *HubServer) refuseCloseAction(ctx context.Context, action poolAction) error {
+	data := action.Data.Supersede
+	if action.Data.Kind != poolActionKindSupersedeClose || data == nil || int(data.Generation)+1 >= supersedeMaxGenerations {
+		return h.refusePoolAction(ctx, action)
 	}
-	h.supersededChecked[id] = true
+	probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
+	if probe.state == heldPaneAbsent || probe.state == heldPanePresent && probe.row.PaneID != action.Data.Pane {
+		return h.refusePoolAction(ctx, action)
+	}
+	if probe.state != heldPanePresent {
+		return errors.New("pane unavailable")
+	}
+	id, err := fleet.NewRequestID()
+	if err != nil {
+		return err
+	}
+	next := action
+	next.ID, next.Phase = id, poolActionPending
+	next.Data = action.Data
+	next.Data.Args, next.Data.TargetAttempt, next.Data.RetryID, next.Data.RetryAfter, next.Data.RetryCount = nil, "", "", 0, 0
+	next.Data.Supersede = &poolSupersede{Successor: data.Successor, Generation: data.Generation + 1, Recorded: data.Recorded}
+	action.Phase = poolActionRefused
+	if err := h.inbox.store.replaceSupersedeAction(ctx, action, next); err != nil {
+		return err
+	}
+	h.poolActionObserved.Delete(action.ID)
+	h.poolActionObserved.Store(next.ID, struct{}{})
+	h.loopNoteDone(loopPoolActions, action.ID)
+	h.logger.Info("successor close action retried", "node", next.Node, "job", next.Job, "action", next.ID, "retry_of", action.ID, "generation", next.Data.Supersede.Generation)
+	return nil
 }
 
-// startSupersededSweep runs the deferred-parent pass off the maintenance
-// ticker, at most one pass in flight: a hung node must never hold Sweep's
-// pings, failover broadcasts and notification dispatch behind a 30s reap.
-func (h *HubServer) startSupersededSweep() {
-	if !h.supersedeClose {
-		return
-	}
-	if !h.supersededSweepMu.TryLock() {
-		return
-	}
-	go func() {
-		defer h.supersededSweepMu.Unlock()
-		h.sweepSupersededParents()
-	}()
-}
+// supersedeEventID is the fixed id of the one info line a supersede close owes
+// the parent's owner lane.
+func supersedeEventID(job string) string { return "superseded:" + job }
 
-// sweepSupersededParents retries every deferred parent close. It runs on the
-// hub's Sweep: the first pass where the pane is no longer working closes it.
-// The first sweep after a hub start re-arms entries recorded before the
-// restart from their hk job.superseded records.
-func (h *HubServer) sweepSupersededParents() {
-	h.rebuildSupersededFromHK()
-	h.mu.Lock()
-	pending := make(map[string]string, len(h.supersededParents))
-	for parent, entry := range h.supersededParents {
-		pending[parent] = entry.successor
-	}
-	h.mu.Unlock()
-	for parent, successor := range pending {
-		h.mu.Lock()
-		job := h.jobs[parent]
-		var node, owner string
-		completed := true
-		if job != nil {
-			node, owner = job.Node, job.OwnerLane
-			completed = job.Completed
+// hubSpawnHasBoolFlag reports whether a hub spawn argv carries the boolean
+// flag, read as strict flag/value pairs like hubSpawnFlagArg so a value
+// cannot forge it.
+func hubSpawnHasBoolFlag(args []string, flag string) bool {
+	for i := 0; i < len(args); {
+		switch elem := args[i]; {
+		case elem == flag:
+			return true
+		case elem == "--keep" || elem == "--job-dup-ok" || elem == "--task-hk-bypass" || elem == "--allow-escalation":
+			i++
+		default:
+			i += 2
 		}
-		h.mu.Unlock()
-		if job == nil || completed || node == "" || owner == "" {
-			h.clearSuperseded(parent)
-			continue
-		}
-		h.supersedeParent(parent, successor, owner, node)
 	}
+	return false
 }

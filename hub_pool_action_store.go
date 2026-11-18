@@ -41,6 +41,10 @@ type poolActionData struct {
 	RetryID                   string
 	RetryAfter                int64
 	RetryCount                uint8
+	// Kind is "" for the quota-stop close and poolActionKindSupersedeClose
+	// for a successor closing its parent (hub_spawn_supersede.go).
+	Kind      string         `json:",omitempty"`
+	Supersede *poolSupersede `json:",omitempty"`
 }
 
 // retryPoolAction atomically keeps the uncertain request fenced and records
@@ -238,4 +242,63 @@ func (h *HubServer) lockWithoutPoolAction(ctx context.Context, job string) (func
 		return nil, false
 	}
 	return unlock, true
+}
+
+// supersedeActionsOf lists the supersede_close rows of job, any phase: one row
+// per parent, so a final row also stops a second one.
+func (s *laneInboxStore) supersedeActionsOf(parent context.Context, job string) ([]poolAction, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,job,node,epoch,phase,data FROM pool_actions WHERE job=? ORDER BY id`), job)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var actions []poolAction
+	for rows.Next() {
+		var action poolAction
+		var data string
+		if err := rows.Scan(&action.ID, &action.Job, &action.Node, &action.Epoch, &action.Phase, &data); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(data), &action.Data); err != nil {
+			return nil, err
+		}
+		if action.Data.Kind == poolActionKindSupersedeClose {
+			actions = append(actions, action)
+		}
+	}
+	return actions, rows.Err()
+}
+
+// replaceSupersedeAction ends a refused supersede row and stores its next
+// request in one transaction, so a restart never sees two live rows for a
+// parent or none.
+func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, next poolAction) error {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	oldData, err := json.Marshal(old.Data)
+	if err != nil {
+		return err
+	}
+	nextData, err := json.Marshal(next.Data)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE pool_actions SET phase=?,data=? WHERE id=? AND phase=?`), poolActionRefused, string(oldData), old.ID, poolActionPending)
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return errors.New("supersede action changed before retry")
+	}
+	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data) VALUES(?,?,?,?,?,?)`), next.ID, next.Job, next.Node, next.Epoch, next.Phase, string(nextData)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

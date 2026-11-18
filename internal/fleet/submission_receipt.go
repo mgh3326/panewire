@@ -61,6 +61,9 @@ func (a *App) saveSubmission(request Submission) (Submission, error) {
 			return Submission{}, fail(exitStateConflict, "submission receipt is incomplete; inspect the existing hub job before repairing it")
 		}
 		request.RequestID = saved.RequestID
+		// A receipt written before the field existed replays as not explicit:
+		// the safe side, since only an explicit parent is ever closed.
+		request.ParentJobExplicit = saved.ParentJobExplicit
 		normalized, _ := json.Marshal(request)
 		canonical, _ := json.Marshal(saved)
 		if !bytes.Equal(normalized, canonical) {

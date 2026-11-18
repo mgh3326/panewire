@@ -102,10 +102,10 @@ type HubServerConfig struct {
 	// the queue, before a rollback past parking (hk 4661,
 	// docs/hub-spawn-operations.md#rolling-back-past-parking).
 	SpawnRollbackDrain bool
-	// SupersedeClose lets a landed implementer successor close its parent
-	// job's pane (hk 5140). Off by default: a parent ref also arrives
-	// implicitly (ARBITER_JOB), and the close is not yet a durable action
-	// (consult-5140-d43fccd5; follow-up hk 5173).
+	// SupersedeClose lets a landed implementer successor that named its parent
+	// with --parent-job close that parent's pane through a durable pool
+	// action (hk 5140, hk 5195). The hub command line defaults it on; a
+	// config built in code leaves it off unless it asks.
 	SupersedeClose bool
 	Logger         *slog.Logger
 	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
@@ -704,20 +704,6 @@ type HubServer struct {
 	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
 	// reads each hk record once while the job stays in its window.
 	reviewerEndSettled map[string]bool
-	// supersededParents records a parent job a landed successor replaced but
-	// whose pane was still working: parent job id to its deferred close. The
-	// hub closes each entry at the first sweep where its pane is no longer
-	// working, through the jobs-close reap path. Guarded by mu.
-	supersededParents map[string]supersededEntry
-	// supersededChecked names the hub jobs whose hk record the deferred
-	// rebuild already read once. A job is checked on the first sweep that
-	// sees it live, so parents that appear after a restart (their nodes
-	// report later) are still re-armed. Guarded by mu.
-	supersededChecked map[string]bool
-	// supersededSweepMu keeps at most one deferred-parent pass in flight;
-	// the Sweep ticker never waits out a hung node (see
-	// startSupersededSweep).
-	supersededSweepMu  sync.Mutex
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool
@@ -2711,7 +2697,6 @@ func (h *HubServer) Sweep() {
 	h.startFleetLoadPublish(now)
 	h.logRouteHits(now)
 	h.sweepOrphanedJobs(now)
-	h.startSupersededSweep()
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)

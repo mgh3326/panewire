@@ -1118,24 +1118,50 @@ Only implementer spawns take over; reviewer and consult children do not.
 Spawns with `--task`, or neither flag and
 no `ARBITER_JOB`, claim as before.
 
-With the hub flag `--supersede-close` (off by default), once that implementer
-successor lands, the hub also ends the parent's pane
-itself through the jobs-close reap path (`hub_spawn_supersede.go`): a parent
-whose pane is `idle`, `done` or `blocked` closes at landing (a blocked pane
-is proven blocked first, then closed carrying that proof, which the node
-re-reads just before closing; the recheck narrows the race to the close call
-itself, since herdr's pane close takes only the pane id); a parent that is
-still `working` is recorded as
-superseded by the successor (`job.superseded` on the parent) and closed at
-the first sweep where it is no longer working. A parent spawned with
-`--keep` is never closed, the worktree is never removed (the successor may
-be using it), and the parent's hk task is untouched: the successor carries
-it. The owner lane hears one `info` lane.event when the pane closes.
+When that implementer successor lands and its `--parent-job` was typed on the
+submitter's command line, the hub also closes the parent's pane itself
+(`hub_spawn_supersede.go`). Nobody has to close a stopped session that was
+continued with another model. The hub flag `--supersede-close` is **on by
+default** and is only an off switch (`--supersede-close=false`). It is safe to
+leave on because of three rules (hk 5195, consult-5140-d43fccd5):
 
-The flag stays off until the close is a durable action that only an
-explicitly requested replacement creates, with a conditional pane close: today
-a parent ref also arrives implicitly from `ARBITER_JOB`, and the close intent
-lives in hub memory (consult-5140-d43fccd5, hk 5173).
+- **Explicit parents only.** The submission carries `parent_job_explicit`,
+  set only when `panewire spawn` was given `--parent-job` on its command line.
+  A parent filled from `ARBITER_JOB`, a hub-built successor (a quota
+  hand-over, an author ladder step) and a request from an older client (no
+  field) never close anything. Only an `--role implementer` successor takes
+  over, only when it owns the parent's lane (its `--owner` is the parent's
+  owner lane), and never a reviewer or consult child.
+- **A durable row.** The hub stores one `pool_actions` row of kind
+  `supersede_close` per parent (successor, parent node and epoch) beside the
+  quota-stop close rows (docs/node-commands.md, "Hub close protocol"), and the
+  pool action reconciler drives it. It survives a hub restart. A failed hk
+  write (`job.superseded` on the parent) leaves the row pending and is
+  retried, never consumed. A parent spawned with `--keep`, and a parent this
+  hub holds no spawn record for (its `--keep` flag cannot be read), get no
+  row.
+- **A conditional close.** The close is the close-op path (`pane.close_op`) to
+  the parent's node at its epoch. The hub sends it only while the parent's
+  pane is `idle` or `done`: a `working` pane is never forced, and a `blocked`
+  one may be waiting for an answer, so both leave the row pending and the next
+  pass (every 10 seconds) looks again. Inside the same operation the node then
+  re-checks that the pane is still the parent's job (the close journal's
+  ownership, attempt, pane and label checks) and still in the status the hub
+  read, twice around its settle delay. A pane that changed hands, resumed work
+  or has text in its composer is refused, never closed. When the node refused
+  while the pane was still the parent's, the row moves to a new request id (up
+  to five), so a race is not final; a pane that is gone or belongs to
+  another job ends the row.
+
+The close never removes the worktree (the successor may be using it) and never
+touches the parent's hk task: the successor carries it. The parent's hk record
+ends `lost` with `end_reason=superseded_by=<successor>` (written by the node's
+settlement, like every hub close), after `job.superseded` was recorded on it.
+The owner lane hears one `info` lane.event, `[panewire] closed <parent> on
+<host>: superseded by <successor>`, once the node proves the close settled.
+A row is created from the landing hook in the hub process: a hub that dies in
+the instant between the spawn's `succeeded` record and the row insert leaves
+that one parent open, as before this feature.
 
 The earlier `job.task_link` event records `status: inherited` and
 `takeover: pending`. After landing, `job.task_rebind` records the outcome:

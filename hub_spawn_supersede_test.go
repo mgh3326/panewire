@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,92 +13,93 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// supersedeFixture is a hub with a parent job on machine-a (real websocket
-// node) and the parent owner lane routed to machine-b (destination agent for
-// info events). The hk job store is a quotaJobs fake so superseded writes are
-// observable.
+// supersedeFixture is a hub with an implementer parent on machine-a (a real
+// websocket node that answers the close-op commands the test scripts) and the
+// parent's owner lane routed to machine-b, where the info line lands. The hk
+// job store is a quotaJobs fake, so job.superseded and the node's lost record
+// are observable.
 type supersedeFixture struct {
-	hub         *HubServer
-	server      *httptest.Server
-	node        *websocket.Conn
-	destination *hubAgent
-	jobs        *quotaJobs
-	logs        *pw2LockedBuffer
-	parent      string
-	successor   string
+	*quotaReplaceFixture
+	successor string
 }
 
-func newSupersedeFixture(t *testing.T) *supersedeFixture {
+func newSupersedeFixture(t *testing.T, mutate func(*fleet.Submission)) *supersedeFixture {
 	t.Helper()
-	t.Setenv(crashReportDSNEnv, "")
-	_, relayClient, stop := newFakeHandoffkeep(t)
-	t.Cleanup(stop)
-	var logs pw2LockedBuffer
-	hub, err := NewHubServer(HubServerConfig{
-		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"},
-		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
-		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
-		Logger:          slog.New(slog.NewTextHandler(&logs, nil)),
-		SupersedeClose:  true,
-		handoffkeep:     relayClient,
-	})
+	f := newQuotaReplaceFixtureWith(t, "implementer", "parent-job", mutate)
+	f.hub.supersedeClose = true
+	f.hub.mu.Lock()
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
+	f.hub.jobs[f.job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: f.job, OwnerLane: "parent", Epoch: 1, Pane: roleHeldPane}, Node: "machine-a", LastSeen: time.Now().UTC()}
+	f.hub.mu.Unlock()
+	return &supersedeFixture{quotaReplaceFixture: f, successor: "successor-job"}
+}
+
+// successorTask is the landed successor's task as the hub's landing hook sees
+// it.
+func (f *supersedeFixture) successorTask(role, owner string, explicit bool) hubSpawnTask {
+	return hubSpawnTask{
+		Job:   f.successor,
+		Owner: owner,
+		Request: fleet.Submission{
+			RequestID:         "d676220b-e763-4af1-aefd-0000000000a1",
+			Args:              []string{"--job", f.successor, "--parent-job", f.job, "--owner", owner, "--role", role},
+			ParentJobExplicit: explicit,
+		},
+	}
+}
+
+func (f *supersedeFixture) rows(t *testing.T) []poolAction {
+	t.Helper()
+	rows, err := f.hub.inbox.store.supersedeActionsOf(t.Context(), f.job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { hub.Close() })
-	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
-	hub.mu.Lock()
-	hub.nodes["machine-b"] = &hubNodeRecord{agent: destination}
-	hub.mu.Unlock()
-	jobs := &quotaJobs{records: map[string]map[string]any{}}
-	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
-	}
-	server := httptest.NewServer(hub.Handler())
-	t.Cleanup(server.Close)
-	node := t14NamedNodeToken(t, hub, server, "machine-a", "node-token", false, true)
-	return &supersedeFixture{hub: hub, server: server, node: node, destination: destination, jobs: jobs, logs: &logs, parent: "parent-job", successor: "successor-job"}
+	return rows
 }
 
-func (f *supersedeFixture) seedParent(t *testing.T, state string) {
+func (f *supersedeFixture) onlyRow(t *testing.T) poolAction {
 	t.Helper()
-	f.hub.jobs[f.parent] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: f.parent, OwnerLane: "parent", Pane: "w1:p1"}, Node: "machine-a", LastSeen: time.Now().UTC()}
+	rows := f.rows(t)
+	if len(rows) != 1 {
+		t.Fatalf("want one supersede row, got %+v", rows)
+	}
+	return rows[0]
+}
+
+// step runs one reconcile pass over the one live row against the scripted
+// node replies.
+func (f *supersedeFixture) step(t *testing.T, replies ...poolActionReply) error {
+	t.Helper()
+	return runPoolActionStep(t, f.hub, f.node, readOnlyPoolAction(t, f.hub), replies...)
+}
+
+// noMoreCommands ends a test: the read that proves silence also closes the
+// node's connection, so it is the last use of the node.
+func (f *supersedeFixture) noMoreCommands(t *testing.T) {
+	t.Helper()
+	if extra, ok := tryNodeCommand(f.node); ok {
+		t.Fatalf("unexpected node command: %s", extra["op"])
+	}
+}
+
+func (f *supersedeFixture) superseded() string {
 	f.jobs.mu.Lock()
-	f.jobs.records[f.parent] = map[string]any{"state": state}
-	f.jobs.mu.Unlock()
+	defer f.jobs.mu.Unlock()
+	v, _ := f.jobs.records[f.job]["superseded"].(string)
+	return v
 }
 
-// serveReap answers one job.reap on the parent node and returns what the hub
-// asked for.
-func serveReap(t *testing.T, f *supersedeFixture, outcome, pane string) map[string]json.RawMessage {
-	t.Helper()
-	command := nodeCommandRead(t, f.node)
-	if string(command["op"]) != `"job.reap"` {
-		t.Fatalf("node received %v, want job.reap", command)
-	}
-	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": outcome, "pane": pane}})
-	return command
-}
-
-func reapForceOf(t *testing.T, command map[string]json.RawMessage) bool {
-	t.Helper()
-	var args nodeJobReapArgs
-	if err := json.Unmarshal(command["args"], &args); err != nil {
-		t.Fatal(err)
-	}
-	return args.Force
-}
-
-func reapExpectOf(t *testing.T, command map[string]json.RawMessage) string {
-	t.Helper()
-	var args nodeJobReapArgs
-	if err := json.Unmarshal(command["args"], &args); err != nil {
-		t.Fatal(err)
-	}
-	return args.Expect
+// nodeEnds plays the node's settlement: the parent's hk record ends lost with
+// the action's end_reason.
+func (f *supersedeFixture) nodeEnds(reason string) {
+	f.jobs.mu.Lock()
+	defer f.jobs.mu.Unlock()
+	f.jobs.records[f.job]["state"] = "lost"
+	f.jobs.records[f.job]["end_reason"] = reason
 }
 
 func tryNodeCommand(conn *websocket.Conn) (map[string]json.RawMessage, bool) {
@@ -121,18 +120,6 @@ func tryNodeCommand(conn *websocket.Conn) (map[string]json.RawMessage, bool) {
 	}
 }
 
-func supersededOf(t *testing.T, f *supersedeFixture) (string, bool) {
-	t.Helper()
-	f.jobs.mu.Lock()
-	defer f.jobs.mu.Unlock()
-	rec, ok := f.jobs.records[f.parent]
-	if !ok {
-		return "", false
-	}
-	v, _ := rec["superseded"].(string)
-	return v, v != ""
-}
-
 func supersedeInfos(destination *hubAgent) []hubRelayInjectEvent {
 	var out []hubRelayInjectEvent
 	for {
@@ -147,33 +134,82 @@ func supersedeInfos(destination *hubAgent) []hubRelayInjectEvent {
 	}
 }
 
-// TestSupersedeClosesIdleParentOnLanding is acceptance: an idle parent is
-// closed when the successor lands, its worktree survives, and the owner hears
-// one info.
-func TestSupersedeClosesIdleParentOnLanding(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
+func supersedeProbe(status string) poolActionReply {
+	return poolActionReply{op: nodeCommandAgentsList, result: map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{{PaneID: roleHeldPane, Name: "parent-job", AgentStatus: status, Cwd: "/work/project"}}, "panes_ok": true}}
+}
+
+var (
+	supersedeNoneStatus = poolStatus(nodeCloseOpNone, false, false)
+	supersedeClosed     = poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpClosed, "replayed": false}}
+)
+
+// closeIdleParent drives a freshly queued row through the whole protocol: the
+// hub reads the pane, sends the close, sees the node settle, and finishes.
+func (f *supersedeFixture) closeIdleParent(t *testing.T) {
+	t.Helper()
+	if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), supersedeClosed); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.step(t, poolStatus(fleet.CloseOpClosed, false, true)); err != nil {
+		t.Fatal(err)
+	}
+	f.nodeEnds(supersedeEndReason(f.successor))
+	if err := f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSupersedeExplicitParentClosesIdleParentOnce is acceptance: an explicit
+// --parent-job implementer lands while the parent is idle: one row, the
+// parent closed through the close-op path, the worktree kept, one info line.
+func TestSupersedeExplicitParentClosesIdleParentOnce(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
 	worktree := filepath.Join(t.TempDir(), "worktree")
 	if err := os.MkdirAll(worktree, 0755); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
-	command := serveReap(t, f, nodeJobReapClosed, "w1:p1")
-	if reapForceOf(t, command) {
-		t.Fatalf("idle close must not use force: %v", command["args"])
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	row := f.onlyRow(t)
+	if row.Data.Kind != poolActionKindSupersedeClose || row.Job != f.job || row.Node != "machine-a" || row.Epoch != 1 || row.Data.Supersede.Successor != f.successor || row.Data.Pane != roleHeldPane || row.Data.Owner != "parent" {
+		t.Fatalf("row does not bind successor, node and epoch: %+v", row)
 	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("supersede did not finish")
+	// The close request the node gets names the parent, its epoch and pane,
+	// the idle status the hub read, and the end reason.
+	done := make(chan error, 1)
+	go func() { done <- f.hub.reconcilePoolAction(t.Context(), row) }()
+	for _, reply := range []poolActionReply{supersedeNoneStatus, supersedeProbe("idle")} {
+		command := nodeCommandRead(t, f.node)
+		if string(command["op"]) != `"`+reply.op+`"` {
+			t.Fatalf("command %s, want %s", command["op"], reply.op)
+		}
+		nodeCommandReplyTo(t, f.node, command, map[string]any{"result": reply.result})
 	}
-	// No extra node work: only the one reap.
-	if extra, ok := tryNodeCommand(f.node); ok {
-		t.Fatalf("extra node command after close: %v", extra)
+	command := nodeCommandRead(t, f.node)
+	if string(command["op"]) != `"`+nodeCommandPaneCloseOp+`"` {
+		t.Fatalf("command %s, want the close op", command["op"])
 	}
-	if got, ok := supersededOf(t, f); !ok || got != f.successor {
-		t.Fatalf("job.superseded=%q ok=%v, want %q", got, ok, f.successor)
+	var args nodePaneCloseOpArgs
+	if err := json.Unmarshal(command["args"], &args); err != nil {
+		t.Fatal(err)
+	}
+	if args.RequestID != row.ID || args.Job != f.job || args.Epoch != 1 || args.PaneID != roleHeldPane || args.AgentStatus != "idle" || args.EndReason != "superseded_by="+f.successor {
+		t.Fatalf("close args=%+v", args)
+	}
+	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": supersedeClosed.result})
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := f.step(t, poolStatus(fleet.CloseOpClosed, false, true)); err != nil {
+		t.Fatal(err)
+	}
+	f.nodeEnds("superseded_by=" + f.successor)
+	if err := f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)); err != nil {
+		t.Fatal(err)
+	}
+	f.noMoreCommands(t)
+	if got := f.superseded(); got != f.successor {
+		t.Fatalf("job.superseded=%q, want %q", got, f.successor)
 	}
 	infos := supersedeInfos(f.destination)
 	if len(infos) != 1 || !strings.Contains(infos[0].Text, "[panewire] closed parent-job on machine-a: superseded by successor-job") {
@@ -182,499 +218,175 @@ func TestSupersedeClosesIdleParentOnLanding(t *testing.T) {
 	if _, err := os.Stat(worktree); err != nil {
 		t.Fatalf("the close must never remove the worktree: %v", err)
 	}
-	f.jobs.mu.Lock()
-	state := f.jobs.records[f.parent]["state"]
-	f.jobs.mu.Unlock()
-	if state != "spawned" {
-		t.Fatalf("the close must not end the hk record (state=%v): the successor carries the task", state)
+	if active, err := f.hub.inbox.store.activePoolActions(t.Context()); err != nil || len(active) != 0 {
+		t.Fatalf("a finished close leaves no live row: %+v %v", active, err)
 	}
-	if _, deferred := f.hub.supersededParents[f.parent]; deferred {
-		t.Fatalf("a closed parent must not stay deferred")
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionDone {
+		t.Fatalf("row=%+v", rows)
 	}
-}
-
-// TestSupersedeDefersWorkingParentUntilSweep: a working parent is recorded at
-// landing and closed at the next sweep after it stops. Force is never used on
-// a working pane.
-func TestSupersedeDefersWorkingParentUntilSweep(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	done := make(chan struct{})
-	go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
-	command := serveReap(t, f, nodeJobReapJobWorking, "w1:p1")
-	if reapForceOf(t, command) {
-		t.Fatalf("working probe must not use force")
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("supersede did not finish")
-	}
-	// Recorded but not closed: no info yet, still deferred.
-	if got, ok := supersededOf(t, f); !ok || got != f.successor {
-		t.Fatalf("working parent must be recorded superseded: %q %v", got, ok)
-	}
-	if infos := supersedeInfos(f.destination); len(infos) != 0 {
-		t.Fatalf("no info before the close: %+v", infos)
-	}
-	f.hub.mu.Lock()
-	_, deferred := f.hub.supersededParents[f.parent]
-	f.hub.mu.Unlock()
-	if !deferred {
-		t.Fatal("a working parent must wait for the sweep")
-	}
-	// The sweep closes it once idle.
-	sweepDone := make(chan struct{})
-	go func() { f.hub.sweepSupersededParents(); close(sweepDone) }()
-	command = serveReap(t, f, nodeJobReapClosed, "w1:p1")
-	if reapForceOf(t, command) {
-		t.Fatalf("idle sweep close must not use force")
-	}
-	select {
-	case <-sweepDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("sweep did not finish")
-	}
-	infos := supersedeInfos(f.destination)
-	if len(infos) != 1 {
-		t.Fatalf("sweep close owes one info: %+v", infos)
+	// A later landing for the same parent adds no second row.
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	if rows := f.rows(t); len(rows) != 1 {
+		t.Fatalf("one row per parent, got %+v", rows)
 	}
 }
 
-// TestSupersedeBlockedParentClosesWithForce: a pane stopped at a prompt closes
-// at landing, proven blocked first and only then forced.
-func TestSupersedeBlockedParentClosesWithForce(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	done := make(chan struct{})
-	go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
-	first := serveReap(t, f, nodeJobReapPaneBlocked, "w1:p1")
-	if reapForceOf(t, first) {
-		t.Fatalf("blocked must be proven without force first")
+// TestSupersedeImplicitParentCreatesNoRow: a parent filled from ARBITER_JOB is
+// not a request to replace it. Older clients send no field, which reads the
+// same.
+func TestSupersedeImplicitParentCreatesNoRow(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", false))
+	if rows := f.rows(t); len(rows) != 0 {
+		t.Fatalf("an implicit parent must create no row: %+v", rows)
 	}
-	second := serveReap(t, f, nodeJobReapClosed, "w1:p1")
-	if !reapForceOf(t, second) {
-		t.Fatalf("blocked close uses force after the proof: %v", second["args"])
-	}
-	if got := reapExpectOf(t, second); got != "blocked" {
-		t.Fatalf("forced close must carry the blocked proof, got %q", got)
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("supersede did not finish")
-	}
-	if infos := supersedeInfos(f.destination); len(infos) != 1 {
-		t.Fatalf("blocked close owes one info: %+v", infos)
-	}
-}
-
-// TestSupersedeNeverClosesKeepParent: --keep is never closed and never recorded.
-func TestSupersedeNeverClosesKeepParent(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	done := make(chan struct{})
-	go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
-	command := serveReap(t, f, nodeJobReapProtected, "w1:p1")
-	if reapForceOf(t, command) {
-		t.Fatalf("keep probe must not use force")
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("supersede did not finish")
-	}
-	if extra, ok := tryNodeCommand(f.node); ok {
-		t.Fatalf("a keep parent must see no second command: %v", extra)
-	}
-	if _, ok := supersededOf(t, f); ok {
-		t.Fatal("a keep parent must never be recorded superseded")
-	}
-	if infos := supersedeInfos(f.destination); len(infos) != 0 {
-		t.Fatalf("a keep parent sends no info: %+v", infos)
-	}
-}
-
-// TestSupersedeMissingParentIsNoop: an unknown or ended parent records nothing
-// and sends nothing.
-func TestSupersedeMissingParentIsNoop(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.hub.supersedeParent("never-existed", f.successor, "parent", "machine-a")
-	if extra, ok := tryNodeCommand(f.node); ok {
-		t.Fatalf("unknown parent must not reach the node: %v", extra)
-	}
-	f.seedParent(t, "spawned")
-	f.hub.jobs[f.parent].Completed = true
-	f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a")
-	if extra, ok := tryNodeCommand(f.node); ok {
-		t.Fatalf("ended parent must not reach the node: %v", extra)
-	}
-	if _, ok := supersededOf(t, f); ok {
-		t.Fatal("an ended parent records nothing")
-	}
-}
-
-// TestSupersedeCloseFailureKeepsSpawnAndWarnsOnce: the successor lands even
-// when the close cannot, and the failure is one warn.
-func TestSupersedeCloseFailureKeepsSpawnAndWarnsOnce(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	// Parent on a machine with no connection: the reap cannot be sent.
-	f.hub.mu.Lock()
-	f.hub.jobs[f.parent].Node = "machine-offline"
-	f.hub.mu.Unlock()
-	request := durableSpawnRequest()
-	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", f.successor, "--job", f.successor, "--t", "T1", "--parent-job", f.parent, "--owner", "parent", "--role", "implementer", "--host", "auto", "--report-relative", f.successor + "/report.md"}
-	task, _, err := f.hub.inbox.store.claimSpawn(context.Background(), request, f.successor, "parent", time.Now())
-	if err != nil {
+	var legacy fleet.Submission
+	if err := json.Unmarshal([]byte(`{"request_id":"d676220b-e763-4af1-aefd-0000000000a1","args":["--job","successor-job","--parent-job","parent-job","--owner","parent","--role","implementer"]}`), &legacy); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := f.hub.completeSpawn(context.Background(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"})
-	if err != nil || !changed {
-		t.Fatalf("successor spawn must land: changed=%v err=%v", changed, err)
-	}
-	eventually(t, 3*time.Second, "the failed close to warn once", func() bool {
-		return strings.Count(f.logs.String(), "successor close failed") == 1
-	})
-	saved, err := f.hub.inbox.store.spawnTask(context.Background(), request.RequestID)
-	if err != nil || saved.Status != "succeeded" {
-		t.Fatalf("failed close must not touch the successor: %+v %v", saved, err)
-	}
-}
-
-// TestSupersedeLandingHookClosesIdleParent: the succeeded spawn operation
-// itself drives the close, end to end.
-func TestSupersedeLandingHookClosesIdleParent(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	request := durableSpawnRequest()
-	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", f.successor, "--job", f.successor, "--t", "T1", "--parent-job", f.parent, "--owner", "parent", "--role", "implementer", "--host", "auto", "--report-relative", f.successor + "/report.md"}
-	task, _, err := f.hub.inbox.store.claimSpawn(context.Background(), request, f.successor, "parent", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	served := make(chan map[string]json.RawMessage, 1)
-	go func() {
-		command := nodeCommandRead(t, f.node)
-		nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": "closed", "pane": "w1:p1"}})
-		served <- command
-	}()
-	changed, err := f.hub.completeSpawn(context.Background(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"})
-	if err != nil || !changed {
-		t.Fatalf("successor spawn must land: changed=%v err=%v", changed, err)
-	}
-	select {
-	case command := <-served:
-		if reapForceOf(t, command) {
-			t.Fatalf("landing close must not use force")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("landing did not close the parent")
-	}
-	eventually(t, 3*time.Second, "the landing close to record and notify", func() bool {
-		got, ok := supersededOf(t, f)
-		return ok && got == f.successor && len(supersedeInfos(f.destination)) == 1
-	})
-}
-
-// TestSupersedeReviewerChildLeavesParentRunning: only an implementer
-// successor takes over; reviewer and consult children must never close the
-// parent pane, even with an explicit --parent-job.
-func TestSupersedeReviewerChildLeavesParentRunning(t *testing.T) {
-	for _, role := range []string{"reviewer", "consult"} {
-		t.Run(role, func(t *testing.T) {
-			f := newSupersedeFixture(t)
-			f.seedParent(t, "spawned")
-			task := hubSpawnTask{
-				Job:     f.successor,
-				Owner:   "parent",
-				Request: fleet.Submission{RequestID: "d676220b-e763-4af1-aefd-0000000000a1", Args: []string{"--job", f.successor, "--parent-job", f.parent, "--owner", "parent", "--role", role}},
-			}
-			f.hub.maybeSupersedeParent(task)
-			if extra, ok := tryNodeCommand(f.node); ok {
-				t.Fatalf("a %s child must not reach the node: %v", role, extra)
-			}
-			if _, ok := supersededOf(t, f); ok {
-				t.Fatalf("a %s child must never record superseded", role)
-			}
-			if infos := supersedeInfos(f.destination); len(infos) != 0 {
-				t.Fatalf("a %s child sends no info: %+v", role, infos)
-			}
-		})
-	}
-}
-
-// TestSupersedeOwnerMismatchLeavesParentRunning: the successor may only end
-// a parent in its own lane. Another lane's blocked pane is usually an open
-// operator decision, so a foreign successor leaves it running with one warn.
-func TestSupersedeOwnerMismatchLeavesParentRunning(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	task := hubSpawnTask{
-		Job:     f.successor,
-		Owner:   "other-lane",
-		Request: fleet.Submission{RequestID: "d676220b-e763-4af1-aefd-0000000000a2", Args: []string{"--job", f.successor, "--parent-job", f.parent, "--owner", "other-lane", "--role", "implementer"}},
-	}
+	task := f.successorTask("implementer", "parent", false)
+	task.Request = legacy
 	f.hub.maybeSupersedeParent(task)
-	if extra, ok := tryNodeCommand(f.node); ok {
-		t.Fatalf("a foreign successor must not reach the node: %v", extra)
-	}
-	if _, ok := supersededOf(t, f); ok {
-		t.Fatal("a foreign successor must never record superseded")
-	}
-	if infos := supersedeInfos(f.destination); len(infos) != 0 {
-		t.Fatalf("a foreign successor sends no info: %+v", infos)
-	}
-	if got := strings.Count(f.logs.String(), "successor close refused"); got != 1 {
-		t.Fatalf("refusal owes one warn, got %d: %s", got, f.logs.String())
+	f.noMoreCommands(t)
+	if rows := f.rows(t); len(rows) != 0 {
+		t.Fatalf("a request with no field must create no row: %+v", rows)
 	}
 }
 
-// TestSupersedeSweepRebuildsFromHK: a parent recorded before a hub restart
-// is re-armed from its hk job.superseded record on the first sweep and
-// closed once idle, even though the in-memory map is empty.
-func TestSupersedeSweepRebuildsFromHK(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	f.jobs.mu.Lock()
-	f.jobs.records[f.parent]["superseded"] = f.successor
-	f.jobs.mu.Unlock()
-	if _, rebuilt := f.hub.supersededParents[f.parent]; rebuilt {
-		t.Fatal("fixture must start with an empty deferred map")
-	}
-	done := make(chan struct{})
-	go func() { f.hub.sweepSupersededParents(); close(done) }()
-	command := serveReap(t, f, nodeJobReapClosed, "w1:p1")
-	if reapForceOf(t, command) {
-		t.Fatalf("rebuilt idle close must not use force")
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("rebuilt sweep did not finish")
-	}
-	if got, ok := supersededOf(t, f); !ok || got != f.successor {
-		t.Fatalf("hk superseded must survive the close: %q %v", got, ok)
-	}
-	if infos := supersedeInfos(f.destination); len(infos) != 1 {
-		t.Fatalf("rebuilt close owes one info: %+v", infos)
-	}
+// TestSupersedeNeverQueuesForTheseParentsOrSuccessors: a reviewer or consult
+// child, a --keep parent, a parent this hub has no spawn record for, a
+// successor of another lane, the switch off, and an ended parent all create no
+// row.
+func TestSupersedeNeverQueuesForTheseParentsOrSuccessors(t *testing.T) {
+	t.Run("reviewer and consult children", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		for _, role := range []string{"reviewer", "consult"} {
+			f.hub.maybeSupersedeParent(f.successorTask(role, "parent", true))
+		}
+		if rows := f.rows(t); len(rows) != 0 {
+			t.Fatalf("a %s child must create no row: %+v", "reviewer or consult", rows)
+		}
+	})
+	t.Run("keep parent", func(t *testing.T) {
+		f := newSupersedeFixture(t, func(request *fleet.Submission) { request.Args = append(request.Args, "--keep") })
+		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		if rows := f.rows(t); len(rows) != 0 {
+			t.Fatalf("a --keep parent must create no row: %+v", rows)
+		}
+	})
+	t.Run("parent without a spawn record", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.mu.Lock()
+		f.hub.jobs["local-job"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "local-job", OwnerLane: "parent", Epoch: 1, Pane: "w9:p9"}, Node: "machine-a"}
+		f.hub.mu.Unlock()
+		task := f.successorTask("implementer", "parent", true)
+		task.Request.Args = []string{"--job", f.successor, "--parent-job", "local-job", "--owner", "parent", "--role", "implementer"}
+		f.hub.maybeSupersedeParent(task)
+		rows, err := f.hub.inbox.store.supersedeActionsOf(t.Context(), "local-job")
+		if err != nil || len(rows) != 0 {
+			t.Fatalf("a parent with no spawn record must create no row: %+v %v", rows, err)
+		}
+	})
+	t.Run("another lane", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.maybeSupersedeParent(f.successorTask("implementer", "other-lane", true))
+		if rows := f.rows(t); len(rows) != 0 {
+			t.Fatalf("a foreign successor must create no row: %+v", rows)
+		}
+	})
+	t.Run("switch off", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.supersedeClose = false
+		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		if rows := f.rows(t); len(rows) != 0 {
+			t.Fatalf("with the switch off no row exists: %+v", rows)
+		}
+	})
+	t.Run("ended parent", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.mu.Lock()
+		f.hub.jobs[f.job].Completed = true
+		f.hub.mu.Unlock()
+		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		if rows := f.rows(t); len(rows) != 0 {
+			t.Fatalf("an ended parent must create no row: %+v", rows)
+		}
+	})
 }
 
-// TestSupersedeForcedCloseRefusesResumedPane: a pane that resumes working
-// between the blocked proof and the forced close is refused, not killed. It
-// waits for the sweep like any other working pane, with no failure warn.
-func TestSupersedeForcedCloseRefusesResumedPane(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	done := make(chan struct{})
-	go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
-	first := serveReap(t, f, nodeJobReapPaneBlocked, "w1:p1")
-	if reapForceOf(t, first) {
-		t.Fatalf("blocked must be proven without force first")
+// TestSupersedeWorkingParentStaysPendingUntilItStops is acceptance: a working
+// parent gets no close request; the row stays pending and a later pass, once
+// the pane has stopped, closes it. A blocked pane waits too.
+func TestSupersedeWorkingParentStaysPendingUntilItStops(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	for _, status := range []string{"working", "working", "blocked"} {
+		if err := f.step(t, supersedeNoneStatus, supersedeProbe(status)); err != nil {
+			t.Fatal(err)
+		}
+		// A stray close request would sit unread on the node's connection
+		// and fail the next scripted read.
+		if row := f.onlyRow(t); row.Phase != poolActionPending || row.Data.Args != nil {
+			t.Fatalf("a %s parent must leave the row pending with no request: %+v", status, row)
+		}
 	}
-	second := serveReap(t, f, nodeJobReapJobWorking, "w1:p1")
-	if !reapForceOf(t, second) || reapExpectOf(t, second) != "blocked" {
-		t.Fatalf("resumed pane must still be rechecked with the proof: %v", second["args"])
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("supersede did not finish")
-	}
-	if got, ok := supersededOf(t, f); !ok || got != f.successor {
-		t.Fatalf("resumed parent stays recorded: %q %v", got, ok)
+	if got := f.superseded(); got != f.successor {
+		t.Fatalf("a waiting parent is still recorded superseded, got %q", got)
 	}
 	if infos := supersedeInfos(f.destination); len(infos) != 0 {
 		t.Fatalf("no info before the close: %+v", infos)
 	}
-	if strings.Contains(f.logs.String(), "successor close failed") {
-		t.Fatalf("a refused resume is a defer, not a failure: %s", f.logs.String())
-	}
-}
-
-// TestNodeJobReapForcedExpectRecheck: a forced close carrying the proven
-// status closes a still-blocked or finished pane, refuses a resumed working
-// pane without closing it, and refuses an invalid expectation.
-func TestNodeJobReapForcedExpectRecheck(t *testing.T) {
-	events := []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", false)}
-	serve := func(t *testing.T, listed string, expect string, extra ...map[string]json.RawMessage) (map[string]any, string, int) {
-		t.Helper()
-		inbox := t.TempDir()
-		markLostJobEvents(t, inbox, "job-a", events...)
-		fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", listed, "/work/a"))}, read: nodeReapScreen("❯ ")}
-		client := &HubClient{jobsInboxRoot: inbox, nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}
-		result, code := nodeRun(t, client, nodeCommandJobReap, nodeJobReapArgs{Job: "job-a", Lane: "lane-a", Force: true, Expect: expect})
-		_ = extra
-		return result, code, fake.called("pane", "close")
-	}
-	if result, code, closes := serve(t, "blocked", "blocked"); code != "" || result["outcome"] != nodeJobReapClosed || closes != 1 {
-		t.Fatalf("still-blocked forced close: result=%v code=%q closes=%d", result, code, closes)
-	}
-	if result, code, closes := serve(t, "working", "blocked"); code != "" || result["outcome"] != nodeJobReapJobWorking || closes != 0 {
-		t.Fatalf("resumed working pane must be refused: result=%v code=%q closes=%d", result, code, closes)
-	}
-	if result, code, closes := serve(t, "idle", "blocked"); code != "" || result["outcome"] != nodeJobReapClosed || closes != 1 {
-		t.Fatalf("finished pane stays closable: result=%v code=%q closes=%d", result, code, closes)
-	}
-	if _, code, _ := serve(t, "blocked", "working"); code == "" {
-		t.Fatal("an invalid expectation must be refused")
-	}
-}
-
-// TestSupersedeSweepRearmsAfterReconnect: the restart order. The first sweep
-// runs before the parent's node reports, so h.jobs is empty; when the node
-// later reports the parent live, a later sweep must still re-arm it from hk
-// and close it once idle.
-func TestSupersedeSweepRearmsAfterReconnect(t *testing.T) {
-	f := newSupersedeFixture(t)
-	// First sweep with no jobs known: records nothing, and must not latch
-	// the rebuild shut.
-	f.hub.sweepSupersededParents()
-	if _, ok := f.hub.supersededParents[f.parent]; ok {
-		t.Fatal("an unknown parent must not be re-armed")
-	}
-	// The node reports the parent live only afterwards; hk kept the
-	// pre-restart superseded record all along.
-	f.seedParent(t, "spawned")
-	f.jobs.mu.Lock()
-	f.jobs.records[f.parent]["superseded"] = f.successor
-	f.jobs.mu.Unlock()
-	done := make(chan struct{})
-	go func() { f.hub.sweepSupersededParents(); close(done) }()
-	command := serveReap(t, f, nodeJobReapClosed, "w1:p1")
-	if reapForceOf(t, command) {
-		t.Fatalf("rebuilt idle close must not use force")
-	}
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("rebuilt sweep did not finish")
-	}
+	f.closeIdleParent(t)
 	if infos := supersedeInfos(f.destination); len(infos) != 1 {
-		t.Fatalf("rebuilt close owes one info: %+v", infos)
+		t.Fatalf("the first pass after it stopped closes it with one info: %+v", infos)
 	}
 }
 
-// TestSupersedeSweepDoesNotWaitOutAHungNode: the deferred pass runs off the
-// maintenance ticker. Sweep returns promptly while a parent's node stays
-// silent; the background pass closes the parent once the node answers.
-func TestSupersedeSweepDoesNotWaitOutAHungNode(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	f.hub.noteSuperseded(f.parent, f.successor)
-	// The destination agent is a test fake with no connection: keep the
-	// tick from pinging it.
-	f.hub.mu.Lock()
-	if rec := f.hub.nodes["machine-b"]; rec != nil {
-		rec.lastPing, rec.lastKeepaliveSent, rec.state = time.Now().UTC(), time.Now().UTC(), "connected"
-		rec.stateSince = time.Now().UTC()
+// TestSupersedeRowSurvivesHubRestart is acceptance: a pending row is finished
+// by the reconciler of a hub started afterwards, which holds no in-memory
+// intent.
+func TestSupersedeRowSurvivesHubRestart(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	if err := f.step(t, supersedeNoneStatus, supersedeProbe("working")); err != nil {
+		t.Fatal(err)
 	}
-	f.hub.mu.Unlock()
-	swept := make(chan struct{})
-	go func() { f.hub.Sweep(); close(swept) }()
-	select {
-	case <-swept:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Sweep held the tick waiting out a silent node")
+	restartPoolActionHub(t, f.quotaReplaceFixture)
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionPending {
+		t.Fatalf("the row must outlive the hub: %+v", rows)
 	}
-	command := serveReap(t, f, nodeJobReapClosed, "w1:p1")
-	if reapForceOf(t, command) {
-		t.Fatalf("idle close must not use force")
+	f.closeIdleParent(t)
+	if infos := supersedeInfos(f.destination); len(infos) != 1 {
+		t.Fatalf("the restarted hub owes one info: %+v", infos)
 	}
-	eventually(t, 5*time.Second, "the background pass to close and notify", func() bool {
-		f.hub.mu.Lock()
-		_, deferred := f.hub.supersededParents[f.parent]
-		f.hub.mu.Unlock()
-		return !deferred && len(supersedeInfos(f.destination)) == 1
-	})
-}
-
-// TestSupersedeWorkingTickWritesSupersededOnce: a working parent held across
-// sweeps costs one hk superseded write, not one per tick.
-func TestSupersedeWorkingTickWritesSupersededOnce(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	counting := &countingSupersededStore{JobStore: f.jobs}
-	f.hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: counting, Out: out, Err: errout}, nil
-	}
-	serve := func(outcome string) {
-		done := make(chan struct{})
-		go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
-		serveReap(t, f, outcome, "w1:p1")
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("supersede did not finish")
-		}
-	}
-	serve(nodeJobReapJobWorking)
-	serve(nodeJobReapJobWorking)
-	if got := counting.supersededWrites(); got != 1 {
-		t.Fatalf("two working ticks wrote job.superseded %d times, want 1", got)
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionDone {
+		t.Fatalf("row=%+v", rows)
 	}
 }
 
-// countingSupersededStore counts hk writes of the superseded field.
-type countingSupersededStore struct {
-	fleet.JobStore
-	mu     sync.Mutex
-	writes int
-}
-
-func (s *countingSupersededStore) Put(ctx context.Context, id string, fields map[string]any) error {
-	if _, ok := fields["superseded"]; ok {
-		s.mu.Lock()
-		s.writes++
-		s.mu.Unlock()
+// TestSupersedeRestartAfterCloseRequestResumesIt: a hub restarted after the
+// close request was sent replays the stored request instead of building a new
+// one, then finishes.
+func TestSupersedeRestartAfterCloseRequestResumesIt(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), supersedeClosed); err != nil {
+		t.Fatal(err)
 	}
-	return s.JobStore.Put(ctx, id, fields)
-}
-
-func (s *countingSupersededStore) supersededWrites() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.writes
-}
-
-// TestSupersedeFailedWriteRetriedUntilConfirmed: a failed job.superseded
-// write is not forgotten. The next working tick retries it, and ticks after
-// confirmation write nothing.
-func TestSupersedeFailedWriteRetriedUntilConfirmed(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.seedParent(t, "spawned")
-	flaky := &flakySupersededStore{JobStore: f.jobs, fail: true}
-	f.hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: flaky, Out: out, Err: errout}, nil
+	sent := f.onlyRow(t).Data.Args
+	if sent == nil {
+		t.Fatal("the request is stored before it is sent")
 	}
-	serve := func(outcome string) {
-		done := make(chan struct{})
-		go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
-		serveReap(t, f, outcome, "w1:p1")
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Fatal("supersede did not finish")
-		}
+	restartPoolActionHub(t, f.quotaReplaceFixture)
+	if err := f.step(t, poolStatus(fleet.CloseOpClosing, false, false), supersedeClosed); err != nil {
+		t.Fatal(err)
 	}
-	serve(nodeJobReapJobWorking)
-	flaky.setFail(false)
-	serve(nodeJobReapJobWorking)
-	serve(nodeJobReapJobWorking)
-	if got, ok := supersededOf(t, f); !ok || got != f.successor {
-		t.Fatalf("retry must confirm the record: %q %v", got, ok)
-	}
-	if got := flaky.attempts(); got != 2 {
-		t.Fatalf("want one failed plus one confirming write and one suppressed tick, got %d attempts", got)
-	}
-	if !strings.Contains(f.logs.String(), "successor close failed") {
-		t.Fatal("the failed write owes one warn")
+	if again := f.onlyRow(t).Data.Args; again == nil || *again != *sent {
+		t.Fatalf("restart must replay the same request: %+v vs %+v", again, sent)
 	}
 }
 
-// flakySupersededStore fails hk writes of the superseded field while told to,
-// counting every attempt.
+// flakySupersededStore fails hk writes of the superseded field while told to.
 type flakySupersededStore struct {
 	fleet.JobStore
 	mu    sync.Mutex
@@ -707,28 +419,244 @@ func (s *flakySupersededStore) attempts() int {
 	return s.tries
 }
 
-// TestSupersedeOffByDefaultLeavesParentRunning: without --supersede-close the
-// hub never closes a parent, neither at landing nor in the sweep (hk 5140
-// follow-up; consult-5140-d43fccd5). An implementer child with an explicit
-// --parent-job is the case that would close it when the switch is on.
-func TestSupersedeOffByDefaultLeavesParentRunning(t *testing.T) {
-	f := newSupersedeFixture(t)
-	f.hub.supersedeClose = false
-	f.seedParent(t, "spawned")
-	task := hubSpawnTask{
-		Job:     f.successor,
-		Owner:   "parent",
-		Request: fleet.Submission{RequestID: "d676220b-e763-4af1-aefd-0000000000b1", Args: []string{"--job", f.successor, "--parent-job", f.parent, "--owner", "parent", "--role", "implementer"}},
+// TestSupersedeFailedHKWriteIsRetriedNotConsumed is acceptance: a failed
+// job.superseded write leaves the row pending with no close request; the next
+// pass writes it and goes on, and later passes do not write again.
+func TestSupersedeFailedHKWriteIsRetriedNotConsumed(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	flaky := &flakySupersededStore{JobStore: f.jobs, fail: true}
+	f.hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: flaky, Out: out, Err: errout}, nil
 	}
-	f.hub.maybeSupersedeParent(task)
-	f.hub.startSupersededSweep()
-	if extra, ok := tryNodeCommand(f.node); ok {
-		t.Fatalf("with the switch off the parent must not reach the node: %v", extra)
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	if err := f.step(t); err == nil {
+		t.Fatal("a failed hk write must not be consumed")
 	}
-	if _, ok := supersededOf(t, f); ok {
-		t.Fatalf("with the switch off nothing is recorded superseded")
+	if row := f.onlyRow(t); row.Phase != poolActionPending || row.Data.Supersede.Recorded {
+		t.Fatalf("row=%+v", row)
 	}
-	if infos := supersedeInfos(f.destination); len(infos) != 0 {
-		t.Fatalf("with the switch off no info is sent: %+v", infos)
+	flaky.setFail(false)
+	f.closeIdleParent(t)
+	if got := f.superseded(); got != f.successor {
+		t.Fatalf("retry must confirm the record: %q", got)
+	}
+	if got := flaky.attempts(); got != 2 {
+		t.Fatalf("want one failed and one confirming write, got %d", got)
+	}
+	if infos := supersedeInfos(f.destination); len(infos) != 1 {
+		t.Fatalf("one info: %+v", infos)
+	}
+}
+
+// TestSupersedePaneThatChangedHandsIsRefusedWithoutClosing is acceptance: a
+// pane that is no longer the parent's is never closed, by the hub's read or
+// by the node's own check inside the close operation.
+func TestSupersedePaneThatChangedHandsIsRefusedWithoutClosing(t *testing.T) {
+	t.Run("hub read finds another pane under the label", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		other := poolActionReply{op: nodeCommandAgentsList, result: map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{{PaneID: "w9:p9", Name: "parent-job", AgentStatus: "idle", Cwd: "/work/project"}}, "panes_ok": true}}
+		release := poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": "00002-job.spawned.json"}}
+		if err := f.step(t, supersedeNoneStatus, other, release); err != nil {
+			t.Fatal(err)
+		}
+		f.noMoreCommands(t)
+		if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused || rows[0].Data.Args != nil {
+			t.Fatalf("a pane that changed hands ends the row with no request: %+v", rows)
+		}
+	})
+	t.Run("node refuses the binding", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		mismatch := poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": nodeCloseOpMismatch, "replayed": false}}
+		release := poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": "00002-job.spawned.json"}}
+		if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), mismatch, release); err != nil {
+			t.Fatal(err)
+		}
+		f.noMoreCommands(t)
+		if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
+			t.Fatalf("row=%+v", rows)
+		}
+		if infos := supersedeInfos(f.destination); len(infos) != 0 {
+			t.Fatalf("a refused close sends no info: %+v", infos)
+		}
+	})
+}
+
+// TestSupersedeRefusalWhilePaneRemainsIsAskedAgain: the node refused the close
+// because the pane changed state between the hub's read and the close; the
+// pane is still the parent's, so the row moves to a new request instead of
+// ending, and the parent closes once it has stopped. The retry is bounded.
+func TestSupersedeRefusalWhilePaneRemainsIsAskedAgain(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	first := f.onlyRow(t)
+	refused := poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpRefused, "replayed": false}}
+	if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), refused, supersedeProbe("working")); err != nil {
+		t.Fatal(err)
+	}
+	rows := f.rows(t)
+	if len(rows) != 2 {
+		t.Fatalf("a refusal that races a state change must queue the next request: %+v", rows)
+	}
+	var live poolAction
+	for _, row := range rows {
+		switch row.ID {
+		case first.ID:
+			if row.Phase != poolActionRefused {
+				t.Fatalf("the refused request must end: %+v", row)
+			}
+		default:
+			live = row
+		}
+	}
+	if live.Phase != poolActionPending || live.Data.Args != nil || live.Data.Supersede.Generation != 1 || live.Data.Supersede.Successor != f.successor {
+		t.Fatalf("next request=%+v", live)
+	}
+	f.closeIdleParent(t)
+
+	// Bounded: every refusal with the pane still there asks again, up to the
+	// cap, then the row ends for good.
+	g := newSupersedeFixture(t, nil)
+	g.hub.maybeSupersedeParent(g.successorTask("implementer", "parent", true))
+	for i := 0; i < supersedeMaxGenerations; i++ {
+		replies := []poolActionReply{supersedeNoneStatus, supersedeProbe("idle"), refused}
+		if i < supersedeMaxGenerations-1 {
+			replies = append(replies, supersedeProbe("working"))
+		}
+		if err := g.step(t, replies...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	active, err := g.hub.inbox.store.activePoolActions(t.Context())
+	if err != nil || len(active) != 0 {
+		t.Fatalf("the cap must end the row: %+v %v", active, err)
+	}
+	if rows := g.rows(t); len(rows) != supersedeMaxGenerations {
+		t.Fatalf("rows=%d, want %d generations", len(rows), supersedeMaxGenerations)
+	}
+}
+
+// TestSupersedeLandingHookQueuesRowFromTheSucceededSpawn: the succeeded spawn
+// operation itself creates the row, but only for an explicit parent.
+func TestSupersedeLandingHookQueuesRowFromTheSucceededSpawn(t *testing.T) {
+	for _, explicit := range []bool{true, false} {
+		f := newSupersedeFixture(t, nil)
+		request := durableSpawnRequest()
+		request.RequestID = "d676220b-e763-4af1-aefd-000000000002"
+		request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", f.successor, "--job", f.successor, "--t", "T1", "--parent-job", f.job, "--owner", "parent", "--role", "implementer", "--host", "auto", "--report-relative", f.successor + "/report.md"}
+		request.ParentJobExplicit = explicit
+		request.Repository.Worktree = f.successor + "-checkout"
+		request.Repository.Checkout.Dir = f.successor + "-checkout"
+		task, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, f.successor, "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed, err := f.hub.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"})
+		if err != nil || !changed {
+			t.Fatalf("successor spawn must land: changed=%v err=%v", changed, err)
+		}
+		if explicit {
+			eventually(t, 3*time.Second, "the landing to queue the close row", func() bool {
+				rows, err := f.hub.inbox.store.supersedeActionsOf(t.Context(), f.job)
+				return err == nil && len(rows) == 1
+			})
+			continue
+		}
+		// An implicit parent queues nothing; the landing hook has run once
+		// the next explicit landing's row exists, so check after a real
+		// explicit landing for another parent in this same hub.
+		f.hub.maybeSupersedeParent(task)
+		if rows := f.rows(t); len(rows) != 0 {
+			t.Fatalf("an implicit landing must queue nothing: %+v", rows)
+		}
+	}
+}
+
+// TestSupersedeNeverSendsReapOrWorktreeCommands: the hub no longer closes a
+// parent through job.reap, and nothing in the whole close, settlement and
+// notice touches the parent's worktree: only the close-op commands and the
+// pane read go to the node.
+func TestSupersedeNeverSendsReapOrWorktreeCommands(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	allowed := map[string]bool{nodeCommandPaneCloseStatus: true, nodeCommandAgentsList: true, nodeCommandPaneCloseOp: true}
+	pass := func(replies ...poolActionReply) {
+		done := make(chan error, 1)
+		go func() { done <- f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)) }()
+		for _, reply := range replies {
+			command := nodeCommandRead(t, f.node)
+			var op string
+			_ = json.Unmarshal(command["op"], &op)
+			if !allowed[op] {
+				t.Fatalf("the close must go through the close op only, got %s", op)
+			}
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": reply.result})
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			command, _ := tryNodeCommand(f.node)
+			t.Fatalf("the pass sent a command the test did not script: %s", command["op"])
+		}
+	}
+	pass(supersedeNoneStatus, supersedeProbe("idle"), supersedeClosed)
+	pass(poolStatus(fleet.CloseOpClosed, false, true))
+	f.nodeEnds(supersedeEndReason(f.successor))
+	pass() // settlement, the hk read and the info line need no node
+	f.noMoreCommands(t)
+}
+
+// TestNodeJobReapForcedExpectRecheck: a forced close carrying the proven
+// status closes a still-blocked or finished pane, refuses a resumed working
+// pane without closing it, and refuses an invalid expectation.
+func TestNodeJobReapForcedExpectRecheck(t *testing.T) {
+	events := []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", false)}
+	serve := func(t *testing.T, listed string, expect string, extra ...map[string]json.RawMessage) (map[string]any, string, int) {
+		t.Helper()
+		inbox := t.TempDir()
+		markLostJobEvents(t, inbox, "job-a", events...)
+		fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", listed, "/work/a"))}, read: nodeReapScreen("❯ ")}
+		client := &HubClient{jobsInboxRoot: inbox, nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}
+		result, code := nodeRun(t, client, nodeCommandJobReap, nodeJobReapArgs{Job: "job-a", Lane: "lane-a", Force: true, Expect: expect})
+		_ = extra
+		return result, code, fake.called("pane", "close")
+	}
+	if result, code, closes := serve(t, "blocked", "blocked"); code != "" || result["outcome"] != nodeJobReapClosed || closes != 1 {
+		t.Fatalf("still-blocked forced close: result=%v code=%q closes=%d", result, code, closes)
+	}
+	if result, code, closes := serve(t, "working", "blocked"); code != "" || result["outcome"] != nodeJobReapJobWorking || closes != 0 {
+		t.Fatalf("resumed working pane must be refused: result=%v code=%q closes=%d", result, code, closes)
+	}
+	if result, code, closes := serve(t, "idle", "blocked"); code != "" || result["outcome"] != nodeJobReapClosed || closes != 1 {
+		t.Fatalf("finished pane stays closable: result=%v code=%q closes=%d", result, code, closes)
+	}
+	if _, code, _ := serve(t, "blocked", "working"); code == "" {
+		t.Fatal("an invalid expectation must be refused")
+	}
+}
+
+// TestSupersedeCloseIsOnByDefaultOnTheHubCommandLine: the flag is only an off
+// switch (hk 5195).
+func TestSupersedeCloseIsOnByDefaultOnTheHubCommandLine(t *testing.T) {
+	authPath := filepath.Join(t.TempDir(), "hub-auth.env")
+	if err := os.WriteFile(authPath, []byte("HUB_TOKEN_operator="+r6OperatorToken+"\nHUB_TOKEN_node-a="+r6NodeAToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{{nil, true}, {[]string{"--supersede-close=false"}, false}} {
+		hub, _, code, err := newHubServerForCLI(append([]string{"--hub-auth", authPath}, tc.args...), nil)
+		if err != nil || code != ExitOK || hub == nil {
+			t.Fatalf("hub: code=%d err=%v", code, err)
+		}
+		if hub.supersedeClose != tc.want {
+			t.Fatalf("args %v: supersedeClose=%v, want %v", tc.args, hub.supersedeClose, tc.want)
+		}
+		_ = hub.Close()
 	}
 }

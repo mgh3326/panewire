@@ -95,7 +95,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	consultTimeout := flags.Duration("consult-timeout", defaultHubConsultTimeout, "how long one consult may take from request to answer")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
 	placementPolicyPath := flags.String("placement-policy", "/etc/panewire/placement.json", "operator-owned JSON placement policy (hot-reloaded)")
-	supersedeClose := flags.Bool("supersede-close", false, "let a landed implementer successor close its parent job's pane (hk 5140); off until the close is a durable, explicitly requested action")
+	supersedeClose := flags.Bool("supersede-close", true, "let a landed implementer successor that named its parent with --parent-job close that parent's pane through a durable action (hk 5140, hk 5195); --supersede-close=false turns it off")
 	spawnRollbackDrain := flags.Bool("spawn-rollback-drain", false, "accept no spawn submission and start no quota hand-off or consult spawn, while queued spawns settle, before a hub rollback past parking")
 	spawnGrantDrain := flags.Bool("spawn-grant-drain", false, "bind no new grant-required spawn and start no quota hand-off, to drain *_grant rows before a hub rollback")
 	uiAllowCFOnly := flags.Bool("ui-allow-cf-only", false, "serve /ui only to Cloudflare Access identities or loopback clients")

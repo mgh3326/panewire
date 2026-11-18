@@ -158,6 +158,11 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	if action.Phase == poolActionGuarded {
 		return h.reconcileGuardedPoolAction(ctx, action)
 	}
+	if action.Data.Kind == poolActionKindSupersedeClose {
+		if stop, err := h.prepareSupersedeClose(ctx, &action); stop || err != nil {
+			return err
+		}
+	}
 	ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}
 	var status nodeCloseOpStatusResult
 	if !h.nodeCall(ctx, action.Node, nodeCommandPaneCloseStatus, ref, hubNodeCommandWait, &status) {
@@ -174,7 +179,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	}
 	switch status.State {
 	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
-		return h.refusePoolAction(ctx, action)
+		return h.refuseCloseAction(ctx, action)
 	case nodeCloseOpSuperseded:
 		if action.Data.Args == nil || status.Attempt == action.Data.Args.Attempt {
 			return errors.New("invalid superseded close proof")
@@ -216,6 +221,11 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			if probe.state != heldPanePresent {
 				return errors.New("pane unavailable")
 			}
+			if action.Data.Kind == poolActionKindSupersedeClose && !supersedeCloseStatus(probe.row.AgentStatus) {
+				// A working (or blocked) parent is never closed: the row
+				// stays pending and the next pass looks again.
+				return nil
+			}
 			args := &nodePaneCloseOpArgs{RequestID: action.ID, Job: action.Job, Epoch: action.Epoch, Attempt: status.Attempt,
 				PaneID: action.Data.Pane, Name: action.Data.Label, AgentStatus: probe.row.AgentStatus, Cwd: probe.row.Cwd,
 				AllowUnnamed: probe.row.Name == "", EndReason: action.Data.EndReason}
@@ -249,7 +259,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		return errors.New("close ownership, capability or answer unavailable")
 	}
 	switch result.Outcome {
-	case fleet.CloseOpRefused, fleet.CloseOpPreempted, fleet.CloseOpCancelled:
+	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
+		return h.refuseCloseAction(ctx, action)
+	case fleet.CloseOpCancelled:
 		return h.refusePoolAction(ctx, action)
 	case nodeCloseOpMismatch, nodeCaptureNotAJob:
 		return h.releasePoolAction(ctx, action)
@@ -409,6 +421,9 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	}
 	if state == "lost" && reason == action.Data.EndReason {
 		eventID := "pool-closed:" + action.Job
+		if action.Data.Kind == poolActionKindSupersedeClose {
+			eventID = supersedeEventID(action.Job)
+		}
 		owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
 		if err != nil {
 			return err
