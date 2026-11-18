@@ -599,38 +599,61 @@ const (
 	briefSubmitReserve = 20 * time.Second
 )
 
+// deliver sends the brief and waits for the pane to take it up.
 func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
-	before, e := a.status(ctx, pane)
+	initial, e := a.sendBrief(ctx, kind, pane, brief)
 	if e != nil {
 		return e
 	}
+	return a.confirmBrief(ctx, kind, pane, brief, initial)
+}
+
+// sendBrief puts the brief into the pane and returns the screen it saw first.
+// It refuses before sending when the node budget cannot hold the submit
+// window, so no pane is ever handed a brief it cannot be confirmed to have
+// taken (requireSubmitWindow).
+func (a *App) sendBrief(ctx context.Context, kind, pane, brief string) (string, error) {
+	before, e := a.status(ctx, pane)
+	if e != nil {
+		return "", e
+	}
 	if before != "idle" && before != "done" {
-		return fail(exitSubmitUnconfirmed, "agent must be idle before initial brief")
+		return "", fail(exitSubmitUnconfirmed, "agent must be idle before initial brief")
 	}
 	initial, e := a.visible(ctx, pane)
 	if e != nil {
-		return e
+		return "", e
+	}
+	if e = a.requireSubmitWindow(ctx); e != nil {
+		return "", e
 	}
 	if kind == "cmd" {
 		if e = a.must(ctx, "herdr", "pane", "send-text", pane, brief); e != nil {
-			return e
+			return "", e
 		}
 		if e = a.must(ctx, "herdr", "pane", "send-keys", pane, "return"); e != nil {
-			return e
+			return "", e
 		}
 	} else {
 		if e = a.must(ctx, "herdr", "agent", "prompt", pane, brief); e != nil {
-			return e
+			return "", e
 		}
 	}
+	return initial, nil
+}
+
+// confirmBrief waits, within the submit window, for the sent brief to start a
+// turn on the pane. initial is the screen sendBrief saw before sending.
+func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial string) error {
+	var e error
 	timeout, retry := a.briefSubmitWindow()
 	clamped := false
 	// A node runs the spawn under its hub_wait budget. Refuse with 76 and the
 	// capture before that budget expires, or the node reports a bare timeout.
-	if until, ok := ctx.Deadline(); ok {
-		if left := time.Until(until) - briefSubmitReserve; left < timeout {
-			timeout, clamped = max(left, 0), true
-		}
+	// requireSubmitWindow held at least the minimum window when the brief was
+	// sent; the floor below keeps a slow send from cutting it to nothing.
+	if left, bounded := a.submitBudgetLeft(ctx); bounded && left < timeout {
+		timeout, clamped = max(left, a.submitFloor()), true
 	}
 	deadline := a.Now().Add(timeout)
 	polls := int(timeout / time.Second)

@@ -228,7 +228,14 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 		if in.result != nil {
 			wanted = in.result
 		}
-		holds, e := a.strictCompletedPutUntil(ctx, id, fields, wanted, spawnReceiptForRepair(j.Events), time.Now().Add(doneResultBudget))
+		// The spawn receipt repairs a claimed record. A spawn whose submit the
+		// node could not confirm (rc 76) wrote no job.spawned, but its pane may
+		// have run: the brief_sent receipt stands in (briefSentReceipt, hk 5174).
+		receipt := spawnReceiptForRepair(j.Events)
+		if receipt == nil {
+			receipt = a.briefSentReceipt(j.Events, id)
+		}
+		holds, e := a.strictCompletedPutUntil(ctx, id, fields, wanted, receipt, time.Now().Add(doneResultBudget))
 		switch {
 		case e == nil:
 			p := map[string]any{"report_sha256": completing, "pinned": pin && holds}

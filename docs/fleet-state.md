@@ -165,7 +165,7 @@ and the `login_missing` placement drop are unchanged.
   other hosts share.
 - **Login screen on rc=76.** A hub spawn that ends rc=76
   (`BRIEF_SUBMISSION_UNCONFIRMED`) leaves the executing node a screen capture,
-  `jobs/<job>/spawn-failure-*.txt` (`captureFailure`). When the newest capture
+  `jobs/<job>/spawn-failure-*.txt` (`captureFailure`). A pane that ran anyway can still complete: the node wrote `job.brief_sent` when it sent the brief, and `done` accepts it as spawn evidence (see rc 76 in [config.md](config.md)). When the newest capture
   is the harness's login screen and pane cleanup was verified, the node marks
   that (host, harness) `login_missing` at once and sends rc=88 with the
   `AUTH_UNAVAILABLE` refusal and sign-in hint. An unchanged hub classifies it

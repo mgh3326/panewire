@@ -1358,6 +1358,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.workspaceTrust(ctx, s, seat, env); e != nil {
 		return fail(exitConfig, "workspace trust: %v", e)
 	}
+	// The launch may not spend the brief's submit window (hk 5174): it ends
+	// where the window begins, or the spawn refuses before any pane exists.
+	launchCtx, endLaunch, e := a.reserveSubmitWindow(ctx)
+	if e != nil {
+		return e
+	}
+	defer endLaunch()
 	startedLaunch := time.Now()
 	launchRecorded := false
 	defer func() {
@@ -1370,7 +1377,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		for _, v := range env {
 			args = append(args, "--env", v)
 		}
-		return a.call(ctx, "herdr", args...)
+		return a.call(launchCtx, "herdr", args...)
 	}
 	s.placement.started = true
 	r := createTab(s.Workspace)
@@ -1406,8 +1413,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if pane == "" {
 		return fail(exitConfig, "tab create omitted pane_id")
 	}
-	if e = a.start(ctx, s, seat, launch, pane, argv); e != nil {
-		return e
+	if e = a.start(launchCtx, s, seat, launch, pane, argv); e != nil {
+		return a.launchBudgetSpent(launchCtx, ctx, e)
 	}
 	a.stage("launch", startedLaunch)
 	launchRecorded = true
@@ -1422,7 +1429,16 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e != nil {
 		return e
 	}
-	if e = a.deliver(ctx, seat.Kind, pane, pointer); e != nil {
+	initialScreen, e := a.sendBrief(ctx, seat.Kind, pane, pointer)
+	if e != nil {
+		return e
+	}
+	// The brief is in the pane. Record that before waiting on the submit
+	// window, so a pane that runs after a 76 can still complete (hk 5174).
+	if e = a.recordBriefSent(ctx, s, seat, launch, pane, pool, owner, payload); e != nil {
+		return e
+	}
+	if e = a.confirmBrief(ctx, seat.Kind, pane, pointer, initialScreen); e != nil {
 		return e
 	}
 	if seat.Kind == "omp" || seat.Kind == "cmd" {
