@@ -543,6 +543,19 @@ func (a *App) remoteAccount(ctx context.Context, pool, host string, cfg map[stri
 	return key, acc
 }
 
+// sharedAccountWeeklyUsed is the account reading's 7d used share, or nil
+// without a 7d window. The hub's bind carries it to the per-account
+// re-check, so the check judges the same figure the selection did (hk 5124).
+func sharedAccountWeeklyUsed(acc SharedAccount) *float64 {
+	for _, w := range acc.windows() {
+		if w.Window == "7d" {
+			used := w.UsedPct
+			return &used
+		}
+	}
+	return nil
+}
+
 // candidateLogin classes a host's evidence for holding the needed account.
 // "present" requires a fresh presence record corroborated by a readable
 // shared-cache observation; everything else is "unknown" — a degraded or
@@ -1547,6 +1560,9 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 			}
 		}
 		key, acc := a.remoteAccount(ctx, try.pool, c.name, c.cfg, try.spawn.AccountKey)
+		// The bind re-checks occupancy against this reading under the
+		// account's lock (hk 5124).
+		try.spawn.AccountWeeklyUsed = sharedAccountWeeklyUsed(acc)
 		if try.spawn.AccountKey != "" && key != try.spawn.AccountKey {
 			// The host stopped holding the selected account since the plan:
 			// admission and the delegated spawn must judge the same one.
@@ -1897,6 +1913,9 @@ func (a *App) placeForced(ctx context.Context, s Spawn, brief string) (bool, map
 			}
 		}
 		key, acc := a.remoteAccount(ctx, pool, c.name, c.cfg, s.AccountKey)
+		// The bind re-checks occupancy against this reading under the
+		// account's lock (hk 5124).
+		s.AccountWeeklyUsed = sharedAccountWeeklyUsed(acc)
 		if s.AccountKey != "" && key != s.AccountKey {
 			return candResult{stop: fail(exitAuthUnavailable, "AUTH_UNAVAILABLE: target no longer holds the selected account")}
 		}

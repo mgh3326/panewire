@@ -519,8 +519,15 @@ type HubServer struct {
 	quotaRefresh            hubQuotaRefreshScheduler
 	spawnActions            hubSpawnActions
 	spawnAdmissions         hubKeyedLocks
-	poolActionLocks         hubKeyedLocks
-	poolActionMu            sync.Mutex
+	// commandcodeSeatLocks serializes the busy check and the bind for one
+	// commandcode account: the account is shared by every host, so two
+	// admissions on it must not both see an empty seat (hk 5124).
+	commandcodeSeatLocks hubKeyedLocks
+	// accountJobsLookupFails counts the current streak of failed account
+	// occupancy lookups: one warn per streak, reset on success (hk 5124).
+	accountJobsLookupFails int
+	poolActionLocks        hubKeyedLocks
+	poolActionMu           sync.Mutex
 	// poolActionObserved avoids repeating inventory logs while an action is active.
 	poolActionObserved sync.Map
 	placementTraces    hubKeyedLocks

@@ -120,6 +120,12 @@ type Spawn struct {
 	// RoutingRole and AccountKey bind delegated admission to the selection.
 	RoutingRole string `json:"routing_role,omitempty"`
 	AccountKey  string `json:"account_key,omitempty"`
+	// AccountWeeklyUsed is the chosen account's 7d used share at selection
+	// time. The hub's bind re-checks occupancy under the account's lock
+	// against this figure, so two concurrent admissions on a nearly spent
+	// account admit exactly one (hk 5124). Nil when the selection held no
+	// reading for the account.
+	AccountWeeklyUsed *float64 `json:"account_weekly_used,omitempty"`
 	// FreshTTLS is the shared-quota freshness window, in seconds, under which
 	// the placing host admitted AccountKey. The executing host rechecks the
 	// account with the same window, so one reading cannot be fresh at plan
