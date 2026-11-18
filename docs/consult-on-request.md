@@ -33,7 +33,9 @@ The direct hub credential flags retain the direct path:
 - `author_job` names the author's job; its hk record gives the family and its
   stored spawn submission gives the repository and checkout evidence. When it
   is omitted, `author_family` must name the family and the task's bound job
-  supplies the repository evidence.
+  supplies the repository evidence. An author job the hub does not know takes
+  the same fallback, so the consult still runs; only when the task is bound to
+  no job either is it refused.
 - `pr` and `head` pin the checkout to the PR head. Without them the author
   job's stored checkout names the commit and ref.
 - No profile pin is accepted. The caller cannot choose the seat.
@@ -51,6 +53,28 @@ may change between evaluations; it is not part of the key. The replacement is
 a compare-and-set on the terminal state, so concurrent POSTs cannot claim two
 seats.
 
+## Owner
+
+The owner is the lane a consult belongs to. Its spawn carries it as `--owner`,
+so the spawn report, the idle-wake and the consult's own completion notice
+(`[consult-done]`) follow it (operator decision 421, routing-policy 2026-11-18;
+hk 5227, 5233). The hub picks it once, when it plans the row, and stores it on
+the row (`owner`), so a respawn or a recovery keeps the same lane:
+
+1. the owner lane of the author job the hub holds (`author_job`), when that
+   lane has a report-relay route on this hub;
+2. otherwise the requesting lane, when `requester` is a lane;
+3. otherwise `operator-desk`, the tool's own lane.
+
+An author job that is unknown, or whose owner lane has no route, falls to the
+next rule. It never drops the consult or its notices. `operator-desk` owns a
+consult only when neither an author job nor a lane requester names an owner,
+so a design lane that owns the author job takes the consult and its notices
+instead of the desk.
+
+A row from before the `owner` column reads the requester rule (rule 2, else 3),
+which is what every row meant before the rule.
+
 ## Seat
 
 The hub uses the consult floor (`hk:doc policy/model-families` §Consult):
@@ -67,9 +91,9 @@ family); nothing is spawned.
 
 One spawn through the ordinary durable hub spawn path:
 
-- `--role consult`, `--task N`, `--owner` the requester lane (or
-  `operator-desk` for a tool), the resolved `-m`/`--effort` with an override
-  reason and `--containment hk:N`;
+- `--role consult`, `--task N`, `--owner` the consult's owner lane (see
+  §Owner), the resolved `-m`/`--effort` with an override reason and
+  `--containment hk:N`;
 - a fresh detached checkout of the PR head on the chosen host;
 - the brief is the fixed preamble plus the question document; it changes no
   code.

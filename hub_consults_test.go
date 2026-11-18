@@ -67,7 +67,7 @@ func newConsultFixture(t *testing.T) *consultFixture {
 		Scopes:       map[string]string{"svc-consult": "consult", "svc-other": "inbox.ack_state"},
 		// InboxStorePath is the durable store the consult rows live in.
 		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
-		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"},"panewire-design":{"machine":"machine-b","pane":"w2:p1"}}}`),
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -84,6 +84,9 @@ func newConsultFixture(t *testing.T) *consultFixture {
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		return &fleet.App{JobStore: f.jobs, Out: out, Err: errout}, nil
 	}
+	// The task is bound to the fixture's author job: an omitted author job
+	// takes its repository evidence from there.
+	h.consultTaskBinding = func(context.Context, string) (string, error) { return "author-job", nil }
 	h.consultPlan = func(_ context.Context, in fleet.ConsultPlanInput) (fleet.ConsultPlan, error) {
 		f.inputs = append(f.inputs, in)
 		f.calls++
@@ -381,12 +384,13 @@ func TestConsultGetUnknownIsNotFound(t *testing.T) {
 	}
 }
 
-// A tool requester owns the spawn through the tool lane, never the tool id:
-// completion notices go to a lane that exists.
+// A tool requester with no author job owns the spawn through the tool lane,
+// never the tool id: completion notices go to a lane that exists.
 func TestConsultToolRequesterOwnsOperatorDesk(t *testing.T) {
 	f := newConsultFixture(t)
 	body := consultRequestBody("42", "example/project#7", strings.Repeat("a", 40))
 	body["requester"] = "mergewake/example/project#7"
+	delete(body, "author_job")
 	code, out := f.post(t, "", t14OperatorToken, body)
 	if code != http.StatusCreated {
 		t.Fatalf("create = %d %v", code, out)
