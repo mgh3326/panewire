@@ -655,6 +655,11 @@ type HubServer struct {
 	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
 	// reads each hk record once while the job stays in its window.
 	reviewerEndSettled map[string]bool
+	// supersededParents records a parent job a landed successor replaced but
+	// whose pane was still working: parent job id to successor job id. The
+	// hub closes each entry at the first sweep where its pane is no longer
+	// working, through the jobs-close reap path. Guarded by mu.
+	supersededParents  map[string]string
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool
@@ -2621,6 +2626,7 @@ func (h *HubServer) Sweep() {
 	h.startFleetLoadPublish(now)
 	h.logRouteHits(now)
 	h.sweepOrphanedJobs(now)
+	h.sweepSupersededParents()
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)
