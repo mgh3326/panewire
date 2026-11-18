@@ -942,8 +942,10 @@ receipt and requires HEAD to equal the branch tip on origin. The outcome is
 `branch_mismatch`, `git_failed` or `not-a-job`; an `ok` result names the
 worktree root, branch and pushed commit. No worktree content is uploaded.
 The hub sends the saved branch, origin and commit with `pane.close_op`; the
-node repeats the check inside that operation before closing. A refusal and its
-reason are journalled, so status and replay retain them across restart.
+node repeats the check after the final pane and open-question checks, as the
+last step before closing. A refusal and its reason are journalled, so status
+and replay retain them across restart. A writer racing the close itself is
+handled by the ordinary worktree and abandoned-worktree patch lifecycle.
 
 ### `worktree.inspect`
 

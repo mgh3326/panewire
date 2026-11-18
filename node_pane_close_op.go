@@ -359,8 +359,11 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 			}
 			return nodeCloseHookStop{outcome: fleet.CloseOpPreempted}
 		}
+		op.State, op.Updated = fleet.CloseOpClosing, client.nowUTC()
+		return fleet.WriteCloseOp(job, op)
+	}, func() error {
 		if guard := args.Handover; guard != nil {
-			check := client.handoverCheckTarget(ctx, nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: guard.Origin, Branch: guard.Branch}, again)
+			check := client.handoverCheckTarget(ctx, nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: guard.Origin, Branch: guard.Branch}, *target)
 			if target.role != "implementer" {
 				check.Outcome = handoverGitFailed
 			} else if check.Outcome == handoverCheckOK && check.Pushed != guard.Commit {
@@ -371,8 +374,7 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
 			}
 		}
-		op.State, op.Updated = fleet.CloseOpClosing, client.nowUTC()
-		return fleet.WriteCloseOp(job, op)
+		return nil
 	})
 	if code != "" {
 		// The journal keeps registered or closing; a repeat of this request

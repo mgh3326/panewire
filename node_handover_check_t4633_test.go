@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -217,6 +218,59 @@ func TestCloseOpRechecksHandoverWorktree(t *testing.T) {
 			status, code := nodeRun(t, restarted, nodeCommandPaneCloseStatus, closeOpRef("op-handover"))
 			if code != "" || status["state"] != tc.outcome || tc.reason != "" && status["reason"] != tc.reason {
 				t.Fatalf("status=%v code=%q", status, code)
+			}
+		})
+	}
+}
+
+// A write during the final pane look is caught by the last worktree check.
+// A write racing pane.close itself remains on disk and is named in the note.
+func TestCloseOpHandoverChecksLastAndNamesLateWork(t *testing.T) {
+	for _, tc := range []struct {
+		name, writeAt, outcome string
+		closes                 int
+	}{
+		{"write during final pane look", "agent list", fleet.CloseOpRefused, 0},
+		{"write racing close", "pane close", fleet.CloseOpClosed, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work, origin, commit := handoverRepo(t)
+			inbox := t.TempDir()
+			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", work))}, read: nodeReapScreen("❯ ")}
+			client := closeOpNode(t, inbox, fake)
+			receipt, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "label": "job-a", "role": "implementer", "herdr_session": "fleet", "cwd": work}})
+			if err := os.WriteFile(filepath.Join(inbox, "jobs", closeOpJob, "events", closeOpAttempt), receipt, 0600); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(work, "after-check.txt")
+			reads := 0
+			client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
+				command := strings.Join(args[:2], " ")
+				if command == "agent list" {
+					reads++
+				}
+				if command == tc.writeAt && (command != "agent list" || reads == 2) {
+					if err := os.WriteFile(file, []byte("later work"), 0600); err != nil {
+						return nil, err
+					}
+				}
+				return fake.run(ctx, args...)
+			}
+			args := closeOpArgs("op-late-work")
+			args["cwd"] = work
+			args["handover"] = map[string]any{"origin": origin, "branch": "wk/task", "commit": commit}
+			result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
+			if code != "" || result["outcome"] != tc.outcome || fake.called("pane", "close") != tc.closes {
+				t.Fatalf("close=%v code=%q close calls=%d", result, code, fake.called("pane", "close"))
+			}
+			if data, err := os.ReadFile(file); err != nil || string(data) != "later work" {
+				t.Fatalf("later work=%q err=%v", data, err)
+			}
+			old := quotaHolderRequest("implementer", closeOpJob)
+			old.Repository.Checkout.Origin = origin
+			successor, err := handoverSuccessorRequest(old, closeOpJob, closeOpJob+"-q1", "claude", "machine-a", window5h(), nodeHandoverCheckResult{Outcome: handoverCheckOK, Top: work, Branch: "wk/task", Pushed: commit})
+			if err != nil || !strings.Contains(successor.Brief, "machine-a:"+work) || !strings.Contains(successor.Brief, "abandoned-worktree.patch") {
+				t.Fatalf("successor note=%q err=%v", successor.Brief, err)
 			}
 		})
 	}

@@ -306,7 +306,7 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 		// The pane sits in another checkout than the job's own.
 		return nil, "worktree_mismatch"
 	}
-	request, err := handoverSuccessorRequest(old, task.Job, newJob, handoverExclude(exhaustion), exhaustion, read)
+	request, err := handoverSuccessorRequest(old, task.Job, newJob, handoverExclude(exhaustion), host, exhaustion, read)
 	if err != nil {
 		return nil, "invalid_successor"
 	}
@@ -362,7 +362,7 @@ const herdrAgentNameMax = 32
 // excluded) as a spec checkout of the branch at its last pushed commit, with
 // --parent-job <old> in place of --task (the two are exclusive; the task is
 // inherited) and a continuation note.
-func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude string, exhaustion poolExhaustion, read nodeHandoverCheckResult) (fleet.Submission, error) {
+func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude, host string, exhaustion poolExhaustion, read nodeHandoverCheckResult) (fleet.Submission, error) {
 	next, err := quotaReplacementRequest(old, oldJob, newJob, exhaustion.Pool, exclude, "implementer")
 	if err != nil {
 		return fleet.Submission{}, err
@@ -398,7 +398,7 @@ func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude stri
 	dir := fleet.CheckoutWorktreeName(newJob)
 	checkout := &fleet.HubCheckout{Origin: old.Repository.Checkout.Origin, Mode: fleet.HubCheckoutSuccessor, Branch: read.Branch, Sha: read.Pushed, Dir: dir}
 	next.Repository = fleet.Repository{Name: old.Repository.Name, Origin: checkout.Origin, Worktree: dir, Checkout: checkout}
-	next.Brief = strings.TrimRight(old.Brief, "\n") + fmt.Sprintf("\n\n## Hand-over from %s\nThe hub handed over this job because pool %s ran out (%s). Continue branch %s from its pushed commit %s. Write the report to the --report path (relative to the node's jobs directory: %s).\n", oldJob, exhaustion.Pool, exhaustion.Cause, read.Branch, read.Pushed, hubSpawnArg(next.Args, "--report-relative"))
+	next.Brief = strings.TrimRight(old.Brief, "\n") + fmt.Sprintf("\n\n## Hand-over from %s\nThe hub handed over this job because pool %s ran out (%s). Continue branch %s from its pushed commit %s. The old worktree is %s:%s; work written after the final check is there or in the old job's abandoned-worktree.patch. Write the report to the --report path (relative to the node's jobs directory: %s).\n", oldJob, exhaustion.Pool, exhaustion.Cause, read.Branch, read.Pushed, host, read.Top, hubSpawnArg(next.Args, "--report-relative"))
 	return next, nil
 }
 

@@ -1127,7 +1127,7 @@ func (client *HubClient) nodePaneMatchInSession(ctx context.Context, session, pa
 // so an idle→working→idle bounce also refuses — leaves only that read-to-
 // close gap, which is no wider than the ssh reap's re-read then close.
 func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseArgs) (any, string) {
-	result, code := client.nodePaneCloseWith(ctx, args, nil)
+	result, code := client.nodePaneCloseWith(ctx, args, nil, nil)
 	if code != "" {
 		return nil, code
 	}
@@ -1138,7 +1138,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 // guarded look and the settle, before the final look and `herdr pane close`;
 // an error from it leaves the pane open and answers close_failed. A close operation records its
 // closing state there (node_pane_close_op.go).
-func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneCloseArgs, beforeClose func() error) (nodePaneCloseResult, string) {
+func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneCloseArgs, beforeClose, lastCheck func() error) (nodePaneCloseResult, string) {
 	// A blocked pane may be a worker waiting on an ESC answer, so the node
 	// closes one only when the job's own ledger names the reviewer role; the
 	// operator-credential command path cannot widen that (hk 3315).
@@ -1185,19 +1185,25 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		timer.Stop()
 		return nodePaneCloseResult{}, "herdr_failed"
 	}
-	// The hook runs before the final look, so whatever it costs (a durable
-	// journal write) never widens the gap between that look and the close.
-	if beforeClose != nil {
-		if err := beforeClose(); err != nil {
-			var stop nodeCloseHookStop
-			if errors.As(err, &stop) {
-				if stop.code != "" {
-					return nodePaneCloseResult{}, stop.code
+	// Record the closing state before the final pane look. The separate
+	// hand-over check runs after that look, just before the close.
+	runHook := func(hook func() error) (nodePaneCloseResult, string, bool) {
+		if hook != nil {
+			if err := hook(); err != nil {
+				var stop nodeCloseHookStop
+				if errors.As(err, &stop) {
+					if stop.code != "" {
+						return nodePaneCloseResult{}, stop.code, true
+					}
+					return nodePaneCloseResult{Outcome: stop.outcome}, "", true
 				}
-				return nodePaneCloseResult{Outcome: stop.outcome}, ""
+				return nodePaneCloseResult{}, "journal_failed", true
 			}
-			return nodePaneCloseResult{}, "journal_failed"
 		}
+		return nodePaneCloseResult{}, "", false
+	}
+	if result, code, stop := runHook(beforeClose); stop {
+		return result, code
 	}
 	outcome, second, err := client.nodePaneMatchInSession(ctx, session, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
@@ -1213,9 +1219,8 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	// A pane that asked a question and is idle is waiting for an answer, not
-	// finished. The node decides from its own records here, after the last
-	// read and immediately before the irreversible close, so a question the
-	// watcher has not copied yet still holds the pane.
+	// finished. The node decides from its own records after the last pane
+	// read, so a question the watcher has not copied yet still holds the pane.
 	if args.QuestionJob != "" {
 		if client.jobsInboxRoot == "" {
 			return nodePaneCloseResult{}, "jobs_root_unset"
@@ -1229,6 +1234,11 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		case open:
 			return nodePaneCloseResult{Outcome: nodePaneQuestionOpen}, ""
 		}
+	}
+	// The hand-over's worktree check is the last step before the close: a
+	// write during the final pane and question checks must still be seen.
+	if result, code, stop := runHook(lastCheck); stop {
+		return result, code
 	}
 	if _, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "close", args.PaneID); err != nil {
 		return nodePaneCloseResult{}, "close_failed"
