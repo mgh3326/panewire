@@ -108,5 +108,11 @@ func (h *HubServer) awaitPaneSweepReply(deadline context.Context, requestID stri
 
 // logPaneSweepTick writes one line per tick. It carries IDs and codes only.
 func (h *HubServer) logPaneSweepTick(tick hubPaneSweepTick) {
+	h.loopTick(loopPaneSweep)
+	h.loopAddMade(loopPaneSweep, tick.Nodes)
+	h.loopAddDone(loopPaneSweep, len(tick.Closed))
+	if len(tick.Failed) > 0 {
+		h.loopNoteError(loopPaneSweep)
+	}
 	h.logger.Info("ended pane sweep", "nodes", tick.Nodes, "closed", strings.Join(tick.Closed, " "), "failed", strings.Join(tick.Failed, " "))
 }

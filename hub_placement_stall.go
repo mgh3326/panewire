@@ -54,6 +54,7 @@ func (h *HubServer) reportPlacementDelivery(requestID, job string, attempt int, 
 		h.notePlacementStall(requestID, job, attempt, d.Reason)
 		return false
 	}
+	h.loopAddDone(loopPlacementRecords, 1)
 	h.clearPlacementStall(requestID, attempt)
 	switch {
 	case d.Quarantined:

@@ -362,9 +362,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			}
 		}()
 	}
-	schedule := func(task hubSpawnTask) {
+	schedule := func(task hubSpawnTask) bool {
 		if task.Status == "bound" && task.Node != nil && h.handleQueuedBinding(ctx, task) {
-			return
+			return true
 		}
 		slots := 1
 		if task.Node != nil {
@@ -411,7 +411,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		}
 		mu.Unlock()
 		if busy {
-			return
+			return false
 		}
 		if task.Node != nil {
 			h.spawnWorkers.Add(1)
@@ -441,14 +441,16 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 					h.kickSpawnPlacement()
 				}
 			}(task)
-			return
+			return true
 		}
 		select {
 		case work <- task:
+			return true
 		default:
 			mu.Lock()
 			delete(active, task.Request.RequestID)
 			mu.Unlock()
+			return false
 		}
 	}
 	tick := time.NewTicker(2 * time.Second)
@@ -474,40 +476,14 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			h.logSpawnRollbackRows(ctx)
 		}
 		if h.drain.admit() {
+			h.loopTick(loopSpawnCoordinator)
 			// Start conditions are checked first so a row released in this
 			// tick is scheduled by the scan below rather than the next one.
 			h.checkWaitingSpawns(ctx)
 			// A request parked too long tells its owner once (hk 4662); the
 			// pass is rate-limited, so most ticks skip it.
 			h.checkParkedSpawnNotices(ctx)
-			// Work claimed during a scan may move later in the ordering. Do not
-			// schedule the same row twice in one pass, even if it reappears.
-			seen := map[string]bool{}
-			position := spawnScanPosition{}
-			for {
-				tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position, h.now().UTC())
-				if err != nil {
-					break
-				}
-				for _, task := range tasks {
-					if !seen[task.Request.RequestID] {
-						seen[task.Request.RequestID] = true
-						schedule(task)
-					}
-				}
-				if len(tasks) < 32 {
-					break
-				}
-				position = next
-			}
-			// Deadline-exceeded replays retain their existing bounded backoff.
-			now := h.now().UTC()
-			ordinary, _ := h.inbox.store.pendingSpawns(ctx, now)
-			for _, task := range ordinary {
-				if task.Status == "deadline_exceeded" {
-					schedule(task)
-				}
-			}
+			h.spawnCoordinatorScan(ctx, schedule)
 		}
 		h.flushSpawnNotifications(ctx)
 		select {
@@ -516,6 +492,65 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		case <-tick.C:
 			ticked = true
 		case <-h.spawnKick:
+		}
+	}
+}
+
+// spawnCoordinatorScan pages the pending spawn rows and hands each new row to
+// schedule, recording made/done in the loop ledger. A store failure counts a
+// silent ledger error (one log line per streak) and keeps the pass's other
+// half: a failed page read still tries the ordinary pending read below.
+func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubSpawnTask) bool) {
+	// Work claimed during a scan may move later in the ordering. Do not
+	// schedule the same row twice in one pass, even if it reappears.
+	seen := map[string]bool{}
+	position := spawnScanPosition{}
+	scanFailed := false
+	for {
+		tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position, h.now().UTC())
+		if err != nil {
+			h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:pendingSpawnPage", err)
+			scanFailed = true
+			break
+		}
+		for _, task := range tasks {
+			if !seen[task.Request.RequestID] {
+				seen[task.Request.RequestID] = true
+				h.loopAddMade(loopSpawnCoordinator, 1)
+				if schedule(task) {
+					h.loopAddDone(loopSpawnCoordinator, 1)
+				}
+			}
+		}
+		if len(tasks) < 32 {
+			break
+		}
+		position = next
+	}
+	if !scanFailed {
+		h.loopClearSilent("hub_spawn_async.go:pendingSpawnPage")
+	}
+	// Deadline-exceeded replays retain their existing bounded backoff.
+	now := h.now().UTC()
+	ordinary, err := h.inbox.store.pendingSpawns(ctx, now)
+	if err != nil {
+		h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:pendingSpawns", err)
+	} else {
+		h.loopClearSilent("hub_spawn_async.go:pendingSpawns")
+		var oldest time.Time
+		for _, task := range ordinary {
+			if oldest.IsZero() || task.Created.Before(oldest) {
+				oldest = task.Created
+			}
+			if task.Status == "deadline_exceeded" {
+				h.loopAddMade(loopSpawnCoordinator, 1)
+				if schedule(task) {
+					h.loopAddDone(loopSpawnCoordinator, 1)
+				}
+			}
+		}
+		if !oldest.IsZero() {
+			h.loopSetOldestPending(loopSpawnCoordinator, now.Sub(oldest))
 		}
 	}
 }

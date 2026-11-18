@@ -433,12 +433,18 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	successors, err := h.inbox.store.quotaSuccessorSpawns(ctx)
 	if err != nil {
+		h.loopNoteSilentError(loopQuotaLadder, "hub_quota_replace.go:quotaSuccessorSpawns", err)
 		return 0
 	}
+	h.loopClearSilent("hub_quota_replace.go:quotaSuccessorSpawns")
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
+		h.loopNoteSilentError(loopQuotaLadder, "hub_quota_replace.go:newSpawnApp", err)
 		return 0
 	}
+	h.loopClearSilent("hub_quota_replace.go:newSpawnApp")
+	h.loopTick(loopQuotaLadder)
+	h.loopAddMade(loopQuotaLadder, len(successors))
 	written := 0
 	for _, successor := range successors {
 		m := quotaSuccessorJob.FindStringSubmatch(successor.Job)
@@ -453,6 +459,7 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 		old := m[1]
 		if h.reconcileQuotaReplacement(ctx, app, successor, old) {
 			written++
+			h.loopAddDone(loopQuotaLadder, 1)
 		}
 	}
 	return written

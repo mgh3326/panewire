@@ -464,8 +464,12 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 	}
 	active, err := h.inbox.store.activeConsults(ctx)
 	if err != nil {
+		h.loopNoteSilentError(loopConsultCoordinator, "hub_consults.go:activeConsults", err)
 		return
 	}
+	h.loopClearSilent("hub_consults.go:activeConsults")
+	h.loopTick(loopConsultCoordinator)
+	h.loopAddMade(loopConsultCoordinator, len(active))
 	var app *fleet.App
 	for _, c := range active {
 		if ctx.Err() != nil {
@@ -474,10 +478,12 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 		if c.State == consultAnswered {
 			// The answer is saved; only its one lane event may still be owed.
 			h.notifyConsultAnswered(ctx, c)
+			h.loopAddDone(loopConsultCoordinator, 1)
 			continue
 		}
 		if !h.now().Before(c.Deadline) {
 			h.failConsult(ctx, c, "timeout: the consult passed its time limit")
+			h.loopAddDone(loopConsultCoordinator, 1)
 			continue
 		}
 		task, err := h.inbox.store.spawnTask(ctx, c.RequestID)
@@ -491,12 +497,14 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 					continue
 				}
 				h.recoverConsult(ctx, c)
+				h.loopAddDone(loopConsultCoordinator, 1)
 			case consultRunning:
 				if c.Respawns == 0 {
 					h.respawnConsult(ctx, c, "spawn_operation_missing")
 				} else {
 					h.failConsult(ctx, c, "spawn_operation_missing")
 				}
+				h.loopAddDone(loopConsultCoordinator, 1)
 			}
 			continue
 		}

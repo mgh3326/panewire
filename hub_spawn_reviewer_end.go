@@ -115,12 +115,16 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 	seen := map[string]bool{}
 	var app *fleet.App
 	var cursor reviewerEndCursor
+	passMade := 0
 	for {
 		tasks, err := h.inbox.store.succeededSpawns(ctx, since, cursor, reviewerEndPage)
 		if err != nil {
+			h.loopNoteSilentError(loopReviewerEnd, "hub_spawn_reviewer_end.go:succeededSpawns", err)
 			h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
 			return
 		}
+		h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawns")
+		h.loopTick(loopReviewerEnd)
 		for _, holder := range tasks {
 			if holder.Status != "succeeded" || !validNodeJobName(holder.Job) {
 				continue
@@ -129,6 +133,7 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 			if err != nil || spawn.Role != reviewerRole {
 				continue
 			}
+			passMade++
 			seen[holder.Job] = true
 			host := spawnHolderHost(holder)
 			if host == "" || h.reviewerEndSettledJob(holder.Job) || !h.nodeConnected(host) {
@@ -150,6 +155,7 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 		last := tasks[len(tasks)-1]
 		cursor = reviewerEndCursor{created: last.Created.UnixMilli(), request: last.Request.RequestID}
 	}
+	h.loopAddMade(loopReviewerEnd, passMade)
 	h.retainReviewerEnd(seen)
 }
 
@@ -207,6 +213,7 @@ func (h *HubServer) endPostedReviewerJob(ctx context.Context, app *fleet.App, sp
 func (h *HubServer) finishReviewerEnd(ctx context.Context, app *fleet.App, spawn fleet.Spawn, holder hubSpawnTask, name, host string) {
 	marked, reason := h.markHolderJobLostBecause(ctx, app, holder, name, reviewerResultPosted)
 	if marked {
+		h.loopAddDone(loopReviewerEnd, 1)
 		h.forgetReviewerEndLog(holder.Job)
 		h.markReviewerEndSettled(holder.Job)
 		if reason == nodeJobMarkLostCompleted {

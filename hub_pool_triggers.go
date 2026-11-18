@@ -58,15 +58,20 @@ func (h *HubServer) checkPoolTriggers(ctx context.Context) {
 	}
 	tasks, err := h.liveSpawnTasks(ctx)
 	if err != nil {
+		h.loopNoteSilentError(loopPoolTriggers, "hub_pool_triggers.go:liveSpawnTasks", err)
 		h.logger.Warn("pool trigger could not list live jobs", "error", err)
 		return
 	}
+	h.loopClearSilent("hub_pool_triggers.go:liveSpawnTasks")
+	h.loopTick(loopPoolTriggers)
 	pools := liveSpawnPools(tasks)
+	h.loopAddMade(loopPoolTriggers, len(pools))
 	if len(pools) == 0 {
 		return
 	}
 	h.checkRetiredPools(ctx, pools)
 	for _, pool := range h.creditExhaustedPools(ctx, tasks) {
+		h.loopAddDone(loopPoolTriggers, 1)
 		h.startPoolSweep(poolExhaustion{Pool: pool, Cause: poolCauseCreditExhausted})
 	}
 }
@@ -92,9 +97,11 @@ func liveSpawnPools(tasks []hubSpawnTask) []string {
 func (h *HubServer) checkRetiredPools(ctx context.Context, pools []string) {
 	rows, err := h.poolCatalogRows(ctx)
 	if err != nil {
-		h.logger.Debug("pool trigger catalog read failed", "error", err)
+		h.loopNoteSilentError(loopPoolTriggers, "hub_pool_triggers.go:poolCatalogRows", err)
+		h.logger.Warn("pool trigger catalog read failed", "error", err)
 		return
 	}
+	h.loopClearSilent("hub_pool_triggers.go:poolCatalogRows")
 	for _, pool := range pools {
 		found, live := catalogPool(rows, pool)
 		switch {
@@ -109,6 +116,7 @@ func (h *HubServer) checkRetiredPools(ctx context.Context, pools []string) {
 				h.poolSweep.forget(poolExhaustion{Pool: pool, Cause: poolCauseCreditExhausted}.key())
 			}
 		default:
+			h.loopAddDone(loopPoolTriggers, 1)
 			h.startPoolSweep(poolExhaustion{Pool: pool, Cause: poolCauseRetired})
 		}
 	}

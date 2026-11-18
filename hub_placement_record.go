@@ -978,9 +978,13 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 	}
 	pending, err := h.inbox.store.pendingPlacementSnapshots(h.closeCtx)
 	if err != nil {
+		h.loopNoteSilentError(loopPlacementRecords, "hub_placement_record.go:pendingPlacementSnapshots", err)
 		h.logger.Warn("placement snapshots could not be listed; records stay pending", "error", err)
 		return
 	}
+	h.loopClearSilent("hub_placement_record.go:pendingPlacementSnapshots")
+	h.loopTick(loopPlacementRecords)
+	h.loopAddMade(loopPlacementRecords, len(pending))
 	if len(pending) == 0 {
 		return
 	}
