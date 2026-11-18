@@ -43,7 +43,11 @@ func TestCreditExhaustedCommandcodeNeedsTheSentence(t *testing.T) {
 		{"any 400", "400 Bad Request: model not found (type=invalid_request_error)\n\n❯ \n", false},
 		{"400 error body without the sentence", "⏺ API Error: 400 {\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad request\"}}\n\n❯ \n", false},
 		{"quoted by a later answer", line + "\nI will retry with a smaller prompt.\n", false},
+		{"quoted as the final answer row", "The documentation says \"You have insufficient credits to make this request\".\n\n❯ \n", false},
 		{"exact status row", "⏺ " + line + "\n\n❯ \n", true},
+		{"API Error prefix", "⏺ API Error: " + line + "\n\n❯ \n", true},
+		{"wrapped continuation row", "400 You have insufficient credits to make this request.\n(type=invalid_request_error\n\n❯ \n", true},
+		{"wrapped continuation then output", "400 You have insufficient credits to make this request.\n(type=invalid_request_error\nI will retry with a smaller prompt.\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := ""

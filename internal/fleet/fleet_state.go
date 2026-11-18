@@ -49,6 +49,13 @@ type FleetStateReader interface {
 	Snapshot(ctx context.Context) (FleetSnapshot, error)
 }
 
+// AccountCreditMarkReader reads the hub's durable provider credit marks. A
+// FleetStateReader may also implement it; the hub serves the marks at
+// /v1/state/account-credit so a snapshot outage does not hide them.
+type AccountCreditMarkReader interface {
+	AccountCreditMarks(ctx context.Context) (map[string]time.Time, error)
+}
+
 // AccountCreditMarkTTL is how long the hub holds a provider credit rejection
 // on one account when no reading of that account arrives: one day (hk 5138).
 // The mark lifts earlier at the first reading taken after it.
@@ -151,6 +158,58 @@ func (r hubStateHTTP) Snapshot(ctx context.Context) (FleetSnapshot, error) {
 		return FleetSnapshot{}, &HubError{Kind: hubDown, Status: status}
 	}
 	return snap, nil
+}
+
+// AccountCreditMarks reads the hub's durable account credit marks.
+func (r hubStateHTTP) AccountCreditMarks(ctx context.Context) (map[string]time.Time, error) {
+	c, e := newHubHTTP(r.a.Config.Hub)
+	if e != nil {
+		return nil, e
+	}
+	status, data, e := c.do(ctx, http.MethodGet, "/v1/state/account-credit", nil, stateSnapshotTimeout)
+	if e != nil {
+		return nil, e
+	}
+	if status != http.StatusOK {
+		return nil, classify(status, data)
+	}
+	var snap struct {
+		V     int                  `json:"v"`
+		At    time.Time            `json:"at"`
+		Marks map[string]time.Time `json:"account_credit_exhausted"`
+	}
+	if len(data) > stateSnapshotMaxBytes || json.Unmarshal(data, &snap) != nil || snap.V != 1 {
+		return nil, &HubError{Kind: hubDown, Status: status}
+	}
+	return snap.Marks, nil
+}
+
+// accountCreditMarks reads the durable marks from the App hook, a state reader
+// that serves them, or the hub endpoint. read is false when no hub source is
+// configured (local use), so no marks exist and nothing fails closed; failed
+// means a configured read did not answer.
+func (a *App) accountCreditMarks(ctx context.Context) (marks map[string]time.Time, read, failed bool) {
+	if a.AccountCreditMarks != nil {
+		m, err := a.AccountCreditMarks(ctx)
+		return m, true, err != nil
+	}
+	if reader, ok := a.State.(AccountCreditMarkReader); ok {
+		m, err := reader.AccountCreditMarks(ctx)
+		return m, true, err != nil
+	}
+	if str(a.Config.Hub, "hub_url") == "" {
+		return nil, false, false
+	}
+	m, err := hubStateHTTP{a}.AccountCreditMarks(ctx)
+	return m, true, err != nil
+}
+
+// snapshotAccountCredit is the snapshot's mark set, nil when it carries none.
+func snapshotAccountCredit(snapshot *FleetSnapshot) map[string]time.Time {
+	if snapshot == nil || len(snapshot.AccountCreditExhausted) == 0 {
+		return nil
+	}
+	return snapshot.AccountCreditExhausted
 }
 
 // fleetSnapshot answers the run's current snapshot, reading it at most once

@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,49 @@ func TestCommandcodeBalanceSelection_t5138(t *testing.T) {
 		}
 		if c := ccCandidates(sel)[ccKeyA]; c.outcome != "dropped:credit_exhausted account="+ccKeyA {
 			t.Fatalf("a pre-mark reading lifted the mark: %s", c.outcome)
+		}
+	})
+
+	t.Run("the durable mark read works while the snapshot is unavailable", func(t *testing.T) {
+		a, s := ccAccountsFixture(t, map[string]*PoolView{
+			ccKeyA: withBalance(ccView(now, 10, 30, 3), ptrF(12)),
+			ccKeyB: withBalance(ccView(now, 10, 40, 3), ptrF(17)),
+		})
+		a.State = &fakeStateReader{err: errors.New("snapshot unavailable")}
+		a.AccountCreditMarks = func(context.Context) (map[string]time.Time, error) {
+			return map[string]time.Time{ccKeyA: now.Add(-30 * time.Second)}, nil
+		}
+		sel, err := a.selectProfile(context.Background(), s)
+		if err != nil || sel.chosen == nil {
+			t.Fatalf("no choice: %v", err)
+		}
+		if c := ccCandidates(sel)[ccKeyA]; c.outcome != "dropped:credit_exhausted account="+ccKeyA {
+			t.Fatalf("the durable mark did not drop the account without a snapshot: %s", c.outcome)
+		}
+		if sel.chosen.accountKey != ccKeyB {
+			t.Fatalf("chosen account %s, want %s", sel.chosen.accountKey, ccKeyB)
+		}
+	})
+
+	t.Run("a failed mark read refuses commandcode accounts", func(t *testing.T) {
+		a, s := ccAccountsFixture(t, map[string]*PoolView{
+			ccKeyA: ccView(now, 10, 30, 3),
+			ccKeyB: ccView(now, 10, 40, 3),
+		})
+		a.AccountCreditMarks = func(context.Context) (map[string]time.Time, error) {
+			return nil, errors.New("mark store unavailable")
+		}
+		sel, _ := a.selectProfile(context.Background(), s)
+		if sel == nil {
+			t.Fatal("no selection plan")
+		}
+		if sel.chosen != nil {
+			t.Fatalf("a failed mark read still chose %s", sel.chosen.accountKey)
+		}
+		for _, key := range []string{ccKeyA, ccKeyB} {
+			if c := ccCandidates(sel)[key]; c.outcome != "dropped:credit_mark_unknown" {
+				t.Fatalf("%s outcome = %q, want dropped:credit_mark_unknown", key, c.outcome)
+			}
 		}
 	})
 

@@ -414,6 +414,13 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 		}
 	} else {
 		if c.row.Pool == "commandcode" {
+			// A configured mark source that did not answer refuses the account
+			// (fail closed): placing it could seat a job on a spent account.
+			if p.accountMarksUnknown {
+				c.reason, c.code, c.outcome = "credit_mark_unknown", outcomeQuotaUnknown, "dropped:credit_mark_unknown"
+				c.tier = -1
+				return
+			}
 			// A credit stop keeps this account off placement while the pool's
 			// other accounts stay candidates (hk 5138). A reading below one
 			// credit refuses the account whatever the mark says (decision 403).

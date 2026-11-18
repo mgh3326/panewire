@@ -556,6 +556,21 @@ func (h *HubServer) handleFleetStateSnapshot(writer http.ResponseWriter, request
 	writeJSON(writer, http.StatusOK, h.fleetSnapshot(h.now().UTC()))
 }
 
+// handleAccountCreditMarks serves the durable account credit marks alone, so
+// selection reads them even when the fleet-state snapshot is off or
+// unavailable (hk 5138).
+func (h *HubServer) handleAccountCreditMarks(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeFleetStateRead(writer, request) {
+		return
+	}
+	now := h.now().UTC()
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"v":                        fleetStateVersion,
+		"at":                       now,
+		"account_credit_exhausted": h.snapshotAccountCreditMarks(now),
+	})
+}
+
 // utcPtr copies an optional time in UTC.
 func utcPtr(t *time.Time) *time.Time {
 	if t == nil {

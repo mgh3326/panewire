@@ -2,9 +2,11 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -236,5 +238,80 @@ func TestAccountCreditMarkLoadRetriesAfterFailure(t *testing.T) {
 	marks := f.hub.snapshotAccountCreditMarks(at)
 	if _, ok := marks[ccMarkAccountA]; !ok || calls != 2 {
 		t.Fatalf("retry marks=%+v calls=%d, want %s after a second read", marks, calls, ccMarkAccountA)
+	}
+}
+
+// hk 5138: the durable marks are served on their own route, so a node reads
+// them even when the fleet snapshot is off or unavailable.
+func TestAccountCreditMarksEndpoint_t5138(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:         map[string]string{"operator": fsOperatorToken},
+		InboxStorePath: path,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hub.Close() })
+	at := hub.now().UTC()
+	if err := hub.markAccountCreditExhausted("commandcode", ccMarkAccountA, at); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(hub.Handler())
+	defer server.Close()
+	status, body := fsGet(t, server, "/v1/state/account-credit", fsOperator())
+	if status != 200 {
+		t.Fatalf("GET account-credit = %d %s", status, body)
+	}
+	var out struct {
+		V     int                  `json:"v"`
+		Marks map[string]time.Time `json:"account_credit_exhausted"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || out.V != 1 {
+		t.Fatalf("account-credit response = %s, %v", body, err)
+	}
+	if got, ok := out.Marks[ccMarkAccountA]; !ok || !got.Equal(at) {
+		t.Fatalf("marks = %+v, want %s at %v", out.Marks, ccMarkAccountA, at)
+	}
+}
+
+// hk 5138: a failed delete of a lifted mark stays pending and is retried, so a
+// restart cannot reload a mark whose reason is gone.
+func TestAccountCreditMarkDeleteRetries_t5138(t *testing.T) {
+	f := newSweepFixture(t)
+	at := f.hub.now()
+	mark := accountCreditMark{Account: ccMarkAccountA, Pool: "commandcode", Marked: at}
+	if err := f.hub.inbox.store.putAccountCreditMark(t.Context(), mark.Account, mark); err != nil {
+		t.Fatal(err)
+	}
+	balance := 2.0
+	f.hub.stateStore().publish(FleetStateMessage{
+		Host: "mac-personal", Kind: fleetStateKindQuota, Key: ccMarkAccountA,
+		MeasuredAt: at.Add(time.Minute), ReceivedAt: at.Add(time.Minute),
+		Quota: &FleetStateQuota{AccountKey: ccMarkAccountA, Pool: "commandcode", Balance: &balance},
+	}, 0)
+	attempts := 0
+	f.hub.accountCreditDelete = func(ctx context.Context, account string, marked time.Time) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("store busy")
+		}
+		return f.hub.inbox.store.deleteAccountCreditMark(ctx, account, marked)
+	}
+	if marks := f.hub.snapshotAccountCreditMarks(at.Add(2 * time.Minute)); len(marks) != 0 {
+		t.Fatalf("a lifted mark was served: %+v", marks)
+	}
+	if rows, err := f.hub.inbox.store.accountCreditMarks(t.Context()); err != nil || len(rows) != 1 {
+		t.Fatalf("rows after failed delete = %+v, %v; want the row kept", rows, err)
+	}
+	if marks := f.hub.snapshotAccountCreditMarks(at.Add(2 * time.Minute)); len(marks) != 0 {
+		t.Fatalf("retry served a lifted mark: %+v", marks)
+	}
+	if rows, err := f.hub.inbox.store.accountCreditMarks(t.Context()); err != nil || len(rows) != 0 {
+		t.Fatalf("rows after retried delete = %+v, %v; want none", rows, err)
+	}
+	if attempts != 2 {
+		t.Fatalf("delete attempts = %d, want 2", attempts)
 	}
 }

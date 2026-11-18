@@ -612,6 +612,7 @@ type HubServer struct {
 	accountCreditLoaded              bool
 	accountCreditLoadFailed          bool
 	accountCreditRead                func(context.Context) (map[string]accountCreditMark, error)
+	accountCreditDelete              func(context.Context, string, time.Time) error
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -1036,6 +1037,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
+	mux.HandleFunc("GET /v1/state/account-credit", h.handleAccountCreditMarks)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/mine", h.handleMyJobs)
 	mux.HandleFunc("POST /v1/jobs/reap", h.handleJobReap)

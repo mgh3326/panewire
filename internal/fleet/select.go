@@ -352,10 +352,29 @@ type selPlan struct {
 	runningJobs    map[string]string
 	runningJobsErr error
 	// accountCredit maps an account key to when the hub read a provider
-	// credit rejection on it (FleetSnapshot.AccountCreditExhausted, hk 5138).
-	// A commandcode candidate on that account is dropped credit_exhausted
-	// until the mark lifts, as a 7d-exhausted account is.
-	accountCredit map[string]time.Time
+	// credit rejection on it (FleetSnapshot.AccountCreditExhausted plus the
+	// hub's durable mark read, hk 5138). A commandcode candidate on that
+	// account is dropped credit_exhausted until the mark lifts, as a
+	// 7d-exhausted account is. accountMarksUnknown marks a configured mark
+	// read that failed: commandcode accounts are refused credit_mark_unknown.
+	accountCredit       map[string]time.Time
+	accountMarksUnknown bool
+}
+
+// mergeAccountCredit adds marks to the plan, keeping the earlier time for an
+// account present in both sources.
+func (p *selPlan) mergeAccountCredit(marks map[string]time.Time) {
+	if len(marks) == 0 {
+		return
+	}
+	if p.accountCredit == nil {
+		p.accountCredit = map[string]time.Time{}
+	}
+	for account, at := range marks {
+		if prior, held := p.accountCredit[account]; !held || at.Before(prior) {
+			p.accountCredit[account] = at
+		}
+	}
 }
 
 func (p *selPlan) poolCutoff(pool string) float64 {
@@ -959,8 +978,18 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	snapshot, coolingState := a.fleetSnapshot(ctx)
 	if snapshot == nil {
 		p.degraded = append(p.degraded, "pool_cooling_"+coolingState)
-	} else {
-		p.accountCredit = snapshot.AccountCreditExhausted
+	}
+	// The account mark is read from the hub's durable store as well as the
+	// snapshot, so a snapshot outage (or [hub] state = off) cannot hide it
+	// (hk 5138). A configured source that fails refuses commandcode accounts.
+	p.accountCredit = snapshotAccountCredit(snapshot)
+	if marks, read, failed := a.accountCreditMarks(ctx); read {
+		if failed {
+			p.accountMarksUnknown = true
+			p.degraded = append(p.degraded, "credit_mark_unavailable")
+		} else {
+			p.mergeAccountCredit(marks)
+		}
 	}
 	var rows []CatalogRow
 	if detailed, ok := a.Quota.(interface {

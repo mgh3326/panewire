@@ -191,9 +191,20 @@ func (h *HubServer) snapshotAccountCreditMarks(now time.Time) map[string]time.Ti
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	del := h.accountCreditDelete
+	if del == nil {
+		del = h.inbox.store.deleteAccountCreditMark
+	}
 	for _, mark := range lifted {
-		if err := h.inbox.store.deleteAccountCreditMark(ctx, mark.Account, mark.Marked); err != nil {
-			h.logger.Warn("lifted account credit mark could not be deleted", "account", mark.Account, "error", err)
+		if err := del(ctx, mark.Account, mark.Marked); err != nil {
+			h.logger.Warn("lifted account credit mark could not be deleted; retrying", "account", mark.Account, "error", err)
+			// Keep the (inactive) mark in memory so the next snapshot retries
+			// the delete; it never drops an account because it is inactive.
+			h.mu.Lock()
+			if _, held := h.accountCreditMarks[mark.Account]; !held {
+				h.accountCreditMarks[mark.Account] = mark
+			}
+			h.mu.Unlock()
 		}
 	}
 	return active

@@ -66,9 +66,10 @@ var (
 	// creditCommandcode is the Command Code provider's rejection as omp renders
 	// it as the status row ("400 You have insufficient credits to make this
 	// request. Please purchase more credits to continue using the service.
-	// (type=invalid_request_error", hk 5138). It anchors on the provider's own
-	// sentence, never on the bare "400": any request may fail with that status.
-	creditCommandcode = regexp.MustCompile(`(?i)you have insufficient credits to make this request`)
+	// (type=invalid_request_error", hk 5138). It anchors on the rendered error
+	// row — the status, omp's "API Error:" prefix and the "⏺" mark — never on
+	// the sentence anywhere in ordinary output, and never on a bare "400".
+	creditCommandcode = regexp.MustCompile(`(?i)^(?:⏺\s*)?(?:api error:\s*)?400\s+you have insufficient credits to make this request`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen when the
@@ -327,10 +328,12 @@ func statusBlockOf(screen string, isStatus func(string) bool) (string, string, b
 			if isStatus(line) {
 				status, tail, found, later, open = line, nil, true, false, false
 				limitOpen, limitIndent = (devin.MatchString(line) || devinRequest.MatchString(line)) && !requestLimitComplete(line), indent
-			} else if found && creditRow(status) && creditDiagnosticRow(line) {
+			} else if found && creditRow(status) && (creditDiagnosticRow(line) || creditContinuationRow(line)) {
 				// omp writes its own diagnostic path under the rejection
-				// ("raw-http-request=<file>", hk 4982). It is the harness's
-				// chrome, not output: the rejection stays the last activity.
+				// ("raw-http-request=<file>", hk 4982) and the rejection itself
+				// may wrap onto a continuation row (hk 5138). Both are the
+				// harness's chrome, not output: the rejection stays the last
+				// activity.
 				tail = append(tail, line)
 			} else {
 				later = true
@@ -391,6 +394,16 @@ func creditRow(line string) bool {
 func creditDiagnosticRow(line string) bool {
 	_, ok := strings.CutPrefix(line, "raw-http-request=")
 	return ok
+}
+
+// creditContinuationRow reports a wrapped continuation of a credit rejection:
+// omp renders the error's tail ("(type=invalid_request_error",
+// "Please purchase more credits…") on the next row when the message wraps.
+// Ordinary output does not start with these fragments, so it still cancels.
+func creditContinuationRow(line string) bool {
+	line = strings.TrimLeft(line, statusPrefixes)
+	lower := strings.ToLower(line)
+	return strings.HasPrefix(lower, "(type=") || strings.HasPrefix(lower, "please purchase more credits") || strings.HasPrefix(lower, "purchase more credits")
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,
