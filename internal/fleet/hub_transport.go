@@ -319,6 +319,10 @@ func classify(status int, data []byte) *HubError {
 }
 
 func (c *hubHTTP) Spawn(ctx context.Context, req HubSpawnRequest) (HubSpawnReply, error) {
+	// The account reading is for the hub's in-process bind re-check only; it
+	// never goes on the wire, where the hub's strict decoder refuses unknown
+	// fields (hk 5124).
+	req.AccountWeeklyUsed = nil
 	status, data, e := c.do(ctx, http.MethodPost, "/v1/spawn", req, time.Duration(req.WaitSeconds+15)*time.Second)
 	if e != nil {
 		return HubSpawnReply{}, e

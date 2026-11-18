@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -866,5 +867,38 @@ func TestHubReportRelativeMatchesPanewireRule(t *testing.T) {
 		if got := hubReportRelativeOK(rel); got != ok {
 			t.Errorf("%q: got %v want %v", rel, got, ok)
 		}
+	}
+}
+
+// The bind-time account reading stays in-process: the remote /v1/spawn body
+// must not carry it, where the hub's strict decoder refuses unknown fields
+// (hk 5124, mergewake od-dbd4425b4e).
+func TestHubHTTPSpawnOmitsAccountWeeklyUsed_t5124(t *testing.T) {
+	var body []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/spawn" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var err error
+		body, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(HubSpawnReply{RequestID: "req-1", Machine: "machine-a", RC: 0, Pane: "w:p1", StdoutTail: "OK pane=w:p1 job=job-a\n"})
+	}))
+	t.Cleanup(server.Close)
+	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client()}
+	weekly := 80.0
+	reply, err := c.Spawn(t.Context(), HubSpawnRequest{RequestID: "req-1", Machine: "machine-a", WaitSeconds: 600, AccountWeeklyUsed: &weekly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Pane != "w:p1" {
+		t.Fatalf("reply pane = %q, want w:p1", reply.Pane)
+	}
+	if strings.Contains(string(body), "account_weekly_used") {
+		t.Fatalf("spawn body carries account_weekly_used: %s", body)
 	}
 }
