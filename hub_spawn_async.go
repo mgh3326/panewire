@@ -716,7 +716,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	defer h.forgetPlacementTraceBase(task.Request.RequestID, task.Attempt)
 	delivery, _ := json.Marshal(placementDelivery{StateDir: app.StateDir, Home: app.Home, Quota: app.Config.Quota})
 	app.PlacementTrace = func(tr fleet.PlacementTrace) {
-		tr = continueSpawnPlacementTrace(previous, tr, task.Exclusions)
+		tr = continueSpawnPlacementTrace(previous, tr, task.Exclusions, h.now())
 		if task.ClaimedHost != "" && len(task.Exclusions) != 0 && tr.Record != nil {
 			// The retry's in-process admission error is not the claimed node's
 			// result. Its final outcome still belongs to the operation row.
@@ -786,7 +786,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			request.Args = append(request.Args, "--host", pinnedHost)
 		}
 		request.RetryHost = pinnedHost
-		for _, excluded := range task.Exclusions {
+		for _, excluded := range liveExclusions(task.Exclusions, h.now()) {
 			if excluded.Machine != pinnedHost {
 				continue
 			}
@@ -1199,7 +1199,7 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	// Reapply saved refusals through the existing candidate loop. In particular,
 	// a launch-proof refusal first tries another harness on this same host;
 	// other refusals rule out the host for the rest of this request (hk 4661: across its attempts).
-	for _, excluded := range t.task.Exclusions {
+	for _, excluded := range liveExclusions(t.task.Exclusions, t.h.now()) {
 		profileOnly := excluded.Reason == "launch_proof_failed" || t.task.ClaimedHost == excluded.Machine
 		if excluded.Machine == req.Machine && (!profileOnly || excluded.Profile == hubSpawnArg(req.Args, "-m")) {
 			t.h.releasePlacementCount(t.task.Job)
@@ -1288,6 +1288,12 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	}
 	reason := spawnResultReason(result)
 	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: hubSpawnArg(node.Args, "-m"), Reason: reason, RC: result.RC}
+	if spawnRefusalTriesNextHost(reason) {
+		// A host-local refusal rules the host out for the launch backoff only:
+		// the state that caused it can be cleaned up in minutes, and a host
+		// excluded for the request's life would never be asked again (hk 5214).
+		exclusion.ExpiresMS = t.h.now().Add(t.h.hostRefusalBackoff()).UnixMilli()
+	}
 	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, nil, t.h.now().UTC())
 	if err != nil {
 		return true, err

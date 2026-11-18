@@ -1213,7 +1213,8 @@ hub read that node's panes (`agents.list`, at most once a minute per request):
 `--hub-url`, `--hub-token-env`, `--hub-cf-env`, defaulting to
 `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV`, `PANEWIRE_HUB_CF_ENV`) calls
 `POST /v1/spawns/<request_id>/abandon` with `{"reason": TEXT}` (operator
-credential). It applies to a pending request bound to a node. A `bound` request
+credential). It applies to a pending request bound to a node, and to an
+unbound one (below). A `bound` request
 has not crossed the send boundary, so the hub skips the pane probe. It still
 checks for a non-terminal hk job from a prior attempt and, if one exists, marks
 it lost through its owning node before releasing the reservation. For a possibly
@@ -1226,8 +1227,20 @@ WARN line `hub spawn abandon` with the request, job, host, verdict and reason.
 A send or another abandonment in progress, a live labelled pane, an unreachable
 node or a refused lost write answers 409
 `spawn_abandon_refused` with the check that held it; a finished request answers
-409 `spawn_not_pending`, an unbound one 409 `spawn_not_bound` (it releases
-itself at its deadline). The CLI exits 5 on a refusal. Abandon does not stop a
+409 `spawn_not_pending`.
+
+An unbound pending request (`accepted`: no node has bound it yet) needs no pane
+probe, since nothing was sent. It ends `failed` with reason
+`operator_abandoned: <TEXT>`, its (task, role) reservation is released in the
+same transaction, and its owner lane gets one `SPAWN_FAILED`. The owner lane
+may withdraw it with its own node credential (`Authorization: Bearer <node
+token>` and `X-Panewire-Machine-ID`) when the lane is routed to that node; a
+node that does not route the lane gets 403 `lane_not_routed_to_caller`. The
+operator CLI carries only the operator token, so a lane withdraws over the
+HTTP route. A request that holds an hk job claim on a host answers 409
+`spawn_abandon_refused` with `reason: claimed_host` and stays with that host.
+A node credential on a bound request answers 401. A request that is already
+withdrawn answers 409 `spawn_not_pending`. The CLI exits 5 on a refusal. Abandon does not stop a
 spawn the node may still be running before its pane exists; use it for a
 request whose node has restarted or whose deadline has passed.
 
