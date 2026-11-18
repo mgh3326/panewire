@@ -68,14 +68,15 @@ func TestSweepKeepsAWorktreeAnotherJobHandedOver(t *testing.T) {
 // The jobs root holds plain files (close-op flags and locks): they are not
 // job directories and never read as a keep mark.
 func TestSweepSkipsNonJobEntriesWhenLookingForKeepMarks(t *testing.T) {
-	jobs := t.TempDir()
+	f, g, _, _ := checkoutFixture(t)
 	for _, name := range []string{".close-ops-enabled", ".close-ops-admission.lock"} {
-		if err := os.WriteFile(filepath.Join(jobs, name), nil, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(f.a.Jobs, name), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if HandoverKeeps(jobs, "/work/unrelated-checkout") {
-		t.Fatal("a plain file in the jobs root kept every worktree")
+	f.endedSweep(61, time.Hour)
+	if len(g.removed) != 1 || f.infoHas("task worktree kept", "reason="+sweepWorktreeHandoverKept) {
+		t.Fatalf("a plain file in the jobs root kept the worktree: removed=%v info=%q", g.removed, f.info)
 	}
 }
 
