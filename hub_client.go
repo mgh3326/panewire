@@ -147,6 +147,7 @@ type HubClient struct {
 	unparsedWarnedAt      time.Time
 	unparsedSuppressed    int
 	relayInject           func(context.Context, string, string) bool
+	codexQueue            func(ctx context.Context, codexHome, thread, text string) error   // fixture seam for `codex queue`
 	relayInjectVerdict    func(context.Context, string, string, []string) relayInjectResult // #547 three-way fixture seam; relayInject wins when set
 	hostLoadCollector     func(context.Context) (HubHostLoad, error)
 	hostMemoryCollector   func(context.Context) (*HubHostMemory, error)

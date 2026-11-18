@@ -26,6 +26,8 @@ does not decide job completion or alter job lifecycle state. See the
 Claude seats start under their job id (`--name`). A trial, off by default, can
 deliver a lane's inbox wake line to its Claude Code session as a session message
 instead of typing it; see [Claude session names and session messages](docs/claude-session-message.md).
+The same trial exists for codex (`codex queue`) and omp (an extension calling
+`pi.sendMessage`): [session-message receivers](docs/session-message-receivers.md).
 
 Escalation `question` text is capped at 240 characters for hub relay; read the
 full question from the referenced events file (or its explicit report file).
