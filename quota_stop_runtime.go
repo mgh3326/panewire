@@ -34,7 +34,7 @@ type quotaStopManager struct {
 	enqueue func(hubScannedRelayEvent) bool
 	// announce records job.lost reason quota_stop for a handed-over job, which
 	// the hub then replaces (hub_quota_replace.go).
-	announce   func(ctx context.Context, job, pane string, stop quotastop.Stop) error
+	announce   func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error
 	mu         sync.Mutex
 	lastPolicy time.Time
 	policy     quotaPolicy
@@ -76,7 +76,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	// role and owner are the job's role and owner lane when the wake was
 	// reserved: the role decides whether the manager acts in shadow mode (hk
 	// 3334) and the owner receives the one info lane event.
-	for _, column := range []string{"role", "owner"} {
+	for _, column := range []string{"role", "owner", "attempt"} {
 		if !storeHasColumn(s.db, "quota_stop_decisions", column) {
 			if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
 				return nil, err
@@ -87,8 +87,8 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	q.session = func(job, pane string) string {
 		return nodeJobHerdrSessionByPaneFromRoot(root, pane)
 	}
-	q.announce = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
-		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, stop)
+	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
+		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, attempt, stop)
 	}
 	q.read = func(ctx context.Context, pane string) (string, error) {
 		session := ""
@@ -514,7 +514,11 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandidate, job HubActiveJob, now time.Time) (fresh, decided bool, err error) {
 	q.store.mu.Lock()
 	defer q.store.mu.Unlock()
-	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner) VALUES(?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane)
+	// The attempt the stop was observed in (ledger view): the hand-over is
+	// announced for that attempt only, so a retry after a re-prompt is refused
+	// (hk 5224). An unreadable ledger leaves it unbound, as before.
+	attempt, _ := fleet.CurrentAttempt(filepath.Join(q.root, "jobs"), job.JobID)
+	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner,attempt) VALUES(?,?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane, attempt)
 	if err != nil {
 		return false, false, err
 	}
@@ -725,20 +729,20 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 	q.retryQuotaClears(ctx, now)
 	// The outbox is drained separately from the one-per-wake screen read.
 	q.store.mu.Lock()
-	rows, err := q.store.db.QueryContext(ctx, `SELECT event_id,job,pane,label,pool,reset,decision,reason,resume_text,due,attempted,hk_recorded,action_recorded,created,action_retry,role,owner FROM quota_stop_decisions WHERE decision<>'' AND ((hk_recorded=0 AND hk_retry<=?) OR (action_recorded=0 AND action_retry<=? AND (decision='handover' OR due<=?))) ORDER BY action_recorded, event_id LIMIT 1`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
+	rows, err := q.store.db.QueryContext(ctx, `SELECT event_id,job,pane,label,pool,reset,decision,reason,resume_text,due,attempted,hk_recorded,action_recorded,created,action_retry,role,owner,attempt FROM quota_stop_decisions WHERE decision<>'' AND ((hk_recorded=0 AND hk_retry<=?) OR (action_recorded=0 AND action_retry<=? AND (decision='handover' OR due<=?))) ORDER BY action_recorded, event_id LIMIT 1`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		q.store.mu.Unlock()
 		return
 	}
 	type row struct {
-		id, job, pane, label, pool, reset, decision, reason, text, role, owner string
-		due, created, actionRetry                                              int64
-		attempted, hk, action                                                  int
+		id, job, pane, label, pool, reset, decision, reason, text, role, owner, attempt string
+		due, created, actionRetry                                                       int64
+		attempted, hk, action                                                           int
 	}
 	var pending []row
 	for rows.Next() {
 		var r row
-		if rows.Scan(&r.id, &r.job, &r.pane, &r.label, &r.pool, &r.reset, &r.decision, &r.reason, &r.text, &r.due, &r.attempted, &r.hk, &r.action, &r.created, &r.actionRetry, &r.role, &r.owner) == nil {
+		if rows.Scan(&r.id, &r.job, &r.pane, &r.label, &r.pool, &r.reset, &r.decision, &r.reason, &r.text, &r.due, &r.attempted, &r.hk, &r.action, &r.created, &r.actionRetry, &r.role, &r.owner, &r.attempt) == nil {
 			pending = append(pending, r)
 		}
 	}
@@ -772,7 +776,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			continue
 		}
 		if r.decision == "handover" && quotaActsOn(r.role, r.pool) {
-			q.handOver(ctx, r.id, r.job, r.pane, r.pool, r.reset, now)
+			q.handOver(ctx, r.id, r.job, r.pane, r.pool, r.reset, r.attempt, now)
 			continue
 		}
 		if r.decision == "handover" {
@@ -865,12 +869,12 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 // handed_over_to=<new job>; it sends the owner the info lane event. When it
 // cannot, the job's watcher ends the job after its grace, without a
 // replacement. A write that fails is retried after a backoff.
-func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, reset string, now time.Time) {
+func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, reset, attempt string, now time.Time) {
 	stop := quotastop.Stop{Pool: pool}
 	if at, err := time.Parse(time.RFC3339, reset); err == nil {
 		stop.Reset = at
 	}
-	if q.announce == nil || q.announce(ctx, job, pane, stop) != nil {
+	if q.announce == nil || q.announce(ctx, job, pane, attempt, stop) != nil {
 		q.backoffAction(ctx, id, now)
 		return
 	}

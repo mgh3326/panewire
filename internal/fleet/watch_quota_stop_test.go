@@ -412,7 +412,7 @@ func TestAnnounceQuotaStopStartsAWatcherAndRearmFindsAnnouncedJobs(t *testing.T)
 	old := announceStartWatch
 	announceStartWatch = func(_ *App, job string) error { started = append(started, job); return nil }
 	t.Cleanup(func() { announceStartWatch = old })
-	if e := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", quotastop.Stop{Pool: "claude"}); e != nil {
+	if e := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", "", quotastop.Stop{Pool: "claude"}); e != nil {
 		t.Fatal(e)
 	}
 	if len(started) != 1 || started[0] != "j" {

@@ -240,7 +240,7 @@ func TestAnnounceQuotaStopSkipsAJobEndedByItsPostedResult(t *testing.T) {
 	t.Cleanup(func() { announceStartWatch = old })
 	before, _ := a.job("j")
 
-	if err := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", quotastop.Stop{Pool: "claude"}); err != nil {
+	if err := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", "", quotastop.Stop{Pool: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := a.job("j")

@@ -78,7 +78,7 @@ func newRoleStopRigScreen(t *testing.T, role string, startedAgo time.Duration, t
 		rig.sends++
 		return relayInjectResult{Outcome: relayInjectDelivered, Evidence: "visible:nonce_echo", Proven: relayNoncesIn(text)}
 	}
-	q.announce = func(_ context.Context, job, pane string, stop quotastop.Stop) error {
+	q.announce = func(_ context.Context, job, pane, _ string, stop quotastop.Stop) error {
 		rig.announce = append(rig.announce, stop)
 		rig.announced = append(rig.announced, job+" "+pane)
 		return nil

@@ -37,9 +37,9 @@ func TestQuotaStopCodexReplayHandsOverUrgentWorker(t *testing.T) {
 	rig.manager.quota = q
 	reads, sends, notes, owners := 0, 0, 0, 0
 	announce := q.announce
-	q.announce = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
+	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
 		owners++
-		return announce(ctx, job, pane, stop)
+		return announce(ctx, job, pane, attempt, stop)
 	}
 	screen, err := os.ReadFile("testdata/quota-stop/codex.txt")
 	if err != nil {

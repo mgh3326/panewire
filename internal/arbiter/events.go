@@ -50,6 +50,15 @@ func (s *Store) eventsDir(job string) string { return filepath.Join(s.Inbox, job
 // non-nil, is an explicit number and a taken one is ExitDuplicate. The state
 // database is created on first use.
 func (s *Store) AppendEvent(ctx context.Context, job, kind string, payload map[string]any, seq *int) (int, error) {
+	return s.AppendEventIf(ctx, job, kind, payload, seq, nil)
+}
+
+// AppendEventIf is AppendEvent with a condition: guard runs once, with the
+// job's events lock held and before the event is numbered, so what it reads of
+// the ledger is what the append sees. A guard error appends nothing and is
+// returned as it is; guard must not take the events lock itself and must not
+// write the ledger. A nil guard appends unconditionally.
+func (s *Store) AppendEventIf(ctx context.Context, job, kind string, payload map[string]any, seq *int, guard func() error) (int, error) {
 	if e := validJobID(job); e != nil {
 		return 0, e
 	}
@@ -67,7 +76,7 @@ func (s *Store) AppendEvent(ctx context.Context, job, kind string, payload map[s
 	var n int
 	e = c.write(func() error {
 		var err error
-		n, err = s.recordEvent(ctx, c, job, kind, payload, seq)
+		n, err = s.recordEventGuarded(ctx, c, job, kind, payload, seq, guard)
 		return err
 	})
 	return n, e
@@ -128,6 +137,12 @@ func highestPrefix(dir string) int {
 // serialised by <job dir>/.wrk-events.lock; the UNIQUE(job_id, seq) index and
 // the exclusive artifact link stop a double consumption.
 func (s *Store) recordEvent(ctx context.Context, c *conn, job, kind string, payload map[string]any, seq *int) (int, error) {
+	return s.recordEventGuarded(ctx, c, job, kind, payload, seq, nil)
+}
+
+// recordEventGuarded is recordEvent with AppendEventIf's guard, run once under
+// the events lock before the event is numbered.
+func (s *Store) recordEventGuarded(ctx context.Context, c *conn, job, kind string, payload map[string]any, seq *int, guard func() error) (int, error) {
 	dir := s.eventsDir(job)
 	if e := os.MkdirAll(dir, 0o755); e != nil {
 		return 0, errf(ExitStorage, "cannot create the events directory: %v", e)
@@ -141,6 +156,11 @@ func (s *Store) recordEvent(ctx context.Context, c *conn, job, kind string, payl
 		return 0, errf(ExitStorage, "cannot take the events lock: %v", e)
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	if guard != nil {
+		if e = guard(); e != nil {
+			return 0, e
+		}
+	}
 	var n int
 	if seq != nil {
 		n = *seq
