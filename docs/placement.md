@@ -319,6 +319,22 @@ the long-park owner notice are separate keys (`spawn_backoff_seconds`,
 `spawn_park_notice_seconds`); see
 [hub-spawn-operations.md](hub-spawn-operations.md#parked-notice).
 
+### Host-local refusals expire
+
+A refusal that moves an `--host auto` request to the next host (the codes
+`cwd_unmapped`, `checkout_refused:dirty`, `checkout_refused:sha-missing`,
+`checkout_refused:branch-elsewhere`, `checkout_refused:branch_in_use`, the
+first-run `spawn_failed:hooks_review`, `spawn_failed:trust_prompt`,
+`spawn_failed:omp_setup_wizard` and `spawn_failed:auth_unavailable`, and
+`launch_proof_failed`) rules its host out only for the launch backoff above
+(`launch_backoff_minutes`, 30 by default). Its expiry is stored with the
+request, so a hub restart keeps it. After the backoff the next placement check
+asks that host again, and a repeat refusal rules it out for another backoff. A
+refusal the hub does not class as host-local (for example `deadline_not_started`)
+rules out its host for the request's life, as before. The placement trace shows
+a live refusal as skipped with its remaining time, `hub_<reason>_retry_in_<n>s`,
+and drops a refusal once it has expired. (hk 5214.)
+
 ### First-run refusals and the desk notice
 
 A first-run dialog or a missing login rules out its harness on the host. When
@@ -363,10 +379,17 @@ ACTION NEEDED: oci codex — run codex once and choose Trust all and continue
 A need is a readiness `dialog` value or `login: missing`; a refusal above counts
 as a report of the same need. The text carries the host, the kind and the
 action only, never screen content. The hub tells each (host, kind, need) once
-while it stands, and records it as told only after the Sentry transport accepts
-and flushes the event (bounded at 2 s). With no Sentry DSN nothing is told, and
-the next report tries again. The told state is kept in the hub store (table
-`one_time_action_notices`, Postgres migration 0026) and read back at start, so a
+while it stands. One notice worker owns those sends: the refusal and readiness
+handlers hand it their observations and return at once, it coalesces repeat
+sightings, and it allows one delivery attempt per untold need at a time. A need
+is recorded as told only when that attempt's own request is answered 2xx, within
+a 2 s deadline derived from hub shutdown. A late 2xx for an earlier attempt, a
+drop, a rate-limit skip, a non-2xx, a network error, a timeout or shutdown leaves
+the need untold, and the next sighting tries again. Hub shutdown stops the
+worker, cancels its request and joins it before the store closes. With no Sentry
+DSN nothing is told, and the next report tries again. The told state is kept in
+the hub store (table `one_time_action_notices`, Postgres migration 0026) and
+read back at start, so a
 hub restart does not tell a standing need again. A need clears only when a
 readiness report shows it gone and it stays gone for one full readiness cycle
 (5 minutes): a report that shows it again inside that cycle cancels the clear

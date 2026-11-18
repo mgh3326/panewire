@@ -199,6 +199,21 @@ func launchFailureReason(reason string) bool {
 	}
 }
 
+// hostRefusalBackoff is how long a host-local refusal (nextHostRefusals) keeps
+// its host out of the next placement checks: the launch-failure backoff of
+// placement.json, the window a launch failure benches a host for. After it the
+// host is tried again, and a repeat refusal re-arms it (hk 5214).
+func (h *HubServer) hostRefusalBackoff() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.reloadPlacementPolicyLocked()
+	policy := h.placementPolicy
+	if !policy.valid() {
+		policy = DefaultPlacementPolicy()
+	}
+	return policy.launchBackoff()
+}
+
 // observeLaunchOutcome counts one node answer to a spawn against its
 // (machine, kind). The threshold-th consecutive launch failure excludes the
 // pair for the policy's backoff; a success clears it. A failed answer that is

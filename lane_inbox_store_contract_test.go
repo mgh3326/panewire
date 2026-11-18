@@ -40,9 +40,9 @@ type laneInboxBackend struct {
 func laneInboxBackends() []laneInboxBackend {
 	return []laneInboxBackend{
 		{name: "sqlite", fresh: func(t *testing.T) func() *laneInboxStore {
-			path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+			path := freshLaneInboxFile(t)
 			return func() *laneInboxStore {
-				s, err := openLaneInboxStore(path)
+				s, err := openLaneInboxStoreTimed(t, path)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -107,7 +107,7 @@ type hubInboxStorage struct{ path, dsn string }
 // forEachHubInboxStorage runs a hub-level inbox test once per backend.
 func forEachHubInboxStorage(t *testing.T, run func(t *testing.T, storage hubInboxStorage)) {
 	t.Run("sqlite", func(t *testing.T) {
-		run(t, hubInboxStorage{path: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+		run(t, hubInboxStorage{path: freshLaneInboxFile(t)})
 	})
 	t.Run("postgres", func(t *testing.T) {
 		_, dsn := hubPostgresTestSchema(t)
