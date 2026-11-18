@@ -414,7 +414,7 @@ func (a *App) quotaStopAnnounceEndLocked(ctx context.Context, j Job, stop quotas
 		return err
 	}
 	defer unlock()
-	if ended, err := a.attemptEndedBeforeAnnouncement(j.ID); err != nil {
+	if ended, err := a.attemptEndedBeforeAnnouncement(j.ID, j.Pane); err != nil {
 		return err
 	} else if ended {
 		return errQuotaStopSuperseded
@@ -438,7 +438,7 @@ func (a *App) quotaStopAnnounceEndLocked(ctx context.Context, j Job, stop quotas
 // loss) other than an earlier non-final quota-stop announcement, which a
 // repeat announcement may follow. A job with no ledger directory has nothing
 // to read; any other unreadable ledger is an error, never permission.
-func (a *App) attemptEndedBeforeAnnouncement(id string) (bool, error) {
+func (a *App) attemptEndedBeforeAnnouncement(id, wantPane string) (bool, error) {
 	// Only a ledger whose events directory is absent has nothing to read; a
 	// listed event that vanished or failed to read is missing evidence.
 	if _, err := os.Lstat(filepath.Join(a.Jobs, id, "events")); errors.Is(err, os.ErrNotExist) {
@@ -449,63 +449,65 @@ func (a *App) attemptEndedBeforeAnnouncement(id string) (bool, error) {
 		return false, err
 	}
 	// A hub revocation allocates its sequence without the ledger lock (hk
-	// 5044), so it can share a number with an event published before it.
-	// Within one sequence number, a revocation is folded after every other
-	// event, so it ends an attempt started at that number; a real start at a
-	// strictly later number clears it.
+	// 5044): a revocation published after a spawn can carry the number of an
+	// event before it, so no sequence order proves a start followed it. Any
+	// revocation tied with another event's number is therefore an end for
+	// good, until hk 5224 fences the allocation (fail closed).
 	ordered := ledgerOrder(evs)
-	slices.SortStableFunc(ordered, func(x, y Event) int {
-		if c := cmpSeqPrefix(x.name, y.name); c != 0 {
-			return c
+	seqs := map[int]int{}
+	for _, ev := range ordered {
+		seqs[ledgerSeq(ev.name)]++
+	}
+	for _, ev := range ordered {
+		if ev.Kind == "job.revoked" && seqs[ledgerSeq(ev.name)] > 1 {
+			return true, nil
 		}
-		return revokedLast(x) - revokedLast(y)
-	})
-	ended, reaped := false, false
+	}
+	ended, sticky := false, false
+	pane := ""
 	for _, ev := range ordered {
 		switch ev.Kind {
-		case "job.claim", "job.claimed", "job.reclaim", "job.spawned":
-			ended, reaped = false, false
+		case "job.claim", "job.claimed", "job.reclaim":
+			ended, sticky = false, false
+		case "job.spawned":
+			ended, sticky = false, false
+			pane = str(ev.Payload, "pane_id")
 		case "job.reprompted":
-			// A re-prompt revives a live attempt, not a reaped one (foldJob
-			// keeps Reaped until a new claim or spawn).
+			// A re-prompt revives a live attempt, not a reaped or revoked one:
+			// it restores no ownership (foldJob keeps Reaped, and
+			// reassignedInLedger keeps a revocation, across it).
 			ended = false
 		case "job.completed", "job.completion", eventRecordSettled, "job.escalate", "job.joined",
-			"job.revoked", "job.handed_off":
+			"job.handed_off":
 			ended = true
-		case "job.reaped":
-			reaped = true
+		case "job.revoked", "job.reaped":
+			sticky = true
 		case "job.lost":
 			if str(ev.Payload, "reason") != "quota_stop" || boolean(ev.Payload, "final", false) {
 				ended = true
 			}
 		}
 	}
-	ended = ended || reaped
+	// An observation of another pane belongs to an earlier attempt.
+	if wantPane != "" && pane != "" && pane != wantPane {
+		return true, nil
+	}
+	ended = ended || sticky
 	return ended, nil
 }
 
-// cmpSeqPrefix compares two ledger file names by numeric sequence prefix
-// alone; names without one compare equal.
-func cmpSeqPrefix(x, y string) int {
-	seq := func(name string) int {
-		i := strings.IndexByte(name, '-')
-		if i <= 0 {
-			return -1
-		}
-		n, err := strconv.Atoi(name[:i])
-		if err != nil {
-			return -1
-		}
-		return n
+// ledgerSeq is the numeric sequence prefix of a ledger file name, -1 when
+// there is none.
+func ledgerSeq(name string) int {
+	i := strings.IndexByte(name, '-')
+	if i <= 0 {
+		return -1
 	}
-	return seq(x) - seq(y)
-}
-
-func revokedLast(ev Event) int {
-	if ev.Kind == "job.revoked" {
-		return 1
+	n, err := strconv.Atoi(name[:i])
+	if err != nil {
+		return -1
 	}
-	return 0
+	return n
 }
 
 // quotaRecordLockWait bounds how long a quota-stop record waits for the job's
