@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"database/sql"
 	"errors"
 	"io"
 	"os"
@@ -28,30 +29,49 @@ func openLaneInboxStoreTimed(t *testing.T, path string) (*laneInboxStore, error)
 	return s, err
 }
 
-// laneInboxTemplate is one migrated, empty SQLite inbox that every fresh test
-// file is copied from. The migration chain runs once per test binary instead
-// of once per store: a copy of a closed, migrated file reopens in milliseconds,
-// because the chain then has nothing to write (hk 5218). The template is built
-// by the production open, so a migration that blocks still fails the build
-// under laneInboxOpTimeout.
+// laneInboxTemplate holds the path of one migrated, empty SQLite inbox that
+// each fresh test file is copied from. Only a successful build is kept: a
+// failed one (for example a stalled open that hit laneInboxOpTimeout) is
+// retried by the next caller, so one stall fails one test, as it did before
+// the template existed (hk 5218).
 var laneInboxTemplate struct {
-	once sync.Once
+	mu   sync.Mutex
 	path string
-	err  error
 }
 
-// freshLaneInboxFile returns a new path holding a copy of the migrated, empty
-// template. Each test owns its copy under t.TempDir.
+// buildLaneInboxTemplateFn builds the template. A test swaps it to inject a
+// failed build.
+var buildLaneInboxTemplateFn = buildLaneInboxTemplate
+
+// laneInboxTemplatePath returns the built template, building it if none exists.
+func laneInboxTemplatePath() (string, error) {
+	laneInboxTemplate.mu.Lock()
+	defer laneInboxTemplate.mu.Unlock()
+	if laneInboxTemplate.path == "" {
+		path, err := buildLaneInboxTemplateFn()
+		if err != nil {
+			return "", err
+		}
+		laneInboxTemplate.path = path
+	}
+	return laneInboxTemplate.path, nil
+}
+
+// freshLaneInboxFile returns a new path holding a copy of the template. Each
+// test owns its copy under t.TempDir.
+//
+// A copy is opened through openLaneInboxStore, which re-runs the whole chain.
+// Correctness does not depend on the template: the chain is idempotent. The
+// template being fully migrated is what makes that re-run write nothing, so
+// the open stays cheap.
 func freshLaneInboxFile(t *testing.T) string {
 	t.Helper()
-	laneInboxTemplate.once.Do(func() {
-		laneInboxTemplate.path, laneInboxTemplate.err = buildLaneInboxTemplate()
-	})
-	if laneInboxTemplate.err != nil {
-		t.Fatalf("lane inbox template: %v", laneInboxTemplate.err)
+	template, err := laneInboxTemplatePath()
+	if err != nil {
+		t.Fatalf("lane inbox template: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
-	if err := copyLaneInboxFile(laneInboxTemplate.path, path); err != nil {
+	if err := copyLaneInboxFile(template, path); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -65,6 +85,12 @@ func buildLaneInboxTemplate() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	built := false
+	defer func() {
+		if !built {
+			os.RemoveAll(dir)
+		}
+	}()
 	path := filepath.Join(dir, "template.sqlite3")
 	s, err := openLaneInboxStore(path)
 	if err != nil {
@@ -76,33 +102,65 @@ func buildLaneInboxTemplate() (string, error) {
 	if _, err := os.Stat(path + "-wal"); err == nil {
 		return "", errors.New("closed template still has a WAL file")
 	}
+	built = true
 	return path, nil
 }
 
-// The full chain from an empty file is the one place the migrations run in
-// full for a fresh store. A template copy must carry the same schema, since
-// the store-contract tests run on copies (hk 5218).
-func TestLaneInboxTemplateCopyMatchesFullChainFromEmpty(t *testing.T) {
+// The template must already hold the full schema, which is what keeps a copy's
+// reopen write-free (hk 5218). It is read through a raw handle: openLaneInboxStore
+// re-runs the chain and would repair a partial template before any comparison.
+func TestLaneInboxTemplateIsFullyMigrated(t *testing.T) {
+	template, err := laneInboxTemplatePath()
+	if err != nil {
+		t.Fatal(err)
+	}
 	full, err := openLaneInboxStore(filepath.Join(t.TempDir(), "full.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer full.close()
-	copied, err := openLaneInboxStore(freshLaneInboxFile(t))
+	raw, err := sql.Open("sqlite", template)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer copied.close()
-	want, got := laneInboxSchema(t, full), laneInboxSchema(t, copied)
+	defer raw.Close()
+	want, got := laneInboxSchema(t, full.db), laneInboxSchema(t, raw)
 	if got != want {
-		t.Fatalf("template copy schema differs from a full chain from empty:\ngot:\n%s\nwant:\n%s", got, want)
+		t.Fatalf("template is not fully migrated:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }
 
-// laneInboxSchema lists every schema object of a store, in a stable order.
-func laneInboxSchema(t *testing.T, s *laneInboxStore) string {
+// A failed template build is not kept: the next caller builds again (hk 5218).
+func TestLaneInboxTemplateRetriesAFailedBuild(t *testing.T) {
+	build := buildLaneInboxTemplateFn
+	t.Cleanup(func() { buildLaneInboxTemplateFn = build })
+	laneInboxTemplate.mu.Lock()
+	laneInboxTemplate.path = ""
+	laneInboxTemplate.mu.Unlock()
+	calls := 0
+	buildLaneInboxTemplateFn = func() (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("stalled open")
+		}
+		return build()
+	}
+	if _, err := laneInboxTemplatePath(); err == nil {
+		t.Fatal("first build did not fail")
+	}
+	path, err := laneInboxTemplatePath()
+	if err != nil {
+		t.Fatalf("second caller got the failed build's error: %v", err)
+	}
+	if calls != 2 || path == "" {
+		t.Fatalf("calls=%d path=%q, want a second build that returns a path", calls, path)
+	}
+}
+
+// laneInboxSchema lists every schema object of a database, in a stable order.
+func laneInboxSchema(t *testing.T, db *sql.DB) string {
 	t.Helper()
-	rows, err := s.db.Query(`SELECT type || ' ' || name || ' ' || IFNULL(sql, '') FROM sqlite_master ORDER BY type, name`)
+	rows, err := db.Query(`SELECT type || ' ' || name || ' ' || IFNULL(sql, '') FROM sqlite_master ORDER BY type, name`)
 	if err != nil {
 		t.Fatal(err)
 	}
