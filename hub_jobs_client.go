@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -581,10 +582,21 @@ func writeHubRevocation(inboxRoot string, revoked hubJobRevokedEvent) error {
 	if inboxRoot == "" || !hubJobIDPattern.MatchString(revoked.JobID) || revoked.Epoch == 0 {
 		return fmt.Errorf("invalid job revocation")
 	}
-	eventsDir := filepath.Join(inboxRoot, "jobs", revoked.JobID, "events")
+	jobDir := filepath.Join(inboxRoot, "jobs", revoked.JobID)
+	eventsDir := filepath.Join(jobDir, "events")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
 		return err
 	}
+	lock, err := os.OpenFile(filepath.Join(jobDir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0o666)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
 		return err

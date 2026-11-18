@@ -88,6 +88,11 @@ type Spawn struct {
 	// resolves the owner from the task's hk project instead of inheriting a
 	// caller lane. A Spawn built in-process leaves it false.
 	ownerOmitted bool
+	// parentJobExplicit records that the command line itself carried a
+	// non-empty --parent-job, as opposed to a parent filled from ARBITER_JOB.
+	// Only the flag parser sets it; the hub closes a replaced parent's pane
+	// only for an explicit request (hk 5195, docs/config.md).
+	parentJobExplicit bool
 	// laneUnregistered is set once hub lane registration failed after its
 	// retry; --wait output and the execution receipt name it.
 	laneUnregistered bool
@@ -253,6 +258,7 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 		return s, fail(exitUsage, "%v", e)
 	}
 	s.ownerOmitted = !flagPassed(f, "owner")
+	s.parentJobExplicit = flagPassed(f, "parent-job") && s.ParentJob != ""
 	if flagPassed(f, "containment") && s.Containment == "" {
 		return s, fail(exitUsage, "invalid containment: expected hk:<task id>")
 	}

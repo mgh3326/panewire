@@ -163,11 +163,10 @@ func argValueRefusal(flag, value string, operator bool) string {
 		}
 		return "--role value must be implementer or reviewer"
 	case "--author-family":
-		switch value {
-		case "anthropic", "openai", "google", "xai", "deepseek", "meta", "mistral", "other":
+		if ValidAuthorFamily(value) {
 			return ""
 		}
-		return "--author-family value must be anthropic, openai, google, xai, deepseek, meta, mistral or other"
+		return "--author-family value must be " + authorFamilyDescription()
 	case "--review-pass":
 		if len(value) == 1 && value[0] >= '1' && value[0] <= '9' {
 			return ""

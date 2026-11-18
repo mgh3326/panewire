@@ -416,6 +416,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						// The hub ended the job on its posted result: no hand-over
 						// is active, so no grace expires and no re-prompt can
 						// follow the end and make the ledger live again.
+					case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+						// The end lock stayed held past its bound: the
+						// rejection stays pending and the next poll retries
+						// the hand-over; only the watcher's own cancellation
+						// ends it.
+						a.warn("credit hand-off waits for the job end lock: %v", err)
+						continue
 					case err != nil:
 						return err
 					default:

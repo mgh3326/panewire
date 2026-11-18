@@ -348,6 +348,11 @@ first and exits when it is held.
   intent; they fail closed on an unreadable ledger. They keep the end lock
   through their hk write, pane close, lease release and `job.reaped`. The
   job-dir TTL keeps a dir whose intent is open (`hub-close-open`).
+- A quota-stop announcement (`job.lost reason=quota_stop`, not final) takes
+  the job's end lock too, then the operation lock, and writes nothing when
+  the re-read ledger already holds another end (a revoke, a completion, a
+  reap): as the newest end it would read as a live hand-over and mask that
+  end. Both lock waits end when the caller's context does.
 - When no intent is open any more (settled, cancelled, or made stale by a
   new attempt), the fence is released and the node re-arms the watchers of
   live jobs, since a watcher that met the fence exited.
@@ -462,7 +467,9 @@ defers. Its rules, which the hub issuer (hk 4745) relies on:
    `job.mark_lost` bound). The planned terminal reason and any successor
    pointer live there, as the last `key=value` token
    (`replaced_by=<job>` for a reviewer, `handed_over_to=<job>` for an
-   implementer; `QuotaStopEndReason`). On a new, bound registration the
+   implementer; `QuotaStopEndReason`). A successor closing its parent
+   (`supersede_close` rows, hk 5195, docs/config.md "--parent-job") uses
+   `superseded_by=<job>`. On a new, bound registration the
    node appends `job.hub_close_intent` to the job's ledger — `request_id`,
    `attempt`, `pane_id`, `label` (the request's `name`) and `end_reason` —
    *before* it writes `registered`, and fsyncs the events directory. A

@@ -203,7 +203,7 @@ func (s *TaskPaneSweeper) endAbandonedJob(ctx context.Context, a *App, j Job, re
 		return "", errJobAlreadyEnded
 	}
 	defer endUnlock()
-	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	unlock, err := a.lockJobOperation(ctx, j.ID, quotaRecordLockWait)
 	if err != nil {
 		return "", err
 	}
