@@ -324,18 +324,21 @@ func (a *App) releaseReassignedQuota(ctx context.Context, j Job) error {
 		if pool == "" {
 			return fail(exitStateConflict, "invalid quota record")
 		}
+		var currentEpoch uint64
 		err := a.ledger().ReleaseQuotaPoolIf(ctx, j.ID, pool, false, func() error {
 			current, err := jobowner.Epoch(a.Jobs, j.ID)
 			if err != nil {
 				return err
 			}
+			currentEpoch = current
 			if current != epoch {
 				return changed
 			}
 			return nil
 		})
 		if errors.Is(err, changed) {
-			return nil
+			a.warn("quota retained for job %s pool %s: captured epoch %d, current epoch %d", j.ID, pool, epoch, currentEpoch)
+			continue
 		}
 		if err != nil {
 			return ledgerFail(err, "release")

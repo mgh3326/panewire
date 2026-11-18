@@ -643,21 +643,29 @@ the grant it started with, even if the job is later assigned back to the same
 node at a newer epoch. Before delivering a reassignment, the hub atomically
 transfers the hk owner with the old owner as `expected_owner`; a stale transfer
 is refused and names the current owner.
-A node whose current grant receives `409 job_owner_mismatch` records the same
-local revocation as a hub notice: it makes no further job-record writes for that
-attempt and the existing pane sweep closes the local pane. A delayed refusal or
-hub revocation cannot revoke a newer local grant. The hub checks the durable hk
-owner before finishing an old pool action, including after restart.
+A node that receives `409 job_owner_mismatch` reads the owner again. If the
+hub seeded this same node at its current grant epoch, it retries once with that
+owner as the condition. Otherwise it records the same local revocation as a hub
+notice: it makes no further job-record writes for that attempt and the existing
+pane sweep closes the local pane. A delayed refusal or hub revocation cannot
+revoke a newer local grant. The hub checks the durable hk owner before finishing
+an old pool action, including after restart.
 
 An older hk omits both owner fields from a job read. Panewire sends no fence
 fields to that server and logs once per streak while retaining legacy behavior.
 When hk gains fence support, the hub adopts a live, unfenced job only from an
 assignment it holds durably, with a conditional empty-owner update at the
-current epoch. It also checks persisted assignments after restart and on
-heartbeat. Nodes do not claim empty owners: they keep legacy writes without
-revoking the job. An assignment the hub no longer holds stays unfenced until
-the job ends. A later assignment back to the same node requires a fresh claim
-or spawn before that node's prior revocation is cleared.
+current epoch. The hub seeds asynchronously after landing and also checks
+persisted assignments after restart and on heartbeat. Between the node's HK
+claim and that seed, upgraded nodes condition their writes on an empty owner;
+they never claim it. Before reassigning an empty-owner job, the hub first seeds
+its current owner and then transfers the fence. Without a durable assignment,
+the hub leaves the job unfenced and cannot reassign it. A later assignment back
+to the same node requires a fresh claim or spawn before that node's prior
+revocation is cleared.
+Older node binaries can still issue an unconditional write while being upgraded.
+Upgrade every node before advertising `close_ops_v1`: the current rollout is
+v0.0.540 followed by the release containing this fence.
 If the hub cannot read the job record, it refuses reassignment until it can
 establish whether fencing is supported. If hk rejects a terminal ownership
 transfer with `job_state_conflict`, the hub refuses the reassignment and names

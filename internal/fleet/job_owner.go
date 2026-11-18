@@ -153,9 +153,7 @@ func PutOwnedJob(ctx context.Context, store JobStore, jobs, node, id string, fie
 	if capability != nil {
 		capability(supported)
 	}
-	if !supported || current == (JobOwner{}) {
-		// Only the hub can establish a first owner. An unowned record keeps
-		// legacy writes and must not turn into a local revocation.
+	if !supported {
 		return store.Put(ctx, id, fields)
 	}
 	if !nodeIDRE.MatchString(node) {
@@ -166,25 +164,61 @@ func PutOwnedJob(ctx context.Context, store JobStore, jobs, node, id string, fie
 		return errors.New("job owner epoch unavailable")
 	}
 	epoch := grant.epoch
+	self := JobOwner{Node: node, Epoch: epoch}
+	if current != (JobOwner{}) && current != self {
+		refusal := &BackendError{Status: http.StatusConflict, Code: "job_owner_mismatch", OwnerNode: current.Node, OwnerEpoch: current.Epoch}
+		return revokeJobOwnerMismatch(jobs, id, epoch, current, fmt.Errorf("job_owner_mismatch: observed owner %s epoch %d: %w", current.Node, current.Epoch, refusal))
+	}
 	update := make(map[string]any, len(fields)+2)
 	for key, value := range fields {
 		update[key] = value
 	}
-	expected := JobOwner{Node: node, Epoch: epoch}
-	update["expected_owner"] = expected
+	// Empty is a condition, never a node-side claim. A seed that lands while
+	// this write is in flight must make the old empty-owner PUT fail.
+	update["expected_owner"] = current
 	err = store.Put(ctx, id, update)
-	if IsJobOwnerMismatch(err) {
-		var backend *BackendError
-		if errors.As(err, &backend) && backend.OwnerNode == "" && backend.OwnerEpoch == 0 {
-			return errors.New("job owner unavailable")
+	if !IsJobOwnerMismatch(err) {
+		return err
+	}
+
+	// A seed for this same grant is the one safe retry. Never retry a write
+	// using another owner's condition, even when the node ID comes back later.
+	var backend *BackendError
+	var observed JobOwner
+	if errors.As(err, &backend) {
+		observed = JobOwner{Node: backend.OwnerNode, Epoch: backend.OwnerEpoch}
+	}
+	refreshed, readErr := store.Get(ctx, id)
+	if readErr == nil {
+		owner, available, ownerErr := JobOwnerFromRecord(refreshed)
+		if ownerErr == nil && available {
+			observed = owner
+			if owner == self {
+				update["expected_owner"] = owner
+				err = store.Put(ctx, id, update)
+				if !IsJobOwnerMismatch(err) {
+					return err
+				}
+				observed = JobOwner{}
+				if errors.As(err, &backend) {
+					observed = JobOwner{Node: backend.OwnerNode, Epoch: backend.OwnerEpoch}
+				}
+			}
 		}
-		revocationEpoch := epoch + 1
-		if backend != nil && backend.OwnerEpoch > revocationEpoch {
-			revocationEpoch = backend.OwnerEpoch
-		}
-		if markerErr := jobowner.RevokeIfEpoch(jobs, id, epoch, revocationEpoch); markerErr != nil {
-			return errors.Join(errJobReassigned, fmt.Errorf("local revocation unavailable: %w", markerErr))
-		}
+	}
+	return revokeJobOwnerMismatch(jobs, id, epoch, observed, err)
+}
+
+func revokeJobOwnerMismatch(jobs, id string, epoch uint64, current JobOwner, err error) error {
+	if current.Node == "" || current.Epoch == 0 {
+		return fmt.Errorf("job owner unavailable after mismatch: %w", err)
+	}
+	revocationEpoch := epoch + 1
+	if current.Epoch > revocationEpoch {
+		revocationEpoch = current.Epoch
+	}
+	if markerErr := jobowner.RevokeIfEpoch(jobs, id, epoch, revocationEpoch); markerErr != nil {
+		return errors.Join(errJobReassigned, fmt.Errorf("local revocation unavailable: %w", markerErr))
 	}
 	return err
 }

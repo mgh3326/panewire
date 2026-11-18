@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
@@ -70,12 +71,16 @@ func TestJobOwnerFenceWatcherReleasesOnlyOldGrantQuota_t5067(t *testing.T) {
 			ledgerRunner(t, a)
 			seedJob(t, a, "j", "implementer")
 			seedLedger(t, a, "j")
+			if _, err := a.ledger().RecordQuotaPool(t.Context(), arbiter.QuotaRun{Job: "j", Profile: "fixture", Gate: arbiter.Gate{Pool: "second"}}); err != nil {
+				t.Fatal(err)
+			}
 			base := a.JobStore.(*fakeJobStore)
 			if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 				t.Fatal(err)
 			}
-			base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "machine-b", float64(2)
+			base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "test-host", float64(1)
 			store := &fenceJobStore{fakeJobStore: base}
+			moveFenceBeforePut(store)
 			if regrant {
 				a.JobStore = mismatchThenRegrant{fenceJobStore: store, jobs: a.Jobs}
 			} else {
@@ -85,8 +90,14 @@ func TestJobOwnerFenceWatcherReleasesOnlyOldGrantQuota_t5067(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, pools := ledgerState(t, a, "j")
-			if got := len(pools); got != 0 && !regrant || got != 1 && regrant {
+			if got := len(pools); got != 0 && !regrant || got != 2 && regrant {
 				t.Fatalf("regrant=%v: quota pools=%v", regrant, pools)
+			}
+			if regrant {
+				warning := a.Err.(*bytes.Buffer).String()
+				if !strings.Contains(warning, "job j pool example") || !strings.Contains(warning, "job j pool second") || strings.Count(warning, "captured epoch 1, current epoch 3") != 2 {
+					t.Fatalf("retained quota warning=%q", warning)
+				}
 			}
 		})
 	}
@@ -98,6 +109,7 @@ type fenceJobStore struct {
 	*fakeJobStore
 	puts       int
 	mismatches int
+	beforePut  func(string)
 }
 
 func (s *fenceJobStore) Claim(ctx context.Context, id, task, host string) error {
@@ -113,6 +125,11 @@ func (s *fenceJobStore) Claim(ctx context.Context, id, task, host string) error 
 }
 
 func (s *fenceJobStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	if s.beforePut != nil {
+		before := s.beforePut
+		s.beforePut = nil
+		before(id)
+	}
 	s.puts++
 	var update struct {
 		Expected *JobOwner `json:"expected_owner"`
@@ -154,6 +171,14 @@ func (s *fenceJobStore) Put(ctx context.Context, id string, fields map[string]an
 	return nil
 }
 
+func moveFenceBeforePut(store *fenceJobStore) {
+	store.beforePut = func(id string) {
+		store.mu.Lock()
+		store.records[id]["owner_node"], store.records[id]["owner_epoch"] = "machine-b", float64(2)
+		store.mu.Unlock()
+	}
+}
+
 // The hub has transferred the shared record to B but A has not yet received
 // the revocation. A's reaper must get a 409 rather than end B's record.
 func TestJobOwnerFenceReapBeforeRevocation_t5067(t *testing.T) {
@@ -169,9 +194,9 @@ func TestJobOwnerFenceReapBeforeRevocation_t5067(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base.records["j"]["owner_node"] = "machine-b"
-	base.records["j"]["owner_epoch"] = float64(2)
+	base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "test-host", float64(1)
 	store := &fenceJobStore{fakeJobStore: base}
+	moveFenceBeforePut(store)
 	a.JobStore = store
 
 	a.markEndedJobLost(t.Context(), job)
@@ -192,8 +217,9 @@ func staleFenceJob(t *testing.T) (*App, *fenceJobStore, Job) {
 		t.Fatal(err)
 	}
 	seedJob(t, a, "j", "implementer")
-	base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "machine-b", float64(2)
+	base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "test-host", float64(1)
 	store := &fenceJobStore{fakeJobStore: base}
+	moveFenceBeforePut(store)
 	a.JobStore = store
 	j, err := a.job("j")
 	if err != nil {
@@ -289,8 +315,10 @@ func TestJobOwnerFenceDelayedMismatchDoesNotRevokeNewGrant_t5067(t *testing.T) {
 	if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
 		t.Fatal(err)
 	}
-	base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "machine-b", float64(2)
-	store := mismatchThenRegrant{fenceJobStore: &fenceJobStore{fakeJobStore: base}, jobs: a.Jobs}
+	base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "test-host", float64(1)
+	fenced := &fenceJobStore{fakeJobStore: base}
+	moveFenceBeforePut(fenced)
+	store := mismatchThenRegrant{fenceJobStore: fenced, jobs: a.Jobs}
 	if err := PutOwnedJob(t.Context(), store, a.Jobs, "test-host", "j", map[string]any{"model": "old"}, nil); !IsJobOwnerMismatch(err) {
 		t.Fatalf("old write error=%v, want owner mismatch", err)
 	}
@@ -330,16 +358,31 @@ func TestJobOwnerFenceCompletionNeverRetriesMismatch_t5067(t *testing.T) {
 	}
 }
 
-type moveOwnerAfterUsage struct{ *fenceJobStore }
+type moveOwnerAfterUsage struct {
+	*fenceJobStore
+	usageWritten bool
+	reads        int
+}
 
-func (s moveOwnerAfterUsage) Put(ctx context.Context, id string, fields map[string]any) error {
+func (s *moveOwnerAfterUsage) Put(ctx context.Context, id string, fields map[string]any) error {
 	err := s.fenceJobStore.Put(ctx, id, fields)
 	if err == nil && fields["usage"] != nil {
-		s.mu.Lock()
-		s.records[id]["owner_node"], s.records[id]["owner_epoch"] = "machine-b", float64(2)
-		s.mu.Unlock()
+		s.usageWritten = true
 	}
 	return err
+}
+
+func (s *moveOwnerAfterUsage) Get(ctx context.Context, id string) (map[string]any, error) {
+	record, err := s.fenceJobStore.Get(ctx, id)
+	if err == nil && s.usageWritten {
+		s.reads++
+		if s.reads == 2 {
+			s.mu.Lock()
+			s.records[id]["owner_node"], s.records[id]["owner_epoch"] = "machine-b", float64(2)
+			s.mu.Unlock()
+		}
+	}
+	return record, err
 }
 
 func TestJobOwnerFenceModelWrite_t5067(t *testing.T) {
@@ -350,7 +393,7 @@ func TestJobOwnerFenceModelWrite_t5067(t *testing.T) {
 	base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "test-host", float64(1)
 	base.records["j"]["model"] = "successor-model"
 	store := &fenceJobStore{fakeJobStore: base}
-	a.JobStore = moveOwnerAfterUsage{store}
+	a.JobStore = &moveOwnerAfterUsage{fenceJobStore: store}
 	j, err := a.job("j")
 	if err != nil {
 		t.Fatal(err)
@@ -432,7 +475,7 @@ func TestJobOwnerFenceMismatchClosesLocalPane_t5067(t *testing.T) {
 	if closed := closedPanes(runner); len(closed) != 1 {
 		t.Fatalf("closed panes=%v, want the stale local pane closed", closed)
 	}
-	if store.puts != 1 || store.mismatches != 1 || base.record(t, "j")["state"] != "spawned" {
+	if store.puts != 0 || store.mismatches != 0 || base.record(t, "j")["state"] != "spawned" {
 		t.Fatalf("puts=%d mismatches=%d record=%v", store.puts, store.mismatches, base.record(t, "j"))
 	}
 }
@@ -476,8 +519,8 @@ func TestJobOwnerFenceOldOperationCannotBorrowNewGrant_t5067(t *testing.T) {
 	store := &ownerMoveDuringRead{fenceJobStore: &fenceJobStore{fakeJobStore: base}, jobs: a.Jobs}
 	a.JobStore = store
 	a.markEndedJobLost(t.Context(), job)
-	if record := base.record(t, "j"); record["state"] != "spawned" || store.mismatches != 1 {
-		t.Fatalf("old operation borrowed newer epoch: record=%v mismatches=%d", record, store.mismatches)
+	if record := base.record(t, "j"); record["state"] != "spawned" || store.puts != 0 {
+		t.Fatalf("old operation borrowed newer epoch: record=%v puts=%d", record, store.puts)
 	}
 	current, err := a.job("j")
 	if err != nil || current.Reassigned || current.OwnerEpoch != 3 {

@@ -22,6 +22,16 @@ type hubOwnerAssignment struct {
 	Ended bool   `json:"ended,omitempty"`
 }
 
+// seedLandedOwner follows a durable landing without making the spawn answer
+// depend on hk availability. Startup and heartbeat retry a missed seed.
+func (h *HubServer) seedLandedOwner(job, node string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
+		defer cancel()
+		h.seedOwnerAssignment(ctx, hubOwnerAssignment{Job: job, Node: node, Epoch: 1})
+	}()
+}
+
 // seedOwnerAssignment only adopts a live legacy record from a binding the hub
 // persisted itself. A node heartbeat cannot establish that authority.
 func (h *HubServer) seedOwnerAssignment(ctx context.Context, assignment hubOwnerAssignment) {
@@ -53,21 +63,7 @@ func (h *HubServer) seedOwnerAssignment(ctx context.Context, assignment hubOwner
 		return
 	}
 	to := fleet.JobOwner{Node: assignment.Node, Epoch: assignment.Epoch}
-	var supportedWrite bool
-	if h.spawnNewApp != nil || h.handoffkeep == nil {
-		app, appErr := h.newSpawnApp(io.Discard, io.Discard)
-		if appErr == nil {
-			supportedWrite, appErr = app.TransferJobOwner(ctx, assignment.Job, fleet.JobOwner{}, to)
-		}
-		err = appErr
-	} else {
-		hk := h.handoffkeep.env
-		store, storeErr := fleet.NewJobStore(hk.URL, hk.Token, hk.CFID, hk.CFSecret)
-		if storeErr == nil {
-			supportedWrite, storeErr = fleet.TransferJobOwner(ctx, store, assignment.Job, fleet.JobOwner{}, to)
-		}
-		err = storeErr
-	}
+	supportedWrite, err := h.writeJobOwner(ctx, assignment.Job, fleet.JobOwner{}, to)
 	if err != nil {
 		h.logger.Warn("handoffkeep owner adoption failed", "job", assignment.Job, "error", err)
 	} else {

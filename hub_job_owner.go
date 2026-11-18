@@ -43,9 +43,20 @@ func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, e
 		return saveSuccessor()
 	}
 	if current == (fleet.JobOwner{}) && !held {
-		// A heartbeat alone is not a durable assignment. Such a legacy job
-		// remains unfenced until it ends.
-		return nil
+		return fmt.Errorf("job %s cannot be reassigned: durable assignment unavailable", id)
+	}
+	if current == (fleet.JobOwner{}) {
+		// Fence the current assignment before transferring it. If the hub
+		// stops after this seed, a retry sees old and repeats the transfer.
+		supported, err = h.writeJobOwner(ctx, id, fleet.JobOwner{}, old)
+		if err != nil {
+			return fmt.Errorf("job %s cannot be reassigned: %w", id, err)
+		}
+		if !supported {
+			h.noteJobFenceSupport(false)
+			return saveSuccessor()
+		}
+		current = old
 	}
 	intent := hubOwnerTransfer{Job: id, From: from, To: to, Epoch: epoch}
 	known, err := h.hasOwnerTransfer(intent)
@@ -63,21 +74,7 @@ func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, e
 			}
 		}
 	}
-	switch {
-	case h.spawnNewApp != nil || h.handoffkeep == nil:
-		var app *fleet.App
-		app, err = h.newSpawnApp(io.Discard, io.Discard)
-		if err == nil {
-			supported, err = app.TransferJobOwner(ctx, id, old, next)
-		}
-	case h.handoffkeep != nil:
-		var store fleet.JobStore
-		hk := h.handoffkeep.env
-		store, err = fleet.NewJobStore(hk.URL, hk.Token, hk.CFID, hk.CFSecret)
-		if err == nil {
-			supported, err = fleet.TransferJobOwner(ctx, store, id, old, next)
-		}
-	}
+	supported, err = h.writeJobOwner(ctx, id, old, next)
 	if err != nil {
 		var backend *fleet.BackendError
 		if known && fleet.IsJobOwnerMismatch(err) && errors.As(err, &backend) && backend.OwnerNode == next.Node && backend.OwnerEpoch == next.Epoch {
@@ -91,6 +88,27 @@ func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, e
 	}
 	h.noteJobFenceSupport(supported)
 	return saveSuccessor()
+}
+
+func (h *HubServer) writeJobOwner(ctx context.Context, id string, from, to fleet.JobOwner) (bool, error) {
+	var supported bool
+	var err error
+	switch {
+	case h.spawnNewApp != nil || h.handoffkeep == nil:
+		var app *fleet.App
+		app, err = h.newSpawnApp(io.Discard, io.Discard)
+		if err == nil {
+			supported, err = app.TransferJobOwner(ctx, id, from, to)
+		}
+	case h.handoffkeep != nil:
+		var store fleet.JobStore
+		hk := h.handoffkeep.env
+		store, err = fleet.NewJobStore(hk.URL, hk.Token, hk.CFID, hk.CFSecret)
+		if err == nil {
+			supported, err = fleet.TransferJobOwner(ctx, store, id, from, to)
+		}
+	}
+	return supported, err
 }
 
 func (h *HubServer) noteJobFenceSupport(supported bool) {

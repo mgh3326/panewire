@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -130,8 +131,8 @@ func TestJobOwnerFenceTransferRejectsOldNode_t5067(t *testing.T) {
 	if hk.record["state"] != "spawned" || hk.record["owner_node"] != "machine-b" || hk.record["owner_epoch"] != float64(2) {
 		t.Fatalf("successor record was changed: %v", hk.record)
 	}
-	if len(hk.updates) != 2 {
-		t.Fatalf("updates=%v, want one transfer and one rejected write", hk.updates)
+	if len(hk.updates) != 1 {
+		t.Fatalf("updates=%v, want the transfer and no stale write", hk.updates)
 	}
 }
 
@@ -144,6 +145,294 @@ func TestJobOwnerFenceTransfersUnfencedOrphan_t5067(t *testing.T) {
 	}
 	if hk.record["owner_node"] != "machine-b" || hk.record["owner_epoch"] != float64(2) {
 		t.Fatalf("owner after transfer=%v", hk.record)
+	}
+}
+
+// seedWindowStore pauses the first owner update and the old node's write so
+// the test observes whether that write was fenced before the transfer.
+type seedWindowStore struct {
+	*ownerFenceHK
+	firstOwner sync.Once
+	ownerReady chan struct{}
+	oldReady   chan struct{}
+	ownerGo    chan struct{}
+	oldGo      chan struct{}
+}
+
+func (s *seedWindowStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	if owner, ok := fields["owner"].(fleet.JobOwner); ok {
+		first := false
+		s.firstOwner.Do(func() { first = true })
+		if first {
+			// In the correct path A's seed is visible before A reads. The
+			// no-seed mutant pauses B's update while the record is still empty.
+			if owner.Node == "machine-a" {
+				if err := s.ownerFenceHK.Put(ctx, id, fields); err != nil {
+					return err
+				}
+			}
+			close(s.ownerReady)
+			select {
+			case <-s.ownerGo:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if owner.Node == "machine-a" {
+				return nil
+			}
+		}
+	}
+	if fields["state"] == "lost" {
+		close(s.oldReady)
+		select {
+		case <-s.oldGo:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.ownerFenceHK.Put(ctx, id, fields)
+}
+
+func TestJobOwnerFenceSeedsBeforeTransfer_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "", "owner_epoch": float64(0)}}
+	hub, _ := ownerFenceHub(t, hk)
+	store := &seedWindowStore{ownerFenceHK: hk, ownerReady: make(chan struct{}), oldReady: make(chan struct{}), ownerGo: make(chan struct{}), oldGo: make(chan struct{})}
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: store, Out: out, Err: errout}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var releaseOwner, releaseOld sync.Once
+	t.Cleanup(func() { releaseOwner.Do(func() { close(store.ownerGo) }); releaseOld.Do(func() { close(store.oldGo) }) })
+	transfer := make(chan error, 1)
+	go func() { _, err := hub.reassignJob("fenced-job", "machine-b"); transfer <- err }()
+	eventually(t, 3*time.Second, "first owner update", func() bool {
+		select {
+		case <-store.ownerReady:
+			return true
+		default:
+			return false
+		}
+	})
+	jobs := filepath.Join(t.TempDir(), "jobs")
+	oldWrite := make(chan error, 1)
+	go func() {
+		oldWrite <- fleet.PutOwnedJob(ctx, store, jobs, "machine-a", "fenced-job", map[string]any{"state": "lost"}, nil)
+	}()
+	eventually(t, 3*time.Second, "old write prepared", func() bool {
+		select {
+		case <-store.oldReady:
+			return true
+		default:
+			return false
+		}
+	})
+	releaseOwner.Do(func() { close(store.ownerGo) })
+	var transferErr error
+	var transferred bool
+	eventually(t, 3*time.Second, "owner transfer", func() bool {
+		select {
+		case transferErr = <-transfer:
+			transferred = true
+		default:
+		}
+		return transferred
+	})
+	if transferErr != nil {
+		t.Fatalf("reassignment: %v", transferErr)
+	}
+	releaseOld.Do(func() { close(store.oldGo) })
+	var oldErr error
+	var wrote bool
+	eventually(t, 3*time.Second, "old write refusal", func() bool {
+		select {
+		case oldErr = <-oldWrite:
+			wrote = true
+		default:
+		}
+		return wrote
+	})
+	if !fleet.IsJobOwnerMismatch(oldErr) {
+		t.Fatalf("old write after transfer error=%v, record=%v", oldErr, hk.record)
+	}
+	if hk.record["state"] != "spawned" || hk.record["owner_node"] != "machine-b" || len(hk.updates) != 3 {
+		t.Fatalf("seed, transfer, and refusal: record=%v updates=%v", hk.record, hk.updates)
+	}
+	seed, moved := hk.updates[0], hk.updates[1]
+	if seed["owner"].(map[string]any)["node"] != "machine-a" || seed["expected_owner"].(map[string]any)["epoch"] != float64(0) || moved["expected_owner"].(map[string]any)["node"] != "machine-a" || moved["owner"].(map[string]any)["node"] != "machine-b" {
+		t.Fatalf("owner updates out of order: %v", hk.updates)
+	}
+}
+
+type competingSeedStore struct{ *ownerFenceHK }
+
+func (s competingSeedStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	if owner, ok := fields["owner"].(fleet.JobOwner); ok && owner.Node == "machine-a" {
+		s.mu.Lock()
+		s.record["owner_node"], s.record["owner_epoch"] = "machine-c", float64(2)
+		s.mu.Unlock()
+	}
+	return s.ownerFenceHK.Put(ctx, id, fields)
+}
+
+func TestJobOwnerFenceRefusesCompetingSeed_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "", "owner_epoch": float64(0)}}
+	hub, agent := ownerFenceHub(t, hk)
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: competingSeedStore{hk}, Out: out, Err: errout}, nil
+	}
+	if _, err := hub.reassignJob("fenced-job", "machine-b"); err == nil || !strings.Contains(err.Error(), "machine-c epoch 2") {
+		t.Fatalf("competing seed error=%v", err)
+	}
+	if len(agent.assignments) != 0 || hub.jobs["fenced-job"].Node != "machine-a" || hk.record["owner_node"] != "machine-c" {
+		t.Fatalf("competing seed exposed successor: job=%+v record=%v", hub.jobs["fenced-job"], hk.record)
+	}
+}
+
+func TestJobOwnerFenceLandingSeedsAssignment_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "", "owner_epoch": float64(0)}}
+	hub, _ := ownerFenceHub(t, hk)
+	hub.seedLandedOwner("fenced-job", "machine-a")
+	var record map[string]any
+	eventually(t, 3*time.Second, "landing owner seed", func() bool {
+		record, _ = hk.Get(t.Context(), "fenced-job")
+		return record["owner_node"] == "machine-a" && record["owner_epoch"] == float64(1)
+	})
+}
+
+type preSeedLegacyStore struct {
+	*ownerFenceHK
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *preSeedLegacyStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	if fields["state"] == "lost" {
+		close(s.started)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.ownerFenceHK.Put(ctx, id, fields)
+}
+
+func TestJobOwnerFencePreSeedWriteIsRefused_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "", "owner_epoch": float64(0)}}
+	hub, _ := ownerFenceHub(t, hk)
+	store := &preSeedLegacyStore{ownerFenceHK: hk, started: make(chan struct{}), release: make(chan struct{})}
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(store.release) }) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jobs := filepath.Join(t.TempDir(), "jobs")
+	done := make(chan error, 1)
+	go func() {
+		done <- fleet.PutOwnedJob(ctx, store, jobs, "machine-a", "fenced-job", map[string]any{"state": "lost"}, nil)
+	}()
+	eventually(t, 3*time.Second, "legacy write waiting", func() bool {
+		select {
+		case <-store.started:
+			return true
+		default:
+			return false
+		}
+	})
+	if _, err := hub.reassignJob("fenced-job", "machine-b"); err != nil {
+		t.Fatal(err)
+	}
+	once.Do(func() { close(store.release) })
+	var err error
+	var finished bool
+	eventually(t, 3*time.Second, "legacy write refusal", func() bool {
+		select {
+		case err = <-done:
+			finished = true
+		default:
+		}
+		return finished
+	})
+	if !fleet.IsJobOwnerMismatch(err) || hk.record["owner_node"] != "machine-b" || hk.record["state"] != "spawned" {
+		t.Fatalf("pre-seed write error=%v record=%v updates=%v", err, hk.record, hk.updates)
+	}
+}
+
+type seedDuringWrite struct {
+	*ownerFenceHK
+	owner fleet.JobOwner
+	done  bool
+}
+
+func (s *seedDuringWrite) Put(ctx context.Context, id string, fields map[string]any) error {
+	if !s.done {
+		s.done = true
+		s.mu.Lock()
+		s.record["owner_node"], s.record["owner_epoch"] = s.owner.Node, float64(s.owner.Epoch)
+		s.mu.Unlock()
+	}
+	return s.ownerFenceHK.Put(ctx, id, fields)
+}
+
+func TestJobOwnerFenceRetriesSameNodeSeedOnce_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "", "owner_epoch": float64(0)}}
+	store := &seedDuringWrite{ownerFenceHK: hk, owner: fleet.JobOwner{Node: "machine-a", Epoch: 1}}
+	jobs := filepath.Join(t.TempDir(), "jobs")
+	if err := fleet.PutOwnedJob(t.Context(), store, jobs, "machine-a", "fenced-job", map[string]any{"model": "updated"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if hk.record["model"] != "updated" || len(hk.updates) != 2 {
+		t.Fatalf("same-node seed retry: record=%v updates=%v", hk.record, hk.updates)
+	}
+	first, retry := hk.updates[0], hk.updates[1]
+	if first["expected_owner"].(map[string]any)["node"] != "" || first["expected_owner"].(map[string]any)["epoch"] != float64(0) || retry["expected_owner"].(map[string]any)["node"] != "machine-a" || retry["expected_owner"].(map[string]any)["epoch"] != float64(1) || first["owner"] != nil || retry["owner"] != nil {
+		t.Fatalf("write conditions or owner claim: %v", hk.updates)
+	}
+	markers, err := filepath.Glob(filepath.Join(jobs, "fenced-job", "events", "*-job.revoked.json"))
+	if err != nil || len(markers) != 0 {
+		t.Fatalf("same-node seed revoked the grant: markers=%v err=%v", markers, err)
+	}
+}
+
+type repeatedSelfMismatch struct {
+	*ownerFenceHK
+	puts int
+}
+
+func (s *repeatedSelfMismatch) Put(context.Context, string, map[string]any) error {
+	s.puts++
+	return &fleet.BackendError{Status: http.StatusConflict, Code: "job_owner_mismatch", OwnerNode: "machine-a", OwnerEpoch: 1}
+}
+
+func TestJobOwnerFenceSameNodeMismatchRetriesOnlyOnce_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "machine-a", "owner_epoch": float64(1)}}
+	store := &repeatedSelfMismatch{ownerFenceHK: hk}
+	jobs := filepath.Join(t.TempDir(), "jobs")
+	err := fleet.PutOwnedJob(t.Context(), store, jobs, "machine-a", "fenced-job", map[string]any{"state": "lost"}, nil)
+	if !fleet.IsJobOwnerMismatch(err) || store.puts != 2 {
+		t.Fatalf("same-node mismatch error=%v puts=%d", err, store.puts)
+	}
+	markers, err := filepath.Glob(filepath.Join(jobs, "fenced-job", "events", "*-job.revoked.json"))
+	if err != nil || len(markers) != 1 {
+		t.Fatalf("exhausted retry revocation markers=%v err=%v", markers, err)
+	}
+}
+
+func TestJobOwnerFenceDoesNotRetryAnotherOwner_t5067(t *testing.T) {
+	for _, owner := range []fleet.JobOwner{{Node: "machine-b", Epoch: 2}, {Node: "machine-a", Epoch: 3}} {
+		t.Run(fmt.Sprintf("%s-%d", owner.Node, owner.Epoch), func(t *testing.T) {
+			hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "", "owner_epoch": float64(0)}}
+			store := &seedDuringWrite{ownerFenceHK: hk, owner: owner}
+			jobs := filepath.Join(t.TempDir(), "jobs")
+			err := fleet.PutOwnedJob(t.Context(), store, jobs, "machine-a", "fenced-job", map[string]any{"state": "lost"}, nil)
+			if !fleet.IsJobOwnerMismatch(err) || len(hk.updates) != 1 || hk.record["state"] != "spawned" || hk.record["owner_node"] != owner.Node {
+				t.Fatalf("another-owner write error=%v record=%v updates=%v", err, hk.record, hk.updates)
+			}
+			markers, err := filepath.Glob(filepath.Join(jobs, "fenced-job", "events", "*-job.revoked.json"))
+			if err != nil || len(markers) != 1 {
+				t.Fatalf("another-owner revocation markers=%v err=%v", markers, err)
+			}
+		})
 	}
 }
 
@@ -161,8 +450,15 @@ func TestJobOwnerFenceSeedsCurrentEpochOrphan_t5067(t *testing.T) {
 	if _, err := hub.reassignJob("fenced-job", "machine-b"); err != nil {
 		t.Fatal(err)
 	}
-	if hk.record["owner_node"] != "machine-b" || hk.record["owner_epoch"] != float64(3) {
-		t.Fatalf("epoch-2 orphan owner=%v", hk.record)
+	if hk.record["owner_node"] != "machine-b" || hk.record["owner_epoch"] != float64(3) || len(hk.updates) != 2 {
+		t.Fatalf("epoch-2 orphan owner=%v updates=%v", hk.record, hk.updates)
+	}
+	seed, moved := hk.updates[0], hk.updates[1]
+	if seed["expected_owner"].(map[string]any)["epoch"] != float64(0) ||
+		seed["owner"].(map[string]any)["node"] != "machine-a" || seed["owner"].(map[string]any)["epoch"] != float64(2) ||
+		moved["expected_owner"].(map[string]any)["node"] != "machine-a" || moved["expected_owner"].(map[string]any)["epoch"] != float64(2) ||
+		moved["owner"].(map[string]any)["node"] != "machine-b" || moved["owner"].(map[string]any)["epoch"] != float64(3) {
+		t.Fatalf("epoch-2 seed and transfer=%v", hk.updates)
 	}
 }
 
@@ -215,8 +511,8 @@ func TestJobOwnerFenceUnheldLegacyStaysUnfenced_t5067(t *testing.T) {
 		t.Fatal("legacy job was not admitted")
 	}
 	hub.jobs["fenced-job"].Orphaned = true
-	if _, err := hub.reassignJob("fenced-job", "machine-b"); err != nil {
-		t.Fatal(err)
+	if _, err := hub.reassignJob("fenced-job", "machine-b"); err == nil || !strings.Contains(err.Error(), "durable assignment unavailable") {
+		t.Fatalf("unheld legacy reassignment error=%v", err)
 	}
 	if hk.record["owner_node"] != "" || len(hk.updates) != 0 {
 		t.Fatalf("unheld legacy reassignment was seeded: record=%v updates=%v", hk.record, hk.updates)
@@ -845,7 +1141,7 @@ func TestJobOwnerFenceNodeMarkLostDoesNotRetry_t5067(t *testing.T) {
 	_, _ = nodeRun(t, client, nodeCommandJobMarkLost, args)
 	hk.mu.Lock()
 	defer hk.mu.Unlock()
-	if len(hk.updates) != 1 || hk.record["state"] != "spawned" {
+	if len(hk.updates) != 0 || hk.record["state"] != "spawned" {
 		t.Fatalf("stale node retried or changed the successor: updates=%v record=%v", hk.updates, hk.record)
 	}
 }
@@ -861,7 +1157,7 @@ func TestJobOwnerFenceReviewerResultDoesNotEndSuccessor_t5067(t *testing.T) {
 	if code != "" || result["outcome"] != nodeJobMarkLostNewerClaim {
 		t.Fatalf("stale posted-result end: result=%v code=%q", result, code)
 	}
-	if len(hk.updates) != 1 || hk.record["state"] != "spawned" || len(jobLostEvents(t, inbox)) != 0 {
+	if len(hk.updates) != 0 || hk.record["state"] != "spawned" || len(jobLostEvents(t, inbox)) != 0 {
 		t.Fatalf("successor changed: updates=%v record=%v", hk.updates, hk.record)
 	}
 }
@@ -985,7 +1281,7 @@ func TestJobOwnerFenceNodeCommandKeepsOriginalGrant_t5067(t *testing.T) {
 		return fake.run(ctx, args...)
 	}
 	result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a"})
-	if code != "" || result["outcome"] != nodeJobMarkLostNewerClaim || len(hk.updates) != 1 || hk.record["state"] != "spawned" {
+	if code != "" || result["outcome"] != nodeJobMarkLostNewerClaim || len(hk.updates) != 0 || hk.record["state"] != "spawned" {
 		t.Fatalf("stale command: result=%v code=%q updates=%v record=%v", result, code, hk.updates, hk.record)
 	}
 	files, err := filepath.Glob(filepath.Join(inbox, "jobs", "job-a", "events", "*-job.revoked.json"))

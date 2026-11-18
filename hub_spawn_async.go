@@ -1638,6 +1638,9 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 		// replayed completion must not count twice.
 		h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
 	}
+	if result.RC == 0 {
+		h.seedLandedOwner(t.task.Job, node.Machine)
+	}
 	return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error, CheckoutMode: result.CheckoutMode}, nil
 }
 
