@@ -15,21 +15,46 @@ import (
 // the brief was delivered to that pane (hk 5174).
 const eventBriefSent = "job.brief_sent"
 
-// recordBriefSent writes the job.brief_sent receipt. It carries the fields of
-// the spawn receipt that a `done` repair needs (localSpawnRepair), the pane the
-// brief went to, and the digest of the brief file the pane was told to read.
-func (a *App) recordBriefSent(ctx context.Context, s Spawn, seat Seat, launch Launch, pane, pool, owner, payload string) error {
+// recordBriefSent writes the job.brief_sent receipt. It carries the whole
+// spawn receipt (spawnReceipt) the pane would have been recorded with, and the
+// digest of the brief file the pane was told to read.
+func (a *App) recordBriefSent(ctx context.Context, s Spawn, seat Seat, launch Launch, pane, tab, pool, owner, payload string) error {
 	sum := sha256.Sum256([]byte(payload))
-	return a.event(ctx, s.Job, eventBriefSent, map[string]any{
-		"pane_id": pane, "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort),
-		"model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role,
-		"owner_lane": owner, "parent_lane": s.Parent, "pool": pool,
-		"brief_path": filepath.Join(a.Jobs, s.Job, "brief-delivered.md"), "brief_sha256": hex.EncodeToString(sum[:]),
-	})
+	receipt := a.spawnReceipt(ctx, s, seat, launch, pane, tab, pool, owner, a.machine())
+	receipt["brief_path"] = filepath.Join(a.Jobs, s.Job, "brief-delivered.md")
+	receipt["brief_sha256"] = hex.EncodeToString(sum[:])
+	return a.event(ctx, s.Job, eventBriefSent, receipt)
 }
 
-// briefSentReceipt is the spawn receipt a `done` may repair a claimed record
-// from when the job has no job.spawned event: the newest job.brief_sent of the
+// adoptBriefSent gives a job with no job.spawned the spawn receipt its
+// validated job.brief_sent stands for, as a job.spawned event, and folds the job
+// again. The late pane then completes as a spawned one would: its pane, label
+// and session are on the job, so the completion names them, usage is read and
+// the pane sweep can reap it. A job that has a spawn receipt, or no valid
+// brief receipt, is returned unchanged.
+func (a *App) adoptBriefSent(ctx context.Context, j Job) (Job, error) {
+	if j.Receipt != nil || j.Pane != "" {
+		return j, nil
+	}
+	sent := a.briefSentReceipt(j.Events, j.ID)
+	if sent == nil {
+		return j, nil
+	}
+	receipt := make(map[string]any, len(sent))
+	for k, v := range sent {
+		if k != "brief_path" && k != "brief_sha256" {
+			receipt[k] = v
+		}
+	}
+	receipt["adopted_from"] = eventBriefSent
+	if e := a.event(ctx, j.ID, "job.spawned", receipt); e != nil {
+		return j, e
+	}
+	return a.job(j.ID)
+}
+
+// briefSentReceipt is the spawn receipt `done` may adopt when the job has no
+// job.spawned event: the newest job.brief_sent of the
 // job's current attempt, accepted only when
 //   - no claim, reclaim, loss, revocation or reap came after it, so it belongs
 //     to this attempt's pane and not to an earlier one that was closed, and
@@ -39,8 +64,7 @@ func (a *App) recordBriefSent(ctx context.Context, s Spawn, seat Seat, launch La
 //
 // A pane that never received the brief has no such receipt: the node writes it
 // only after the send, into its own ledger, and no panewire command appends an
-// event of this kind. A job.spawned event, when present, is the better receipt
-// and spawnReceiptForRepair returns it first.
+// event of this kind.
 func (a *App) briefSentReceipt(events []Event, id string) map[string]any {
 	var receipt map[string]any
 	for _, event := range events {

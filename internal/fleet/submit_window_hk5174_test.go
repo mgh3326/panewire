@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// defaultFloor is the submit window of a host with no brief_submit_* settings.
+const defaultFloor = defaultBriefSubmitRetryMS*time.Millisecond + briefSubmitWaitSlice
+
 var windowCutRE = regexp.MustCompile(`window cut to (\d+)s`)
 
 // hk 5174: the steps before the brief (fetch, checkout, launch) spent the node
@@ -25,7 +28,7 @@ func TestDeliverRefusesBeforeSendingWhenBudgetCannotHoldSubmitWindow(t *testing.
 	}{
 		{"nothing left", 100 * time.Millisecond},
 		{"only the reserve left", briefSubmitReserve},
-		{"reserve plus a short window", briefSubmitReserve + briefSubmitMinWindow - 5*time.Second},
+		{"reserve plus a short window", briefSubmitReserve + defaultFloor - 5*time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, d := claudeDeliveryApp(t, func(*claudeDelivery) string { return claudeScreenEmpty() }, idleStatus)
@@ -50,15 +53,15 @@ func TestDeliverKeepsMinimumSubmitWindowInsideBudget(t *testing.T) {
 		}
 		return claudeScreenBriefInComposer()
 	}, idleStatus)
-	ctx, cancel := context.WithTimeout(t.Context(), briefSubmitReserve+briefSubmitMinWindow+3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), briefSubmitReserve+defaultFloor+3*time.Second)
 	defer cancel()
 	err := a.deliver(ctx, "claude", "w:p1", claudeTestBrief)
 	m := windowCutRE.FindStringSubmatch(errText(err))
 	if code(err) != exitSubmitUnconfirmed || m == nil {
 		t.Fatalf("err=%v", err)
 	}
-	if secs, _ := strconv.Atoi(m[1]); time.Duration(secs)*time.Second < briefSubmitMinWindow {
-		t.Fatalf("window cut to %ds, below the %v minimum", secs, briefSubmitMinWindow)
+	if secs, _ := strconv.Atoi(m[1]); time.Duration(secs)*time.Second < defaultFloor {
+		t.Fatalf("window cut to %ds, below the %v minimum", secs, defaultFloor)
 	}
 	if d.pastes != 1 {
 		t.Fatalf("pastes=%d", d.pastes)
@@ -76,7 +79,7 @@ func errText(err error) string {
 // for them refuses before a pane exists.
 func TestReserveSubmitWindowBoundsLaunch(t *testing.T) {
 	a := testApp(t)
-	tight, cancelTight := context.WithTimeout(t.Context(), briefSubmitReserve+briefSubmitMinWindow-time.Second)
+	tight, cancelTight := context.WithTimeout(t.Context(), briefSubmitReserve+defaultFloor-time.Second)
 	defer cancelTight()
 	if _, _, err := a.reserveSubmitWindow(tight); code(err) != exitConfig || !strings.Contains(err.Error(), "nothing launched") {
 		t.Fatalf("tight budget: %v", err)
@@ -92,8 +95,8 @@ func TestReserveSubmitWindowBoundsLaunch(t *testing.T) {
 	defer endLaunch()
 	until, _ := ctx.Deadline()
 	launchBy, ok := launch.Deadline()
-	if !ok || until.Sub(launchBy) != briefSubmitReserve+briefSubmitMinWindow {
-		t.Fatalf("launch ends %v before the node budget, want reserve+window=%v", until.Sub(launchBy), briefSubmitReserve+briefSubmitMinWindow)
+	if !ok || until.Sub(launchBy) != briefSubmitReserve+defaultFloor {
+		t.Fatalf("launch ends %v before the node budget, want reserve+window=%v", until.Sub(launchBy), briefSubmitReserve+defaultFloor)
 	}
 
 	// A launch cut by its own deadline names the cause; a node-budget expiry or
@@ -112,7 +115,7 @@ func TestReserveSubmitWindowBoundsLaunch(t *testing.T) {
 // before any pane exists, and the lease is released.
 func TestSpawnRefusesBeforeLaunchWhenBudgetCannotHoldSubmitWindow(t *testing.T) {
 	a, s, f, _ := cmdFixture(t)
-	ctx, cancel := context.WithTimeout(t.Context(), briefSubmitReserve+briefSubmitMinWindow-time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), briefSubmitReserve+defaultFloor-time.Second)
 	defer cancel()
 	e := a.Spawn(ctx, s)
 	if code(e) != exitConfig || !strings.Contains(errText(e), "SUBMIT_WINDOW_UNAVAILABLE") {
@@ -164,4 +167,56 @@ func TestSpawnRecordsBriefSentBeforeConfirming(t *testing.T) {
 	if receipt := a.briefSentReceipt(events, s.Job); receipt == nil {
 		t.Fatal("the node's own receipt is not accepted as spawn evidence")
 	}
+}
+
+// The floor follows the host's own retry period: with a 25 s retry, a 20 s
+// window ends before the first Return retry that the window exists to keep.
+func TestSubmitFloorFollowsConfiguredRetry(t *testing.T) {
+	a, d := claudeDeliveryApp(t, func(*claudeDelivery) string { return claudeScreenEmpty() }, idleStatus)
+	a.Config.Local = map[string]any{"brief_submit_timeout_ms": int64(60000), "brief_submit_retry_ms": int64(25000)}
+	if got, want := a.submitFloor(), 25*time.Second+briefSubmitWaitSlice; got != want {
+		t.Fatalf("floor=%v want %v", got, want)
+	}
+	// A default-sized window (20 s) would pass this budget; the configured one must not.
+	ctx, cancel := context.WithTimeout(t.Context(), briefSubmitReserve+defaultFloor+2*time.Second)
+	defer cancel()
+	if err := a.deliver(ctx, "claude", "w:p1", claudeTestBrief); code(err) != exitConfig || d.pastes != 0 {
+		t.Fatalf("err=%v pastes=%d", err, d.pastes)
+	}
+	a.Config.Local = map[string]any{"brief_submit_timeout_ms": int64(30000), "brief_submit_retry_ms": int64(29000)}
+	if got := a.submitFloor(); got != 30*time.Second {
+		t.Fatalf("floor=%v, want the configured timeout to bound it", got)
+	}
+}
+
+// The tab create is not run under the launch deadline: a create killed there
+// may already have made the pane, which would then never be parsed or closed.
+func TestSpawnTabCreateRunsUnderNodeBudget(t *testing.T) {
+	a, s, f, _ := cmdFixture(t)
+	spy := &deadlineSpy{Runner: f}
+	a.Runner = spy
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
+	defer cancel()
+	want, _ := ctx.Deadline()
+	_ = a.Spawn(ctx, s)
+	if !spy.seen {
+		t.Fatal("no tab create observed")
+	}
+	if !spy.deadline.Equal(want) {
+		t.Fatalf("tab create deadline is %v before the node budget's", want.Sub(spy.deadline))
+	}
+}
+
+type deadlineSpy struct {
+	Runner
+	seen     bool
+	deadline time.Time
+}
+
+func (d *deadlineSpy) Run(ctx context.Context, c Command) Result {
+	if c.Name == "herdr" && len(c.Args) > 1 && c.Args[0] == "tab" && c.Args[1] == "create" {
+		d.seen = true
+		d.deadline, _ = ctx.Deadline()
+	}
+	return d.Runner.Run(ctx, c)
 }

@@ -5,20 +5,17 @@ import (
 	"time"
 )
 
-// briefSubmitMinWindow is the least time a node leaves itself to confirm a
-// brief after sending it: one submit-key retry period plus one wait slice, so a
-// pane that starts its turn late still gets the Return retry and a
-// confirmation read. The node's hub_wait budget (docs/config.md) is split into
-// the steps before the brief (fetch, checkout, launch), this window and the
-// briefSubmitReserve for capture and cleanup. The steps before the brief may
-// not take the window (hk 5174).
-const briefSubmitMinWindow = defaultBriefSubmitRetryMS*time.Millisecond + briefSubmitWaitSlice
-
-// submitFloor is the window the node keeps for confirming a brief: the
-// minimum, or the configured submit window when a host sets it lower.
+// submitFloor is the least time the node keeps for confirming a brief after
+// sending it: one submit-key retry period (the host's brief_submit_retry_ms)
+// plus one wait slice, so a pane that starts its turn late still gets the
+// Return retry and a confirmation read, bounded by the host's own
+// brief_submit_timeout_ms. The node's hub_wait budget (docs/config.md) is split
+// into the steps before the brief (fetch, checkout, launch), this window and
+// the briefSubmitReserve for capture and cleanup. The steps before the brief
+// may not take the window (hk 5174).
 func (a *App) submitFloor() time.Duration {
-	timeout, _ := a.briefSubmitWindow()
-	return min(briefSubmitMinWindow, timeout)
+	timeout, retry := a.briefSubmitWindow()
+	return min(retry+briefSubmitWaitSlice, timeout)
 }
 
 // submitBudgetLeft is the time the node budget still allows for the submit

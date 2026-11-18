@@ -117,3 +117,48 @@ func TestDoneRefusesBriefReceiptThatIsNotThisAttemptsOwn(t *testing.T) {
 		})
 	}
 }
+
+// The late pane completes as a spawned one: the job takes the spawn receipt, so
+// the completion names its pane and label and the pane sweep can find it.
+func TestDoneAdoptsBriefReceiptAsSpawnReceipt(t *testing.T) {
+	a, _, report, result := strictClaimedWithoutReceiptFixture(t)
+	payload := briefSentPayload(t, a, "the brief\n")
+	payload["cwd"], payload["herdr_session"], payload["expires_at"] = "/work/tree", "sess", "2026-11-18T08:00:00Z"
+	putEvent(t, a, "j", eventBriefSent, payload)
+	if err := strictDone(t, a, report, result); err != nil {
+		t.Fatal(err)
+	}
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Pane != "w:p1" || j.Label != "agent-a" || str(j.Receipt, "cwd") != "/work/tree" || str(j.Receipt, "herdr_session") != "sess" || str(j.Receipt, "expires_at") == "" {
+		t.Fatalf("job did not take the spawn receipt: pane=%q label=%q receipt=%v", j.Pane, j.Label, j.Receipt)
+	}
+	if str(j.Receipt, "brief_sha256") != "" || str(j.Receipt, "adopted_from") != eventBriefSent {
+		t.Fatalf("receipt=%v", j.Receipt)
+	}
+	completed := 0
+	for _, ev := range mustEvents(t, a, "j") {
+		if ev.Kind == "job.completed" {
+			completed++
+			if str(ev.Payload, "pane_id") != "w:p1" || str(ev.Payload, "label") != "agent-a" {
+				t.Fatalf("completion names pane=%q label=%q", str(ev.Payload, "pane_id"), str(ev.Payload, "label"))
+			}
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("job.completed events=%d", completed)
+	}
+}
+
+// Nothing is adopted without a receipt: no job.spawned appears.
+func TestDoneAdoptsNothingWithoutBriefReceipt(t *testing.T) {
+	a, _, report, result := strictClaimedWithoutReceiptFixture(t)
+	_ = strictDone(t, a, report, result)
+	for _, ev := range mustEvents(t, a, "j") {
+		if ev.Kind == "job.spawned" {
+			t.Fatal("job.spawned written without a delivered-brief receipt")
+		}
+	}
+}

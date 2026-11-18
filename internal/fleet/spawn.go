@@ -1377,7 +1377,11 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		for _, v := range env {
 			args = append(args, "--env", v)
 		}
-		return a.call(launchCtx, "herdr", args...)
+		// Under the node's context, not the launch's: a create the launch
+		// deadline killed may have committed, and its pane_id would never be
+		// parsed. A create that returns late is cleaned up with its pane, and
+		// start refuses on the expired launch context.
+		return a.call(ctx, "herdr", args...)
 	}
 	s.placement.started = true
 	r := createTab(s.Workspace)
@@ -1435,7 +1439,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	// The brief is in the pane. Record that before waiting on the submit
 	// window, so a pane that runs after a 76 can still complete (hk 5174).
-	if e = a.recordBriefSent(ctx, s, seat, launch, pane, pool, owner, payload); e != nil {
+	if e = a.recordBriefSent(ctx, s, seat, launch, pane, tab, pool, owner, payload); e != nil {
 		return e
 	}
 	if e = a.confirmBrief(ctx, seat.Kind, pane, pointer, initialScreen); e != nil {
@@ -1478,23 +1482,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
 		}
 	}
-	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
-	// The request's time limit, so the node's pane sweep can end a reviewer or
-	// consult by its real limit (hk 4747).
-	receipt["expires_at"] = a.spawnExpiresAt(s).UTC().Format(time.RFC3339)
-	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
-	// What the node put on disk for a checkout spec: "sparse" carries the
-	// paths the request left out, so the reviewer prompt may say they are
-	// absent on purpose (hk 5098). Absent for a spawn with no spec.
-	if s.checkoutMode != "" {
-		receipt["checkout_mode"] = s.checkoutMode
-	}
-	if s.AccountKey != "" {
-		receipt["account_key"] = s.AccountKey
-	}
-	if s.E6Arm != "" {
-		receipt["e6_arm"] = s.E6Arm
-	}
+	receipt := a.spawnReceipt(ctx, s, seat, launch, pane, tab, pool, owner, machine)
 	if laneOK {
 		receipt["hub_lane"] = lane
 		receipt["hub_lane_machine"] = machine
@@ -1772,6 +1760,30 @@ func noSymlinks(path string) error {
 // returns the one-line pointer that is typed into the pane instead. Typing the
 // whole brief lost everything past about 1 KB on a remote host, and the pane
 // still reported a landed brief; a file has no such limit.
+// spawnReceipt is the job.spawned receipt of a pane the node launched, without
+// the lane fields registration adds. job.brief_sent carries the same fields, so
+// a `done` that adopts it (adoptBriefSent) leaves the job as a spawn would.
+func (a *App) spawnReceipt(ctx context.Context, s Spawn, seat Seat, launch Launch, pane, tab, pool, owner, machine string) map[string]any {
+	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
+	// The request's time limit, so the node's pane sweep can end a reviewer or
+	// consult by its real limit (hk 4747).
+	receipt["expires_at"] = a.spawnExpiresAt(s).UTC().Format(time.RFC3339)
+	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
+	// What the node put on disk for a checkout spec: "sparse" carries the
+	// paths the request left out, so the reviewer prompt may say they are
+	// absent on purpose (hk 5098). Absent for a spawn with no spec.
+	if s.checkoutMode != "" {
+		receipt["checkout_mode"] = s.checkoutMode
+	}
+	if s.AccountKey != "" {
+		receipt["account_key"] = s.AccountKey
+	}
+	if s.E6Arm != "" {
+		receipt["e6_arm"] = s.E6Arm
+	}
+	return receipt
+}
+
 func (a *App) writeDeliveredBrief(job, payload string) (string, error) {
 	dir := filepath.Join(a.Jobs, job)
 	if e := os.MkdirAll(dir, 0700); e != nil {
