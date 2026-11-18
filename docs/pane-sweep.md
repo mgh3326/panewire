@@ -92,7 +92,8 @@ implementer's task-derived end counts, and an open PR or a live task does not
 hold it once that end is a day old.
 
 A job that never emitted `job.spawned` — a design session, a desk pane, a
-shell — has no recorded pane and is never a candidate.
+shell — has no recorded pane and is never a candidate. A job a successor
+replaced is a candidate whatever its state (see Replaced jobs).
 
 ## Ownership proof
 
@@ -153,6 +154,32 @@ pin writes take that lock only briefly, and a pass that finds a `done` holding i
 leaves both writes to the next pass. The ordered `pane.sweep` command does
 not republish; only the node's own local pass does.
 
+## Replaced jobs
+
+A job whose job dir holds a `job.replaced` event (its `payload.replaced_by`
+names the successor; spawn.go writes it when a successor takes the job's task)
+counts as ended, whatever its PR or pane state: the successor owns the task and
+the PR. This rule runs before the open-PR keep. Without it, a replaced parent
+sitting on a quota error screen, whose successor owns the PR, would be kept
+forever (hk 5308).
+
+- The pane closes on the first pass that finds its row matching the job and
+  not `working`; `blocked` counts. No grace and no owner-age wait. A working
+  pane is kept (`reason=pane-working`) and closes on the first pass after it
+  stops. A pane with no row closes through the ownership proof below.
+- A pane another job's label or session has taken is refused, as for any
+  ended job (`pane-mismatch`, or the proof's reason).
+- The close is the same close as any ended pane: the ownership proof, the job's
+  end lock (a hub close that owns the end is respected, `hub_close_owns_end`),
+  then `herdr pane close`. The sweep issues no close op itself.
+- The worktree is kept (`task worktree kept reason=replaced`). The hk task is
+  left alone: the last screen goes to `<job dir>/pane-screen.txt` only, and no
+  failure rep is recorded for the replaced job.
+- The owner lane gets one info line, `[panewire] closed <job> (replaced by
+  <successor>) on <host>`, under the event id `replaced-close-<job>`, so a
+  repeat is one event.
+- A `--keep` job keeps its own rule (hk 5295).
+
 ## Timing
 
 The local pass runs every `--task-pane-sweep-interval` (default `5m`). A
@@ -179,7 +206,9 @@ close never interleaves with another acting node command.
 Before `herdr pane close` runs, the pane's last screen is read and uploaded
 to handoffkeep as `screens/<job>/pane-screen.txt` (the explicit pane.capture
 document contract, capped at hk's document bound). A screen hk stores only as
-a cut tail keeps its whole copy in `<job dir>/pane-screen.txt`, mode 0600.
+a cut tail keeps its whole copy in `<job dir>/pane-screen.txt`, mode 0600. A
+replaced job's screen is never uploaded: it stays in `<job dir>/pane-screen.txt`
+(see Replaced jobs).
 
 Only a failed pane read, or a failed local write, keeps the pane as
 `reason=screen_save_failed`; a close that fails keeps it as
