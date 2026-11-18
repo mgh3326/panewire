@@ -836,6 +836,55 @@ func TestCloseOpFencesTheWatcherAndSettles_t4652(t *testing.T) {
 	}
 }
 
+// F3 / PRRT_kwDOUGxnCM6473EX & PRRT_kwDOUGxnCM648nmI (hk 5063): a non-lending
+// watcher reads as incompatible; bindCloseOp refuses with watcher_incompatible
+// before recording any intent.
+func TestCloseOpRefusesNonLendingWatcher_t5063(t *testing.T) {
+	inbox := t.TempDir()
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherIncompatible}
+	client.nodeHubClose = ledger
+
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1")); code != "watcher_incompatible" {
+		t.Fatalf("code=%q, want watcher_incompatible", code)
+	}
+	if len(ledger.intents) != 0 {
+		t.Fatalf("intents=%d, want 0 recorded", len(ledger.intents))
+	}
+}
+
+// F3 / A4 (hk 5063): when an unfenced intent closes (e.g. released or cancelled)
+// and the job is live with no watcher running, reconcileWatcherFence re-arms
+// the watcher even though the node held no fence.
+func TestReconcileWatcherFenceRearmsLiveJobAfterUnfencedIntentCloses_t5063(t *testing.T) {
+	inbox := t.TempDir()
+	seedCloseOpJob(t, inbox)
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+
+	// FenceState: not open (intent closed), live (attempt still live).
+	// In fakeHubClose, FenceState returns: (f.state == fleet.HubClosePending && len(f.intents) > 0), true, nil.
+	// With state != fleet.HubClosePending and len(intents) == 0, open is false, live is true.
+	ledger := &fakeHubClose{
+		watcher: fleet.HubCloseWatcherNone,
+		state:   fleet.HubCloseSettled,
+	}
+	client.nodeHubClose = ledger
+
+	var rearmed string
+	client.fenceRearm = func(job string) {
+		rearmed = job
+	}
+
+	safe := client.reconcileWatcherFence(context.Background(), closeOpJob)
+	if !safe {
+		t.Fatal("reconcileWatcherFence = false, want true")
+	}
+	if rearmed != closeOpJob {
+		t.Fatalf("rearmed = %q, want %q", rearmed, closeOpJob)
+	}
+}
+
 // A second request id while one is still registered for the attempt is
 // refused: one open close per attempt.
 func TestCloseOpRefusesAnOverlappingRequest_t4652(t *testing.T) {

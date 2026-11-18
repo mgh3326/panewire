@@ -142,12 +142,33 @@ func LockJobEnd(jobDir string) (func(), error) {
 	return func() { f.Close() }, nil
 }
 
+// TryLockJobEnd takes the job's end lock non-blockingly and returns its
+// release; ok is false when another process holds it.
+func TryLockJobEnd(jobDir string) (release func(), ok bool, err error) {
+	f, e := secureOpen(filepath.Join(jobDir, jobEndLock), true, nil)
+	if e != nil {
+		return nil, false, e
+	}
+	if !tryLock(f) {
+		f.Close()
+		return nil, false, nil
+	}
+	return func() { f.Close() }, true, nil
+}
+
 // LockJobEndContext takes the job's end lock, waiting at most until ctx is
 // done, so a daemon step never blocks unbounded behind a slow holder.
 func LockJobEndContext(ctx context.Context, jobDir string) (func(), error) {
 	f, e := secureOpen(filepath.Join(jobDir, jobEndLock), true, nil)
 	if e != nil {
 		return nil, e
+	}
+	if tryLock(f) {
+		return func() { f.Close() }, nil
+	}
+	if err := ctx.Err(); err != nil {
+		f.Close()
+		return nil, err
 	}
 	for !tryLock(f) {
 		select {
@@ -170,7 +191,8 @@ const (
 	// HubCloseWatcherAware: a watcher that defers to hub-close intents runs.
 	HubCloseWatcherAware
 	// HubCloseWatcherIncompatible: a watcher that does not read hub-close
-	// intents (an older binary that outlived a node upgrade) runs.
+	// intents (an older binary that outlived a node upgrade, or a watcher
+	// whose lock-lending socket failed) runs.
 	HubCloseWatcherIncompatible
 )
 
@@ -191,7 +213,8 @@ func ProbeHubCloseWatcher(jobDir string) (HubCloseWatcher, error) {
 	}
 	// A watcher takes the watch lock before the hub-close one, so a watcher
 	// caught in between reads as incompatible: the hub retries. So does a v1
-	// watcher, which holds the v1 lock.
+	// watcher, which holds the v1 lock, or a watcher whose lock-lending socket
+	// failed, which holds only the watch lock.
 	if running, e := held(jobWatchLock); e != nil || running {
 		return HubCloseWatcherIncompatible, e
 	}
@@ -585,6 +608,9 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 		}
 		if err != nil {
 			out = append(out, entry.Name())
+			continue
+		}
+		if hubPlacementOnly(evs) {
 			continue
 		}
 		// Reaped is folded in ledger sequence order, as settlement folds it.

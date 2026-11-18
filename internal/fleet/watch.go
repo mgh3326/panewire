@@ -204,21 +204,27 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		return nil
 	}
 	// The lending socket is up before the capability lock, so a watcher the
-	// node probes as aware can always lend its watch lock.
+	// node probes as aware can always lend its watch lock. If the socket
+	// cannot be served (e.g. its directory is not private), the watcher
+	// continues without lock-lending rather than abandoning the job, holding
+	// only the watch lock: ProbeHubCloseWatcher reads it as Incompatible.
 	stopLending, e := serveWatchLock(filepath.Join(a.Jobs, id), lock)
+	var lendingDisabled bool
 	if e != nil {
-		return e
-	}
-	defer stopLending()
-	// Held for the watcher's life: it tells the node this watcher defers to
-	// hub-close intents (watch_hub_close.go ProbeHubCloseWatcher).
-	hubCloseLock, e := secureOpen(filepath.Join(a.Jobs, id, hubCloseWatchLock), true, a.warn)
-	if e != nil {
-		return e
-	}
-	defer hubCloseLock.Close()
-	if e := syscall.Flock(int(hubCloseLock.Fd()), syscall.LOCK_EX); e != nil {
-		return e
+		a.warn("watch-lock lending disabled for job %s: %v", id, e)
+		lendingDisabled = true
+	} else {
+		defer stopLending()
+		// Held for the watcher's life: it tells the node this watcher defers to
+		// hub-close intents (watch_hub_close.go ProbeHubCloseWatcher).
+		hubCloseLock, e := secureOpen(filepath.Join(a.Jobs, id, hubCloseWatchLock), true, a.warn)
+		if e != nil {
+			return e
+		}
+		defer hubCloseLock.Close()
+		if e := syscall.Flock(int(hubCloseLock.Fd()), syscall.LOCK_EX); e != nil {
+			return e
+		}
 	}
 	timeout := time.Hour
 	if v := a.envOr("PANEWIRE_COMPLETION_TIMEOUT_S", "WRK_COMPLETION_TIMEOUT_S"); v != "" {
@@ -264,6 +270,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// The node's final job.lost closes the intent and ends this watch; a
 		// request that closed nothing hands the job back.
 		if _, ok := pendingHubCloseIntent(j); ok {
+			if lendingDisabled {
+				// Lending is disabled: the node cannot borrow our watch lock,
+				// and settlement needs to fence it. Exit so the node can take
+				// the fence without spinning on an intent that only the node's
+				// settlement can end.
+				return nil
+			}
 			if err := a.Sleep(ctx, 5*time.Second); err != nil {
 				return err
 			}

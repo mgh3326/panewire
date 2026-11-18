@@ -233,7 +233,11 @@ type HubClient struct {
 
 	// taskPaneSweepMu serializes the node's sweeps over one shared sweeper: the
 	// local pass and the hub's pane.sweep command (node_pane_sweep_ended.go).
-	// Lock order: taskPaneSweepMu, then nodeCommandMu.
+	// Lock order: taskPaneSweepMu -> nodeCommandMu -> job end lock. Nothing
+	// waits on an end lock while holding nodeCommandMu, except close commands,
+	// which are bounded by their command context. Sweeps take nodeCommandMu
+	// (s.Exclusive) first, then take the job end lock non-blockingly
+	// (lockUnchangedEnd try-lock; hk 5063).
 	taskPaneSweepMu     sync.Mutex
 	taskPaneSweeperOnce sync.Once
 	taskPaneSweeper     *fleet.TaskPaneSweeper
@@ -277,6 +281,7 @@ type HubClient struct {
 	// hub close and no watcher (takeWatcherFence).
 	closeFenceMu    sync.Mutex
 	closeFences     map[string]func()
+	closeRearmed    map[string]bool
 	fenceRearm      func(job string) // fixture seam; nil re-arms the node's watchers.
 	nodeGitLockWait time.Duration    // fixture seam; zero is nodeGitOpLockWait.
 	busyRelayMu     sync.Mutex
