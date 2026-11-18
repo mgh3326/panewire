@@ -391,7 +391,12 @@ func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop)
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return a.quotaStopAnnounceEndLocked(ctx, j, stop)
 	}
-	endUnlock, err := LockJobEndContext(ctx, dir)
+	// Bounded like the operation lock: the quota-stop manager calls this
+	// with its daemon context while holding its own mutexes, and an end-lock
+	// holder can wait a long time; a timed-out hand-over is retried.
+	lockCtx, cancel := context.WithTimeout(ctx, quotaRecordLockWait)
+	defer cancel()
+	endUnlock, err := LockJobEndContext(lockCtx, dir)
 	if err != nil {
 		return err
 	}
@@ -407,7 +412,9 @@ func (a *App) quotaStopAnnounceEndLocked(ctx context.Context, j Job, stop quotas
 		return err
 	}
 	defer unlock()
-	if fresh, err := a.job(j.ID); err == nil && endedOtherThanByAnnouncement(fresh) {
+	if ended, err := a.attemptEndedBeforeAnnouncement(j.ID); err != nil {
+		return err
+	} else if ended {
 		return errQuotaStopSuperseded
 	}
 	if ended, err := a.endedByResultPosted(ctx, j.ID, true); err != nil {
@@ -422,19 +429,36 @@ func (a *App) quotaStopAnnounceEndLocked(ctx context.Context, j Job, stop quotas
 	return a.quotaStopEvent(ctx, j, stop, false)
 }
 
-// endedOtherThanByAnnouncement reports whether the job's attempt has a local
-// end that a quota announcement must not follow: a reap, or a terminal event
-// other than an earlier non-final quota-stop announcement (a repeat announce
-// of the same stop is allowed, as before).
-func endedOtherThanByAnnouncement(j Job) bool {
-	if j.Reaped {
-		return true
+// attemptEndedBeforeAnnouncement reads the job's ledger in sequence order and
+// reports whether its current attempt already has an end a quota announcement
+// must not follow: any end marker the close protocol recognizes (a completion,
+// a settled record, an escalation, a revoke, a hand-off, a join, a reap, or a
+// loss) other than an earlier non-final quota-stop announcement, which a
+// repeat announcement may follow. A job with no ledger directory has nothing
+// to read; any other unreadable ledger is an error, never permission.
+func (a *App) attemptEndedBeforeAnnouncement(id string) (bool, error) {
+	evs, err := a.events(id)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	if !j.Terminal {
-		return false
+	if err != nil {
+		return false, err
 	}
-	_, announced := announcedQuotaStop(j)
-	return !announced
+	ended := false
+	for _, ev := range ledgerOrder(evs) {
+		switch ev.Kind {
+		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted":
+			ended = false
+		case "job.completed", "job.completion", eventRecordSettled, "job.escalate", "job.joined",
+			"job.revoked", "job.handed_off", "job.reaped":
+			ended = true
+		case "job.lost":
+			if str(ev.Payload, "reason") != "quota_stop" || boolean(ev.Payload, "final", false) {
+				ended = true
+			}
+		}
+	}
+	return ended, nil
 }
 
 // quotaRecordLockWait bounds how long a quota-stop record waits for the job's
