@@ -71,7 +71,7 @@ func HubCloseWatchersReady(ctx context.Context, jobs string, list ProcessLister)
 			if err != nil {
 				return false, err
 			}
-			if watcher != HubCloseWatcherAware && watcher != HubCloseWatcherDegraded {
+			if watcher != HubCloseWatcherAware {
 				return false, nil
 			}
 			break

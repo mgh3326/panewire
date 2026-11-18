@@ -5,13 +5,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // F3 (hk 5063): if serveWatchLock fails (e.g. because the socket directory is
 // not private), the watcher continues to watch the job without lock-lending
-// or hub-close awareness rather than aborting.
+// or hub-close awareness rather than aborting. It holds only the watch lock;
+// ProbeHubCloseWatcher reports HubCloseWatcherIncompatible while it runs.
 func TestWatcherRunsWhenLockLendingSocketFails_t5063(t *testing.T) {
 	base, err := os.MkdirTemp("/tmp", "pw-sock-")
 	if err != nil {
@@ -35,20 +37,28 @@ func TestWatcherRunsWhenLockLendingSocketFails_t5063(t *testing.T) {
 		t.Fatal(e)
 	}
 
+	var hookRan bool
+	sleep := a.Sleep
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		hookRan = true
+		jobDir := filepath.Join(a.Jobs, longID)
+		status, err := ProbeHubCloseWatcher(jobDir)
+		if err != nil {
+			t.Errorf("ProbeHubCloseWatcher in sleep hook: %v", err)
+		}
+		if status != HubCloseWatcherIncompatible {
+			t.Errorf("ProbeHubCloseWatcher in sleep hook = %v, want HubCloseWatcherIncompatible", status)
+		}
+		return sleep(ctx, d)
+	}
+
 	// Watch must run and succeed (return nil) despite serveWatchLock failing.
 	if err := a.watch(context.Background(), []string{longID}); err != nil {
 		t.Fatalf("watch returned error on lending socket failure: %v", err)
 	}
 
-	// Because lending was disabled, hubCloseWatchLock was not taken; the probe
-	// must not report aware.
-	jobDir := filepath.Join(a.Jobs, longID)
-	status, err := ProbeHubCloseWatcher(jobDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status == HubCloseWatcherAware {
-		t.Fatalf("ProbeHubCloseWatcher = %v, want not aware", status)
+	if !hookRan {
+		t.Fatal("Sleep hook did not run to observe watcher during execution")
 	}
 }
 
@@ -80,6 +90,11 @@ func TestServeWatchLockCleansUpSocketDir_t5063(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var stopOnce sync.Once
+	stopClean := func() {
+		stopOnce.Do(stop)
+	}
+	t.Cleanup(stopClean)
 
 	sockDir, err := watchLockSocketDir(longJob)
 	if err != nil {
@@ -89,7 +104,7 @@ func TestServeWatchLockCleansUpSocketDir_t5063(t *testing.T) {
 		t.Fatalf("socket dir %s missing while serving: %v", sockDir, err)
 	}
 
-	stop()
+	stopClean()
 
 	// The hash dir under /tmp/panewire-<uid> must be removed.
 	if _, err := os.Stat(sockDir); !os.IsNotExist(err) {
@@ -159,11 +174,36 @@ func TestWatcherExitsOnOpenIntentWhenLendingDisabled_t5063(t *testing.T) {
 	}); e != nil {
 		t.Fatal(e)
 	}
+
+	j, err := a.job(longID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempt string
+	for _, ev := range j.Events {
+		if ev.Kind == "job.spawned" {
+			attempt = ev.name
+		}
+	}
+	if attempt == "" {
+		t.Fatal("no job.spawned event found")
+	}
+
 	// Record an open hub-close intent before watch starts.
-	if e := a.event(context.Background(), longID, hubCloseIntentKind, map[string]any{
-		"request_id": "req-1", "attempt": "old-session", "pane": "w:p1", "label": "agent-long", "end_reason": hubCloseReason,
-	}); e != nil {
-		t.Fatal(e)
+	in := HubCloseIntent{
+		RequestID: "close-1",
+		Attempt:   attempt,
+		Pane:      "w:p1",
+		Label:     "agent-long",
+		EndReason: hubCloseReason,
+	}
+	if err := a.recordHubCloseIntent(context.Background(), longID, in); err != nil {
+		t.Fatal(err)
+	}
+
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		t.Fatalf("a.Sleep called (%v); watcher should exit immediately when lending disabled on open intent", d)
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -183,36 +223,33 @@ func TestWatcherExitsOnOpenIntentWhenLendingDisabled_t5063(t *testing.T) {
 	release()
 }
 
-// Review finding 4613443497 (hk 5063): a degraded watcher holding
-// hubCloseWatchLockDegraded reports HubCloseWatcherDegraded and does not block
-// HubCloseWatchersReady or CloseOpsReady for the node.
-func TestDegradedWatcherDoesNotBlockHubCloseWatchersReady_t5063(t *testing.T) {
+// Review findings PRRT_kwDOUGxnCM6473EX & PRRT_kwDOUGxnCM648nmI (hk 5063): a
+// watcher whose lock-lending socket fails runs holding only .panewire-watch.lock;
+// it reads as HubCloseWatcherIncompatible, HubCloseWatchersReady is false while
+// it runs, and close-ops cannot be enabled.
+func TestNonLendingWatcherIsIncompatible_t5063(t *testing.T) {
 	jobs := t.TempDir()
 	jobDir := filepath.Join(jobs, "job-deg")
 	holdLock(t, jobDir, jobWatchLock)
-	holdLock(t, jobDir, hubCloseWatchLockDegraded)
 
 	status, err := ProbeHubCloseWatcher(jobDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status != HubCloseWatcherDegraded {
-		t.Fatalf("ProbeHubCloseWatcher = %v, want HubCloseWatcherDegraded", status)
+	if status != HubCloseWatcherIncompatible {
+		t.Fatalf("ProbeHubCloseWatcher = %v, want HubCloseWatcherIncompatible", status)
 	}
 
 	ready, err := HubCloseWatchersReady(context.Background(), jobs, listing("  101 /usr/local/bin/panewire _watch job-deg\n"))
-	if err != nil || !ready {
-		t.Fatalf("HubCloseWatchersReady = %v, err = %v, want true", ready, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("HubCloseWatchersReady = true, want false with non-lending watcher")
 	}
 
 	now := time.Now().UTC()
-	if err := EnableCloseOps(context.Background(), jobs, listing("  101 /usr/local/bin/panewire _watch job-deg\n"), now); err != nil {
-		t.Fatalf("EnableCloseOps failed with degraded watcher: %v", err)
-	}
-	if err := AdvertiseCloseOps(jobs, now); err != nil {
-		t.Fatalf("AdvertiseCloseOps failed: %v", err)
-	}
-	if !CloseOpsReady(context.Background(), jobs, listing("  101 /usr/local/bin/panewire _watch job-deg\n")) {
-		t.Fatal("CloseOpsReady = false, want true with degraded watcher")
+	if err := EnableCloseOps(context.Background(), jobs, listing("  101 /usr/local/bin/panewire _watch job-deg\n"), now); err == nil {
+		t.Fatal("EnableCloseOps succeeded with non-lending watcher, want failure")
 	}
 }

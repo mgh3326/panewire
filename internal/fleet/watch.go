@@ -206,21 +206,12 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	// node probes as aware can always lend its watch lock. If the socket
 	// cannot be served (e.g. its directory is not private), the watcher
 	// continues without lock-lending rather than abandoning the job, holding
-	// hubCloseWatchLockDegraded so node readiness does not treat it as an older
-	// binary.
+	// only the watch lock: ProbeHubCloseWatcher reads it as Incompatible.
 	stopLending, e := serveWatchLock(filepath.Join(a.Jobs, id), lock)
 	var lendingDisabled bool
 	if e != nil {
 		a.warn("watch-lock lending disabled for job %s: %v", id, e)
 		lendingDisabled = true
-		degradedLock, e := secureOpen(filepath.Join(a.Jobs, id, hubCloseWatchLockDegraded), true, a.warn)
-		if e != nil {
-			return e
-		}
-		defer degradedLock.Close()
-		if e := syscall.Flock(int(degradedLock.Fd()), syscall.LOCK_EX); e != nil {
-			return e
-		}
 	} else {
 		defer stopLending()
 		// Held for the watcher's life: it tells the node this watcher defers to

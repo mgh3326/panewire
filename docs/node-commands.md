@@ -310,9 +310,10 @@ current registration advertises it. `CloseOpsReady` has three parts:
   executable is named) must be the job's aware watcher.
   - An aware watcher is one that holds
     `jobs/<job>/.panewire-watch-hubclose-v3.lock` for its whole life, and
-    lends its watch lock (below). A degraded watcher (whose lock-lending socket
-    failed) holds `.panewire-watch-hubclose-degraded.lock` and defers by exiting
-    when a hub-close intent is open; it does not block the node's readiness scan.
+    lends its watch lock (below). A watcher whose lock-lending socket fails runs
+    holding only `.panewire-watch.lock`: it reads as incompatible, so
+    `fleet.HubCloseWatchersReady` withholds readiness and close admission refuses
+    for that job until the watcher completes.
   - A watcher of an older binary holds only `.panewire-watch.lock`, or that
     and the v1 or v2 lock. A v1 watcher lacks the stale-decision check below;
     a v2 one cannot lend its lock.
@@ -334,10 +335,12 @@ first and exits when it is held.
   directory is created 0700 before the socket binds, and is refused unless it
   is a real directory owned by the user with no group or other access. So no
   other local user can connect. If the lending socket cannot be served, the
-  watcher still runs and watches the job, but without lock-lending or hub-close
-  awareness, and any created socket directory is removed. flock stays held
-  until every reference closes, so the watcher exiting or being killed
-  mid-close cannot free the lock.
+  watcher still runs and watches the job holding only `.panewire-watch.lock`.
+  Socket directory cleanup on error or exit is best effort: only the per-job
+  `<hash>` directory is removed, removal errors are ignored, and the shared
+  `/tmp/panewire-<uid>` base directory stays. flock stays held until every
+  reference closes, so the watcher exiting or being killed mid-close cannot
+  free the lock.
 
 - The fence is reconciled under the job's end lock, which admission also
   holds. So a release can never drop the fence of a close admitted

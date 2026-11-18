@@ -452,11 +452,6 @@ func (client *HubClient) closeTargetBound(ctx context.Context, args nodePaneClos
 	return true, ""
 }
 
-// hubCloseBindEndLockBudget bounds the end-lock wait in bindCloseOp so that
-// a close op racing a concurrent sweep (which takes the end lock before
-// nodeCommandMu) fails fast with journal_failed and yields nodeCommandMu.
-const hubCloseBindEndLockBudget = 500 * time.Millisecond
-
 // bindCloseOp checks the job's ledger proof (readNodeCloseTarget): its
 // current attempt has its own receipt naming the requested pane and label,
 // and has not ended. A new request that fails opens nothing (mismatch). A
@@ -468,9 +463,7 @@ func (client *HubClient) bindCloseOp(ctx context.Context, job *os.Root, jobDir s
 	// The job's end lock, which its watcher takes around every terminal
 	// decision, spans the binding check and the intent: no watcher end can
 	// land between them (hk 4652).
-	lockCtx, cancel := context.WithTimeout(ctx, hubCloseBindEndLockBudget)
-	defer cancel()
-	unlock, err := client.hubCloseLedger().LockEnd(lockCtx, jobDir)
+	unlock, err := client.hubCloseLedger().LockEnd(ctx, jobDir)
 	if err != nil {
 		return op, nil, "", "journal_failed"
 	}
@@ -689,13 +682,6 @@ func (client *HubClient) admitHubCloseWatcher(ctx context.Context, job, jobDir s
 		return "journal_failed", false
 	case watcher == fleet.HubCloseWatcherIncompatible:
 		return "watcher_incompatible", false
-	case watcher == fleet.HubCloseWatcherDegraded:
-		// A degraded watcher holds the job watch lock and cannot lend it.
-		// It defers by exiting once an intent is recorded in the ledger.
-		// We admit the close without taking the fence here (took: false);
-		// once RecordIntent lands, the degraded watcher exits, and
-		// reconcileWatcherFence takes the fence when ProbeHubCloseWatcher reads None.
-		return "", false
 	case watcher == fleet.HubCloseWatcherAware:
 		// The node holds the watcher's own lock description for the close,
 		// so the watcher exiting cannot free the lock (#662 consult NCxM).
@@ -809,8 +795,8 @@ func (client *HubClient) reconcileWatcherFence(ctx context.Context, job string) 
 	if !open {
 		if held {
 			client.releaseWatcherFence(job)
-			rearm = live
 		}
+		rearm = live
 		return true
 	}
 	if held {

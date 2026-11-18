@@ -219,11 +219,11 @@ type HubClient struct {
 
 	// taskPaneSweepMu serializes the node's sweeps over one shared sweeper: the
 	// local pass and the hub's pane.sweep command (node_pane_sweep_ended.go).
-	// Lock order: taskPaneSweepMu, then nodeCommandMu. A sweep takes the job's
-	// end lock (lockUnchangedEnd) before taking nodeCommandMu (via s.Exclusive). A
-	// close operation that takes a job's end lock while holding nodeCommandMu
-	// bounds its wait to hubCloseBindEndLockBudget (node_pane_close_op.go) so
-	// it fails fast and yields nodeCommandMu if a concurrent sweep holds the end lock.
+	// Lock order: taskPaneSweepMu -> nodeCommandMu -> job end lock. Nothing
+	// waits on an end lock while holding nodeCommandMu, except close commands,
+	// which are bounded by their command context. Sweeps take nodeCommandMu
+	// (s.Exclusive) first, then take the job end lock non-blockingly
+	// (lockUnchangedEnd try-lock; hk 5063).
 	taskPaneSweepMu     sync.Mutex
 	taskPaneSweeperOnce sync.Once
 	taskPaneSweeper     *fleet.TaskPaneSweeper

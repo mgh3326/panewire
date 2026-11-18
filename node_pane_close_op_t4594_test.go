@@ -836,22 +836,52 @@ func TestCloseOpFencesTheWatcherAndSettles_t4652(t *testing.T) {
 	}
 }
 
-// Review findings 4613769157 & 4613769159 (hk 5063): a degraded watcher is
-// admitted so the node records the hub-close intent; the degraded watcher then
-// exits upon seeing the intent, and reconcileWatcherFence takes the fence to settle.
-func TestCloseOpAdmitsDegradedWatcherAndRecordsIntent_t5063(t *testing.T) {
+// F3 / PRRT_kwDOUGxnCM6473EX & PRRT_kwDOUGxnCM648nmI (hk 5063): a non-lending
+// watcher reads as incompatible; bindCloseOp refuses with watcher_incompatible
+// before recording any intent.
+func TestCloseOpRefusesNonLendingWatcher_t5063(t *testing.T) {
 	inbox := t.TempDir()
 	fake := idlePaneHerdr()
 	client := closeOpNode(t, inbox, fake)
-	ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherDegraded}
+	ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherIncompatible}
 	client.nodeHubClose = ledger
-	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
-	if len(ledger.intents) != 1 {
-		t.Fatalf("intents=%d, want 1 recorded for degraded watcher", len(ledger.intents))
+
+	if _, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-1")); code != "watcher_incompatible" {
+		t.Fatalf("code=%q, want watcher_incompatible", code)
 	}
-	want := fleet.HubCloseIntent{RequestID: "op-1", Attempt: closeOpAttempt, Epoch: 1, Pane: "w1:p1", Label: "job-a", EndReason: "quota_stop pool=devin-free replaced_by=job-c"}
-	if ledger.intents[0] != want {
-		t.Fatalf("intent %+v, want %+v", ledger.intents[0], want)
+	if len(ledger.intents) != 0 {
+		t.Fatalf("intents=%d, want 0 recorded", len(ledger.intents))
+	}
+}
+
+// F3 / A4 (hk 5063): when an unfenced intent closes (e.g. released or cancelled)
+// and the job is live with no watcher running, reconcileWatcherFence re-arms
+// the watcher even though the node held no fence.
+func TestReconcileWatcherFenceRearmsLiveJobAfterUnfencedIntentCloses_t5063(t *testing.T) {
+	inbox := t.TempDir()
+	seedCloseOpJob(t, inbox)
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+
+	// FenceState: not open (intent closed), live (attempt still live).
+	// In fakeHubClose, FenceState returns: (f.state == fleet.HubClosePending && len(f.intents) > 0), true, nil.
+	// With state != fleet.HubClosePending and len(intents) == 0, open is false, live is true.
+	ledger := &fakeHubClose{
+		watcher: fleet.HubCloseWatcherNone,
+		state:   fleet.HubCloseSettled,
+	}
+	client.nodeHubClose = ledger
+
+	var rearmed string
+	client.fenceRearm = func(job string) {
+		rearmed = job
+	}
+
+	safe := client.reconcileWatcherFence(context.Background(), closeOpJob)
+	if !safe {
+		t.Fatal("reconcileWatcherFence = false, want true")
+	}
+	if rearmed != closeOpJob {
+		t.Fatalf("rearmed = %q, want %q", rearmed, closeOpJob)
 	}
 }
 
@@ -955,36 +985,6 @@ func TestCloseOpEndLockWaitIsBounded_t4652(t *testing.T) {
 	_, code := client.nodePaneCloseOp(ctx, args)
 	if code != "journal_failed" || time.Since(start) > 5*time.Second {
 		t.Fatalf("code=%q after %v, want journal_failed within the deadline", code, time.Since(start))
-	}
-}
-
-// Review findings 4613454435 & 4613443524 (hk 5063): bindCloseOp's end-lock
-// wait is bounded to hubCloseBindEndLockBudget (500ms) rather than waiting out
-// the full 20s nodeCommandRunTimeout, so that it fails fast with journal_failed
-// and releases nodeCommandMu when a concurrent sweep holds the end lock.
-func TestCloseOpEndLockWaitFailsFastUnderLongCommandTimeout_t5063(t *testing.T) {
-	inbox := t.TempDir()
-	client := closeOpNode(t, inbox, idlePaneHerdr())
-	unlock, err := fleet.LockJobEnd(filepath.Join(inbox, "jobs", closeOpJob))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	var args nodePaneCloseOpArgs
-	raw, _ := json.Marshal(closeOpArgs("op-1"))
-	if err := json.Unmarshal(raw, &args); err != nil {
-		t.Fatal(err)
-	}
-	start := time.Now()
-	_, code := client.nodePaneCloseOp(ctx, args)
-	elapsed := time.Since(start)
-	if code != "journal_failed" {
-		t.Fatalf("code=%q, want journal_failed", code)
-	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("took %v, want fail fast within ~hubCloseBindEndLockBudget (500ms)", elapsed)
 	}
 }
 

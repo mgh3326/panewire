@@ -109,8 +109,7 @@ const (
 	hubCloseWatchLockV1 = ".panewire-watch-hubclose.lock"
 	// hubCloseWatchLockV2 is held by a watcher that defers but cannot lend
 	// its watch lock (BorrowWatchLock): incompatible.
-	hubCloseWatchLockV2       = ".panewire-watch-hubclose-v2.lock"
-	hubCloseWatchLockDegraded = ".panewire-watch-hubclose-degraded.lock"
+	hubCloseWatchLockV2 = ".panewire-watch-hubclose-v2.lock"
 )
 
 // FenceWatchers takes the job's watch lock for the node, without blocking,
@@ -143,12 +142,33 @@ func LockJobEnd(jobDir string) (func(), error) {
 	return func() { f.Close() }, nil
 }
 
+// TryLockJobEnd takes the job's end lock non-blockingly and returns its
+// release; ok is false when another process holds it.
+func TryLockJobEnd(jobDir string) (release func(), ok bool, err error) {
+	f, e := secureOpen(filepath.Join(jobDir, jobEndLock), true, nil)
+	if e != nil {
+		return nil, false, e
+	}
+	if !tryLock(f) {
+		f.Close()
+		return nil, false, nil
+	}
+	return func() { f.Close() }, true, nil
+}
+
 // LockJobEndContext takes the job's end lock, waiting at most until ctx is
 // done, so a daemon step never blocks unbounded behind a slow holder.
 func LockJobEndContext(ctx context.Context, jobDir string) (func(), error) {
 	f, e := secureOpen(filepath.Join(jobDir, jobEndLock), true, nil)
 	if e != nil {
 		return nil, e
+	}
+	if tryLock(f) {
+		return func() { f.Close() }, nil
+	}
+	if err := ctx.Err(); err != nil {
+		f.Close()
+		return nil, err
 	}
 	for !tryLock(f) {
 		select {
@@ -170,12 +190,9 @@ const (
 	HubCloseWatcherNone HubCloseWatcher = iota
 	// HubCloseWatcherAware: a watcher that defers to hub-close intents runs.
 	HubCloseWatcherAware
-	// HubCloseWatcherDegraded: a watcher of this binary runs, but lock-lending
-	// is disabled (e.g. socket directory is not private); it defers by
-	// exiting when a hub-close intent is open.
-	HubCloseWatcherDegraded
 	// HubCloseWatcherIncompatible: a watcher that does not read hub-close
-	// intents (an older binary that outlived a node upgrade) runs.
+	// intents (an older binary that outlived a node upgrade, or a watcher
+	// whose lock-lending socket failed) runs.
 	HubCloseWatcherIncompatible
 )
 
@@ -194,12 +211,10 @@ func ProbeHubCloseWatcher(jobDir string) (HubCloseWatcher, error) {
 	if aware, e := held(hubCloseWatchLock); e != nil || aware {
 		return HubCloseWatcherAware, e
 	}
-	if degraded, e := held(hubCloseWatchLockDegraded); e != nil || degraded {
-		return HubCloseWatcherDegraded, e
-	}
 	// A watcher takes the watch lock before the hub-close one, so a watcher
 	// caught in between reads as incompatible: the hub retries. So does a v1
-	// watcher, which holds the v1 lock.
+	// watcher, which holds the v1 lock, or a watcher whose lock-lending socket
+	// failed, which holds only the watch lock.
 	if running, e := held(jobWatchLock); e != nil || running {
 		return HubCloseWatcherIncompatible, e
 	}
