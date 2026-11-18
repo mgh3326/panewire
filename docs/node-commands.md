@@ -941,11 +941,13 @@ receipt and requires HEAD to equal the branch tip on origin. The outcome is
 `ok`, `dirty_worktree`, `unpushed_commits`,
 `branch_mismatch`, `git_failed` or `not-a-job`; an `ok` result names the
 worktree root, branch and pushed commit. No worktree content is uploaded.
-The hub sends the saved branch, origin and commit with `pane.close_op`; the
-node repeats the check after the final pane and open-question checks, as the
-last step before closing. A refusal and its reason are journalled, so status
-and replay retain them across restart. A writer racing the close itself is
-handled by the ordinary worktree and abandoned-worktree patch lifecycle.
+The hub sends the saved branch, origin and commit with `pane.close_op`. The
+node reads the remote tip before the final pane and open-question checks,
+then repeats the local worktree check against that tip with a two-second
+deadline immediately before closing. A timeout refuses the close. A refusal
+and its reason are journalled, so status and replay retain them across
+restart. A writer racing the close itself is handled by the ordinary
+worktree and abandoned-worktree patch lifecycle.
 
 ### `worktree.inspect`
 

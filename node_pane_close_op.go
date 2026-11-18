@@ -342,6 +342,7 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 		// (hk 4633).
 		closeArgs.QuestionJob = args.Job
 	}
+	var prepared nodeHandoverPrepared
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
 		// The proof is read again after the settle: the job's watcher, a
 		// separate process, may have recorded a re-prompt or an end of the
@@ -359,16 +360,28 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 			}
 			return nodeCloseHookStop{outcome: fleet.CloseOpPreempted}
 		}
+		if guard := args.Handover; guard != nil {
+			if again.role != "implementer" {
+				op.Reason = handoverGitFailed
+				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
+			}
+			var reason string
+			prepared, reason = client.handoverPrepare(ctx, nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: guard.Origin, Branch: guard.Branch}, &again)
+			if reason == "" && prepared.tip != guard.Commit {
+				reason = handoverUnpushed
+			}
+			if reason != "" {
+				op.Reason = reason
+				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
+			}
+		}
 		op.State, op.Updated = fleet.CloseOpClosing, client.nowUTC()
 		return fleet.WriteCloseOp(job, op)
 	}, func() error {
-		if guard := args.Handover; guard != nil {
-			check := client.handoverCheckTarget(ctx, nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: guard.Origin, Branch: guard.Branch}, *target)
-			if target.role != "implementer" {
-				check.Outcome = handoverGitFailed
-			} else if check.Outcome == handoverCheckOK && check.Pushed != guard.Commit {
-				check.Outcome = handoverUnpushed
-			}
+		if args.Handover != nil {
+			localCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			check := client.handoverCheckLocal(localCtx, prepared)
+			cancel()
 			if check.Outcome != handoverCheckOK {
 				op.Reason = check.Outcome
 				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}

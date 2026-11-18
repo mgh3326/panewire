@@ -158,14 +158,16 @@ decides with the §Implementer rule (the job's start, the task's priority and
   2. **Recheck.** Before the close, the hub holds a row during a spawn drain,
      confirms the stop and task binding, and requires the same idle pane and
      working directory. Inside `pane.close_op`, after checking the job's
-     attempt, the final pane state and open questions, the node repeats the
-     eligibility check against the saved origin, branch and commit as the
-     last step before close. A dirty or unpushed worktree refuses the close;
-     its journalled reason makes the row `handover_failed` and the owner gets
-     the fallback notice. A writer racing the close itself is not stopped: the
-     continuation note names the old `host:path` and the old job's
-     `abandoned-worktree.patch` as places to look for later work. The ordinary
-     worktree cleanup rules apply; this path creates no keep mark or lock.
+     attempt, the node reads the branch tip from origin before the final pane
+     and open-question checks. It then checks the local worktree and HEAD
+     against that tip with a two-second deadline as the last step before
+     close. A timeout, dirty or unpushed worktree refuses the close; its
+     journalled reason makes the row `handover_failed` and the owner gets the
+     fallback notice. A writer or resumed pane racing the close itself is not
+     stopped: the continuation note names the old `host:path` and the old
+     job's `abandoned-worktree.patch` as places to look for later work. The
+     ordinary worktree cleanup rules apply; this path creates no keep mark or
+     lock.
   3. **Close.** The reconciler closes the old pane through `pane.close_op` to
      the job's node at its epoch, keeping `pane.close`'s open-question guard
      for an implementer. The node writes the old record `lost` with

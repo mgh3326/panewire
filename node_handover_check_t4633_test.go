@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -273,6 +274,65 @@ func TestCloseOpHandoverChecksLastAndNamesLateWork(t *testing.T) {
 				t.Fatalf("successor note=%q err=%v", successor.Brief, err)
 			}
 		})
+	}
+}
+
+func TestCloseOpRefusesPaneResumingDuringHandoverRemoteRead(t *testing.T) {
+	work, origin, commit := handoverRepo(t)
+	inbox := t.TempDir()
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", work))}, read: nodeReapScreen("❯ ")}
+	client := closeOpNode(t, inbox, fake)
+	receipt, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "label": "job-a", "role": "implementer", "herdr_session": "fleet", "cwd": work}})
+	if err := os.WriteFile(filepath.Join(inbox, "jobs", closeOpJob, "events", closeOpAttempt), receipt, 0600); err != nil {
+		t.Fatal(err)
+	}
+	git := client.nodeGitRunner()
+	readRemote := false
+	client.nodeGit = func(ctx context.Context, args ...string) ([]byte, error) {
+		if slices.Contains(args, "ls-remote") {
+			readRemote = true
+			fake.mu.Lock()
+			fake.agents = []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "working", work))}
+			fake.mu.Unlock()
+		}
+		return git(ctx, args...)
+	}
+	args := closeOpArgs("op-resumed")
+	args["cwd"] = work
+	args["handover"] = map[string]any{"origin": origin, "branch": "wk/task", "commit": commit}
+	result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
+	if !readRemote || code != "" || result["outcome"] != fleet.CloseOpRefused || fake.called("pane", "close") != 0 {
+		t.Fatalf("remote=%v close=%v code=%q close calls=%d", readRemote, result, code, fake.called("pane", "close"))
+	}
+}
+
+func TestCloseOpRefusesHandoverLocalCheckTimeout(t *testing.T) {
+	work, origin, commit := handoverRepo(t)
+	inbox := t.TempDir()
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", work))}, read: nodeReapScreen("❯ ")}
+	client := closeOpNode(t, inbox, fake)
+	receipt, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "label": "job-a", "role": "implementer", "herdr_session": "fleet", "cwd": work}})
+	if err := os.WriteFile(filepath.Join(inbox, "jobs", closeOpJob, "events", closeOpAttempt), receipt, 0600); err != nil {
+		t.Fatal(err)
+	}
+	git := client.nodeGitRunner()
+	shortDeadline := false
+	client.nodeGit = func(ctx context.Context, args ...string) ([]byte, error) {
+		if slices.Contains(args, "status") {
+			deadline, ok := ctx.Deadline()
+			shortDeadline = ok && time.Until(deadline) <= 2*time.Second
+			// Simulate a slow local Git read until its deadline expires.
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return git(ctx, args...)
+	}
+	args := closeOpArgs("op-local-timeout")
+	args["cwd"] = work
+	args["handover"] = map[string]any{"origin": origin, "branch": "wk/task", "commit": commit}
+	result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
+	if !shortDeadline || code != "" || result["outcome"] != fleet.CloseOpRefused || result["reason"] != handoverGitFailed || fake.called("pane", "close") != 0 {
+		t.Fatalf("short deadline=%v close=%v code=%q close calls=%d", shortDeadline, result, code, fake.called("pane", "close"))
 	}
 }
 
