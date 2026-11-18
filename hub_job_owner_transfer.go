@@ -160,6 +160,23 @@ func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTra
 	}
 	state, _ := record["state"].(string)
 	if hkTerminalState(state) {
+		// Retire the held assignment before removing the intent. Otherwise an
+		// HK outage could make the old assignment look authoritative again.
+		assignment, held, assignmentErr := h.ownerAssignment(intent.Job)
+		if assignmentErr != nil {
+			return false
+		}
+		if held && !assignment.Ended {
+			assignment.Ended = true
+			if err := h.saveOwnerAssignment(assignment, false); err != nil {
+				return false
+			}
+		}
+		h.mu.Lock()
+		if job := h.jobs[intent.Job]; job != nil {
+			job.Completed, job.Orphaned = true, false
+		}
+		h.mu.Unlock()
 		_ = h.removeOwnerTransfer(intent)
 		return false
 	}

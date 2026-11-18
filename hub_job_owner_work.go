@@ -138,16 +138,28 @@ func (h *HubServer) restoreOwnerAssignment(ctx context.Context, assignment hubOw
 	if err != nil || !found || !sameOwnerAssignment(current, assignment) {
 		return false
 	}
-	h.mu.Lock()
-	known := h.jobs[assignment.Job] != nil
-	h.mu.Unlock()
-	if known {
-		return false
-	}
 	pending, err := h.hasPendingOwnerTransfer(assignment.Job)
 	if err != nil || pending {
 		return false
 	}
+	h.mu.Lock()
+	if known := h.jobs[assignment.Job]; known != nil {
+		if known.Node != assignment.Node || known.Epoch != assignment.Epoch {
+			h.mu.Unlock()
+			return false
+		}
+		h.restoreAssignmentFencesLocked(known, assignment)
+		predecessors := make([]string, 0, len(known.FencedNodes))
+		for node := range known.FencedNodes {
+			predecessors = append(predecessors, node)
+		}
+		h.mu.Unlock()
+		for _, node := range predecessors {
+			h.tryPendingRevocations(node)
+		}
+		return false
+	}
+	h.mu.Unlock()
 	record, exists, err := h.readJobRecord(ctx, assignment.Job)
 	if err != nil || !exists {
 		return false
@@ -196,6 +208,9 @@ func (h *HubServer) restoreAssignmentFencesLocked(job *hubJobRecord, assignment 
 	}
 	for _, node := range append(append([]string(nil), assignment.Fenced...), assignment.From) {
 		if node == "" || node == assignment.Node {
+			continue
+		}
+		if job.FencedNodes[node] >= assignment.Epoch {
 			continue
 		}
 		job.FencedNodes[node] = assignment.Epoch

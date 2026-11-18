@@ -50,3 +50,25 @@ func TestJobOwnerFenceTerminalOwnerNotReadmitted_t5067(t *testing.T) {
 		t.Fatalf("terminal HK owner was readmitted as active: %+v", job)
 	}
 }
+
+func TestJobOwnerFenceTerminalCleanupCannotReadmitPredecessor_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "completed", "owner_node": "machine-b", "owner_epoch": float64(2)}}
+	hub, _ := ownerFenceHub(t, hk)
+	intent := hubOwnerTransfer{Job: "fenced-job", From: "machine-a", To: "machine-b", Epoch: 1}
+	if err := hub.saveOwnerTransfer(intent); err != nil {
+		t.Fatal(err)
+	}
+	hub.recoverOwnerTransfer(t.Context(), intent)
+	if exists, err := hub.hasOwnerTransfer(intent); err != nil || exists {
+		t.Fatalf("terminal intent not retired: exists=%v err=%v", exists, err)
+	}
+	delete(hub.jobs, "fenced-job")
+	hub.nodes["machine-a"] = &hubNodeRecord{}
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: unavailableOwnerStore{hk}, Out: out, Err: errout}, nil
+	}
+	hub.observeActiveJobs("machine-a", []HubActiveJob{{JobID: "fenced-job", AgentLabel: "worker-a", Epoch: 1}}, hub.now())
+	if job := hub.jobs["fenced-job"]; job != nil {
+		t.Fatalf("terminal cleanup readmitted predecessor during HK outage: %+v", job)
+	}
+}

@@ -92,3 +92,30 @@ func TestJobOwnerFenceRecoveryRetainsAllPredecessors_t5067(t *testing.T) {
 		}
 	}
 }
+
+func TestJobOwnerFenceHeartbeatRestoresHistoryOnce_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "spawned", "owner_node": "machine-b", "owner_epoch": float64(2)}}
+	hub, agent := ownerFenceHub(t, hk)
+	if err := hub.saveOwnerAssignment(hubOwnerAssignment{Job: "fenced-job", Node: "machine-b", Epoch: 2, From: "machine-a", Fenced: []string{"machine-a"}}, false); err != nil {
+		t.Fatal(err)
+	}
+	delete(hub.jobs, "fenced-job")
+	hub.observeActiveJobs("machine-b", []HubActiveJob{{JobID: "fenced-job", AgentLabel: "worker-b", Epoch: 2}}, hub.now())
+	hub.sendHeartbeatDirectives("machine-b", agent)
+	eventually(t, 3*time.Second, "predecessor revocation after heartbeat", func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		return hub.pendingRevocations["machine-a"]["fenced-job"].Epoch == 2
+	})
+	waitOwnerWork(t, hub, "machine-b", false)
+	if !hub.acknowledgeRevocation("machine-a", hubJobEventPayload{JobID: "fenced-job", Epoch: 2}) {
+		t.Fatal("could not acknowledge recovered revocation")
+	}
+	hub.sendHeartbeatDirectives("machine-b", agent)
+	waitOwnerWork(t, hub, "machine-b", false)
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if pending := hub.pendingRevocations["machine-a"]["fenced-job"]; pending.Epoch != 0 {
+		t.Fatalf("acknowledged revocation was queued again: %+v", pending)
+	}
+}

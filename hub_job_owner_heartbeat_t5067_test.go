@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -93,6 +95,23 @@ func TestJobOwnerFenceTerminalRecoveryRetiresJournal_t5067(t *testing.T) {
 	hub.recoverOwnerTransfer(t.Context(), intent)
 	if exists, err := hub.hasOwnerTransfer(intent); err != nil || exists {
 		t.Fatalf("terminal transfer journal retained: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestJobOwnerFenceTerminalRecoveryKeepsUnsettledJournal_t5067(t *testing.T) {
+	hk := &ownerFenceHK{record: map[string]any{"state": "completed", "owner_node": "machine-b", "owner_epoch": float64(2)}}
+	hub, _ := ownerFenceHub(t, hk)
+	intent := hubOwnerTransfer{Job: "fenced-job", From: "machine-a", To: "machine-b", Epoch: 1}
+	if err := hub.saveOwnerTransfer(intent); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hub.ownerTransferDir, "_assignments", "fenced-job.json")
+	if err := os.WriteFile(path, []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hub.recoverOwnerTransfer(t.Context(), intent)
+	if exists, err := hub.hasOwnerTransfer(intent); err != nil || !exists {
+		t.Fatalf("unsettled terminal journal removed: exists=%v err=%v", exists, err)
 	}
 }
 
