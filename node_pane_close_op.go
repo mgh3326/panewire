@@ -740,15 +740,21 @@ func (client *HubClient) releaseWatcherFence(job string) {
 // left to the next step, never to the hub. The fence is reconciled under the
 // job's end lock before the step (a step runs only while no watcher that
 // ignores the close can run) and after it (released once no intent is open).
-func (client *HubClient) settleHubClose(ctx context.Context, job string) {
+// settleHubClose drives one job's hub close one step. It reports whether the
+// close settled: the daemon pass counts exits in the ledger's hub_close_settle
+// flow.
+func (client *HubClient) settleHubClose(ctx context.Context, job string) bool {
 	if !client.reconcileWatcherFence(ctx, job) {
 		slog.Warn("hub close settlement waits: the job's watch lock is held by a watcher that does not defer, or unreadable", "job", job)
-		return
+		return false
 	}
+	settled := true
 	if _, err := client.hubCloseLedger().Settle(ctx, job); err != nil {
 		slog.Warn("hub close settlement pending", "job", job, "error", err)
+		settled = false
 	}
 	client.reconcileWatcherFence(ctx, job)
+	return settled
 }
 
 // reconcileWatcherFence makes the node's fence on the job's watch lock match
@@ -846,6 +852,7 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 				return
 			}
 			slog.Warn("hub close legacy recovery waits", "error", err)
+			client.nodeLoopNoteError(nodeHubCloseSettle)
 			select {
 			case <-recoveryCtx.Done():
 				return
@@ -860,11 +867,21 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 	// the fence within hubCloseFenceInterval.
 	var open []string
 	pass := func() {
+		// The ledger ticks at the top of every full pass, not on the fence
+		// ticks between them: the tick is the settlement liveness signal.
+		client.nodeLoopTick(nodeHubCloseSettle)
 		jobs, err := fleet.PendingHubCloseJobs(jobsRoot)
 		if err != nil {
+			client.nodeLoopNoteSilentError(nodeHubCloseSettle, "node_pane_close_op.go:pendingHubCloseJobs", err)
 			return
 		}
+		client.nodeLoopClearSilent("node_pane_close_op.go:pendingHubCloseJobs")
 		open = jobs
+		// Flow edges: one item per job with an open hub-close intent. A job
+		// enters when the pass lists it; a settled close exits.
+		for _, job := range jobs {
+			client.nodeLoopNoteMade(nodeHubCloseSettle, job)
+		}
 		// Each step is bounded and runs outside the node's acting lock: the
 		// job's end lock alone serializes it with that job's close ops. A
 		// fenced job whose intent went stale is visited too, to release it.
@@ -883,7 +900,9 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 				defer func() { <-slots }()
 				step, cancel := context.WithTimeout(ctx, hubCloseSettleBudget)
 				defer cancel()
-				client.settleHubClose(step, job)
+				if client.settleHubClose(step, job) {
+					client.nodeLoopNoteDone(nodeHubCloseSettle, job)
+				}
 			}(job)
 		}
 	}

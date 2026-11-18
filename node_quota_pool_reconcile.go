@@ -46,6 +46,9 @@ func (client *HubClient) runQuotaPoolReconcile(ctx context.Context) {
 }
 
 func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
+	// The ledger ticks at the top of every pass, including passes that find
+	// nothing to release: the tick is the liveness signal.
+	client.nodeLoopTick(nodeQuotaPoolReconcile)
 	newApp := client.quotaReconcile.app
 	if newApp == nil {
 		newApp = func() (*fleet.App, error) { return fleet.New(slogWarnWriter{}, slogWarnWriter{}) }
@@ -53,6 +56,7 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 	app, err := newApp()
 	if err != nil {
 		slog.Warn("quota_pool reconciliation skipped", "reason", "app unavailable")
+		client.nodeLoopNoteError(nodeQuotaPoolReconcile)
 		return
 	}
 	app.Jobs = filepath.Join(client.jobsInboxRoot, "jobs")
@@ -99,7 +103,18 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 	})
 	if err != nil {
 		slog.Warn("quota_pool reconciliation failed", "error", err)
+		client.nodeLoopNoteError(nodeQuotaPoolReconcile)
 		return
+	}
+	// Flow edges: one item per ledger row the pass saw. Stale quota records
+	// and orphan jobs enter when first listed; an orphan release exits when
+	// the ledger drops it.
+	for _, row := range result.StaleQuota {
+		client.nodeLoopNoteMade(nodeQuotaPoolReconcile, row.Job)
+	}
+	for _, row := range result.OrphanReleased {
+		client.nodeLoopNoteMade(nodeQuotaPoolReconcile, row.Job)
+		client.nodeLoopNoteDone(nodeQuotaPoolReconcile, row.Job)
 	}
 	if len(result.StaleQuota) != 0 || len(result.OrphanReleased) != 0 {
 		slog.Info("quota_pool reconciliation completed", "stale_records", len(result.StaleQuota), "orphan_jobs", len(result.OrphanReleased))

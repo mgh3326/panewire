@@ -49,15 +49,23 @@ const (
 // settleExecutingSpawns settles every executing row this process is not
 // running. It returns how many rows it completed and how many it left.
 func (client *HubClient) settleExecutingSpawns(ctx context.Context, journal *nodeSpawnJournal) (settled, left int) {
+	// The ledger ticks at the top of every settle pass: the tick is the
+	// liveness signal while rows remain.
+	client.nodeLoopTick(nodeSpawnSettle)
 	client.spawnActiveMu.Lock()
 	rows, err := journal.executing(ctx)
 	rows = notActive(rows, client.spawnActive)
 	client.spawnActiveMu.Unlock()
 	if err != nil {
+		client.nodeLoopNoteError(nodeSpawnSettle)
 		return 0, 1
 	}
+	// Flow edges: one item per executing row. A row enters when first listed;
+	// a settled row exits.
 	for _, row := range rows {
+		client.nodeLoopNoteMade(nodeSpawnSettle, row.RequestID)
 		if _, ok := client.settleExecutingSpawn(ctx, journal, row); ok {
+			client.nodeLoopNoteDone(nodeSpawnSettle, row.RequestID)
 			settled++
 		} else {
 			left++
@@ -324,8 +332,13 @@ func (client *HubClient) runSpawnSettle(ctx context.Context) {
 	}
 	journal, err := client.acquireSpawnJournal()
 	if err != nil {
+		// The journal acquire fails silently today: without the ledger the
+		// settle loop would vanish with no row and no notice. It counts as a
+		// silent error, once per streak per day.
+		client.nodeLoopNoteSilentError(nodeSpawnSettle, "hub_spawn_settle.go:acquireSpawnJournal", err)
 		return
 	}
+	client.nodeLoopClearSilent("hub_spawn_settle.go:acquireSpawnJournal")
 	defer client.releaseSpawnJournal()
 	for {
 		if _, left := client.settleExecutingSpawns(ctx, journal); left == 0 {

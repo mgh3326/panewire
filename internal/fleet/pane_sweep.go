@@ -367,6 +367,13 @@ type TaskPaneSweeper struct {
 	// 4904). It is called once per measured pass, zero included; a pass that
 	// could not read herdr reports nothing.
 	EndedOpen func(open int)
+	// NoteWorktreeSeen and NoteWorktreeRemoved report the worktree tail's flow
+	// to the node's loop ledger (hk 5117): a worktree of an ended job enters
+	// when worktreePlan clears it for removal, and exits when the removal
+	// succeeds. Both are nil except on the node's own sweeper; the checkout
+	// sweep command counts its rows itself.
+	NoteWorktreeSeen    func(jobID string)
+	NoteWorktreeRemoved func(jobID string)
 
 	// staleOpen is the count the pass is reporting, for its log line.
 	staleOpen int

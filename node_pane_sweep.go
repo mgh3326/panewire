@@ -102,6 +102,14 @@ func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
 				client.endedPanesOpen.Store(int64(open))
 				client.endedPanesMeasured.Store(true)
 			},
+			// The worktree tail's flow enters the node's worktree_flow
+			// mechanism (hk 5117): one item per worktree of an ended job.
+			NoteWorktreeSeen: func(jobID string) {
+				client.nodeLoopNoteMade(nodeWorktreeFlow, jobID)
+			},
+			NoteWorktreeRemoved: func(jobID string) {
+				client.nodeLoopNoteDone(nodeWorktreeFlow, jobID)
+			},
 		}
 	})
 	return client.taskPaneSweeper
@@ -124,6 +132,7 @@ func (client *HubClient) endedPanesForHeartbeat() *int {
 // is picked up; the sweeper keeps the idle times between passes. The pass holds
 // taskPaneSweepMu, which the hub's pane.sweep command also takes.
 func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.TaskPaneSweeper) {
+	client.nodeLoopTick(nodeTaskPaneSweep)
 	client.taskPaneSweepMu.Lock()
 	app, reason := client.taskPaneSweepApp(sweeper)
 	var err error
@@ -133,10 +142,12 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 	client.taskPaneSweepMu.Unlock()
 	if reason != "" {
 		slog.Warn("task pane sweep skipped", "reason", reason)
+		client.nodeLoopNoteError(nodeTaskPaneSweep)
 		return
 	}
 	if err != nil {
 		slog.Warn("task pane sweep failed", "reason", "jobs-unreadable")
+		client.nodeLoopNoteError(nodeTaskPaneSweep)
 	}
 	// Reports an ended job announced but never published are retried here, on
 	// their own budget and outside taskPaneSweepMu: an upload that waits on hk
@@ -144,6 +155,7 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 	// dir TTL runs on its own loop (runJobDirTTL), not here.
 	if err := sweeper.RepublishReports(ctx, app); err != nil {
 		slog.Warn("report republish failed", "reason", "jobs-unreadable")
+		client.nodeLoopNoteError(nodeTaskPaneSweep)
 	}
 }
 
@@ -194,9 +206,11 @@ func (client *HubClient) taskPaneSweepApp(sweeper *fleet.TaskPaneSweeper) (*flee
 // checked on the loaded config first, so an unset key costs one config
 // read an hour and no hk credential reads.
 func (client *HubClient) sweepJobDirs(ctx context.Context, expiry *fleet.JobDirTTL) {
+	client.nodeLoopTick(nodeJobDirTTL)
 	app, err := fleet.New(slogWarnWriter{}, slogWarnWriter{})
 	if err != nil {
 		slog.Warn("job dir ttl skipped", "reason", "app-unavailable")
+		client.nodeLoopNoteError(nodeJobDirTTL)
 		return
 	}
 	if _, ok := fleet.ConfiguredJobDirTTL(app.Config); !ok {
@@ -206,6 +220,7 @@ func (client *HubClient) sweepJobDirs(ctx context.Context, expiry *fleet.JobDirT
 	app.HerdrSession = client.nodeSpawnSession()
 	if app.JobStore, err = client.nodeJobStoreForCommand(); err != nil {
 		slog.Warn("job dir ttl skipped", "reason", "hk-unavailable")
+		client.nodeLoopNoteError(nodeJobDirTTL)
 		return
 	}
 	client.expireJobDirs(ctx, app, expiry)
@@ -227,6 +242,7 @@ func (client *HubClient) expireJobDirs(ctx context.Context, app *fleet.App, expi
 	}
 	if _, err := expiry.Pass(ctx, app); err != nil {
 		slog.Warn("job dir ttl failed", "reason", "jobs-unreadable")
+		client.nodeLoopNoteError(nodeJobDirTTL)
 	}
 }
 

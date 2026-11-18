@@ -114,6 +114,9 @@ var fleetQuotaErrorKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 const fleetQuotaErrorKindUnreadable = "unreadable"
 
 func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sent map[string]fleetQuotaSent) {
+	// The ledger ticks per measured pool: each pool is its own reading with
+	// its own failure streak.
+	client.nodeLoopTick(nodeQuotaMeasure)
 	// The login probe follows this pool's own measurement in the same
 	// goroutine, so it never runs beside it (quota_login_probe.go).
 	defer client.probeFleetLogin(ctx, pool)
@@ -123,6 +126,7 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	publishes, ok, measuredHere, kind := client.measureFleetQuotaAccounts(run, ctx, pool)
 	previous := sent[pool]
 	if !ok {
+		client.nodeLoopNoteError(nodeQuotaMeasure)
 		// One warning per failure streak, not one per interval. Consumers see
 		// the reading age past its TTL and measure directly.
 		if !previous.failing {
