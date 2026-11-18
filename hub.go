@@ -26,6 +26,7 @@ import (
 	"github.com/getsentry/sentry-go"
 	"github.com/mgh3326/panewire/internal/configkeys"
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 const (
@@ -538,6 +539,13 @@ type HubServer struct {
 	waitingMu         sync.Mutex
 	waitingCheckedAt  time.Time
 	waitingReadFailed bool
+	// spawnTaskFailMu guards the spawn-failure task comment's once-per-streak
+	// post failure log (hub_spawn_task_fail.go). spawnTaskFailRetry overrides
+	// the hk post backoff; zero is the hubretry default, negative disables
+	// retries so a fixture can count exact attempts.
+	spawnTaskFailMu     sync.Mutex
+	spawnTaskFailWarned bool
+	spawnTaskFailRetry  hubretry.Policy
 	// parkNoticeMu guards the parked-request owner notice's poll time and its
 	// candidate cursor (hub_spawn_park_notice.go).
 	parkNoticeMu        sync.Mutex

@@ -1,0 +1,322 @@
+package panewire
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/hubretry"
+)
+
+// taskFailHub is a hub whose handoffkeep points at the fake, with the
+// spawn-failure comment backoff disabled so each sweep makes exactly one hk
+// attempt and tests observe retry across sweeps deterministically.
+func taskFailHub(t *testing.T, storePath string, client *handoffkeepRelayClient, logs *bytes.Buffer) *HubServer {
+	t.Helper()
+	t.Setenv(crashReportDSNEnv, "")
+	config := HubServerConfig{
+		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"},
+		InboxStorePath:  storePath,
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		handoffkeep:     client,
+	}
+	if logs != nil {
+		config.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	}
+	h, err := NewHubServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	h.spawnTaskFailRetry = hubretry.Policy{Budget: -1}
+	return h
+}
+
+func taskFailComments(t *testing.T, fake *fakeHandoffkeep) []fakeHandoffkeepComment {
+	t.Helper()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return append([]fakeHandoffkeepComment(nil), fake.comments...)
+}
+
+func taskFailPending(t *testing.T, h *HubServer) []string {
+	t.Helper()
+	ids, err := h.inbox.store.pendingSpawnTaskFailNoticeIDs(t.Context(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+func taskFailClaim(t *testing.T, h *HubServer, seq int) hubSpawnTask {
+	t.Helper()
+	request := durableSpawnRequest()
+	request.RequestID = t14RequestID(51370 + seq)
+	job := fmt.Sprintf("task-fail-%d", seq)
+	request.Args = replaceSpawnArg(request.Args, "--job", job)
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+// Each terminal failure with --task posts exactly one comment with the exact
+// wake-skill text, and a second sweep posts nothing more.
+func TestSpawnTaskFail5137PostsOncePerTerminalStatus(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		seq     int
+		sent    bool
+		outcome hubSpawnOutcome
+		want    string
+		refused bool
+	}{
+		{
+			name:    "failed",
+			seq:     11,
+			outcome: hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"},
+			want:    "spawn failed request=%s rc=1 stage=placement reason=spawn_failed: boom",
+		},
+		{
+			name:    "refused",
+			seq:     12,
+			outcome: hubSpawnOutcome{RC: 78, Stage: "queue", Reason: "task:42=missing"},
+			want:    "spawn failed request=%s rc=78 stage=queue reason=task:42=missing",
+			refused: true,
+		},
+		{
+			name:    "deadline exceeded",
+			seq:     13,
+			sent:    true,
+			outcome: hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"},
+			want:    "spawn failed request=%s rc=124 stage=landing reason=timeout",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake, client, stop := newFakeHandoffkeep(t)
+			t.Cleanup(stop)
+			h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+			var task hubSpawnTask
+			if test.refused {
+				request := durableSpawnRequest()
+				request.RequestID = t14RequestID(51379)
+				request.Args = replaceSpawnArg(request.Args, "--job", "task-fail-refused")
+				request.StartConditions = []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}}
+				var err error
+				task, _, err = h.inbox.store.claimSpawn(t.Context(), request, "task-fail-refused", "parent", time.Now())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if task.Status != "waiting" {
+					t.Fatalf("conditioned claim status = %q, want waiting", task.Status)
+				}
+				h.endWaitingSpawn(t.Context(), task, "refused", "task:42=missing", 78)
+			} else {
+				task = taskFailClaim(t, h, test.seq)
+				if test.sent {
+					// A deadline-exceeded row keeps its node binding (the node
+					// may still answer), so only a sent attempt can time out
+					// into it; an unsent one renews instead (hk 4660).
+					node := hubSpawnRequest{RequestID: t14RequestID(51990 + test.seq), Machine: "machine-a", Args: task.Request.Args, WaitSeconds: 600}
+					bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, node, time.Now().UTC())
+					if err != nil {
+						t.Fatal(err)
+					}
+					task = sentSpawnFixture(t, h.inbox.store, bound)
+				}
+				if _, err := h.inbox.store.completeSpawn(t.Context(), task, test.outcome, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.flushSpawnTaskFailNotices(t.Context())
+			got := taskFailComments(t, fake)
+			if len(got) != 1 {
+				t.Fatalf("comments after first sweep = %d, want 1: %+v", len(got), got)
+			}
+			if want := fmt.Sprintf(test.want, task.Request.RequestID); got[0].Body != want {
+				t.Fatalf("comment = %q, want %q", got[0].Body, want)
+			}
+			if got[0].TaskPath != "/v1/tasks/42/comments" {
+				t.Fatalf("comment path = %q, want /v1/tasks/42/comments", got[0].TaskPath)
+			}
+			h.flushSpawnTaskFailNotices(t.Context())
+			if got := taskFailComments(t, fake); len(got) != 1 {
+				t.Fatalf("comments after second sweep = %d, want 1", len(got))
+			}
+			if pending := taskFailPending(t, h); len(pending) != 0 {
+				t.Fatalf("pending notices = %v, want none", pending)
+			}
+		})
+	}
+}
+
+// A restart after the post marks nothing pending and posts no second comment:
+// the posted-at mark on the operation is the idempotency proof.
+func TestSpawnTaskFail5137RestartPostsNothing(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	storePath := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	first := taskFailHub(t, storePath, client, nil)
+	task := taskFailClaim(t, first, 1)
+	if _, err := first.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	first.flushSpawnTaskFailNotices(t.Context())
+	if got := taskFailComments(t, fake); len(got) != 1 {
+		t.Fatalf("comments before restart = %d, want 1", len(got))
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second := taskFailHub(t, storePath, client, nil)
+	second.flushSpawnTaskFailNotices(t.Context())
+	if got := taskFailComments(t, fake); len(got) != 1 {
+		t.Fatalf("comments after restart sweep = %d, want 1", len(got))
+	}
+	if pending := taskFailPending(t, second); len(pending) != 0 {
+		t.Fatalf("pending notices after restart = %v, want none", pending)
+	}
+}
+
+// An hk outage keeps the comment pending and warns once; once hk answers,
+// exactly one comment lands however many sweeps ran meanwhile.
+func TestSpawnTaskFail5137RetryThenSinglePost(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	var logs bytes.Buffer
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &logs)
+	task := taskFailClaim(t, h, 1)
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.commentStatus = http.StatusServiceUnavailable
+	fake.mu.Unlock()
+	h.flushSpawnTaskFailNotices(t.Context())
+	h.flushSpawnTaskFailNotices(t.Context())
+	if got := taskFailComments(t, fake); len(got) != 0 {
+		t.Fatalf("comments while hk is down = %d, want 0", len(got))
+	}
+	if n := strings.Count(logs.String(), "hub spawn task comment not posted"); n != 1 {
+		t.Fatalf("failure warns = %d, want 1 (one per streak):\n%s", n, logs.String())
+	}
+	if pending := taskFailPending(t, h); len(pending) != 1 {
+		t.Fatalf("pending notices while hk is down = %v, want the one failure", pending)
+	}
+	fake.mu.Lock()
+	fake.commentStatus = 0
+	fake.mu.Unlock()
+	h.flushSpawnTaskFailNotices(t.Context())
+	h.flushSpawnTaskFailNotices(t.Context())
+	got := taskFailComments(t, fake)
+	if len(got) != 1 {
+		t.Fatalf("comments after recovery = %d, want 1: %+v", len(got), got)
+	}
+	if want := "spawn failed request=" + task.Request.RequestID + " rc=1 stage=placement reason=spawn_failed: boom"; got[0].Body != want {
+		t.Fatalf("comment = %q, want %q", got[0].Body, want)
+	}
+	if pending := taskFailPending(t, h); len(pending) != 0 {
+		t.Fatalf("pending notices after recovery = %v, want none", pending)
+	}
+}
+
+func TestSpawnTaskFail5137NoPostWithoutTerminalFailure(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		fake, client, stop := newFakeHandoffkeep(t)
+		t.Cleanup(stop)
+		h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+		task := taskFailClaim(t, h, 1)
+		if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-1", NodeResult: true}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		h.flushSpawnTaskFailNotices(t.Context())
+		if got := taskFailComments(t, fake); len(got) != 0 {
+			t.Fatalf("comments for success = %d, want 0", len(got))
+		}
+	})
+
+	t.Run("no task", func(t *testing.T) {
+		fake, client, stop := newFakeHandoffkeep(t)
+		t.Cleanup(stop)
+		h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+		request := durableSpawnRequest()
+		request.RequestID = t14RequestID(51380)
+		args := replaceSpawnArg(request.Args, "--job", "task-fail-notask")
+		// Drop the --task flag and its value; --parent-job keeps the request
+		// valid without naming an hk task.
+		var kept []string
+		skip := false
+		for _, arg := range args {
+			if skip {
+				skip = false
+				continue
+			}
+			if arg == "--task" {
+				skip = true
+				continue
+			}
+			kept = append(kept, arg)
+		}
+		request.Args = append(kept, "--parent-job", "task-fail-parent")
+		task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "task-fail-notask", "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		h.flushSpawnTaskFailNotices(t.Context())
+		if got := taskFailComments(t, fake); len(got) != 0 {
+			t.Fatalf("comments without --task = %d, want 0", len(got))
+		}
+		if pending := taskFailPending(t, h); len(pending) != 0 {
+			t.Fatalf("pending notices without --task = %v, want none (judged)", pending)
+		}
+	})
+
+	t.Run("retryable then success", func(t *testing.T) {
+		fake, client, stop := newFakeHandoffkeep(t)
+		t.Cleanup(stop)
+		h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+		task := taskFailClaim(t, h, 1)
+		// A node refusal the same request can survive is retryable, not
+		// final: nothing posts. The attempt must have started; an unstarted
+		// timeout renews the attempt instead (hk 4660).
+		node := hubSpawnRequest{RequestID: t14RequestID(51991), Machine: "machine-a", Args: task.Request.Args, WaitSeconds: 600}
+		bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, node, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.inbox.store.completeSpawn(t.Context(), bound, hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:dirty", Host: "machine-a", Retryable: true, NodeResult: true}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		h.flushSpawnTaskFailNotices(t.Context())
+		if got := taskFailComments(t, fake); len(got) != 0 {
+			t.Fatalf("comments for retryable = %d, want 0", len(got))
+		}
+		current, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayed, err := h.inbox.store.resumeCleanedSpawn(t.Context(), current, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.inbox.store.completeSpawn(t.Context(), replayed, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-1", NodeResult: true}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		h.flushSpawnTaskFailNotices(t.Context())
+		if got := taskFailComments(t, fake); len(got) != 0 {
+			t.Fatalf("comments after replay to success = %d, want 0", len(got))
+		}
+	})
+}

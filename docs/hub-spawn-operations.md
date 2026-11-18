@@ -1298,6 +1298,22 @@ stays `<request_id>:<attempt>:<status>`; the submitting lane's is the same id
 with `:<lane>` appended.
 `SPAWNED` stays type `report`.
 
+A spawn that names an hk task (`--task`) and reaches a terminal failure
+(`failed`, `refused` or `deadline_exceeded`) also posts one comment to that
+hk task (hk 5137):
+
+`spawn failed request=<request_id> rc=<rc> stage=<stage> reason=<reason>`
+
+That is the line the wake skill asks sessions to write by hand; the hub
+writing it keeps the stuck-work wait accurate without a session in the loop.
+The comment posts once per request id: the operation carries a posted-at mark
+(`task_fail_notice_ms`, migration `0022_spawn_task_fail_notice.sql`) that
+survives a hub restart, and a post hk refuses for good is dropped loudly
+while any other failure stays pending and retries with the hub's backoff
+(one warn per failure streak). Succeeded spawns, spawns without `--task`,
+and retryable outcomes (which a later attempt may still land) post nothing.
+
+
 **Reviewer jobs a daemon started** (`--role reviewer`, job id starting `mwr-`;
 [how the hub recognises them](quiet-delivery.md#records-kept-in-hk-only)) are
 routed differently when the owner is a design lane (hk 4270, decision 152).
