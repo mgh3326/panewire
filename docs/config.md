@@ -1118,18 +1118,104 @@ Only implementer spawns take over; reviewer and consult children do not.
 Spawns with `--task`, or neither flag and
 no `ARBITER_JOB`, claim as before.
 
-Once that implementer successor lands, the hub also ends the parent's pane
-itself through the jobs-close reap path (`hub_spawn_supersede.go`): a parent
-whose pane is `idle`, `done` or `blocked` closes at landing (a blocked pane
-is proven blocked first, then closed carrying that proof, which the node
-re-reads just before closing; the recheck narrows the race to the close call
-itself, since herdr's pane close takes only the pane id); a parent that is
-still `working` is recorded as
-superseded by the successor (`job.superseded` on the parent) and closed at
-the first sweep where it is no longer working. A parent spawned with
-`--keep` is never closed, the worktree is never removed (the successor may
-be using it), and the parent's hk task is untouched: the successor carries
-it. The owner lane hears one `info` lane.event when the pane closes.
+When that implementer successor lands and its `--parent-job` was typed on the
+submitter's command line, the hub also closes the parent's pane itself
+(`hub_spawn_supersede.go`). Nobody has to close a stopped session that was
+continued with another model. The hub flag `--supersede-close` is **on by
+default** and is only an off switch (`--supersede-close=false`). It is safe to
+leave on because of three rules (hk 5195, consult-5140-d43fccd5):
+
+- **Explicit parents only.** The submission carries `parent_job_explicit`,
+  set only when `panewire spawn` was given `--parent-job` on its command line.
+  A parent filled from `ARBITER_JOB`, a hub-built successor (a quota
+  hand-over, an author ladder step) and a request from an older client (no
+  field) never close anything. Only an `--role implementer` successor takes
+  over, only when it owns the parent's lane (its `--owner` is the parent's
+  owner lane), and never a reviewer or consult child.
+- **A durable row.** The hub stores one `pool_actions` row of kind
+  `supersede_close` per parent (successor, parent node and epoch) beside the
+  quota-stop close rows (docs/node-commands.md, "Hub close protocol"), and the
+  pool action reconciler drives it. It survives a hub restart. The hub writes
+  no hk record of the parent itself (the hub's credential holds no write grant
+  on a job hosted by another node): the node's settlement writes the `lost`
+  record, and a settlement not yet proved, or an hk the hub cannot read,
+  leaves the row pending and is retried, never consumed. A parent spawned with `--keep`, and a parent this
+  hub holds no spawn record for (its `--keep` flag cannot be read), get no
+  row.
+- **A conditional close.** The close is the close-op path (`pane.close_op`) to
+  the parent's node at its epoch. The hub sends it only while the parent's
+  pane is `idle` or `done`: a `working` pane is never forced, and a `blocked`
+  one may be waiting for an answer, so both leave the row pending and the next
+  pass (every 10 seconds) looks again. Inside the same operation the node then
+  re-checks that the pane is still the parent's job (the close journal's
+  ownership, attempt, pane and label checks) and still in the status the hub
+  read, twice around its settle delay. A pane that changed hands, resumed work
+  or has text in its composer is refused, never closed. When the node refused
+  while the pane was still the parent's, the row moves to a new request id (up
+  to five), so a race is not final; a pane that is gone or belongs to
+  another job ends the row.
+
+The close never removes the worktree (the successor may be using it) and never
+touches the parent's hk task: the successor carries it. The parent's hk record
+ends `lost` with `end_reason=superseded_by=<successor>` (written by the node's
+settlement, like every hub close); that end reason is the only marker.
+The owner lane hears one `info` lane.event, `[panewire] closed <parent> on
+<host>: superseded by <successor>`, once the node proves the close settled.
+When an explicit implementer successor request is accepted while the switch is
+on, the hub arms it in `supersede_landings` (Postgres migration
+`0025_supersede_landings.sql`) with the fence generation current at that
+moment. The row becomes a pending intent **in the same transaction that makes
+the spawn `succeeded`**, only if the fence has not moved: if that write fails,
+the outcome is rolled back and recovered through the usual bound-request
+reconciliation, so a landing is never committed without it. A request accepted
+while the switch is off is never armed, and one armed before an off start never
+becomes pending, so replaying an uncommitted outcome under an enabled hub
+cannot give an off-period landing a close. The landing loop (its own goroutine, never the pool action
+reconciler's) queues the row, retrying every minute, 50 intents per pass,
+least recently tried first (the try is recorded before any probe), for 48
+hours, until the row exists or the parent is definitively ineligible.
+
+**The off switch is a durable fence** (consult-5195-002ed32a). A hub started
+with `--supersede-close=false` advances `supersede_fence.generation` before it
+accepts any work, and does not start if it cannot. Every landing intent and
+close row carries the generation it was queued under; a later hub, enabled or
+not, treats any of an older generation as cancelled for dispatch, without a
+sweep having run and whatever the nodes did meanwhile. A cancelled row that
+sent nothing ends. A cancelled row whose request was stored is
+cancellation-only: its node is asked for status, a request that is `none` or
+`registered` is released with the close-release tombstone, and only that
+retires it, so an offline node leaves it pending across restarts; a request
+the node already began closing is settled as usual. A cancelled row creates no
+replacement request. An enabled start only reads the fence; while it is unreadable the hub
+withholds supersede work and leaves it unchanged (it neither ends nor
+cancels anything), and resumes once a read succeeds. Only an explicit off
+start ends pending work. `--supersede-close=false` is refused at startup
+whenever the hub would run without its inbox database (`--delivery-policy off`,
+which never opens it, or an empty `--inbox-store` with no database URL): such a
+start could not record the fence, and a later start on the same store would
+resume what it meant to revoke. The fence lives in the hub's inbox database
+(the one durable store every hub of this deployment shares), not in a separate
+file. A retry of a refused close stays bound to the attempt the refused
+request named, and refused and unknown requests share one retry chain: a
+request that already has a live successor mints no other, and the chain has
+five requests in all. A revoked request whose node reports no attempt at all
+(its job directory expired) retires on that proof, since a close op for it can
+only answer not-a-job. The one gap: a hub that dies between the node's result and the
+spawn's `succeeded` commit commits neither the outcome nor the intent, and is
+recovered like any other uncommitted landing.
+Parents that an earlier hub
+(#678) recorded as superseded in hk are not migrated: their requests carry no
+`parent_job_explicit`, so under the explicit-only rule none of them is
+eligible; close them by hand.
+
+**Rolling back past this change.** A binary without the supersede fence
+dispatches any `pending` `pool_actions` row, whatever its kind. Before such a
+rollback, start the hub once with `--supersede-close=false`: that start ends
+every `supersede_close` row that sent no close request, in the final `refused`
+phase every binary ignores. A row that stored a close request is released by
+the node through the new binary's reconciler; roll back only when
+`SELECT id FROM pool_actions WHERE phase IN ('pending','guarded','settled') AND
+data LIKE '%supersede_close%'` returns no row.
 
 The earlier `job.task_link` event records `status: inherited` and
 `takeover: pending`. After landing, `job.task_rebind` records the outcome:

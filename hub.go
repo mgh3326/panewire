@@ -102,7 +102,12 @@ type HubServerConfig struct {
 	// the queue, before a rollback past parking (hk 4661,
 	// docs/hub-spawn-operations.md#rolling-back-past-parking).
 	SpawnRollbackDrain bool
-	Logger             *slog.Logger
+	// SupersedeClose lets a landed implementer successor that named its parent
+	// with --parent-job close that parent's pane through a durable pool
+	// action (hk 5140, hk 5195). The hub command line defaults it on; a
+	// config built in code leaves it off unless it asks.
+	SupersedeClose bool
+	Logger         *slog.Logger
 	// PlacementPolicyPath is an optional operator-owned JSON policy. Placement
 	// never changes pressure thresholds or dispatches work.
 	PlacementPolicyPath string
@@ -699,27 +704,19 @@ type HubServer struct {
 	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
 	// reads each hk record once while the job stays in its window.
 	reviewerEndSettled map[string]bool
-	// supersededParents records a parent job a landed successor replaced but
-	// whose pane was still working: parent job id to its deferred close. The
-	// hub closes each entry at the first sweep where its pane is no longer
-	// working, through the jobs-close reap path. Guarded by mu.
-	supersededParents map[string]supersededEntry
-	// supersededChecked names the hub jobs whose hk record the deferred
-	// rebuild already read once. A job is checked on the first sweep that
-	// sees it live, so parents that appear after a restart (their nodes
-	// report later) are still re-armed. Guarded by mu.
-	supersededChecked map[string]bool
-	// supersededSweepMu keeps at most one deferred-parent pass in flight;
-	// the Sweep ticker never waits out a hung node (see
-	// startSupersededSweep).
-	supersededSweepMu  sync.Mutex
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool
 	spawnRollbackDrain bool
-	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
-	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
-	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	supersedeClose     bool
+	// supersedeWarned keeps a retried landing from repeating its warn. In
+	// memory only; the durable intent is the supersede_landings row.
+	supersedeWarned sync.Map
+	// supersedeKick wakes the landing loop (wakeSupersedeLandings).
+	supersedeKick    chan struct{}
+	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.
 
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
@@ -959,9 +956,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
-		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
+		inbox: inbox, supersedeKick: make(chan struct{}, 1), spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, consultTimeout: config.ConsultTimeout, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, spawnRollbackDrain: config.SpawnRollbackDrain, alertObservations: defaultHubAlertObservations, logger: config.Logger,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, spawnRollbackDrain: config.SpawnRollbackDrain, supersedeClose: config.SupersedeClose, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
 		poolTriggerInterval: defaultPoolTriggerInterval,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
@@ -987,6 +984,16 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		if cleared > 0 {
 			hub.logger.Info("hub cleared reviewer role reservations", "rows", cleared)
 		}
+	}
+	if err := hub.initSupersedeFence(); err != nil {
+		hub.closeCancel()
+		if hub.inbox != nil {
+			_ = hub.inbox.store.close()
+		}
+		return nil, err
+	}
+	if hub.inbox != nil {
+		hub.inbox.store.landingIntent = hub.supersedeLandingOf
 	}
 	hub.prepareInbox()
 	if hub.inbox != nil {
@@ -2705,7 +2712,6 @@ func (h *HubServer) Sweep() {
 	h.startFleetLoadPublish(now)
 	h.logRouteHits(now)
 	h.sweepOrphanedJobs(now)
-	h.startSupersededSweep()
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)
