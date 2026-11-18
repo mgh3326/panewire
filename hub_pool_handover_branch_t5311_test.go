@@ -58,31 +58,41 @@ func TestExcludeHostArgKeepsTheReplacedList(t *testing.T) {
 	}
 }
 
-func TestOtherHostCanTakeSuccessorNeedsAnAcceptingHost(t *testing.T) {
+func TestOtherHostCanTakeSuccessorNeedsASpawnCapableHost(t *testing.T) {
 	f := handoverFixture(t, "other-host-job", 1, 0)
-	set := func(connected, accepting bool) {
+	type host struct {
+		connected, accepting, state, spawnV2 bool
+	}
+	set := func(h host) {
 		t.Helper()
 		f.hub.mu.Lock()
 		defer f.hub.mu.Unlock()
 		record := f.hub.nodes["machine-b"]
-		record.accepting = accepting
-		if connected {
+		record.accepting = h.accepting
+		record.state = ""
+		if h.state {
+			record.state = "connected"
+		}
+		record.capabilities = map[string]bool{"spawn_v2": h.spawnV2}
+		if h.connected {
 			record.agent = f.destination
 		} else {
 			record.agent = nil
 		}
 	}
 	for _, tc := range []struct {
-		name                 string
-		connected, accepting bool
-		want                 bool
+		name string
+		host host
+		want bool
 	}{
-		{"connected and accepting", true, true, true},
-		{"connected but not accepting", true, false, false},
-		{"accepting but not connected", false, true, false},
+		{"connected, spawn_v2 and accepting", host{connected: true, accepting: true, state: true, spawnV2: true}, true},
+		{"connected but not accepting", host{connected: true, accepting: false, state: true, spawnV2: true}, false},
+		{"accepting but not connected", host{connected: false, accepting: true, state: true, spawnV2: true}, false},
+		{"stale connection state", host{connected: true, accepting: true, state: false, spawnV2: true}, false},
+		{"no spawn_v2 capability", host{connected: true, accepting: true, state: true, spawnV2: false}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			set(tc.connected, tc.accepting)
+			set(tc.host)
 			if got := f.hub.otherHostCanTakeSuccessor("machine-a"); got != tc.want {
 				t.Fatalf("otherHostCanTakeSuccessor=%v, want %v", got, tc.want)
 			}

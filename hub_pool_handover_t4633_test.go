@@ -44,7 +44,10 @@ func handoverFixture(t *testing.T, job string, priority int, expected time.Durat
 // off machine-a, so it needs somewhere else to be placed (hk 5311).
 func acceptSuccessorHost(f *quotaReplaceFixture) {
 	f.hub.mu.Lock()
-	f.hub.nodes["machine-b"].accepting = true
+	record := f.hub.nodes["machine-b"]
+	record.accepting = true
+	record.state = "connected"
+	record.capabilities = map[string]bool{"spawn_v2": true}
 	f.hub.mu.Unlock()
 }
 

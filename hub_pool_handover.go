@@ -222,14 +222,15 @@ func (h *HubServer) nodeResumes(ctx context.Context, host, job string) int {
 	return *ledger.QuotaResumes
 }
 
-// otherHostCanTakeSuccessor reports whether a host other than machine has an
-// open node connection and accepts work, so a successor kept off machine has
-// somewhere to be placed.
+// otherHostCanTakeSuccessor reports whether a host other than machine can take
+// a spec-checkout successor: connected, advertising spawn_v2, and accepting.
+// handleSpawn refuses a checkout spawn on any other host, so one of these is
+// the only place the successor can be placed after the close (hk 5311).
 func (h *HubServer) otherHostCanTakeSuccessor(machine string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for name, record := range h.nodes {
-		if name != machine && record != nil && record.agent != nil && h.acceptingEffectiveLocked(name, record.accepting) {
+		if name != machine && record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_v2"] && h.acceptingEffectiveLocked(name, record.accepting) {
 			return true
 		}
 	}
