@@ -1470,7 +1470,10 @@ design hk:doc `design/2026-11-18/pw-4898-hub-store-mysql` §2-§3).
 - A crash between the work and the delete leaves the row. The next pass redoes
   the work under its idempotency key: the hk placement record is keyed by
   job and attempt, and a lane event by its event id.
-- The upgrade copies every snapshot not yet recorded and every notification not
-  yet delivered into the outboxes once: Postgres in migration
-  `0028_spawn_outboxes.sql`, SQLite in `ensureSpawnOutboxes`, behind a guard
-  row.
+- Every start, on both dialects, makes each outbox equal the history rows still
+  owed (`reconcileSpawnOutboxes`): it adds a row for every snapshot not yet
+  recorded and every notification not yet delivered, and drops a row whose work
+  is done. That carries over the pending rows at the upgrade, and after a
+  rollback it takes in what an older hub binary left, since that binary writes
+  and seals history rows without touching the outboxes. Migration
+  `0028_spawn_outboxes.sql` creates the Postgres tables and does the same copy.

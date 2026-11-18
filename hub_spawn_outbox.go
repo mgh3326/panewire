@@ -77,37 +77,44 @@ func (s *laneInboxStore) dequeueDeliveredSpawnNotice(ctx context.Context, x sqlE
 	return err
 }
 
-// ensureSpawnOutboxes creates the outbox tables and, once per store, copies
-// every snapshot not yet recorded and every notification not yet delivered
-// into them, so nothing pending is lost at the upgrade. The guard row and the
-// copy commit together: a hub that stops half way redoes the copy, and a
-// finished one never rescans. Postgres does the same in migration 0028.
+// ensureSpawnOutboxes creates the SQLite outbox tables and reconciles both
+// outboxes with the history tables (reconcileSpawnOutboxes). Postgres gets its
+// tables from migration 0028.
 func (s *laneInboxStore) ensureSpawnOutboxes(parent context.Context) error {
 	ctx, done := s.op(parent)
 	defer done()
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS placement_record_outbox (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,PRIMARY KEY(request_id,attempt))`,
+		`CREATE TABLE IF NOT EXISTS spawn_notice_outbox (event_id TEXT PRIMARY KEY)`,
+	} {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return s.reconcileSpawnOutboxes(ctx)
+}
+
+// reconcileSpawnOutboxes makes each outbox equal the set of history rows still
+// owed: every snapshot not yet recorded and every notification not yet
+// delivered gets a row, and a row whose work is already done goes. It runs at
+// every start, on both dialects, not once at the upgrade: a hub binary from
+// before the outboxes (a rollback) writes snapshots and notifications and
+// seals them without touching the outboxes, so the first start after returning
+// to this release must carry over what that binary left pending and drop what
+// it finished. All four statements commit together.
+func (s *laneInboxStore) reconcileSpawnOutboxes(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	for _, statement := range []string{
-		`CREATE TABLE IF NOT EXISTS placement_record_outbox (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,PRIMARY KEY(request_id,attempt))`,
-		`CREATE TABLE IF NOT EXISTS spawn_notice_outbox (event_id TEXT PRIMARY KEY)`,
-		`CREATE TABLE IF NOT EXISTS spawn_outbox_backfill (singleton INTEGER PRIMARY KEY CHECK(singleton=1))`,
+		`INSERT INTO placement_record_outbox(request_id,attempt) SELECT request_id,attempt FROM spawn_placement_snapshots WHERE recorded<>1 ON CONFLICT(request_id,attempt) DO NOTHING`,
+		`INSERT INTO spawn_notice_outbox(event_id) SELECT event_id FROM spawn_notifications WHERE delivered<>1 ON CONFLICT(event_id) DO NOTHING`,
+		`DELETE FROM placement_record_outbox WHERE NOT EXISTS (SELECT 1 FROM spawn_placement_snapshots p WHERE p.request_id=placement_record_outbox.request_id AND p.attempt=placement_record_outbox.attempt AND p.recorded<>1)`,
+		`DELETE FROM spawn_notice_outbox WHERE NOT EXISTS (SELECT 1 FROM spawn_notifications n WHERE n.event_id=spawn_notice_outbox.event_id AND n.delivered<>1)`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return err
-		}
-	}
-	marked, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO spawn_outbox_backfill(singleton) VALUES(1)`)
-	if err != nil {
-		return err
-	}
-	if n, _ := marked.RowsAffected(); n == 1 {
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO placement_record_outbox(request_id,attempt) SELECT request_id,attempt FROM spawn_placement_snapshots WHERE recorded<>1`); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO spawn_notice_outbox(event_id) SELECT event_id FROM spawn_notifications WHERE delivered<>1`); err != nil {
 			return err
 		}
 	}

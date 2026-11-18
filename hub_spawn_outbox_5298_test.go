@@ -99,8 +99,6 @@ func TestSpawnOutboxUpgradeBackfillsPendingRows_t5298(t *testing.T) {
 		legacy := []string{`DROP TABLE placement_record_outbox`, `DROP TABLE spawn_notice_outbox`}
 		if s.dialect == laneInboxPostgres {
 			legacy = append(legacy, `DELETE FROM panewire_schema_migrations WHERE version='0028_spawn_outboxes'`)
-		} else {
-			legacy = append(legacy, `DROP TABLE spawn_outbox_backfill`)
 		}
 		for _, statement := range legacy {
 			if _, err := s.db.Exec(statement); err != nil {
@@ -128,16 +126,55 @@ func TestSpawnOutboxUpgradeBackfillsPendingRows_t5298(t *testing.T) {
 		}
 		wantKeys(t, "placement outbox", placementOutboxKeys(t, upgraded), "req-open/1", "req-frozen/2")
 		wantKeys(t, "notice outbox", noticeOutboxKeys(t, upgraded), "ev-pending", "ev-held", "ev-publishing")
-		// Opening again is a no-op: a row the work already removed is not copied back.
-		if _, err := upgraded.db.Exec(`DELETE FROM placement_record_outbox`); err != nil {
+	})
+}
+
+// A hub binary from before the outboxes (a rollback) writes and seals history
+// rows without touching the outboxes. The first start back on this release
+// carries over what it left pending and drops what it finished, on both
+// dialects (review of hk 5298).
+func TestSpawnOutboxReconcilesRowsAnOlderBinaryWrote_t5298(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		if err := s.ensureSpawnTasks(); err != nil {
 			t.Fatal(err)
 		}
-		_ = upgraded.close()
-		again := open()
-		if err := again.ensureSpawnTasks(); err != nil {
+		ctx := context.Background()
+		// This release owes two records and one notice.
+		for _, request := range []string{"req-sealed-later", "req-stays"} {
+			if err := s.saveSpawnPlacementSnapshot(ctx, request, 1, []byte(`{}`), ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.db.Exec(s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered) VALUES(?,?,?,?,?,?,?)`), "ev-finished-later", "req-n", "job", "owner", `{}`, 1, spawnNoticePending); err != nil {
 			t.Fatal(err)
 		}
-		wantKeys(t, "placement outbox after a second open", placementOutboxKeys(t, again))
+		if err := s.enqueueSpawnNotice(ctx, s.db, "ev-finished-later"); err != nil {
+			t.Fatal(err)
+		}
+		// The older binary, while delivery fails: a new pending snapshot and
+		// notification (no outbox row), and the sealing of two owed ones.
+		for _, statement := range []string{
+			`UPDATE spawn_placement_snapshots SET recorded=1 WHERE request_id='req-sealed-later'`,
+			`UPDATE spawn_notifications SET delivered=1 WHERE event_id='ev-finished-later'`,
+		} {
+			if _, err := s.db.Exec(statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.db.Exec(s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,recorded,delivery) VALUES(?,?,?,?,?)`), "req-old-binary", 1, `{}`, 0, ``); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered) VALUES(?,?,?,?,?,?,?)`), "ev-old-binary", "req-o", "job", "owner", `{}`, 2, spawnNoticePending); err != nil {
+			t.Fatal(err)
+		}
+		_ = s.close()
+		back := open()
+		if err := back.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		wantKeys(t, "placement outbox after the rollback", placementOutboxKeys(t, back), "req-stays/1", "req-old-binary/1")
+		wantKeys(t, "notice outbox after the rollback", noticeOutboxKeys(t, back), "ev-old-binary")
 	})
 }
 

@@ -170,7 +170,11 @@ func liveExclusions(exclusions []hubSpawnExclusion, now time.Time) []hubSpawnExc
 
 func (s *laneInboxStore) ensureSpawnTasks() error {
 	if s.dialect == laneInboxPostgres {
-		return nil
+		// The schema is migrated; the outboxes still reconcile with the history
+		// at every start (hk 5298).
+		ctx, done := s.op(s.life)
+		defer done()
+		return s.reconcileSpawnOutboxes(ctx)
 	}
 	ctx, done := s.op(s.life)
 	defer done()
