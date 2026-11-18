@@ -63,6 +63,12 @@ type fakeHandoffkeep struct {
 	// hub-side marker guard is exercised against a server whose retire write
 	// the listing does not observe (#658).
 	retiredMarkerStaysUndelivered bool
+	// commentStatus, when set, is the reply to every POST /v1/tasks/{id}/comments,
+	// so a test can fail the spawn-failure task comment and watch it retry.
+	commentStatus int
+	// comments records every task comment body in arrival order, keyed by the
+	// task id path the POST named.
+	comments []fakeHandoffkeepComment
 	// observe runs at the start of every request, before any reply, so a test
 	// can inspect hub state at the exact moment handoffkeep is called.
 	observe func(method, path string)
@@ -77,6 +83,11 @@ type fakeHandoffkeepCall struct {
 	Path   string
 	Query  string
 	Body   map[string]any
+}
+
+type fakeHandoffkeepComment struct {
+	TaskPath string
+	Body     string
 }
 
 func newFakeHandoffkeep(t *testing.T) (*fakeHandoffkeep, *handoffkeepRelayClient, func()) {
@@ -211,6 +222,21 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments"):
+		f.mu.Lock()
+		reply := f.commentStatus
+		count := len(f.comments)
+		if reply == 0 {
+			f.comments = append(f.comments, fakeHandoffkeepComment{TaskPath: r.URL.Path, Body: asString(body["body"])})
+			count = len(f.comments)
+		}
+		f.mu.Unlock()
+		if reply == 0 {
+			reply = http.StatusCreated
+		}
+		w.WriteHeader(reply)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": count, "task_id": 0, "body": asString(body["body"]), "author": "svc-panewire"})
+
 	default:
 		if status != http.StatusCreated && status != http.StatusOK {
 			w.WriteHeader(status)

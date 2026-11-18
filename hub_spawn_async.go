@@ -494,6 +494,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			h.spawnCoordinatorScan(ctx, schedule)
 		}
 		h.flushSpawnNotifications(ctx)
+		// Terminal spawn failures with --task owe their hk task one comment (hk
+		// 5137); the sweep posts each once and retries failures with backoff.
+		h.flushSpawnTaskFailNotices(ctx)
 		select {
 		case <-ctx.Done():
 			return
