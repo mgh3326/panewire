@@ -637,6 +637,7 @@ func TestLoopLedgerMidnightRolloverKeepsLiveness(t *testing.T) {
 	now := time.Date(2026, 11, 18, 23, 59, 50, 0, time.UTC)
 	h := loopLedgerTestHub(t, &now, nil)
 	ctx := context.Background()
+	h.startedAt = now.Add(-2 * time.Hour)
 
 	for _, m := range loopMechanisms {
 		h.loopTick(m)
