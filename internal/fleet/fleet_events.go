@@ -150,6 +150,13 @@ func (a *App) placementEvent(s Spawn, rec map[string]any, err error) {
 	if err != nil || rec == nil || s.DryRun {
 		return
 	}
+	// The placed selection's SWE-2 drops count once, here: a dry run, a
+	// refusal and a plan query never reach this point.
+	if a.OnSelectionDrops != nil {
+		if drops := selectionDrops(s.Sel); len(drops) > 0 {
+			a.OnSelectionDrops(drops)
+		}
+	}
 	chosen, _ := rec["chose"].(string)
 	ranking, _ := rec["ranking"].(string)
 	if src, _ := rec["source"].(string); src == "forced" {

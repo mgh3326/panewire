@@ -1140,11 +1140,12 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 				}
 			}
 			if x.reason == "" && IsFreeRung(x.row.Profile) {
-				// One concurrent free-band launch per account: a burst's second
-				// launch already moves to another pool (hk 4765).
+				// Concurrent free-band launches per account are capped by
+				// [quota].free_band_per_account (default 1): a burst's launch
+				// past the cap already moves to another pool (hk 4765).
 				if key, live := capGate.freeAccountFull(ctx, binding.key); key != "" {
 					x.reason, x.code = reasonPoolAtCap, outcomeQuotaExhausted
-					x.cap, x.capLive, x.capLimit = key, live, freeBandPerAccountLimit
+					x.cap, x.capLive, x.capLimit = key, live, capGate.freeLimit
 					x.outcome = "dropped:" + x.reason
 				}
 			}

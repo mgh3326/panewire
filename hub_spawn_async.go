@@ -27,6 +27,9 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 		app.LiveSpawnProfiles = h.liveSpawnProfiles
 		app.LivePlacedByAccount = h.liveProfilesByAccount
 		app.LiveAccountJobs = h.liveAccountJobs
+		// Each placed selection's dropped SWE-2 candidates count into the daily
+		// loops row (docs/loops.md, selection_drops).
+		app.OnSelectionDrops = h.noteSelectionDrops
 		// The hub owns the durable account credit marks: its in-process
 		// selection reads them directly, in addition to the snapshot (hk 5138).
 		app.AccountCreditMarks = func(context.Context) (map[string]time.Time, error) {

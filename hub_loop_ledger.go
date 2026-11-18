@@ -191,6 +191,24 @@ type loopLedgerState struct {
 	// nodeRowsWrittenThrough records the latest date whose daily row and prune
 	// have completed. Reports for that date or earlier are dropped.
 	nodeRowsWrittenThrough string
+	// drops counts the SWE-2 candidates placed selections dropped, by UTC date,
+	// reason and account (the selection_drops group of the daily row). A
+	// date's counts leave with its row.
+	drops map[string]map[selectionDropKey]int64
+}
+
+// selectionDropKey is one selection_drops row: a drop reason on one account.
+type selectionDropKey struct {
+	reason  string
+	account string
+}
+
+// selectionDropRow is one entry of the daily row's selection_drops group.
+type selectionDropRow struct {
+	Machine string `json:"machine"`
+	Reason  string `json:"reason"`
+	Account string `json:"account"`
+	Dropped int64  `json:"dropped"`
 }
 
 // nodeLoopReport is one node's latest heartbeat ledger bucket. Rows reuse
@@ -214,6 +232,7 @@ func newLoopLedgerState() *loopLedgerState {
 		nodeFirstSeen:           make(map[string]time.Time),
 		nodeConsecutiveNoReport: make(map[string]int),
 		nodeNoticeSent:          make(map[string]string),
+		drops:                   make(map[string]map[selectionDropKey]int64),
 	}
 }
 
@@ -485,6 +504,48 @@ type loopsRowDoc struct {
 	At      time.Time       `json:"at"`
 	Machine string          `json:"machine"`
 	Rows    []loopsRowEntry `json:"rows"`
+	// SelectionDrops is the selection drops row group: SWE-2 candidates the
+	// placed selections dropped, by reason and account (docs/loops.md).
+	SelectionDrops []selectionDropRow `json:"selection_drops"`
+}
+
+// noteSelectionDrops counts the SWE-2 candidates one placed selection dropped
+// into today's UTC date, by reason and account. A hub without a clock skips the
+// count, as every ledger call does.
+func (h *HubServer) noteSelectionDrops(drops []fleet.SelectionDrop) {
+	now, ok := h.loopNow()
+	if !ok || len(drops) == 0 {
+		return
+	}
+	st := h.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	date := loopDateOf(now)
+	byKey := st.drops[date]
+	if byKey == nil {
+		byKey = make(map[selectionDropKey]int64)
+		st.drops[date] = byKey
+	}
+	for _, d := range drops {
+		byKey[selectionDropKey{reason: d.Reason, account: d.Account}]++
+	}
+}
+
+// selectionDropRowsLocked returns date's selection_drops group, sorted by
+// reason then account so the document body is deterministic. The caller holds
+// st.mu.
+func selectionDropRowsLocked(st *loopLedgerState, date string) []selectionDropRow {
+	out := make([]selectionDropRow, 0, len(st.drops[date]))
+	for key, n := range st.drops[date] {
+		out = append(out, selectionDropRow{Machine: "hub", Reason: key.reason, Account: key.account, Dropped: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Reason != out[j].Reason {
+			return out[i].Reason < out[j].Reason
+		}
+		return out[i].Account < out[j].Account
+	})
+	return out
 }
 
 // loopsRowDocument builds the row for date from that date's bucket. Every
@@ -515,7 +576,7 @@ func (h *HubServer) loopsRowDocument(date string, now time.Time) loopsRowDoc {
 		})
 	}
 	rows = append(rows, h.nodeLoopsRowsLocked(st, date)...)
-	return loopsRowDoc{V: loopsRowVersion, At: now.UTC(), Machine: "hub", Rows: rows}
+	return loopsRowDoc{V: loopsRowVersion, At: now.UTC(), Machine: "hub", Rows: rows, SelectionDrops: selectionDropRowsLocked(st, date)}
 }
 
 // nodeLoopsRowsLocked returns the merged per-machine rows for date: each
@@ -651,7 +712,14 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 	st := h.loopLedger()
 	st.mu.Lock()
 	var pending []string
+	dates := map[string]bool{}
 	for date := range st.days {
+		dates[date] = true
+	}
+	for date := range st.drops {
+		dates[date] = true
+	}
+	for date := range dates {
 		if date >= today {
 			continue
 		}
@@ -695,6 +763,7 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 		}
 		st.mu.Lock()
 		delete(st.days, date)
+		delete(st.drops, date)
 		h.pruneNodeLoopDayLocked(st, date)
 		if st.nodeRowsWrittenThrough < date {
 			st.nodeRowsWrittenThrough = date
