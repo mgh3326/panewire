@@ -348,6 +348,11 @@ first and exits when it is held.
   intent; they fail closed on an unreadable ledger. They keep the end lock
   through their hk write, pane close, lease release and `job.reaped`. The
   job-dir TTL keeps a dir whose intent is open (`hub-close-open`).
+- A quota-stop announcement (`job.lost reason=quota_stop`, not final) takes
+  the job's end lock too, then the operation lock, and writes nothing when
+  the re-read ledger already holds another end (a revoke, a completion, a
+  reap): as the newest end it would read as a live hand-over and mask that
+  end. Both lock waits end when the caller's context does.
 - When no intent is open any more (settled, cancelled, or made stale by a
   new attempt), the fence is released and the node re-arms the watchers of
   live jobs, since a watcher that met the fence exited.

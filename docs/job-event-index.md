@@ -49,8 +49,8 @@ changed, not a read of every event file.
 
 Writers that rewrite an event file in place long after creating it would not be
 seen. None does: `panewire emit`, the completion and close writers in `job.go`
-and `job_close.go`, and `writeHubRevocation` publish by link or rename, and a
-create-then-write publish finishes inside the racy window above, which keeps
+and `job_close.go`, and `writeHubRevocation` allocate sequence and publish under
+`.wrk-events.lock` by link or rename, and a create-then-write publish finishes inside the racy window above, which keeps
 the directory being read again meanwhile.
 
 A read that fails (an event file that cannot be opened, or whose stat fails) says

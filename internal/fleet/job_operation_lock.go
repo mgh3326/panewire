@@ -44,7 +44,11 @@ func TryLockJobOperation(jobDir string) (unlock func(), err error) {
 // A job with no directory under a.Jobs has no job-dir ledger for the node's end
 // to read, and that end refuses such a job (ledger_missing), so there is nothing
 // to order against and the lock is a no-op.
-func (a *App) lockJobOperation(id string, wait time.Duration) (func(), error) {
+//
+// The wait also ends when ctx is done, with ctx's error, so a canceled watcher
+// or a stopping daemon never waits out the whole bound behind a slow holder
+// (hk 4761, from #593 round 6).
+func (a *App) lockJobOperation(ctx context.Context, id string, wait time.Duration) (func(), error) {
 	if _, err := os.Lstat(filepath.Join(a.Jobs, id)); errors.Is(err, os.ErrNotExist) {
 		return func() {}, nil
 	}
@@ -54,7 +58,11 @@ func (a *App) lockJobOperation(id string, wait time.Duration) (func(), error) {
 		if !errors.Is(err, ErrJobOperationBusy) || !time.Now().Before(deadline) {
 			return unlock, err
 		}
-		time.Sleep(jobOperationLockPoll)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(jobOperationLockPoll):
+		}
 	}
 }
 
