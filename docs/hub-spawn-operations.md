@@ -1190,6 +1190,13 @@ entry executing until the node settles it from the pane (see
 answers such a replay `unknown` instead of `reconciling` (an older hub ignores
 that answer and keeps the request pending, as before).
 
+A completed hk job also settles a request past its deadline (hk 5267): when the
+job record reads `completed` with a pane, the request's node host, and the
+request's `--task` id, the hub settles the request `succeeded` at the next probe
+(`settleCompletedSpawn`), without a node connection. A landing receipt that
+never reached the hub is therefore not required. Then a correcting `SPAWNED`
+follows any unresolved notice already sent.
+
 Past the deadline, an `unknown` answer from the bound, connected node makes the
 hub read that node's panes (`agents.list`, at most once a minute per request):
 
@@ -1293,9 +1300,26 @@ The outbox hands each record to lane delivery, which stores one handoffkeep
 parent lane, then injects it. A restarted hub retries undelivered rows. Delivery
 is at least once; consumers use the event id
 (`<request_id>:<attempt>:<status>`) to deduplicate. Timeout emits
-`SPAWN_FAILED … reason=timeout` as an observation with `deadline_exceeded`, not
-proof of cleanup. A later verified landing may emit a distinct `SPAWNED`
-reconciliation event.
+a bound request past its deadline (`deadline_exceeded`) notifies nothing, because
+it is not final (hk 5267). Its outcome is decided by one of three things, and
+then the owner hears it once:
+
+- a late node result or a completed hk job settles it: `SPAWNED`
+  (`<request_id>:<attempt>:succeeded`); a late failure settles it `SPAWN_FAILED`
+  with that failure;
+- the stale probe's horizon, 30 minutes past the deadline
+  (`spawnStuckAfter`), with no answer and no final proof: one unresolved
+  `SPAWN_FAILED … stage=landing reason=deadline_exceeded_unresolved replay=no`
+  (`<request_id>:<attempt>:deadline_unresolved`, plus `:<lane>` for the
+  submitting lane). Ownership is kept. Its SPAWN_FAILED error event is recorded
+  once.
+- a landing after that unresolved notice: one correcting `SPAWNED … request=<id>
+  (after an earlier unresolved notice)` under the same request id, as the
+  request's last outcome. Its event id is the ordinary `…:succeeded`.
+
+An unbound timeout (the node never took the request) is not held by this rule.
+Each event id is fixed and unique per attempt, so a restart never repeats a
+notice.
 
 `SPAWN_FAILED` names the job, request, exit status, stage, `replay=yes|no`
 (whether replaying the saved request can help), reason and fix. It has
@@ -1362,8 +1386,9 @@ the requester's copy is an ordinary lane event. A design session's own spawns, a
 
 `reconciling` (the node's answer is unknown, or the node is disconnected) writes
 no `spawn_notifications` row, so neither lane is notified. The owner keeps
-ownership. A request that later lands notifies one `SPAWNED`; one that fails or
-passes its deadline notifies one `SPAWN_FAILED`, as above. The hub journal logs
+ownership. A request that later lands notifies one `SPAWNED`; one that fails
+notifies one `SPAWN_FAILED`. A bound deadline notifies nothing until it is final
+(see Notifications and telemetry, hk 5267). The hub journal logs
 the transition as `hub spawn reconciling`, not as a refusal, and captures no
 Sentry event for it.
 

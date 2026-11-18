@@ -824,8 +824,9 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 			if _, err = second.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Pane: "pane-1"}, time.Now()); err != nil {
 				t.Fatal(err)
 			}
+			// The bound timeout is held (hk 5267): only the landing's SPAWNED is queued.
 			var notifications int
-			if err = second.db.QueryRow(`SELECT count(*) FROM spawn_notifications`).Scan(&notifications); err != nil || notifications != 2 {
+			if err = second.db.QueryRow(`SELECT count(*) FROM spawn_notifications`).Scan(&notifications); err != nil || notifications != 1 {
 				t.Fatalf("outbox %d %v", notifications, err)
 			}
 			if _, err = store.db.Exec(`UPDATE spawn_notifications SET delivered=1`); err != nil {

@@ -1736,6 +1736,9 @@ func spawnNotificationType(result hubSpawnOutcome) string {
 func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 	if result.RC == 0 {
 		text := fmt.Sprintf("[panewire] SPAWNED %s host=%s profile=%s pane=%s model=%s", job, result.Host, result.Profile, result.Pane, result.Model)
+		if result.AfterUnresolved {
+			text += " request=" + request + " (after an earlier unresolved notice)"
+		}
 		if result.LaneUnregistered {
 			text += " LANE_UNREGISTERED: hub lane registration failed after one retry; this pane's findings are not routed"
 		}

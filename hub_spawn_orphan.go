@@ -77,6 +77,11 @@ func (h *HubServer) reprobeStaleSpawn(parent context.Context, task hubSpawnTask)
 	defer cancel()
 	transport := directSpawnTransport{h: h, task: task}
 	_, _ = transport.dispatch(ctx, *task.Node)
+	// A completed job is the landing proof even when no receipt reached the
+	// hub (hk 5267). It settles at any probe, before the horizon.
+	if h.settleCompletedSpawn(parent, task) {
+		return
+	}
 	h.noteStuckSpawn(task)
 	if h.now().Sub(task.Deadline) < spawnStuckAfter {
 		return
@@ -92,6 +97,14 @@ func (h *HubServer) reprobeStaleSpawn(parent context.Context, task hubSpawnTask)
 	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOrphanedReason, Host: spawnTaskHost(task), NodeResult: true}
 	if released, why := h.finishUnownedSpawn(parent, current, outcome); !released {
 		h.logger.Info("hub kept a stale spawn", "request_id", task.Request.RequestID, "job", task.Job, "host", spawnTaskHost(task), "reason", why)
+		// No final answer at the horizon: the owner hears it once, as unresolved
+		// (hk 5267). A landing that comes later is corrected, not repeated.
+		queued, err := h.inbox.store.noteUnresolvedSpawn(parent, current, h.now())
+		if err != nil {
+			h.logger.Warn("hub could not queue the unresolved spawn notice", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
+		} else if queued {
+			h.recordUnresolvedSpawnError(current)
+		}
 	}
 }
 
