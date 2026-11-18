@@ -6,14 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// poolActionSchema is also installed by Postgres migration 0021.
+// poolActionSchema is also installed by Postgres migration 0021; final_ms is
+// Postgres 0028's column, which an older SQLite file gets from ensureSpawnTasks.
 const poolActionSchema = `CREATE TABLE IF NOT EXISTS pool_actions (
  id TEXT PRIMARY KEY, job TEXT NOT NULL, node TEXT NOT NULL,
  epoch BIGINT NOT NULL CHECK(epoch>0),
  phase TEXT NOT NULL CHECK(phase IN ('pending','guarded','settled','done','refused')),
- data TEXT NOT NULL)`
+ data TEXT NOT NULL, final_ms BIGINT NOT NULL DEFAULT 0)`
 
 const (
 	poolActionPending = "pending"
@@ -41,10 +44,16 @@ type poolActionData struct {
 	RetryID                   string
 	RetryAfter                int64
 	RetryCount                uint8
-	// Kind is "" for the quota-stop close and poolActionKindSupersedeClose
-	// for a successor closing its parent (hub_spawn_supersede.go).
+	// StuckSince is the first observation of an unresolved close/release
+	// failure, in Unix milliseconds. It survives a hub restart.
+	StuckSince int64 `json:",omitempty"`
+	// Kind is "" for the quota-stop close (reviewer, consult),
+	// poolActionKindSupersedeClose for a successor closing its parent
+	// (hub_spawn_supersede.go), poolActionKindHandover for an implementer
+	// hand-over and poolActionKindWait for a waited stop (hk 4633).
 	Kind      string         `json:",omitempty"`
 	Supersede *poolSupersede `json:",omitempty"`
+	Handover  *poolHandover  `json:",omitempty"`
 	// Acked is set once the node confirmed the hub's ack of its
 	// intent_cancelled answer (hk 5073); a guarded action then asks no more.
 	Acked bool
@@ -88,6 +97,8 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	// Carry the same budget to an unknown successor: a chain of uncertain
 	// closes must not mint a fresh request on every reconciliation pass.
 	retry.Data.RetryAfter, retry.Data.RetryCount = current.RetryAfter, current.RetryCount
+	// A new row has its own notice and its own failure interval.
+	retry.Data.StuckSince = 0
 	retryData, err := json.Marshal(retry.Data)
 	if err != nil {
 		return false, err
@@ -103,7 +114,7 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	if n, err := result.RowsAffected(); err != nil || n != 1 {
 		return false, errors.New("pool action changed before retry")
 	}
-	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data) VALUES(?,?,?,?,?,?)`), retry.ID, retry.Job, retry.Node, retry.Epoch, retry.Phase, string(retryData)); err != nil {
+	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,?)`), retry.ID, retry.Job, retry.Node, retry.Epoch, retry.Phase, string(retryData), poolFinalMS(retry.Phase, now)); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -134,26 +145,66 @@ func (s *laneInboxStore) poolRetryReady(parent context.Context, action poolActio
 	return phase == poolActionRefused, err
 }
 
-func (s *laneInboxStore) insertPoolAction(parent context.Context, action poolAction) error {
+func (s *laneInboxStore) insertPoolAction(parent context.Context, action poolAction, now time.Time) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
 	data, err := json.Marshal(action.Data)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data) VALUES(?,?,?,?,?,?)`), action.ID, action.Job, action.Node, action.Epoch, action.Phase, string(data))
+	_, err = s.db.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,?)`), action.ID, action.Job, action.Node, action.Epoch, action.Phase, string(data), poolFinalMS(action.Phase, now))
 	return err
 }
 
-func (s *laneInboxStore) savePoolAction(parent context.Context, action poolAction) error {
+func (s *laneInboxStore) savePoolAction(parent context.Context, action poolAction, now time.Time) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
 	data, err := json.Marshal(action.Data)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE pool_actions SET phase=?,data=? WHERE id=?`), action.Phase, string(data), action.ID)
+	// final_ms is set once, by the write that makes the row final (hk 5297).
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE pool_actions SET phase=?,data=?,final_ms=CASE WHEN final_ms=0 THEN ? ELSE final_ms END WHERE id=?`), action.Phase, string(data), poolFinalMS(action.Phase, now), action.ID)
 	return err
+}
+
+// observePoolActionStuck changes only the persisted failure timer, without
+// overwriting a close argument or phase concurrently saved by another pass.
+func (s *laneInboxStore) observePoolActionStuck(parent context.Context, id string, stuck bool, now time.Time) (poolAction, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	var action poolAction
+	var data string
+	action.ID = id
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT job,node,epoch,phase,data FROM pool_actions WHERE id=?`), id).Scan(&action.Job, &action.Node, &action.Epoch, &action.Phase, &data)
+	if err != nil {
+		return action, err
+	}
+	if err := json.Unmarshal([]byte(data), &action.Data); err != nil {
+		return action, err
+	}
+	if action.Phase != poolActionPending {
+		return action, nil
+	}
+	if stuck && action.Data.StuckSince == 0 {
+		action.Data.StuckSince = now.UnixMilli()
+	} else if !stuck && action.Data.StuckSince != 0 {
+		action.Data.StuckSince = 0
+	} else {
+		return action, nil
+	}
+	updated, err := json.Marshal(action.Data)
+	if err != nil {
+		return action, err
+	}
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE pool_actions SET data=? WHERE id=? AND phase=? AND data=?`), string(updated), id, poolActionPending, data)
+	if err != nil {
+		return action, err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return action, errors.New("pool action changed while recording stuck time")
+	}
+	return action, nil
 }
 
 func (s *laneInboxStore) pendingPoolAction(parent context.Context, job string) (string, error) {
@@ -239,7 +290,7 @@ func (h *HubServer) lockWithoutPoolAction(ctx context.Context, job string) (func
 		unlock()
 		return nil, false
 	}
-	id, err := h.inbox.store.pendingPoolAction(ctx, job)
+	id, err := h.inbox.store.poolActionOwns(ctx, job)
 	if err != nil || id != "" {
 		unlock()
 		return nil, false
@@ -247,9 +298,42 @@ func (h *HubServer) lockWithoutPoolAction(ctx context.Context, job string) (func
 	return unlock, true
 }
 
-// supersedeActionsOf lists the supersede_close rows of job, any phase: one row
-// per parent, so a final row also stops a second one.
-func (s *laneInboxStore) supersedeActionsOf(parent context.Context, job string) ([]poolAction, error) {
+// poolActionOwns names the pool action that owns job, or "": a close not
+// yet settled (pending or guarded), or a handover row that is not final —
+// settled included, while it still owes its successor (hk 4633). It is the
+// one fence reassignment, role release, quota replacement and the sweep check.
+func (s *laneInboxStore) poolActionOwns(parent context.Context, job string) (string, error) {
+	if id, err := s.pendingPoolAction(parent, job); err != nil || id != "" {
+		return id, err
+	}
+	rows, err := s.poolActionsOf(parent, job)
+	if err != nil {
+		return "", err
+	}
+	for _, action := range rows {
+		if action.Data.Kind == poolActionKindHandover && action.Phase != poolActionDone && action.Phase != poolActionRefused {
+			return action.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// poolWaitResets lists the resets of the stops already waited out for job.
+func (s *laneInboxStore) poolWaitResets(parent context.Context, job string) ([]int64, error) {
+	rows, err := s.poolActionsOf(parent, job)
+	if err != nil {
+		return nil, err
+	}
+	var resets []int64
+	for _, action := range rows {
+		if action.Data.Kind == poolActionKindWait && action.Data.Handover != nil {
+			resets = append(resets, action.Data.Handover.Reset)
+		}
+	}
+	return resets, nil
+}
+
+func (s *laneInboxStore) poolActionsOf(parent context.Context, job string) ([]poolAction, error) {
 	ctx, cancel := s.op(parent)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,job,node,epoch,phase,data FROM pool_actions WHERE job=? ORDER BY id`), job)
@@ -267,17 +351,50 @@ func (s *laneInboxStore) supersedeActionsOf(parent context.Context, job string) 
 		if err := json.Unmarshal([]byte(data), &action.Data); err != nil {
 			return nil, err
 		}
+		actions = append(actions, action)
+	}
+	return actions, rows.Err()
+}
+
+// claimHandoverSuccessor claims a hand-over's stored successor. A replay
+// with the same request id answers the existing row (claimSpawn). On the
+// first claim the old job's task role, still reserved for it while its row
+// owns the job, passes to the successor in the same transaction, so no other
+// spawn for the task is admitted between the two (hk 4633).
+func (s *laneInboxStore) claimHandoverSuccessor(parent context.Context, request fleet.Submission, job, owner, oldRequest string, now time.Time) (hubSpawnTask, bool, error) {
+	ctx, cancel := s.op(parent)
+	var role sql.NullString
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT task_role FROM spawn_reservations WHERE request_id=?`), oldRequest).Scan(&role)
+	cancel()
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return hubSpawnTask{}, false, err
+	}
+	if !role.Valid || role.String == "" {
+		return s.claimSpawn(parent, request, job, owner, now)
+	}
+	return s.claimSpawnReplacing(parent, request, job, owner, now, oldRequest, role.String, "accepted")
+}
+
+// supersedeActionsOf lists the supersede_close rows of job, any phase: one row
+// per parent, so a final row also stops a second one.
+func (s *laneInboxStore) supersedeActionsOf(parent context.Context, job string) ([]poolAction, error) {
+	rows, err := s.poolActionsOf(parent, job)
+	if err != nil {
+		return nil, err
+	}
+	var actions []poolAction
+	for _, action := range rows {
 		if action.Data.Kind == poolActionKindSupersedeClose {
 			actions = append(actions, action)
 		}
 	}
-	return actions, rows.Err()
+	return actions, nil
 }
 
 // replaceSupersedeAction ends a refused supersede row and stores its next
 // request in one transaction, so a restart never sees two live rows for a
 // parent or none.
-func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, next poolAction) error {
+func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, next poolAction, now time.Time) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -289,18 +406,20 @@ func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, nex
 	if err != nil {
 		return err
 	}
+	// A new row has its own notice and its own failure interval.
+	next.Data.StuckSince = 0
 	nextData, err := json.Marshal(next.Data)
 	if err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE pool_actions SET phase=?,data=? WHERE id=? AND phase=?`), poolActionRefused, string(oldData), old.ID, poolActionPending)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE pool_actions SET phase=?,data=?,final_ms=? WHERE id=? AND phase=?`), poolActionRefused, string(oldData), poolFinalMS(poolActionRefused, now), old.ID, poolActionPending)
 	if err != nil {
 		return err
 	}
 	if n, err := result.RowsAffected(); err != nil || n != 1 {
 		return errors.New("supersede action changed before retry")
 	}
-	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data) VALUES(?,?,?,?,?,?)`), next.ID, next.Job, next.Node, next.Epoch, next.Phase, string(nextData)); err != nil {
+	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,?)`), next.ID, next.Job, next.Node, next.Epoch, next.Phase, string(nextData), poolFinalMS(next.Phase, now)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -449,14 +568,14 @@ func (s *laneInboxStore) endSupersedeLandings(parent context.Context, before tim
 
 // insertSupersedeAction stores a supersede_close row only while the fence is
 // still at generation, in one statement.
-func (s *laneInboxStore) insertSupersedeAction(parent context.Context, action poolAction, generation int64) error {
+func (s *laneInboxStore) insertSupersedeAction(parent context.Context, action poolAction, generation int64, now time.Time) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
 	data, err := json.Marshal(action.Data)
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data) SELECT ?,?,?,?,?,? FROM supersede_fence WHERE singleton=1 AND generation=?`), action.ID, action.Job, action.Node, action.Epoch, action.Phase, string(data), generation)
+	result, err := s.db.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) SELECT ?,?,?,?,?,?,? FROM supersede_fence WHERE singleton=1 AND generation=?`), action.ID, action.Job, action.Node, action.Epoch, action.Phase, string(data), poolFinalMS(action.Phase, now), generation)
 	if err != nil {
 		return err
 	}
@@ -470,7 +589,7 @@ func (s *laneInboxStore) insertSupersedeAction(parent context.Context, action po
 // stored no close request, so nothing was ever sent for it. The off start runs
 // it after advancing the fence: the revocation of such a row is then a plain
 // final phase, which any binary reads, with no node I/O.
-func (s *laneInboxStore) refuseUnsentSupersedeActions(parent context.Context) error {
+func (s *laneInboxStore) refuseUnsentSupersedeActions(parent context.Context, now time.Time) error {
 	actions, err := s.activePoolActions(parent)
 	if err != nil {
 		return err
@@ -480,7 +599,7 @@ func (s *laneInboxStore) refuseUnsentSupersedeActions(parent context.Context) er
 			continue
 		}
 		action.Phase = poolActionRefused
-		if err := s.savePoolAction(parent, action); err != nil {
+		if err := s.savePoolAction(parent, action, now); err != nil {
 			return err
 		}
 	}

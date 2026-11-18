@@ -1435,6 +1435,17 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 		}
 	}
+	unlock, err := h.poolActionLocks.lock(ctx, current.Job)
+	if err != nil {
+		releaseAdmission()
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	err = h.saveOwnerAssignment(hubOwnerAssignment{Job: current.Job, Node: node.Machine, Epoch: 1}, current.Status == "bound")
+	unlock()
+	if err != nil {
+		releaseAdmission()
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
 	started, err := h.inbox.store.beginSpawnSend(ctx, current)
 	if err != nil || !started {
 		releaseAdmission()
@@ -1632,6 +1643,9 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 		// The first completion of a request is the launch outcome; a
 		// replayed completion must not count twice.
 		h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
+	}
+	if result.RC == 0 {
+		h.seedLandedOwner(t.task.Job, node.Machine)
 	}
 	return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error, CheckoutMode: result.CheckoutMode}, nil
 }

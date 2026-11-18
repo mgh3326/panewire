@@ -479,12 +479,12 @@ func TestSpawnQueueMigrationBackfills_t5299(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		body, err := hubPostgresMigrations.ReadFile("hub_postgres_migrations/0028_spawn_queue_outbox.sql")
+		body, err := hubPostgresMigrations.ReadFile("hub_postgres_migrations/0030_spawn_queue_outbox.sql")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if s.dialect == laneInboxPostgres {
-			if _, err := s.db.Exec(`DELETE FROM panewire_schema_migrations WHERE version='0028_spawn_queue_outbox'`); err != nil {
+			if _, err := s.db.Exec(`DELETE FROM panewire_schema_migrations WHERE version='0030_spawn_queue_outbox'`); err != nil {
 				t.Fatal(err)
 			}
 			_ = s.close()

@@ -30,38 +30,23 @@ import (
 	"database/sql"
 )
 
-// spawnQueueTable is the SQLite form; the Postgres form is migration 0028.
+// spawnQueueTable is the SQLite form; the Postgres form is migration 0030.
 const spawnQueueTable = `CREATE TABLE IF NOT EXISTS spawn_queue (request_id TEXT PRIMARY KEY,next_check_ms BIGINT NOT NULL DEFAULT 0)`
 
 // spawnQueueNextCheckIndex serves the coordinator's due-time read.
 const spawnQueueNextCheckIndex = `CREATE INDEX IF NOT EXISTS spawn_queue_next_check ON spawn_queue(next_check_ms,request_id)`
 
 // taskFailNoticeOutboxTable is the SQLite form; the Postgres form is
-// migration 0028.
+// migration 0030.
 const taskFailNoticeOutboxTable = `CREATE TABLE IF NOT EXISTS task_fail_notice_outbox (request_id TEXT PRIMARY KEY,retry_ms BIGINT NOT NULL DEFAULT 0)`
 
 // taskFailNoticeOutboxIndex serves the sweep's due read.
 const taskFailNoticeOutboxIndex = `CREATE INDEX IF NOT EXISTS task_fail_notice_outbox_retry ON task_fail_notice_outbox(retry_ms,request_id)`
 
-// spawnTerminalStatuses are the stored statuses an operation never leaves.
+// The terminal statuses are spawnTerminalStatuses (hub_store_retention.go):
 // retryable is not one of them (a replay or the expiry gives it a new attempt
 // or ends it), nor is deadline_exceeded (a late node result can still land
 // it), nor any *_grant refinement.
-var spawnTerminalStatuses = []string{"succeeded", "failed", "refused", "given_up", "cancelled"}
-
-// spawnTerminalStatusList is spawnTerminalStatuses as an SQL list, for the
-// backfills and the tests.
-const spawnTerminalStatusList = `'succeeded','failed','refused','given_up','cancelled'`
-
-// spawnStatusTerminal reports whether status ends an operation.
-func spawnStatusTerminal(status string) bool {
-	for _, terminal := range spawnTerminalStatuses {
-		if status == terminal {
-			return true
-		}
-	}
-	return false
-}
 
 // spawnStatusOwesTaskFailNotice reports whether a request that ended as
 // status owes the hk task comment of hk 5137.
@@ -112,7 +97,7 @@ func (s *laneInboxStore) syncSpawnQueueNextCheck(ctx context.Context, ex spawnQu
 }
 
 // backfillSpawnQueue copies the operations that predate the two tables, once
-// per SQLite store (Postgres does it in migration 0028): every non-terminal
+// per SQLite store (Postgres does it in migration 0030): every non-terminal
 // operation into the queue, and every failed or refused operation whose
 // comment is still owed into the outbox. It runs after
 // backfillSpawnTaskFailNotices, so a failure that backfill stamped judged
@@ -135,7 +120,7 @@ func (s *laneInboxStore) backfillSpawnQueue(parent context.Context) error {
 		return err
 	}
 	if n, _ := marked.RowsAffected(); n == 1 {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO spawn_queue(request_id,next_check_ms) SELECT request_id,next_check_ms FROM spawn_operations WHERE status NOT IN (`+spawnTerminalStatusList+`) ON CONFLICT DO NOTHING`); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO spawn_queue(request_id,next_check_ms) SELECT request_id,next_check_ms FROM spawn_operations WHERE status NOT IN (`+spawnTerminalStatuses+`) ON CONFLICT DO NOTHING`); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO task_fail_notice_outbox(request_id,retry_ms) SELECT request_id,task_fail_retry_ms FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0 ON CONFLICT DO NOTHING`); err != nil {

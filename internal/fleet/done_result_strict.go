@@ -112,10 +112,13 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 		}
 		callCtx, cancel := context.WithTimeout(ctx, left)
 		attempts++
-		last = store.Put(callCtx, id, fields)
+		last = a.putJobRecord(callCtx, id, fields)
 		cancel()
 		if last == nil {
 			return true, nil
+		}
+		if IsJobOwnerMismatch(last) || errors.Is(last, errJobReassigned) {
+			return false, &doneResultFailure{code: exitStateConflict, reason: "job_reassigned"}
 		}
 		if ctx.Err() != nil {
 			return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(ctx.Err())}
@@ -160,9 +163,12 @@ func (a *App) strictCompletedPutUntil(ctx context.Context, id string, fields map
 				return false, &doneResultFailure{code: exitStateConflict, reason: "job_reassigned"}
 			}
 			callCtx, cancel = context.WithTimeout(ctx, left)
-			repairErr := store.Put(callCtx, id, spawned)
+			repairErr := a.putJobRecord(callCtx, id, spawned)
 			cancel()
 			if repairErr != nil {
+				if IsJobOwnerMismatch(repairErr) || errors.Is(repairErr, errJobReassigned) {
+					return false, &doneResultFailure{code: exitStateConflict, reason: "job_reassigned"}
+				}
 				if ctx.Err() != nil || (!ambiguousDoneResultFailure(repairErr) && !isJobStateConflict(repairErr)) {
 					return false, &doneResultFailure{code: exitFailure, reason: doneResultReason(repairErr)}
 				}

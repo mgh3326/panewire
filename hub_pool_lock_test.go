@@ -32,7 +32,7 @@ func TestPoolActionStoreWaitDoesNotHoldHubLock(t *testing.T) {
 				}
 				app, err := f.hub.newSpawnApp(io.Discard, io.Discard)
 				if err == nil {
-					_ = f.hub.createPoolAction(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseRetired}, f.holder, app)
+					_ = f.hub.createPoolAction(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseRetired}, f.holder, app, nil)
 				}
 			}()
 			waiting := waitUntil(2*time.Second, func() bool { return db.Stats().WaitCount > before })

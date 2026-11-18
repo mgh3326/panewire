@@ -136,7 +136,12 @@ func sameLegacyPlacementRecord(task hubSpawnTask, trace fleet.PlacementTrace, at
 func (s *laneInboxStore) sealReconciledPlacement(parent context.Context, requestID string, attempt int, payload []byte, delivery string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET recorded=1 WHERE request_id=? AND attempt=? AND recorded=0 AND payload=? AND delivery=?`), requestID, attempt, string(payload), delivery)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET recorded=1 WHERE request_id=? AND attempt=? AND recorded=0 AND payload=? AND delivery=?`), requestID, attempt, string(payload), delivery)
 	if err != nil {
 		return err
 	}
@@ -146,7 +151,10 @@ func (s *laneInboxStore) sealReconciledPlacement(parent context.Context, request
 		}
 		return errors.New("legacy placement snapshot changed before sealing")
 	}
-	return nil
+	if err := s.dequeuePlacementRecord(ctx, tx, requestID, attempt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func samePlacementRecord(a, b fleet.PlacementRecord) bool {
@@ -178,7 +186,7 @@ func (h *HubServer) noticeLegacyPlacementConflict(ctx context.Context, task hubS
 	op, done := store.op(ctx)
 	defer done()
 	id := fmt.Sprintf("%s:%d:placement_record_conflict", task.Request.RequestID, attempt)
-	if _, err := store.db.ExecContext(op, store.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), id, task.Request.RequestID, task.Job, task.Owner, string(raw), h.now().UnixMilli()); err != nil {
+	if err := store.saveSpawnNotice(op, id, task, string(raw), h.now()); err != nil {
 		h.logger.Warn("legacy placement conflict notice could not be saved", "request_id", task.Request.RequestID, "attempt", attempt)
 	}
 }

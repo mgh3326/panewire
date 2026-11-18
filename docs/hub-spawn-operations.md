@@ -1369,7 +1369,7 @@ outbox, and recording the mark deletes the row. A post hk refuses for good is dr
 failure stays pending and retries on later sweeps: one hk attempt per due
 row per sweep, then a growing per-row delay persisted on the row's
 `task_fail_notice_outbox` entry (`retry_ms`, migration
-`0028_spawn_queue_outbox.sql`; 30s doubling to 10m; the older
+`0030_spawn_queue_outbox.sql`; 30s doubling to 10m; the older
 `task_fail_retry_ms` column is no longer written), so an outage costs one bounded sweep and cheap skips
 instead of stalling scheduling (one warn per failure streak). The mark and
 the retry delay are written detached from the sweep budget, so a spent
@@ -1458,7 +1458,7 @@ read the work still to do and not the whole of `spawn_operations`. The row is
 inserted in the transaction that inserts the operation and deleted in the
 transaction that ends it; `next_check_ms` mirrors the operation's parked wake
 time and every writer of that column copies it across in the same
-transaction. Migration `0028_spawn_queue_outbox.sql` (SQLite: the one-shot
+transaction. Migration `0030_spawn_queue_outbox.sql` (SQLite: the one-shot
 `backfillSpawnQueue`) copies the operations that predate the tables.
 
 Terminal statuses are `succeeded`, `failed`, `refused`, `given_up` and
@@ -1476,3 +1476,34 @@ through `releaseEndedSpawn`) in the same transaction, which also writes the
 | `cancelStagedSpawn`, `discardStagedSpawn` | row deleted | `dequeueSpawn` |
 
 A new writer of a terminal status must use one of these.
+
+### Outboxes
+
+The coordinator reads two small tables for the work it still owes, instead of
+scanning the history tables, which keep every row they ever held (hk 5298;
+design hk:doc `design/2026-11-18/pw-4898-hub-store-mysql` §2-§3).
+
+| Outbox | Holds | Written | Deleted |
+|---|---|---|---|
+| `placement_record_outbox(request_id, attempt)` | each `spawn_placement_snapshots` row whose `recorded` is not 1 | in the transaction that writes the snapshot | in the transaction that sets `recorded=1` |
+| `spawn_notice_outbox(event_id)` | each `spawn_notifications` row whose `delivered` is not 1 (not routed, held, or being published) | in the transaction that writes the notification | in the transaction that sets `delivered=1` |
+
+- The recorder lists the outbox joined to the snapshot and the operation,
+  oldest operation first, and the 2 s probe reads one outbox row: an idle hub
+  reads an empty table. The notice router pages the outbox and joins the
+  notification for its state.
+- `spawn_placement_snapshots` and `spawn_notifications` keep their rows and
+  their `recorded`, `delivered` and `telemetry_recorded` columns. The telemetry
+  claim and the stuck-notice lookup still go by `event_id` on
+  `spawn_notifications`; the outbox row does not wait for telemetry, which a
+  successful notice never records. Hk 5297 prunes the history tables by age.
+- A crash between the work and the delete leaves the row. The next pass redoes
+  the work under its idempotency key: the hk placement record is keyed by
+  job and attempt, and a lane event by its event id.
+- Every start, on both dialects, makes each outbox equal the history rows still
+  owed (`reconcileSpawnOutboxes`): it adds a row for every snapshot not yet
+  recorded and every notification not yet delivered, and drops a row whose work
+  is done. That carries over the pending rows at the upgrade, and after a
+  rollback it takes in what an older hub binary left, since that binary writes
+  and seals history rows without touching the outboxes. Migration
+  `0028_spawn_outboxes.sql` creates the Postgres tables and does the same copy.

@@ -160,7 +160,7 @@ func TestPoolActionUnknownSuccessorCanRetryWhileOriginalIsPending(t *testing.T) 
 	args := *action.Data.Args
 	args.RequestID = retry.ID
 	retry.Data.Args = &args
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), retry); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), retry, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f)
@@ -189,7 +189,7 @@ func TestPoolActionUnknownSuccessorHonorsRetryBackoff(t *testing.T) {
 	args := *original.Data.Args
 	args.RequestID = successor.ID
 	successor.Data.Args = &args
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), successor); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), successor, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f)

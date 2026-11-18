@@ -68,7 +68,7 @@ func TestPoolActionAcksTheStoredGuardOnCloseStatus_t5073(t *testing.T) {
 func TestPoolActionAcksBeforeFinishingAGuard_t5073(t *testing.T) {
 	f, action := poolActionFixture(t)
 	action.Phase = "guarded"
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.jobs.mu.Lock()
@@ -91,7 +91,7 @@ func terminalGuardedAction(t *testing.T) (*quotaReplaceFixture, poolAction) {
 	t.Helper()
 	f, action := poolActionFixture(t)
 	action.Phase = "guarded"
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.jobs.mu.Lock()

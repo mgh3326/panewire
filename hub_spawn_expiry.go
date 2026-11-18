@@ -151,6 +151,13 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 	if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
 		return err
 	}
+	// Every caller has just made the row terminal, so its retention clock starts
+	// here (hk 5297).
+	if spawnTerminalStatus(status) {
+		if _, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET terminal_ms=? WHERE request_id=? AND attempt=? AND terminal_ms=0`), now.UnixMilli(), task.Request.RequestID, task.Attempt); err != nil {
+			return err
+		}
+	}
 	return queueSpawnNotifications(ctx, s, tx, task, status, raw, now, false)
 }
 

@@ -43,6 +43,7 @@ func t3434Hub(t *testing.T, path string) (*HubServer, *hubAgent, *fakeHandoffkee
 	fake, hk, closeServer := newFakeHandoffkeep(t)
 	t.Cleanup(closeServer)
 	h, agent := t3426Hub(t, path, hk, t3426Records)
+	useLegacyOwnerStore(h)
 	agent.machineID = "host-a"
 	other := &hubAgent{machineID: "host-b", relays: make(chan hubRelayInjectEvent, 32), persisted: make(chan hubRelayPersistedEvent, 32)}
 	h.mu.Lock()

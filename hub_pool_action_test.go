@@ -27,7 +27,7 @@ func poolActionFixture(t *testing.T) (*quotaReplaceFixture, poolAction) {
 	args := &nodePaneCloseOpArgs{RequestID: "action-1", Job: f.job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project", EndReason: "quota_stop pool=claude"}
 	action := poolAction{ID: args.RequestID, Job: f.job, Node: "machine-a", Epoch: 1, Phase: poolActionPending,
 		Data: poolActionData{Owner: "parent", Text: "The job ended.", SpawnRequest: f.holder.Request.RequestID, Pane: args.PaneID, Label: args.Name, EndReason: args.EndReason, Args: args}}
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return f, action
@@ -211,6 +211,7 @@ func TestPoolActionReassignWithoutStoreWarnsOnce(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	logs := captureHubLog(h)
+	useLegacyOwnerStore(h)
 	for _, id := range []string{"job-a", "job-b"} {
 		h.jobs[id] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: id, Epoch: 1}, Node: "machine-a", Orphaned: true}
 		if _, err := h.reassignJob(id, "machine-b"); err != nil {
@@ -376,7 +377,7 @@ func TestPoolActionNoticeWaitsForEveryPendingRequest(t *testing.T) {
 	}
 	settled := pending
 	settled.ID, settled.Phase = "settled-retry", poolActionSettled
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), settled); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), settled, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.jobs.mu.Lock()
@@ -425,6 +426,7 @@ func restartPoolActionHub(t *testing.T, f *quotaReplaceFixture) {
 	}
 	t.Cleanup(func() { _ = hub.Close() })
 	hub.spawnNewApp = newApp
+	hub.handoverInputs = old.handoverInputs
 	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
 	hub.mu.Lock()
 	hub.nodes["machine-b"] = &hubNodeRecord{agent: destination}
@@ -434,6 +436,7 @@ func restartPoolActionHub(t *testing.T, f *quotaReplaceFixture) {
 	f.node = t14Node(t, hub, server, true)
 	hub.mu.Lock()
 	hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
+	hub.nodes["machine-a"].capabilities[hubCapabilityHandoverCheck] = true
 	hub.mu.Unlock()
 	f.hub, f.destination = hub, destination
 }
@@ -504,7 +507,7 @@ func TestPoolActionRestartAfterCloseAndBeforeNotice(t *testing.T) {
 	// Simulate a crash after the relay accepted the notice but before the
 	// action's done update was committed.
 	action.Phase = poolActionSettled
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f)
@@ -542,7 +545,7 @@ func TestPoolActionCompletionRaceKeepsCompletedRecord(t *testing.T) {
 func TestPoolActionCompletionBeforeCloseReleasesUnsentIntent(t *testing.T) {
 	f, action := poolActionFixture(t)
 	action.Data.Args = nil
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.jobs.mu.Lock()

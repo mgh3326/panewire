@@ -172,6 +172,8 @@ func (client *HubClient) taskPaneSweepApp(sweeper *fleet.TaskPaneSweeper) (*flee
 		return nil, "app-unavailable"
 	}
 	app.Jobs = filepath.Join(client.jobsInboxRoot, "jobs")
+	app.JobOwnerNode = client.machineID
+	app.JobFenceCapability = client.noteJobFenceSupport
 	app.HerdrSession = client.nodeSpawnSession()
 	if app.JobStore, err = client.nodeJobStoreForCommand(); err != nil {
 		return nil, "hk-unavailable"
@@ -221,6 +223,8 @@ func (client *HubClient) sweepJobDirs(ctx context.Context, expiry *fleet.JobDirT
 		return
 	}
 	app.Jobs = filepath.Join(client.jobsInboxRoot, "jobs")
+	app.JobOwnerNode = client.machineID
+	app.JobFenceCapability = client.noteJobFenceSupport
 	app.HerdrSession = client.nodeSpawnSession()
 	if app.JobStore, err = client.nodeJobStoreForCommand(); err != nil {
 		slog.Warn("job dir ttl skipped", "reason", "hk-unavailable")

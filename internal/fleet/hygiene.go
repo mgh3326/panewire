@@ -198,9 +198,14 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 // reapEnded is reap's end of one eligible job, run under its end lock
 // (lockUnlessHubCloseOwnsEnd) so no hub close is admitted while it runs.
 func (a *App) reapEnded(ctx context.Context, j, latest Job, present bool, reason string, worktrees bool) error {
+	ctx = withJobEpoch(ctx, j)
 	var e error
-	a.recordJobUsage(ctx, latest, true)
-	a.markEndedJobLost(ctx, latest)
+	if err := a.recordJobUsage(ctx, latest, true); !IsJobReassigned(err) {
+		a.markEndedJobLost(ctx, latest)
+	}
+	if !a.sameJobOwnerEpoch(j) {
+		return fail(exitStateConflict, "job ownership changed during reap")
+	}
 	if present {
 		// Usage and hk can take time; check the pane again immediately before
 		// the physical close, still under the job's end lock.
@@ -217,8 +222,8 @@ func (a *App) reapEnded(ctx context.Context, j, latest Job, present bool, reason
 				found = true
 			}
 		}
-		if !found {
-			return fail(exitStateConflict, "pane changed during reap")
+		if !found || !a.sameJobOwnerEpoch(j) {
+			return fail(exitStateConflict, "pane or job ownership changed during reap")
 		}
 		if e = a.must(ctx, "herdr", "pane", "close", j.Pane); e != nil {
 			return e
@@ -563,6 +568,7 @@ func (a *App) lanesMissing(ctx context.Context) error {
 // just before the write): the new owner's record is not this node's to end. A failed read or write is a
 // warning plus job.record_failed; reap goes on.
 func (a *App) markEndedJobLost(ctx context.Context, j Job) {
+	ctx = withJobEpoch(ctx, j)
 	if j.Ended != "job.revoked" && j.Ended != "job.lost" {
 		return
 	}

@@ -65,7 +65,7 @@ func TestPoolActionIntentCancelledRetainsReassignmentFence(t *testing.T) {
 func TestPoolActionGuardStopsOtherUnknownRetries(t *testing.T) {
 	f, guard := poolActionFixture(t)
 	guard.Phase = "guarded"
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), guard); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), guard, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	other := guard
@@ -73,7 +73,7 @@ func TestPoolActionGuardStopsOtherUnknownRetries(t *testing.T) {
 	args := *other.Data.Args
 	args.RequestID = other.ID
 	other.Data.Args = &args
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), other); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), other, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	runUnknownRetry(t, f, other, other.Data.Args.Attempt)
@@ -85,7 +85,7 @@ func TestPoolActionGuardStopsOtherUnknownRetries(t *testing.T) {
 func TestPoolActionGuardReleasedByNodeSettlement(t *testing.T) {
 	f, action := poolActionFixture(t)
 	action.Phase = "guarded"
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.jobs.mu.Lock()
@@ -97,6 +97,12 @@ func TestPoolActionGuardReleasedByNodeSettlement(t *testing.T) {
 	if events := spawnFailedInjections(f.destination); len(events) != 0 {
 		t.Fatalf("guarded settlement sent a notice: %+v", events)
 	}
+	if _, err := f.hub.reassignJob(action.Job, "machine-b"); err == nil || !strings.Contains(err.Error(), "not_found") {
+		t.Fatalf("missing hk record must refuse reassignment: %v", err)
+	}
+	f.jobs.mu.Lock()
+	f.jobs.records[f.job] = map[string]any{"state": "spawned"}
+	f.jobs.mu.Unlock()
 	if _, err := f.hub.reassignJob(action.Job, "machine-b"); err != nil {
 		t.Fatalf("settled node did not release the guard: %v", err)
 	}
