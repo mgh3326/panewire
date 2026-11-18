@@ -309,3 +309,18 @@ func TestNoAttemptIdentityIsNotAWildcard_t5224(t *testing.T) {
 		t.Fatalf("announce bound to NoAttempt on a job with attempts: %v, want errQuotaStopSuperseded", err)
 	}
 }
+
+// A respawn stamped earlier than the spawn before it (a stepped clock) is the
+// current attempt in the ledger's sequence: the pane, report and role the
+// watcher acts on are its, not the previous worker's (#699 review).
+func TestJobFoldsAttemptFieldsInSequenceOrder_t5224(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
+	writeLedgerFile(t, a, "00091-job.spawned.json", `{"created_at":"2000-01-01T00:00:01Z","job_id":"j","kind":"job.spawned","payload":{"pane_id":"w:p2","label":"agent-b","report":"/new/report.md","role":"reviewer"},"seq":91}`)
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Pane != "w:p2" || j.Report != "/new/report.md" || j.SpawnRole != "reviewer" || j.Label != "agent-b" {
+		t.Fatalf("job fields pane=%q report=%q role=%q label=%q, want the respawn's (the later sequence)", j.Pane, j.Report, j.SpawnRole, j.Label)
+	}
+}

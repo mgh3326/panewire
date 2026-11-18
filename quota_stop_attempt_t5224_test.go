@@ -45,3 +45,27 @@ func TestReserveDecisionBindsTheAttemptAndRefusesAnUnreadableLedger_t5224(t *tes
 		t.Fatalf("attempt=%q err=%v, want the spawn the stop was observed in", attempt, err)
 	}
 }
+
+// A reservation made earlier is not re-bound: actOnQuotaStop reserves again
+// after observe did, and a ledger read that failed meanwhile must not fail
+// the second call and strand the undecided row (#699 review).
+func TestReserveDecisionKeepsAnExistingReservationWithoutReadingTheLedger_t5224(t *testing.T) {
+	rig := newRoleStopRig(t, "implementer", time.Hour, "42")
+	events := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events")
+	job := HubActiveJob{JobID: "job-active", AgentLabel: "worker-synthetic"}
+	c := idleWakeCandidate{EventID: "e-twice", PaneID: "workspace:pane-1"}
+	for name, kind := range map[string]string{"00001-job.claimed.json": "job.claimed", "00002-job.spawned.json": "job.spawned"} {
+		if err := os.WriteFile(filepath.Join(events, name), []byte(`{"kind":"`+kind+`","payload":{}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fresh, _, err := rig.q.reserveDecision(context.Background(), c, job, rig.now); err != nil || !fresh {
+		t.Fatalf("first reservation fresh=%v err=%v", fresh, err)
+	}
+	if err := os.Symlink(filepath.Join(events, "missing"), filepath.Join(events, "00003-job.note.json")); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, decided, err := rig.q.reserveDecision(context.Background(), c, job, rig.now); err != nil || fresh || decided {
+		t.Fatalf("second reservation fresh=%v decided=%v err=%v, want the existing undecided row without a ledger read", fresh, decided, err)
+	}
+}

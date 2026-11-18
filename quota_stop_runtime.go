@@ -3,8 +3,10 @@ package panewire
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -514,6 +516,16 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandidate, job HubActiveJob, now time.Time) (fresh, decided bool, err error) {
 	q.store.mu.Lock()
 	defer q.store.mu.Unlock()
+	// A reservation made earlier (observe reserves before it reads the screen,
+	// actOnQuotaStop reserves again) keeps its attempt: the ledger is not read
+	// again, so a transient read failure cannot strand an undecided row.
+	var decision string
+	switch err := q.store.db.QueryRowContext(ctx, `SELECT decision FROM quota_stop_decisions WHERE event_id=?`, c.EventID).Scan(&decision); {
+	case err == nil:
+		return false, decision != "", nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, false, err
+	}
 	// The attempt the stop was observed in (ledger view): the hand-over is
 	// announced for that attempt only, so a retry after a re-prompt is refused
 	// (hk 5224). A ledger that cannot be read reserves nothing: an unbound
@@ -529,7 +541,6 @@ func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandid
 	if n, _ := result.RowsAffected(); n == 1 {
 		return true, false, nil
 	}
-	var decision string
 	if err := q.store.db.QueryRowContext(ctx, `SELECT decision FROM quota_stop_decisions WHERE event_id=?`, c.EventID).Scan(&decision); err != nil {
 		return false, false, err
 	}

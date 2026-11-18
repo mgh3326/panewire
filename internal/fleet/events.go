@@ -168,11 +168,14 @@ func (a *App) job(id string) (Job, error) {
 	return foldJob(id, evs)
 }
 
-// foldJob builds the job from its events in the order given: timestamp order
-// for a.job, ledger sequence order for a hub close (watch_hub_close.go).
+// foldJob builds the job from its events in ledger sequence order, never in
+// timestamp order (ledgerView).
 func foldJob(id string, evs []Event) (Job, error) {
 	j := Job{ID: id, Events: evs}
-	for _, ev := range evs {
+	// The fields the attempt decides (pane, receipt, report, role, end) are
+	// folded in the view's sequence order, so a respawn stamped earlier by a
+	// stepped clock is still the current attempt (hk 5224).
+	for _, ev := range sequenceGroups(evs) {
 		p := ev.Payload
 		switch ev.Kind {
 		case "job.claim", "job.claimed", "job.reclaim":
