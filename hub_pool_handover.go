@@ -51,8 +51,22 @@ type poolHandover struct {
 	Submitted bool
 	Outcome   string `json:",omitempty"`
 	Reason    string `json:",omitempty"`
-	// Reset is the wait row's reset (unix seconds).
-	Reset int64 `json:",omitempty"`
+	// Reset is the stop's reset (unix seconds) and Account its account: the
+	// wait row's identity, and for a hand-over the exhaustion the reconciler
+	// checks again before the close.
+	Reset   int64  `json:",omitempty"`
+	Account string `json:",omitempty"`
+	// Cwd, Branch and Digest bind the saved patch to the worktree: just before
+	// the close the hub captures again and releases the row on a change.
+	Cwd, Branch, Digest string `json:",omitempty"`
+}
+
+func (ho *poolHandover) exhaustion() poolExhaustion {
+	var reset time.Time
+	if ho.Reset != 0 {
+		reset = time.Unix(ho.Reset, 0).UTC()
+	}
+	return poolExhaustion{Pool: ho.Pool, Account: ho.Account, Cause: ho.Cause, Reset: reset}
 }
 
 // handoverInputs is what the §Implementer rule reads from hk: the quota
@@ -62,6 +76,8 @@ type handoverInputs struct {
 	policyOK bool
 	priority int
 	expected time.Duration
+	// bound is the job the task's refs.job_id names; empty when unread.
+	bound string
 }
 
 func (h *HubServer) readHandoverInputs(ctx context.Context, task string) handoverInputs {
@@ -89,8 +105,12 @@ func (h *HubServer) readHandoverInputs(ctx context.Context, task string) handove
 		var t struct {
 			Priority any     `json:"priority"`
 			Expected *string `json:"expected"`
+			Refs     struct {
+				Job string `json:"job_id"`
+			} `json:"refs"`
 		}
 		if json.Unmarshal(raw, &t) == nil {
+			in.bound = t.Refs.Job
 			in.priority, _ = quotaTaskPriority(t.Priority)
 			if t.Expected != nil {
 				in.expected, _ = quotaDuration(*t.Expected)
@@ -107,6 +127,11 @@ func (h *HubServer) readHandoverInputs(ctx context.Context, task string) handove
 // today's hand-over notice instead.
 func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, app *fleet.App, record map[string]any) poolJobResult {
 	const role = "implementer"
+	if h.spawnGrantDrain || h.spawnRollbackDrain {
+		// No successor may be created while grant rows drain; a row opened
+		// now would close the job and then never place (hk 4661).
+		return poolJobSkip(role, "draining")
+	}
 	if active, err := h.inbox.store.activePoolActionFor(ctx, task.Job); err != nil || active {
 		// One row per job: an existing non-final row owns it.
 		return poolJobSkip(role, "action_exists")
@@ -118,13 +143,33 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 	waits := 0
 	for _, reset := range resets {
 		if reset == exhaustion.Reset.Unix() {
-			// This stop is the one already waited out.
-			return poolJobSkip(role, "waiting")
+			// This stop is the one already waited out; its notice is replayed
+			// until the inbox owns it.
+			return h.notifyPoolWait(ctx, exhaustion, task, "waiting")
 		}
 		waits++
 	}
-	in := h.readHandoverInputs(ctx, prior.Task)
-	decision, why := quotaDecisionJob(in.policy, in.policyOK, in.priority, in.expected, task.Created, waits, quotaStop{Reset: exhaustion.Reset}, h.now())
+	// The effective task: a --parent-job successor inherits it, so the job
+	// record names it, not the submission.
+	taskID := prior.Task
+	if id := hkRecordTaskID(record); id != "" {
+		taskID = id
+	}
+	in := h.readHandoverInputs(ctx, taskID)
+	if in.bound != "" && in.bound != task.Job {
+		// Another job holds the task now; replacing this one would start a
+		// second implementer beside it.
+		return poolJobSkip(role, "task_rebound")
+	}
+	started := task.Created
+	h.mu.Lock()
+	if job := h.jobs[task.Job]; job != nil {
+		if at, err := time.Parse(time.RFC3339, job.StartedAt); err == nil {
+			started = at
+		}
+	}
+	h.mu.Unlock()
+	decision, why := quotaDecisionJob(in.policy, in.policyOK, in.priority, in.expected, started, waits, quotaStop{Reset: exhaustion.Reset}, h.now())
 	if decision == "wait" {
 		return h.waitPoolStop(ctx, exhaustion, task, why)
 	}
@@ -181,8 +226,21 @@ func (h *HubServer) waitPoolStop(ctx context.Context, exhaustion poolExhaustion,
 	if err := h.inbox.store.insertPoolAction(ctx, row); err != nil {
 		return poolJobSkip(role, "store_unavailable")
 	}
-	text := fmt.Sprintf("[panewire] %s waits for the %s reset at %s (%s %s); a later stop hands it over.", task.Job, exhaustion.Pool, exhaustion.Reset.UTC().Format(time.RFC3339), exhaustion.Pool, exhaustion.Cause)
+	return h.notifyPoolWait(ctx, exhaustion, task, why)
+}
+
+// notifyPoolWait publishes the wait's fixed-id notice unless the inbox
+// already owns it, so a crash after the wait row is stored is repaired by the
+// next pass.
+func (h *HubServer) notifyPoolWait(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, why string) poolJobResult {
+	const role = "implementer"
 	eventID := fmt.Sprintf("pool-wait:%s:%d", task.Job, exhaustion.Reset.Unix())
+	if owned, err := h.inbox.store.poolNoticeOwned(ctx, task.Owner, eventID); err != nil {
+		return poolJobSkip(role, "store_unavailable")
+	} else if owned {
+		return poolJobSkip(role, why)
+	}
+	text := fmt.Sprintf("[panewire] %s waits for the %s reset at %s (%s %s); a later stop hands it over.", task.Job, exhaustion.Pool, exhaustion.Reset.UTC().Format(time.RFC3339), exhaustion.Pool, exhaustion.Cause)
 	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(task.Owner, eventID), OwnerLane: task.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
 	if result.ID == 0 || result.PersistFailed {
 		return poolJobSkip(role, "owner_not_notified")
@@ -201,6 +259,15 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 	if prior.Task == "" && prior.ParentJob == "" {
 		return nil, "not_replaceable"
 	}
+	if prior.Profile != "" && prior.Profile != "auto" || prior.Host != "" && prior.Host != "auto" {
+		// A pinned profile or host cannot move off the spent pool or the old
+		// host's worktree; the owner decides (the quota replacement refuses
+		// the same).
+		return nil, "pinned"
+	}
+	if !validNodeEndReason(handoverEndReason(record, exhaustion, newJob)) {
+		return nil, "end_reason_too_long"
+	}
 	checkout := old.Repository.Checkout
 	if checkout == nil || checkout.Branch == "" || checkout.Origin == "" {
 		return nil, "no_branch"
@@ -210,24 +277,65 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 	if probe.state != heldPanePresent || !validNodeCommandPath(probe.row.Cwd) {
 		return nil, "pane_unavailable"
 	}
+	if !nodePaneIdleStatus[probe.row.AgentStatus] {
+		// The patch must be the pane's final work: capture only an idle pane.
+		return nil, "pane_not_idle"
+	}
 	var patch nodeHandoverPatchResult
-	if !h.nodeCall(ctx, host, nodeCommandHandoverPatch, nodeHandoverPatchArgs{Job: task.Job, Cwd: probe.row.Cwd, Branch: checkout.Branch}, hubNodeCommandWait, &patch) || patch.Outcome != nodeHandoverPatchSaved {
+	if !h.nodeCall(ctx, host, nodeCommandHandoverPatch, nodeHandoverPatchArgs{Job: task.Job, Cwd: probe.row.Cwd, Branch: checkout.Branch}, hubNodeCommandWait, &patch) {
 		return nil, "patch_unavailable"
 	}
-	exclude := exhaustion.Pool
-	if exhaustion.accountCredit() {
-		// The account mark keeps the successor off the spent account while
-		// the pool's other accounts stay placeable (hk 5138).
-		exclude = ""
+	if patch.Outcome != nodeHandoverPatchSaved {
+		return nil, "patch_" + patch.Outcome
 	}
-	request, err := handoverSuccessorRequest(old, task.Job, newJob, exclude, exhaustion, patch)
+	request, err := handoverSuccessorRequest(old, task.Job, newJob, handoverExclude(exhaustion), exhaustion, patch)
 	if err != nil {
 		return nil, "invalid_successor"
 	}
 	if next, err := fleet.ValidateSubmission(request); err != nil || !validLaneReference(next.Owner) {
 		return nil, "invalid_successor"
 	}
-	return &poolHandover{Successor: request, Job: newJob, Pool: exhaustion.Pool, Cause: exhaustion.Cause}, ""
+	if !fleet.ValidAgentName(hubSpawnArg(request.Args, "-l")) {
+		// herdr's 32-character name rule, which the hub's own claim does not
+		// run through the submit preflight.
+		return nil, "label_too_long"
+	}
+	reset := int64(0)
+	if !exhaustion.Reset.IsZero() {
+		reset = exhaustion.Reset.Unix()
+	}
+	return &poolHandover{Successor: request, Job: newJob, Pool: exhaustion.Pool, Cause: exhaustion.Cause, Reset: reset, Account: exhaustion.Account,
+		Cwd: probe.row.Cwd, Branch: checkout.Branch, Digest: patch.Digest}, ""
+}
+
+// handoverExclude is the pool the successor excludes: the band a quota
+// reading spent (a Devin free limit is devin-free, a paid window the paid
+// band), the whole pool for a pool-wide cause, and none for a Command Code
+// account credit stop, whose account mark keeps the successor off the spent
+// account (hk 5138).
+func handoverExclude(exhaustion poolExhaustion) string {
+	switch {
+	case exhaustion.accountCredit():
+		return ""
+	case exhaustion.Cause == poolCauseFreeLimit:
+		return fleet.BandKey(exhaustion.Pool + "-free")
+	case exhaustion.fromQuota():
+		return fleet.BandKey(exhaustion.Pool)
+	}
+	return exhaustion.Pool
+}
+
+// hkRecordTaskID is the task an hk job record names.
+func hkRecordTaskID(record map[string]any) string {
+	switch task := record["task_id"].(type) {
+	case float64:
+		if task > 0 {
+			return strconv.FormatInt(int64(task), 10)
+		}
+	case string:
+		return strings.TrimSpace(task)
+	}
+	return ""
 }
 
 // handoverSuccessorRequest is the stored successor: the quota replacement's
@@ -240,13 +348,22 @@ func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude stri
 	if err != nil {
 		return fleet.Submission{}, err
 	}
-	// The successor holds no local checkout: drop -c and --task.
-	for _, flag := range []string{"-c", "--task"} {
-		if i := slices.Index(next.Args, flag); i >= 0 && i+1 < len(next.Args) {
+	// The successor holds no local checkout and inherits the task: drop -c,
+	// --task and any earlier --parent-job, so exactly one names oldJob.
+	for _, flag := range []string{"-c", "--task", "--parent-job"} {
+		for i := slices.Index(next.Args, flag); i >= 0 && i+1 < len(next.Args); i = slices.Index(next.Args, flag) {
 			next.Args = slices.Delete(next.Args, i, i+2)
 		}
 	}
 	next.Args = append(next.Args, "--parent-job", oldJob)
+	if hubSpawnArg(next.Args, "--report-relative") == "" {
+		// A --parent-job spawn requires a report; it lives in the successor's
+		// own job directory.
+		next.Args = append(next.Args, "--report-relative", newJob+"/report.md")
+	}
+	// The old job already passed its start gate; its conditions name the task
+	// the successor no longer carries.
+	next.StartConditions = nil
 	branch := old.Repository.Checkout.Branch
 	dir := fleet.CheckoutWorktreeName(newJob)
 	checkout := &fleet.HubCheckout{Origin: old.Repository.Checkout.Origin, Mode: fleet.HubCheckoutSuccessor, Branch: branch, Sha: patch.Pushed, Dir: dir}
@@ -269,13 +386,10 @@ func handoverNote(oldJob, branch string, exhaustion poolExhaustion, patch nodeHa
 	} else {
 		fmt.Fprintf(&b, "Branch %s was never pushed: this worktree is detached at its base %s (%s). Create branch %s here, apply the patch below, and push it.", branch, patch.Base, strings.TrimPrefix(patch.BaseRef, "refs/heads/"), branch)
 	}
-	switch {
-	case !patch.Dirty:
+	if patch.Dirty {
+		fmt.Fprintf(&b, " The old worktree's uncommitted and unpushed work, untracked files included, is saved as hk evidence %s; apply everything under its patch heading with git apply.", patch.Doc)
+	} else {
 		b.WriteString(" The old worktree held no other work.")
-	case patch.Doc != "":
-		fmt.Fprintf(&b, " The old worktree's uncommitted and unpushed work is saved as hk evidence %s (git status, untracked files, git diff --binary); apply it with git apply.", patch.Doc)
-	default:
-		fmt.Fprintf(&b, " The old worktree's uncommitted and unpushed work is saved on the old host at %s (the hk upload failed).", patch.Saved)
 	}
 	return b.String()
 }
@@ -364,4 +478,31 @@ func handoverEndReason(record map[string]any, exhaustion poolExhaustion, newJob 
 		pool = exhaustion.Pool
 	}
 	return fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", newJob)
+}
+
+// handoverStillDue is checked before the first close command of a handover
+// row. The stop must still hold, and the worktree must be the one whose
+// patch the successor names: the node captures again and the digest must
+// match. A drain holds the row (no close while no successor can be claimed).
+func (h *HubServer) handoverStillDue(ctx context.Context, action poolAction) (bool, error) {
+	if h.spawnGrantDrain || h.spawnRollbackDrain {
+		return false, errors.New("hand-over held while grant rows drain")
+	}
+	handover := action.Data.Handover
+	if handover == nil {
+		return false, nil
+	}
+	if h.poolEventGone(handover.exhaustion(), h.now()) {
+		h.logger.Info("pool hand-over withdrawn: the stop no longer holds", "job", action.Job, "action", action.ID)
+		return false, nil
+	}
+	var patch nodeHandoverPatchResult
+	if !h.nodeCall(ctx, action.Node, nodeCommandHandoverPatch, nodeHandoverPatchArgs{Job: action.Job, Cwd: handover.Cwd, Branch: handover.Branch}, hubNodeCommandWait, &patch) {
+		return false, errors.New("hand-over patch unavailable")
+	}
+	if patch.Outcome != nodeHandoverPatchSaved || patch.Digest != handover.Digest {
+		h.logger.Info("pool hand-over withdrawn: the worktree changed since its patch", "job", action.Job, "action", action.ID, "outcome", patch.Outcome)
+		return false, nil
+	}
+	return true, nil
 }

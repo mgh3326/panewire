@@ -102,11 +102,15 @@ const HandoverPatchFile = "handover-patch.txt"
 // is uploaded as; the successor's brief names it.
 func HandoverPatchDocKey(job string) string { return "handover/" + job + "/" + HandoverPatchFile }
 
-// UploadHandoverPatch writes the hand-over patch to hk as evidence, cut to
-// hk's cap like a screen, and returns its key once hk stored it.
+// UploadHandoverPatch writes the whole hand-over patch to hk as evidence and
+// returns its key once hk stored it. The caller keeps the patch within hk's
+// cap and UTF-8; a patch the cap would cut is refused here, never truncated.
 func UploadHandoverPatch(ctx context.Context, job, task string, patch []byte) (string, error) {
 	key := HandoverPatchDocKey(job)
-	doc := client.Document{Key: key, Kind: "evidence", Job: job, Body: paneScreenDocBody(patch), OriginClass: "job"}
+	if len(patch) > PaneScreenDocMaxBytes {
+		return "", errors.New("hand-over patch is over hk's document cap")
+	}
+	doc := client.Document{Key: key, Kind: "evidence", Job: job, Body: string(patch), OriginClass: "job"}
 	if id, err := hkTaskID(task); err == nil {
 		doc.TaskID = &id
 	}

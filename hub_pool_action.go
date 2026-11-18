@@ -226,6 +226,17 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			if action.Data.TargetAttempt != "" && status.Attempt != action.Data.TargetAttempt {
 				return h.releasePoolAction(ctx, action)
 			}
+			if action.Data.Kind == poolActionKindHandover {
+				// No close command was sent yet: the last point the hand-over
+				// can still be withdrawn without a trace (hk 4633).
+				due, err := h.handoverStillDue(ctx, action)
+				if err != nil {
+					return err
+				}
+				if !due {
+					return h.releasePoolAction(ctx, action)
+				}
+			}
 			probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
 			if probe.state == heldPaneAbsent || probe.state == heldPanePresent && probe.row.PaneID != action.Data.Pane {
 				// No command was sent before Args was saved. A tombstone
@@ -400,6 +411,16 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	job := h.jobs[action.Job]
 	moved := job != nil && (job.Node != action.Node || job.Epoch != action.Epoch)
 	h.mu.Unlock()
+	if moved && action.Data.Kind == poolActionKindHandover {
+		// The old job moved after its close settled. A successor already
+		// claimed is finished as usual; one not yet submitted is not placed
+		// beside the moved job, and the row ends handover_failed with the
+		// owner's notice instead of vanishing (hk 4633).
+		if handover := action.Data.Handover; handover != nil && !handover.Submitted && handover.Outcome == "" {
+			handover.Outcome, handover.Reason = handoverFailed, "old job moved to another owner"
+		}
+		return h.finishHandover(ctx, action, "", "")
+	}
 	if moved {
 		// Settlement permits reassignment. Once another owner has the job,
 		// this old action must not release its role or announce its end.

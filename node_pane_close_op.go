@@ -308,6 +308,12 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 		return nodePaneCloseOpResult{Outcome: outcome}, ""
 	}
 	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, target: target}
+	if target.role == "implementer" {
+		// An idle implementer may be waiting on an ESC answer: the hub's
+		// hand-over close keeps the open-question guard pane.close has
+		// (hk 4633).
+		closeArgs.QuestionJob = args.Job
+	}
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
 		// The proof is read again after the settle: the job's watcher, a
 		// separate process, may have recorded a re-prompt or an end of the

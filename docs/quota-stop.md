@@ -135,22 +135,36 @@ cause: window, free limit past `max_wait`, credit, retired and account credit.
      worktree: `git ls-remote origin refs/heads/<branch>` for the last pushed
      commit, then `git status --porcelain`, the untracked file list and
      `git diff --binary` against that commit (against the merge-base with
-     origin's default branch when nothing was pushed) into
-     `jobs/<old>/handover-patch.txt` (mode 0600) and to hk as evidence
-     `handover/<old>/handover-patch.txt`. The worktree is only read, so a
-     dirty worktree never blocks the hand-over.
+     origin's default branch when nothing was pushed), plus a new-file diff
+     with the contents of every untracked file, into
+     `jobs/<old>/handover-patch.txt` (mode 0600) and, whole and byte for
+     byte, to hk as evidence `handover/<old>/handover-patch.txt`. The
+     worktree is only read, so a dirty worktree never blocks the hand-over.
+     The pane must be idle. The node refuses, and the owner gets the
+     fallback notice, when the pushed tip is not in the worktree's history
+     (`diverged`), the patch is over hk's document cap or has more than 500
+     untracked files (`too_large`), it is not UTF-8 (`unportable`), or hk
+     did not store it (`upload_failed`): no hand-over rests on a cut, rewritten
+     or host-local copy.
   2. **Saved successor.** The row stores the complete successor submission
      with a fixed request id before anything is closed: same role, owner and
      brief; job `<old>-q<n>` (at most two replacements); `--parent-job <old>`
      in place of `--task` (the two are exclusive; the task is inherited); the
-     spent pool excluded (none for a Command Code account credit stop, where
-     the account mark does it); and a spec checkout of the branch at its last
+     spent band excluded (`devin-free` for a free limit, the paid band for a
+     window, the pool for a pool-wide cause, none for a Command Code account
+     credit stop, where the account mark does it); its own
+     `--report-relative`; no start conditions; and a spec checkout of the branch at its last
      pushed commit (`successor` mode, hk 5118), so the successor needs neither
      the old host nor a clean old worktree. A never-pushed branch starts
      detached at its base and the note says the patch is the whole work. The
      brief ends with a continuation note: what happened, the branch and commit
      to continue from, and where the patch is.
-  3. **Close.** The reconciler closes the old pane through `pane.close_op` to
+  3. **Close.** Before its first close command the reconciler checks the stop
+     still holds and captures the patch again; a changed digest or a cleared
+     stop releases the row unclosed, and a later pass prepares a fresh one.
+     During a spawn rollback or grant drain it neither opens a row nor
+     closes. The close keeps `pane.close`'s open-question guard for an
+     implementer. The reconciler then closes the old pane through `pane.close_op` to
      the job's node at its epoch. The node writes the old record `lost` with
      `end_reason="quota_stop pool=<pool> replaced_by=<new job>"`, the pinned
      format (`TestQuotaStopEndReasonFormatIsPinned`). It is written with the
@@ -172,9 +186,12 @@ cause: window, free limit past `max_wait`, credit, retired and account credit.
   quota-stop successor already placed makes the sweep do nothing. Whichever
   creates its row (or successor) first owns the job.
 
-For an implementer on a node without those capabilities, past the replacement
-limit, or when no successor can be built (no branch, pane unreadable, patch
-unavailable), and for a reviewer or consult on a node that does not advertise
+The decision reads the task the job record names (a `--parent-job` successor
+inherits it) and the job's start; a task whose `refs.job_id` names another job
+is left alone. For an implementer on a node without those capabilities, past
+the replacement limit, or when no successor can be built (no branch, a pinned
+profile or host, an end reason or label over its limit, a pane not idle or
+unreadable, a refused patch), and for a reviewer or consult on a node that does not advertise
 close operations, the hub records a `lane.event` asking the owner to hand the
 job over or end it and respawn it on another pool. On a capable node, the hub
 instead stores a close intent for a reviewer or consult, closes and settles it
