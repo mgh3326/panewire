@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
 // Node commands (docs/node-commands.md) are operator-authenticated hub→node
@@ -289,6 +290,28 @@ func nodeCommandHasFields(raw json.RawMessage, names []string) bool {
 	return true
 }
 
+// nodeWorktreePrepareFields accepts the required fields plus the optional
+// exclude and include of a sparse spec checkout (hk 5098).
+func nodeWorktreePrepareFields(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	for _, name := range nodeCommandArgFields[nodeCommandWorktreePrepare] {
+		value, found := fields[name]
+		if !found || isJSONNull(value) {
+			return false
+		}
+		delete(fields, name)
+	}
+	for key, value := range fields {
+		if (key != "exclude" && key != "include") || isJSONNull(value) {
+			return false
+		}
+	}
+	return true
+}
+
 func nodeWorktreeInspectFields(raw json.RawMessage) bool {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil || fields["cwd"] == nil || isJSONNull(fields["cwd"]) {
@@ -319,9 +342,10 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalUnnamed := (op == nodeCommandPaneClose || op == nodeCommandPaneCapture) && nodeCommandHasFields(raw, append(append([]string(nil), names...), "allow_unnamed"))
 	optionalList := op == nodeCommandWorktreeList && nodeWorktreeListFields(raw)
 	optionalInspect := op == nodeCommandWorktreeInspect && nodeWorktreeInspectFields(raw)
+	optionalSparse := op == nodeCommandWorktreePrepare && nodeWorktreePrepareFields(raw)
 	optionalEndReason := op == nodeCommandJobMarkLost && nodeCommandHasFields(raw, append(append([]string(nil), names...), "end_reason"))
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion) {
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse) {
 		return nil, false
 	}
 	switch op {
@@ -387,6 +411,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 			return nil, false
 		}
 		if _, ok := nodeOriginRepo(args.Origin); !ok || !validNodeJobName(args.Dir) {
+			return nil, false
+		}
+		if spawnargs.SparseSpecRefusal(args.Mode, args.Exclude, args.Include) != "" {
 			return nil, false
 		}
 		switch args.Mode {
@@ -583,6 +610,23 @@ func defaultNodeCommandRunner() relayCommandRunner {
 	}
 }
 
+// nodeGitStdinRunner runs one git command with its stdin fed from the caller.
+// The sparse checkout's pattern list travels this way and never on a command
+// line or through a shell (hk 5098).
+type nodeGitStdinRunner func(context.Context, string, ...string) ([]byte, error)
+
+func defaultNodeGitStdinRunner() nodeGitStdinRunner {
+	return func(ctx context.Context, input string, args ...string) ([]byte, error) {
+		cmd := nodeGitCommand(ctx, args...)
+		cmd.Stdin = strings.NewReader(input)
+		out, err := cmd.Output()
+		if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+			return out, nil
+		}
+		return out, err
+	}
+}
+
 // nodeHerdrRunner runs herdr in the session the node spawns into (spawn.json
 // herdr_session, else "default"), so pane.read, pane.close and agents.list see
 // the panes the node launched. A plain herdr call would read the daemon's own
@@ -735,6 +779,15 @@ func (client *HubClient) nodeGitRunner() relayCommandRunner {
 		return client.nodeGit
 	}
 	return defaultNodeCommandRunner()
+}
+
+// nodeGitStdinRunner returns the runner for a git command fed on stdin. The
+// fixture seam is client.nodeGitStdin; production runs git as a child.
+func (client *HubClient) nodeGitStdinRunner() nodeGitStdinRunner {
+	if client != nil && client.nodeGitStdin != nil {
+		return client.nodeGitStdin
+	}
+	return defaultNodeGitStdinRunner()
 }
 
 // nodeAddRunner returns the runner for one worktree add. The node's own runner

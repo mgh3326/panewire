@@ -69,6 +69,13 @@ type HubCheckout struct {
 	Fetch       string `json:"fetch,omitempty"`
 	Dir         string `json:"dir"`
 	VerifyReuse bool   `json:"verify_reuse,omitempty"`
+	// Exclude and Include ask for a sparse checkout (hk 5098): the paths kept
+	// out of the worktree, and the changed paths kept in it even inside an
+	// excluded tree. Both empty is today's full checkout, byte for byte. The
+	// node builds the pattern list and falls back to the full checkout on a
+	// git without sparse-checkout (checkout_mode in the answer says which).
+	Exclude []string `json:"exclude,omitempty"`
+	Include []string `json:"include,omitempty"`
 }
 
 // HubSpawnReply is a completed node answer (HTTP 200). Status is set instead
@@ -82,6 +89,11 @@ type HubSpawnReply struct {
 	StdoutTail string `json:"stdout_tail"`
 	Error      string `json:"error"`
 	Status     string `json:"status"`
+	// CheckoutMode is what the node prepared for a checkout spec: "sparse"
+	// when its pattern list was applied, "full" when the whole tree is on
+	// disk (a node without checkout_sparse_v1, a git without the command, or
+	// a spec with no patterns). Empty for a spawn that names no spec.
+	CheckoutMode string `json:"checkout_mode,omitempty"`
 	// NextHost is set by the hub's own transport when it handed the request back
 	// to placement after a refusal that rules out only this host (a first-run
 	// dialog, a missing login, an unmapped repository). The loop tries the next

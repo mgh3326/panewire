@@ -72,6 +72,11 @@ type hubSpawnCheckout struct {
 	Fetch       string `json:"fetch,omitempty"`
 	Dir         string `json:"dir"`
 	VerifyReuse bool   `json:"verify_reuse,omitempty"`
+	// Exclude and Include are the sparse checkout lists the node turns into
+	// its own pattern list (hk 5098). They travel only to a node that
+	// advertises checkout_sparse_v1; every other node gets the full checkout.
+	Exclude []string `json:"exclude,omitempty"`
+	Include []string `json:"include,omitempty"`
 }
 
 type hubSpawnRequest struct {
@@ -103,6 +108,9 @@ type hubSpawnResult struct {
 	StdoutTail  string                  `json:"stdout_tail"`
 	CompletedAt *time.Time              `json:"completed_at,omitempty"`
 	Error       string                  `json:"error,omitempty"`
+	// CheckoutMode is the node's answer for a checkout spec: "sparse" or
+	// "full" (hk 5098). Empty for a spawn that names no spec.
+	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
 type hubSpawnRecord struct {
@@ -111,6 +119,11 @@ type hubSpawnRecord struct {
 	status  string
 	created time.Time
 	waiter  chan hubSpawnResult
+	// checkoutStripped records that the hub dropped this request's sparse
+	// lists because the node does not advertise checkout_sparse_v1 (hk 5098).
+	// A node from before the feature answers no checkout_mode at all, so the
+	// hub then reports "full" itself rather than leaving the answer silent.
+	checkoutStripped bool
 }
 
 func validHubSpawnRequestID(value string) bool { return hubSpawnRequestIDPattern.MatchString(value) }
@@ -147,6 +160,12 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 	}
 	repo := ownerRepo[strings.IndexByte(ownerRepo, '/')+1:]
 	if strings.EqualFold(checkout.Dir, repo) {
+		return false
+	}
+	// The sparse lists belong to a detached spec only (hk 5098): the same rule
+	// the node applies, so a branch-mode request with lists is refused here
+	// instead of being accepted and refused at the node or silently run full.
+	if spawnargs.SparseSpecRefusal(checkout.Mode, checkout.Exclude, checkout.Include) != "" {
 		return false
 	}
 	switch checkout.Mode {
@@ -196,12 +215,12 @@ func withoutSpawnFlag(args []string, flag string) []string {
 // result is a node-to-hub control response, not an event envelope.
 func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || fields == nil || (len(fields) < 6 || len(fields) > 11) {
+	if json.Unmarshal(raw, &fields) != nil || fields == nil || (len(fields) < 6 || len(fields) > 12) {
 		return hubSpawnResult{}, false
 	}
 	for key := range fields {
 		switch key {
-		case "type", "request_id", "rc", "job_id", "pane", "stdout_tail", "error", "stage", "stage_ms", "retryable", "receipt":
+		case "type", "request_id", "rc", "job_id", "pane", "stdout_tail", "error", "stage", "stage_ms", "retryable", "receipt", "checkout_mode":
 		default:
 			return hubSpawnResult{}, false
 		}
@@ -243,7 +262,18 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 		}
 		result.Receipt = &receipt
 	}
+	if raw, ok := fields["checkout_mode"]; ok {
+		if json.Unmarshal(raw, &result.CheckoutMode) != nil || !validSpawnCheckoutMode(result.CheckoutMode) {
+			return hubSpawnResult{}, false
+		}
+	}
 	return result, true
+}
+
+// validSpawnCheckoutMode is the closed set a node may answer for a spec
+// checkout (hk 5098).
+func validSpawnCheckoutMode(value string) bool {
+	return value == "" || value == nodeCheckoutSparse || value == nodeCheckoutFull
 }
 
 func validHubSpawnResultError(value string) bool {
@@ -332,6 +362,12 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	entry := &hubSpawnRecord{request: body, status: "pending", created: now, waiter: make(chan hubSpawnResult, 1)}
 	h.spawnRecords[body.RequestID] = entry
 	agent := record.agent
+	// Only a node that advertises checkout_sparse_v1 reads exclude/include;
+	// every other node gets the full checkout and says so (hk 5098). The
+	// record keeps the request as sent, so a replay to a capable node keeps
+	// the lists.
+	checkout := sparseCheckoutForNode(body.Checkout, record.capabilities)
+	entry.checkoutStripped = checkout != body.Checkout
 	h.mu.Unlock()
 
 	message := struct {
@@ -342,7 +378,7 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 		Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
 		Args        []string          `json:"args"`
 		WaitSeconds int               `json:"wait_seconds"`
-	}{Type: "job.spawn", RequestID: body.RequestID, CWDKey: body.CWDKey, Brief: body.Brief, Checkout: body.Checkout, Args: body.Args, WaitSeconds: body.WaitSeconds}
+	}{Type: "job.spawn", RequestID: body.RequestID, CWDKey: body.CWDKey, Brief: body.Brief, Checkout: checkout, Args: body.Args, WaitSeconds: body.WaitSeconds}
 	if err := agent.writeJSON(message); err != nil {
 		h.mu.Lock()
 		delete(h.spawnRecords, body.RequestID)
@@ -410,6 +446,12 @@ func (h *HubServer) resolveSpawn(machine string, result hubSpawnResult) {
 		return
 	}
 	completed := h.now().UTC()
+	// A pre-feature node cannot answer checkout_mode; the hub knows the
+	// request asked for a sparse checkout and the node got no lists, so the
+	// checkout it prepared is the full one (hk 5098 review).
+	if result.CheckoutMode == "" && record.checkoutStripped {
+		result.CheckoutMode = nodeCheckoutFull
+	}
 	result.Machine = machine
 	result.CompletedAt = &completed
 	record.result = result

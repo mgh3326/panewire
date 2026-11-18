@@ -278,7 +278,7 @@ func TestSuccessfulSpawnWritesNodeSpawnEvent(t *testing.T) {
 		spawnConfigPath: t14SpawnConfig(t, t.TempDir()),
 		now:             func() time.Time { clock = clock.Add(1500 * time.Millisecond); return clock },
 		fleetEvents:     func(_ time.Time, ev fleetEvent) bool { events = append(events, ev); return true },
-		spawnEngine: func(_ context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+		spawnEngine: func(_ context.Context, cwd, brief, workspace, session string, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 			output := &hubSpawnOutput{}
 			_, _ = output.stderr.Write([]byte("SECRET SCREEN TEXT"))
 			return output, fleet.Execution{Receipt: fleet.ExecutionReceipt{Job: "job-ok", Pane: "w:p1", Profile: "claude-opus-high"}}
@@ -306,7 +306,7 @@ func TestSuccessfulSpawnWritesNodeSpawnEvent(t *testing.T) {
 // optional fields, through the production writer.
 func TestSuccessfulSpawnEventReachesTheEventsFile(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		return &hubSpawnOutput{}, fleet.Execution{Receipt: fleet.ExecutionReceipt{Job: "job-ok", Profile: "codex-high"}}
 	}}
 	requestID := t14RequestID(2870)

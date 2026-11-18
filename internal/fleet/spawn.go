@@ -38,12 +38,22 @@ type Spawn struct {
 	// names so the submitting host holds no checkout at all (hk 4738). They
 	// are submitter input only; the wire carries Repository.Checkout.
 	CheckoutOrigin, CheckoutCommit, CheckoutRef string `json:"-"`
+	// CheckoutExclude and CheckoutInclude are the repeatable
+	// --checkout-exclude and --checkout-include of a sparse spec checkout (hk
+	// 5098): the paths left out of the node's worktree, and the changed paths
+	// kept in it. They are valid only with the spec above and travel as
+	// Repository.Checkout.Exclude/Include.
+	CheckoutExclude, CheckoutInclude []string `json:"-"`
 	// hubExpiresAt is the absolute request expiry the hub sent with a
 	// node-delivered spawn (hk 4747). The own spawn writes it into its
 	// job.spawned receipt as expires_at, which the node's pane sweep reads to
 	// end a reviewer or consult past its real limit. Zero when the hub named
 	// none: the receipt then carries the role's default.
 	hubExpiresAt time.Time
+	// checkoutMode is what the node prepared for this spawn's checkout spec
+	// ("sparse" or "full", hk 5098). The job.spawned record carries it; it
+	// never parses out of the args, since the node's own prepare decided it.
+	checkoutMode string
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
 	// names the pass in the operation and in RoleKey; a reviewer holds no
 	// reservation (hk 4737), so it widens no slot. panewire never parses it out
@@ -205,6 +215,10 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	var consultStamp string
 	f := flags("spawn")
 	f.Var((*repeatedStringFlag)(&s.After), "after", "start condition (repeatable)")
+	// A sparse checkout's two lists are repeatable and carry patterns rather
+	// than ordinary names, so they parse apart from the string flags above.
+	f.Var((*repeatedStringFlag)(&s.CheckoutExclude), "checkout-exclude", "path or pattern left out of the checkout (repeatable)")
+	f.Var((*repeatedStringFlag)(&s.CheckoutInclude), "checkout-include", "changed path kept in the checkout (repeatable)")
 	for _, p := range []struct {
 		k string
 		v *string
@@ -816,7 +830,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	defer func() {
 		if a.ObserveReceipt != nil {
 			x := s.placement.execution
-			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Pool: x.Pool, AccountKey: x.AccountKey, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered})
+			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Pool: x.Pool, AccountKey: x.AccountKey, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered, CheckoutMode: s.checkoutMode})
 		}
 	}()
 
@@ -1446,6 +1460,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	// consult by its real limit (hk 4747).
 	receipt["expires_at"] = a.spawnExpiresAt(s).UTC().Format(time.RFC3339)
 	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
+	// What the node put on disk for a checkout spec: "sparse" carries the
+	// paths the request left out, so the reviewer prompt may say they are
+	// absent on purpose (hk 5098). Absent for a spawn with no spec.
+	if s.checkoutMode != "" {
+		receipt["checkout_mode"] = s.checkoutMode
+	}
 	if s.AccountKey != "" {
 		receipt["account_key"] = s.AccountKey
 	}

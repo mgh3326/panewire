@@ -85,13 +85,24 @@ func openNodeSpawnJournal(root string) (*nodeSpawnJournal, error) {
 }
 func spawnFingerprint(message hubOutboundMessage) string {
 	// Only execution fields contribute; transport/reconnect metadata does not.
+	// The sparse lists are not part of the identity: the hub adds or drops them
+	// with the target node's checkout_sparse_v1 capability, so a replay across
+	// that node's upgrade or rollback must still match its journaled request.
+	// They change what is on disk, never which commit, directory or origin the
+	// job runs in (hk 5098 review).
+	checkout := message.Checkout
+	if checkout != nil && (len(checkout.Exclude) != 0 || len(checkout.Include) != 0) {
+		stripped := *checkout
+		stripped.Exclude, stripped.Include = nil, nil
+		checkout = &stripped
+	}
 	raw, _ := json.Marshal(struct {
 		ID, CWD, Inline, Doc string
 		Args                 []string
 		Checkout             *hubSpawnCheckout
 		Wait                 int
 		Deadline             int64
-	}{message.RequestID, message.CWDKey, message.BriefInline, message.BriefDoc, message.Args, message.Checkout, message.WaitSeconds, message.DeadlineMS})
+	}{message.RequestID, message.CWDKey, message.BriefInline, message.BriefDoc, message.Args, checkout, message.WaitSeconds, message.DeadlineMS})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }

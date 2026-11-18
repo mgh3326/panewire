@@ -150,7 +150,7 @@ func TestNodeSpawnLegacyResultKeepsOldWireShape(t *testing.T) {
 
 func TestNodeSpawnSuccessfulReceiptSurvivesContextExpiry(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnEngine: func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		cancel()
 		return t14EngineOK()
 	}}

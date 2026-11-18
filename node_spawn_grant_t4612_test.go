@@ -58,7 +58,7 @@ func grantNode(t *testing.T) (*HubClient, *atomic.Int32) {
 	t.Helper()
 	var runs atomic.Int32
 	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, t.TempDir()), spawnJournalDir: t.TempDir(), fleetEvents: (&fleetEventRecorder{}).write}
-	client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		runs.Add(1)
 		return t14EngineOK()
 	}

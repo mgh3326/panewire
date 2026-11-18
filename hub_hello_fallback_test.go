@@ -98,9 +98,26 @@ func runHelloFallbackNode(t *testing.T, server *httptest.Server, ackTimeout time
 	})
 }
 
+// helloHasSpawnV2 reports that the hello carries the capabilities every
+// upgraded node advertises. close_ops_v1 and checkout_sparse_v1 depend on the
+// host, so their presence is not part of this shape.
 func helloHasSpawnV2(hello map[string]any) bool {
 	capabilities, _ := hello["capabilities"].([]any)
-	return len(capabilities) == len(hubSpawnCapabilities) && capabilities[0] == "spawn_v2" && capabilities[1] == "spawn_ops_v1"
+	if len(capabilities) < len(hubSpawnCapabilities) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, capability := range capabilities {
+		if name, ok := capability.(string); ok {
+			seen[name] = true
+		}
+	}
+	for _, want := range hubSpawnCapabilities {
+		if !seen[want] {
+			return false
+		}
+	}
+	return capabilities[0] == "spawn_v2" && capabilities[1] == "spawn_ops_v1"
 }
 
 func TestHelloFallbackOldHubRegistersWithoutCapabilities(t *testing.T) {

@@ -33,7 +33,10 @@ func ErrorCode(err error) int {
 // CLI engine and guards, while execution paths and session come from node config.
 // expiresAt is the hub's request expiry when the frame carried one (hk 4747):
 // the spawn writes it into its receipt so the pane sweep reads the real limit.
-func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, expiresAt time.Time, args []string, out, errout io.Writer) Execution {
+// checkoutMode is what the node prepared for the spawn's checkout spec (hk
+// 5098); the job record carries it so a reader knows the absent paths are
+// absent on purpose. Empty when the spawn names no spec.
+func ExecuteNode(ctx context.Context, cwd, brief, workspace, session, checkoutMode string, expiresAt time.Time, args []string, out, errout io.Writer) Execution {
 	result := Execution{Stage: "placement", StageMS: map[string]int64{}, Retryable: true}
 	a, err := New(out, errout)
 	if err != nil {
@@ -54,6 +57,7 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, exp
 		return result
 	}
 	s = bindNodeSpawn(s, cwd, brief, workspace)
+	s.checkoutMode = checkoutMode
 	if !expiresAt.IsZero() {
 		s.hubExpiresAt = expiresAt
 	}
@@ -115,6 +119,10 @@ type ExecutionReceipt struct {
 	// LaneUnregistered is true when the pane exists but hub lane registration
 	// failed after its retry (receipt field lane_unregistered).
 	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
+	// CheckoutMode is what the node prepared for a checkout spec — "sparse"
+	// or "full" (hk 5098) — so the job record says whether paths are absent
+	// on purpose. Empty for a spawn that names no spec.
+	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
 // ExistingJob exposes only the durable job read needed before hub acceptance.

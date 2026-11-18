@@ -47,7 +47,7 @@ func TestLaunchProofNodeWireReasonT2803(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := quotaClient(t)
 			client.spawnConfigPath = t14SpawnConfig(t, t.TempDir())
-			client.spawnEngine = func(context.Context, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+			client.spawnEngine = func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 				return &hubSpawnOutput{}, fleet.Execution{RC: 70, Stage: "launch", Retryable: true, FailureClass: tc.class}
 			}
 			result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(2803), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 1, Args: []string{"--job", "job-2803", "-m", "codex-sol"}})
@@ -60,10 +60,10 @@ func TestLaunchProofNodeWireReasonT2803(t *testing.T) {
 
 func TestLaunchProofOldHubCompatibilityT2803(t *testing.T) {
 	result := hubSpawnResult{RC: 70, Error: "launch_proof_failed", Retryable: true}
-	if got := spawnResultForHub(result, false); got.Error != "spawn_failed" || !got.Retryable {
+	if got := spawnResultForHub(result, false, true); got.Error != "spawn_failed" || !got.Retryable {
 		t.Fatalf("old hub result = %+v", got)
 	}
-	if got := spawnResultForHub(result, true); got.Error != "launch_proof_failed" {
+	if got := spawnResultForHub(result, true, true); got.Error != "launch_proof_failed" {
 		t.Fatalf("new hub result = %+v", got)
 	}
 }

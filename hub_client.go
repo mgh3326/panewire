@@ -240,6 +240,7 @@ type HubClient struct {
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodeGitStdin       nodeGitStdinRunner // fixture seam for a git command fed on stdin; nil runs git.
 	nodeAdd            nodeAddRunner      // fixture seam for the worktree add child; nil runs git and records it.
 	nodeCheckouts      map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
 	nodeInstallWait    time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
@@ -709,8 +710,11 @@ type hubClientConnection struct {
 	// (node_pane_sweep.go): the heartbeat may carry the sweep's open-pane count.
 	acceptsEndedPanes  atomic.Bool
 	acceptsLaunchProof atomic.Bool
-	connection         *websocket.Conn
-	writeMu            hubWriteMutex
+	// acceptsCheckoutSparse is the same for hubFeatureCheckoutSparse
+	// (checkout_sparse.go): the spawn result may carry checkout_mode.
+	acceptsCheckoutSparse atomic.Bool
+	connection            *websocket.Conn
+	writeMu               hubWriteMutex
 	// closed is closed when the session on this connection ends; a nil
 	// channel (a test peer) never ends.
 	closed chan struct{}
@@ -2205,6 +2209,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
 				peer.acceptsEndedPanes.Store(slices.Contains(message.Features, hubFeatureEndedPanes))
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
+				peer.acceptsCheckoutSparse.Store(slices.Contains(message.Features, hubFeatureCheckoutSparse))
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)

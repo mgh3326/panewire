@@ -239,7 +239,7 @@ func TestHubSpawnFailingEngineStderrReachesResultBoundedAndRedacted(t *testing.T
 	// 8 KiB of stderr noise, then the line that explains the refusal.
 
 	message := hubOutboundMessage{RequestID: t14RequestID(91), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 5, Args: []string{"--job", "job-stderr"}}
-	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 		output := &hubSpawnOutput{}
 		_, _ = output.stderr.Write([]byte(strings.Repeat("noise\n", 1500) + "panewire: quota gate refused: " + fleetEventFakeSecretText))
 		return output, fleet.Execution{RC: 70, Stage: "placement"}

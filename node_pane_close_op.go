@@ -39,15 +39,20 @@ func (client *HubClient) closeOpsReady(ctx context.Context) bool {
 }
 
 // spawnHelloCapabilities is hubSpawnCapabilities plus close_ops_v1 when the
-// node is ready for it, read fresh; it records what it decided so the
+// node is ready for it and checkout_sparse_v1 when its git can run a sparse
+// checkout, read fresh; it records what it decided about close ops so the
 // connected re-check can tell a change.
 func (client *HubClient) spawnHelloCapabilities(ctx context.Context) []string {
 	ready := client.closeOpsReady(ctx)
 	client.closeOpsAdvertised.Store(ready)
-	if !ready {
-		return hubSpawnCapabilities
+	capabilities := slices.Clone(hubSpawnCapabilities)
+	if ready {
+		capabilities = append(capabilities, hubCapabilityCloseOps)
 	}
-	return append(slices.Clone(hubSpawnCapabilities), hubCapabilityCloseOps)
+	if client.checkoutSparseReady(ctx) {
+		capabilities = append(capabilities, hubCapabilityCheckoutSparse)
+	}
+	return capabilities
 }
 
 // Close operations (hk 4594; docs/node-commands.md, "Close operations") are
