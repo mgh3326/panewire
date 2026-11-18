@@ -124,9 +124,11 @@ func (client *HubClient) runCheckoutRevisit(ctx context.Context) {
 		pass = client.revisitKeptWorktrees
 	}
 	guarded := func(ctx context.Context) {
+		passCtx, cancel := context.WithTimeout(ctx, nodeCheckoutSweepRunTimeout)
+		defer cancel()
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
-		pass(ctx)
+		pass(passCtx)
 	}
 	guarded(ctx)
 	ticks := client.checkoutRevisitTicks

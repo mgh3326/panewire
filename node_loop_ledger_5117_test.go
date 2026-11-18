@@ -528,6 +528,40 @@ func TestRunCheckoutRevisitHoldsCommandMu(t *testing.T) {
 	}
 }
 
+// TestRunCheckoutRevisitPassBoundedByTimeout verifies that the revisit pass runs
+// under a context bounded by nodeCheckoutSweepRunTimeout, preventing slow git
+// remotes from holding nodeCommandMu indefinitely.
+func TestRunCheckoutRevisitPassBoundedByTimeout(t *testing.T) {
+	client := &HubClient{jobsInboxRoot: t.TempDir()}
+	ticks := make(chan time.Time, 1)
+	client.checkoutRevisitTicks = ticks
+	var hasDeadline bool
+	var remaining time.Duration
+	done := make(chan struct{})
+	client.checkoutRevisitPass = func(ctx context.Context) {
+		deadline, ok := ctx.Deadline()
+		hasDeadline = ok
+		if ok {
+			remaining = time.Until(deadline)
+		}
+		close(done)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.runCheckoutRevisit(ctx)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("revisit pass did not run")
+	}
+	if !hasDeadline {
+		t.Fatal("revisit pass context has no deadline")
+	}
+	if remaining <= 0 || remaining > nodeCheckoutSweepRunTimeout {
+		t.Fatalf("revisit pass deadline = %v, want bounded by %v", remaining, nodeCheckoutSweepRunTimeout)
+	}
+}
+
 // TestNodeLoopsNoReportRetriesAfterPersistFailure is the fix for review
 // finding 3 (medium): a failed no-report persist keeps the date pending
 // instead of pruning it, so the next sweep retries instead of losing the
