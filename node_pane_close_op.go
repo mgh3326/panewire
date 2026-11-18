@@ -761,7 +761,9 @@ func (client *HubClient) settleHubClose(ctx context.Context, job string) {
 	if _, err := client.hubCloseLedger().Settle(ctx, job); err != nil {
 		slog.Warn("hub close settlement pending", "job", job, "error", err)
 	}
-	client.reconcileWatcherFence(ctx, job)
+	if client.holdsWatcherFence(job) {
+		client.reconcileWatcherFence(ctx, job)
+	}
 }
 
 // reconcileWatcherFence makes the node's fence on the job's watch lock match
@@ -795,8 +797,10 @@ func (client *HubClient) reconcileWatcherFence(ctx context.Context, job string) 
 	if !open {
 		if held {
 			client.releaseWatcherFence(job)
+			rearm = live
+		} else if watcher, err := ledger.Watcher(dir); err == nil && watcher == fleet.HubCloseWatcherNone {
+			rearm = live
 		}
-		rearm = live
 		return true
 	}
 	if held {
