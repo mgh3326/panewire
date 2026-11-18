@@ -425,6 +425,7 @@ func restartPoolActionHub(t *testing.T, f *quotaReplaceFixture) {
 	}
 	t.Cleanup(func() { _ = hub.Close() })
 	hub.spawnNewApp = newApp
+	hub.handoverInputs = old.handoverInputs
 	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
 	hub.mu.Lock()
 	hub.nodes["machine-b"] = &hubNodeRecord{agent: destination}
@@ -434,6 +435,7 @@ func restartPoolActionHub(t *testing.T, f *quotaReplaceFixture) {
 	f.node = t14Node(t, hub, server, true)
 	hub.mu.Lock()
 	hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
+	hub.nodes["machine-a"].capabilities[hubCapabilityHandoverCheck] = true
 	hub.mu.Unlock()
 	f.hub, f.destination = hub, destination
 }

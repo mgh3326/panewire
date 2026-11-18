@@ -988,6 +988,9 @@ func TestPlacementDeliveryDoesNotBlockOtherDispatch_t4581(t *testing.T) {
 	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_notifications SET delivered=1 WHERE request_id=?`, request.RequestID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := h.inbox.store.db.Exec(`DELETE FROM spawn_notice_outbox`); err != nil {
+		t.Fatal(err)
+	}
 	h.startSpawnCoordinator(t.Context())
 	select {
 	case <-started:
