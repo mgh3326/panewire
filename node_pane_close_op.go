@@ -322,6 +322,12 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 	}
 	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, target: target}
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
+		if client.jobsInboxRoot != "" {
+			epoch, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+			if err != nil || epoch > args.Epoch {
+				return nodeCloseHookStop{code: "epoch_mismatch"}
+			}
+		}
 		// The proof is read again after the settle: the job's watcher, a
 		// separate process, may have recorded a re-prompt or an end of the
 		// attempt meanwhile.

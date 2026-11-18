@@ -1429,6 +1429,17 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 		}
 	}
+	unlock, err := h.poolActionLocks.lock(ctx, current.Job)
+	if err != nil {
+		releaseAdmission()
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	err = h.saveOwnerAssignment(hubOwnerAssignment{Job: current.Job, Node: node.Machine, Epoch: 1}, current.Status == "bound")
+	unlock()
+	if err != nil {
+		releaseAdmission()
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
 	started, err := h.inbox.store.beginSpawnSend(ctx, current)
 	if err != nil || !started {
 		releaseAdmission()

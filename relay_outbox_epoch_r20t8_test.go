@@ -137,14 +137,13 @@ func r20t8OutboxNullRows(t *testing.T, store *Store) int {
 }
 
 // TestR20T8RestartReusesUnpersistedOutboxEpoch is the independent RED
-// reproduction for T8/AC4. An assignment fences the first send at epoch 2;
-// after a process restart the scanner reads epoch 1 from the same event file.
-// It must re-present the outstanding epoch-2 row instead of minting epoch 1.
+// reproduction for T8/AC4. The event carries epoch 2 and its outstanding
+// row is retained across restart, including its original delivery identity.
 func TestR20T8RestartReusesUnpersistedOutboxEpoch(t *testing.T) {
 	inbox := t.TempDir()
 	store := NewMemoryStore(t)
 	defer store.Close()
-	r20WriteEvent(t, inbox, "t8-epoch-reuse", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-source","label":"lane-source","host":"host-a","report_path":"report.md","report_last_line":"done"}`, time.Time{})
+	r20WriteEvent(t, inbox, "t8-epoch-reuse", "00001-job.completed.json", `{"type":"job.completed","epoch":2,"owner_lane":"lane-source","label":"lane-source","host":"host-a","report_path":"report.md","report_last_line":"done"}`, time.Time{})
 
 	first := r20Node(inbox, store)
 	first.assignedJobs["t8-epoch-reuse"] = 2
@@ -173,6 +172,22 @@ func TestR20T8RestartReusesUnpersistedOutboxEpoch(t *testing.T) {
 	}
 	if rows != 1 {
 		t.Fatalf("restart minted %d relay_sent rows, want 1", rows)
+	}
+}
+
+func TestJobOwnerFenceOutboxCannotPromoteOldCompletion_t5067(t *testing.T) {
+	inbox := t.TempDir()
+	store := NewMemoryStore(t)
+	defer store.Close()
+	const job, file = "old-completion", "00001-job.completed.json"
+	r20WriteEvent(t, inbox, job, file, `{"type":"job.completed","epoch":1,"owner_lane":"lane-source"}`, time.Time{})
+	oldSender := relayOutboxKey{Kind: "job.completed", JobID: job, Epoch: 3, EventID: file}
+	if err := store.RecordRelaySent(context.Background(), oldSender, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
+		t.Fatal(err)
+	}
+	events := r20Node(inbox, store).jobCompletionEvents()
+	if len(events) != 1 || events[0].relayKey.Epoch != 1 || !strings.Contains(string(events[0].Payload), `"epoch":1`) {
+		t.Fatalf("outbox promoted an old completion: %+v", events)
 	}
 }
 
@@ -213,7 +228,8 @@ func TestR20T8LiveEpochDoesNotReuseOlderUnpersistedRow(t *testing.T) {
 	_ = drainPersisted(sourceAgent) // The sender's acknowledgement was lost.
 
 	// A redispatched run writes another completion for the same report path.
-	r20WriteEvent(t, inbox, jobID, "00002-job.completed.json", first, time.Time{})
+	second := strings.Replace(first, `"epoch":1`, `"epoch":2`, 1)
+	r20WriteEvent(t, inbox, jobID, "00002-job.completed.json", second, time.Time{})
 	liveNode := r20Node(inbox, store)
 	liveNode.assignedJobs[jobID] = 2
 	liveBatch := liveNode.jobCompletionEvents()

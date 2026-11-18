@@ -262,6 +262,10 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 	admitted := make(map[jobGrant]bool, len(unknown))
 	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
 	for _, job := range unknown {
+		assignment, held, err := h.ownerAssignment(job.JobID)
+		if err != nil || held && assignment.Ended && assignment.Node == machineID && assignment.Epoch == job.Epoch {
+			continue
+		}
 		admitted[jobGrant{job.JobID, job.Epoch}] = h.firstSeenJobOwned(ctx, job.JobID, machineID, job.Epoch)
 	}
 	cancel()
@@ -395,7 +399,45 @@ func (h *HubServer) acknowledgeRevocation(machineID string, ack hubJobEventPaylo
 	return true
 }
 
+// lockEndingAssignment serializes a terminal event with reassignment and
+// persists its end before the in-memory record can be lost on restart.
+func (h *HubServer) lockEndingAssignment(machineID string, event hubJobEventPayload) (func(), bool) {
+	h.mu.Lock()
+	job := h.jobs[event.JobID]
+	valid := job != nil && !job.Reassigning && job.Epoch == event.Epoch && job.Node == machineID
+	h.mu.Unlock()
+	if !valid {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
+	unlock, err := h.poolActionLocks.lock(ctx, event.JobID)
+	if err != nil {
+		cancel()
+		return nil, false
+	}
+	release := func() { unlock(); cancel() }
+	h.mu.Lock()
+	job = h.jobs[event.JobID]
+	valid = job != nil && !job.Reassigning && job.Epoch == event.Epoch && job.Node == machineID
+	h.mu.Unlock()
+	if !valid {
+		release()
+		return nil, false
+	}
+	if err := h.endOwnerAssignment(event.JobID, machineID, event.Epoch); err != nil {
+		h.logger.Warn("job assignment end unavailable", "job", event.JobID)
+		release()
+		return nil, false
+	}
+	return release, true
+}
+
 func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEventPayload, received time.Time) bool {
+	unlock, ok := h.lockEndingAssignment(machineID, completion)
+	if !ok {
+		return false
+	}
+	defer unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	job := h.jobs[completion.JobID]
@@ -415,6 +457,11 @@ func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEven
 // epoch fencing. A cancelled job did not come back, so no job.recovered event
 // is queued — the console feed records a revoked entry on the first close.
 func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayload, received time.Time) bool {
+	unlock, ok := h.lockEndingAssignment(machineID, event)
+	if !ok {
+		return false
+	}
+	defer unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	job := h.jobs[event.JobID]
@@ -448,6 +495,22 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 	owned := h.firstSeenJobOwned(ctx, completion.JobID, machineID, completion.Epoch)
 	cancel()
 	if !owned {
+		return false
+	}
+	ctx, cancel = context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
+	defer cancel()
+	unlock, err := h.poolActionLocks.lock(ctx, completion.JobID)
+	if err != nil {
+		return false
+	}
+	defer unlock()
+	h.mu.Lock()
+	if h.jobs[completion.JobID] != nil {
+		h.mu.Unlock()
+		return false
+	}
+	h.mu.Unlock()
+	if err := h.endOwnerAssignment(completion.JobID, machineID, completion.Epoch); err != nil {
 		return false
 	}
 	h.mu.Lock()

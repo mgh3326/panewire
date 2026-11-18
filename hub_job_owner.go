@@ -22,8 +22,29 @@ func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, e
 	if !exists {
 		return fmt.Errorf("job %s cannot be reassigned: job not_found", id)
 	}
+	assignment, held, err := h.ownerAssignment(id)
+	if err != nil {
+		return fmt.Errorf("job %s cannot be reassigned: assignment unavailable", id)
+	}
+	if held && (assignment.Node != from || assignment.Epoch != epoch) && (!supported || current == (fleet.JobOwner{})) {
+		return fmt.Errorf("job %s cannot be reassigned: assignment changed", id)
+	}
+	if held && assignment.Ended && (!supported || current == (fleet.JobOwner{}) || current == old) {
+		return fmt.Errorf("job %s cannot be reassigned: assignment ended", id)
+	}
+	saveSuccessor := func() error {
+		if !held && (!supported || current == (fleet.JobOwner{})) {
+			return nil
+		}
+		return h.saveOwnerAssignment(hubOwnerAssignment{Job: id, Node: to, Epoch: epoch + 1}, false)
+	}
 	if !supported {
 		h.noteJobFenceSupport(false)
+		return saveSuccessor()
+	}
+	if current == (fleet.JobOwner{}) && !held {
+		// A heartbeat alone is not a durable assignment. Such a legacy job
+		// remains unfenced until it ends.
 		return nil
 	}
 	intent := hubOwnerTransfer{Job: id, From: from, To: to, Epoch: epoch}
@@ -33,9 +54,9 @@ func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, e
 	}
 	if known && current == next {
 		h.noteJobFenceSupport(true)
-		return nil
+		return saveSuccessor()
 	}
-	if current == old || (current == (fleet.JobOwner{}) && epoch == 1) {
+	if current == old || current == (fleet.JobOwner{}) {
 		if !known {
 			if err := h.saveOwnerTransfer(intent); err != nil {
 				return fmt.Errorf("job %s cannot be reassigned: transfer journal unavailable", id)
@@ -59,13 +80,17 @@ func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, e
 	}
 	if err != nil {
 		var backend *fleet.BackendError
+		if known && fleet.IsJobOwnerMismatch(err) && errors.As(err, &backend) && backend.OwnerNode == next.Node && backend.OwnerEpoch == next.Epoch {
+			h.noteJobFenceSupport(true)
+			return saveSuccessor()
+		}
 		if fleet.IsJobOwnerMismatch(err) || (errors.As(err, &backend) && backend.Code == "job_state_conflict") {
 			_ = h.removeOwnerTransfer(intent)
 		}
 		return fmt.Errorf("job %s cannot be reassigned: %w", id, err)
 	}
 	h.noteJobFenceSupport(supported)
-	return nil
+	return saveSuccessor()
 }
 
 func (h *HubServer) noteJobFenceSupport(supported bool) {
@@ -89,10 +114,8 @@ func poolActionOwnerMoved(action poolAction, record map[string]any) (bool, error
 	return supported && owner.Node != "" && (owner.Node != action.Node || owner.Epoch != action.Epoch), nil
 }
 
-// firstSeenJobOwned admits a restarted hub's first observation only when hk
-// confirms the owner. Older servers and absent job records retain epoch-1
-// registration; a supporting server's stored grant is authoritative.
-func (h *HubServer) readJobOwner(ctx context.Context, id string) (fleet.JobOwner, bool, bool, error) {
+// readJobRecord uses the same configured hk client for fencing and recovery.
+func (h *HubServer) readJobRecord(ctx context.Context, id string) (map[string]any, bool, error) {
 	var record map[string]any
 	var exists bool
 	var err error
@@ -117,6 +140,14 @@ func (h *HubServer) readJobOwner(ctx context.Context, id string) (fleet.JobOwner
 		}
 	}
 	if err != nil {
+		return nil, false, err
+	}
+	return record, exists, nil
+}
+
+func (h *HubServer) readJobOwner(ctx context.Context, id string) (fleet.JobOwner, bool, bool, error) {
+	record, exists, err := h.readJobRecord(ctx, id)
+	if err != nil {
 		return fleet.JobOwner{}, false, false, err
 	}
 	if !exists {
@@ -126,15 +157,33 @@ func (h *HubServer) readJobOwner(ctx context.Context, id string) (fleet.JobOwner
 	return owner, supported, true, err
 }
 
+// firstSeenJobOwned uses hk's owner, or a persisted hub assignment for a
+// legacy record. A heartbeat alone can only register the legacy first epoch.
 func (h *HubServer) firstSeenJobOwned(ctx context.Context, id, node string, epoch uint64) bool {
 	owner, supported, exists, err := h.readJobOwner(ctx, id)
 	if err != nil {
-		// Without an explicit hk client the historical epoch-1 fallback is
-		// retained; reassignment itself still requires the owner record.
-		return h.spawnNewApp == nil && h.handoffkeep == nil && epoch == 1
+		return false
+	}
+	if exists && supported && owner.Node != "" {
+		return owner.Node == node && owner.Epoch == epoch
+	}
+	assignment, held, assignmentErr := h.ownerAssignment(id)
+	if assignmentErr != nil {
+		return false
+	}
+	if held {
+		if assignment.Ended || assignment.Node != node || assignment.Epoch != epoch {
+			return false
+		}
+		// A missed startup sweep must not strand a known later assignment.
+		h.seedOwnerAssignment(ctx, assignment)
+		owner, supported, exists, err = h.readJobOwner(ctx, id)
+		if err != nil {
+			return false
+		}
 	}
 	if !exists || !supported || owner.Node == "" {
-		return epoch == 1
+		return held || epoch == 1
 	}
 	return owner.Node == node && owner.Epoch == epoch
 }

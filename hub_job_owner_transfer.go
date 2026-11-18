@@ -23,7 +23,10 @@ type hubOwnerTransfer struct {
 	Epoch uint64 `json:"epoch"`
 }
 
-func defaultHubOwnerTransferDir() string {
+func defaultHubOwnerTransferDir(inboxPath string, sqlite bool) string {
+	if sqlite && inboxPath != "" {
+		return inboxPath + ".job-owner-transfers"
+	}
 	if state := panewireStateDir(); state != "" {
 		return filepath.Join(state, "job-owner-transfers")
 	}
@@ -149,6 +152,28 @@ func (h *HubServer) recoverOwnerTransfers(machine string) {
 
 func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTransfer) {
 	next := fleet.JobOwner{Node: intent.To, Epoch: intent.Epoch + 1}
+	record, exists, err := h.readJobRecord(ctx, intent.Job)
+	if err != nil || !exists {
+		return
+	}
+	state, _ := record["state"].(string)
+	if hkTerminalState(state) {
+		return
+	}
+	owner, supported, err := fleet.JobOwnerFromRecord(record)
+	if err != nil || !supported {
+		return
+	}
+	if owner != next {
+		// Epochs only increase; a competing owner makes this intent obsolete.
+		if owner.Epoch >= next.Epoch {
+			_ = h.removeOwnerTransfer(intent)
+		}
+		return
+	}
+	if err := h.saveOwnerAssignment(hubOwnerAssignment{Job: intent.Job, Node: next.Node, Epoch: next.Epoch}, false); err != nil {
+		return
+	}
 	h.mu.Lock()
 	current := h.jobs[intent.Job]
 	if current != nil && current.Node == next.Node && current.Epoch == next.Epoch {
@@ -158,6 +183,11 @@ func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTra
 		if node != nil {
 			active, present = node.activeJobs[intent.Job]
 		}
+		if current.FencedNodes == nil {
+			current.FencedNodes = make(map[string]uint64)
+		}
+		current.FencedNodes[intent.From] = next.Epoch
+		h.enqueueRevocationLocked(intent.From, hubJobRevokedEvent{Type: "job.revoked", JobID: intent.Job, Epoch: next.Epoch})
 		h.mu.Unlock()
 		if present && active.Epoch == next.Epoch {
 			_ = h.removeOwnerTransfer(intent)
@@ -165,18 +195,6 @@ func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTra
 		return
 	}
 	h.mu.Unlock()
-	owner, supported, exists, err := h.readJobOwner(ctx, intent.Job)
-	if err != nil || !exists || !supported {
-		return
-	}
-	if owner != next {
-		// Epochs only increase. Once hk reached this epoch elsewhere, the
-		// old conditional transfer can no longer commit.
-		if owner.Epoch >= next.Epoch {
-			_ = h.removeOwnerTransfer(intent)
-		}
-		return
-	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	current = h.jobs[intent.Job]
@@ -184,7 +202,7 @@ func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTra
 		current = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: intent.Job, Epoch: next.Epoch}, Node: next.Node, LastSeen: h.now(), FencedNodes: make(map[string]uint64)}
 		h.jobs[intent.Job] = current
 	} else if current.Node == intent.From && current.Epoch == intent.Epoch && !current.Reassigning {
-		current.Node, current.Epoch, current.Orphaned = next.Node, next.Epoch, false
+		current.Node, current.Epoch, current.Orphaned, current.Completed = next.Node, next.Epoch, false, false
 	} else {
 		return
 	}

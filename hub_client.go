@@ -2537,8 +2537,8 @@ func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubC
 		}
 		// Monotonic: a superseded session's drain can still run while a newer
 		// session already recorded a later epoch for the same job, and the
-		// read side only ever raises a scanned epoch (heartbeatEvent,
-		// jobCompletionEvents), never lowers it.
+		// heartbeat read side only raises a scanned epoch, never lowers it.
+		// Completion records keep the epoch of the producing attempt.
 		client.assignmentMu.Lock()
 		if message.Epoch > client.assignedJobs[message.JobID] {
 			client.assignedJobs[message.JobID] = message.Epoch
@@ -2819,16 +2819,6 @@ func (client *HubClient) nowUTC() time.Time {
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	completed := scanHubRelayEventsWithin(client.jobsInboxRoot, relayOutboxMaxAge())
-	client.assignmentMu.Lock()
-	for index := range completed {
-		if epoch, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), completed[index].JobID); err == nil && epoch > completed[index].Epoch {
-			completed[index].Epoch = epoch
-		}
-		if assigned := client.assignedJobs[completed[index].JobID]; assigned > completed[index].Epoch {
-			completed[index].Epoch = assigned
-		}
-	}
-	client.assignmentMu.Unlock()
 	events := make([]hubClientEvent, 0, len(completed))
 	for _, job := range completed {
 		if event, ok := client.relayEventForSend(job); ok {
@@ -2850,10 +2840,11 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	if client.outbox != nil {
 		if outstanding, found, err := client.outbox.UnpersistedRelayOutboxKey(context.Background(), key); err != nil {
 			client.warnMessage("relay outbox outstanding key unavailable")
-		} else if found {
-			// The scanner's assignment epoch is process memory. Reuse the one
-			// outstanding row so the same retained event file is re-presented.
-			key, job.Epoch = outstanding, outstanding.Epoch
+		} else if found && outstanding.Epoch == job.Epoch {
+			// The event file owns its epoch. An older sender may have saved
+			// a later assignment on this same outbox row; never replay that
+			// later epoch as if this attempt had produced it.
+			key = outstanding
 		}
 	}
 	send, replay := client.selectRelayEvent(key)

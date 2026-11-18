@@ -153,7 +153,9 @@ func PutOwnedJob(ctx context.Context, store JobStore, jobs, node, id string, fie
 	if capability != nil {
 		capability(supported)
 	}
-	if !supported {
+	if !supported || current == (JobOwner{}) {
+		// Only the hub can establish a first owner. An unowned record keeps
+		// legacy writes and must not turn into a local revocation.
 		return store.Put(ctx, id, fields)
 	}
 	if !nodeIDRE.MatchString(node) {
@@ -169,17 +171,7 @@ func PutOwnedJob(ctx context.Context, store JobStore, jobs, node, id string, fie
 		update[key] = value
 	}
 	expected := JobOwner{Node: node, Epoch: epoch}
-	// A job may have landed before hk acquired fencing. Adopt an unfenced
-	// non-terminal record in the same conditional write as its first update.
-	if current == (JobOwner{}) {
-		if state := str(record, "state"); state != "claimed" && state != "spawned" {
-			return errors.New("job owner unavailable for terminal record")
-		}
-		update["owner"] = expected
-		update["expected_owner"] = JobOwner{}
-	} else {
-		update["expected_owner"] = expected
-	}
+	update["expected_owner"] = expected
 	err = store.Put(ctx, id, update)
 	if IsJobOwnerMismatch(err) {
 		var backend *BackendError
@@ -209,7 +201,7 @@ func TransferJobOwner(ctx context.Context, store JobStore, id string, from, to J
 		return supported, err
 	}
 	expected := from
-	if current == (JobOwner{}) && from.Epoch == 1 {
+	if current == (JobOwner{}) {
 		expected = JobOwner{}
 	}
 	err = store.Put(ctx, id, map[string]any{"expected_owner": expected, "owner": to})

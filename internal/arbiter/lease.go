@@ -332,6 +332,12 @@ func (s *Store) QuotaPools(ctx context.Context, job string) ([]string, error) {
 // ReleaseQuotaPool deletes a job's quota_pool record and marks the job
 // released. A missing record is ExitFencing.
 func (s *Store) ReleaseQuotaPool(ctx context.Context, job, pool string, force bool) error {
+	return s.ReleaseQuotaPoolIf(ctx, job, pool, force, nil)
+}
+
+// ReleaseQuotaPoolIf checks guard under the job's events lock before the
+// release event is published. A failed guard rolls back the quota deletion.
+func (s *Store) ReleaseQuotaPoolIf(ctx context.Context, job, pool string, force bool, guard func() error) error {
 	c, e := s.rw(ctx, false)
 	if e != nil {
 		return e
@@ -357,7 +363,7 @@ func (s *Store) ReleaseQuotaPool(ctx context.Context, job, pool string, force bo
 		if force {
 			kind += ".force"
 		}
-		_, err = s.recordEvent(ctx, c, job, kind, map[string]any{"job_id": job, "pool": pool, "profile": profile, "started_at": started, "forced": force}, nil)
+		_, err = s.recordEventGuarded(ctx, c, job, kind, map[string]any{"job_id": job, "pool": pool, "profile": profile, "started_at": started, "forced": force}, nil, guard)
 		return err
 	})
 }

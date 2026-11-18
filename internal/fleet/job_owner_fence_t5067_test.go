@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +14,83 @@ import (
 
 	"github.com/mgh3326/panewire/internal/jobowner"
 )
+
+func TestJobOwnerFenceReturningNodeRequiresNewAttempt_t5067(t *testing.T) {
+	jobs := filepath.Join(t.TempDir(), "jobs")
+	base := newFakeJobStore()
+	base.records["j"] = map[string]any{"state": "spawned", "owner_node": "machine-a", "owner_epoch": float64(3)}
+	store := &fenceJobStore{fakeJobStore: base}
+	if err := jobowner.Revoke(jobs, "j", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobowner.Assign(jobs, "j", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := PutOwnedJob(t.Context(), store, jobs, "machine-a", "j", map[string]any{"model": "old-attempt"}, nil); !IsJobReassigned(err) {
+		t.Fatalf("old attempt accepted after grant: %v", err)
+	}
+	claim := filepath.Join(jobs, "j", "events", "00002-job.claim.json")
+	if err := os.WriteFile(claim, []byte(`{"kind":"job.claim","payload":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stale := withJobEpoch(t.Context(), Job{ID: "j", OwnerEpoch: 1})
+	if err := PutOwnedJob(stale, store, jobs, "machine-a", "j", map[string]any{"model": "old-attempt"}, nil); !IsJobOwnerMismatch(err) {
+		t.Fatalf("old operation accepted after new claim: %v", err)
+	}
+	if err := PutOwnedJob(t.Context(), store, jobs, "machine-a", "j", map[string]any{"model": "new-attempt"}, nil); err != nil {
+		t.Fatalf("new attempt could not write: %v", err)
+	}
+}
+
+func TestJobOwnerFenceRelayUsesProducingEpoch_t5067(t *testing.T) {
+	runner := &fakeRunner{}
+	a := &App{Runner: runner, Jobs: filepath.Join(t.TempDir(), "jobs")}
+	a.relayReport(t.Context(), Job{ID: "j", Owner: "lane-a", OwnerEpoch: 3}, "job.completed", "report", "", nil, "", false)
+	if len(runner.Calls) != 1 {
+		t.Fatalf("relay calls=%v", runner.Calls)
+	}
+	args := runner.Calls[0].Args
+	for i, arg := range args {
+		if arg == "--epoch" && i+1 < len(args) && args[i+1] == "3" {
+			return
+		}
+	}
+	t.Fatalf("relay lost producing epoch: %v", args)
+}
+
+// The local quota ledger is exercised by CI, including the guard's transaction.
+func TestJobOwnerFenceWatcherReleasesOnlyOldGrantQuota_t5067(t *testing.T) {
+	for _, regrant := range []bool{false, true} {
+		name := "no newer local grant"
+		if regrant {
+			name = "newer local grant"
+		}
+		t.Run(name, func(t *testing.T) {
+			a := testApp(t)
+			ledgerRunner(t, a)
+			seedJob(t, a, "j", "implementer")
+			seedLedger(t, a, "j")
+			base := a.JobStore.(*fakeJobStore)
+			if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {
+				t.Fatal(err)
+			}
+			base.records["j"]["owner_node"], base.records["j"]["owner_epoch"] = "machine-b", float64(2)
+			store := &fenceJobStore{fakeJobStore: base}
+			if regrant {
+				a.JobStore = mismatchThenRegrant{fenceJobStore: store, jobs: a.Jobs}
+			} else {
+				a.JobStore = store
+			}
+			if err := a.watch(t.Context(), []string{"j"}); err != nil {
+				t.Fatal(err)
+			}
+			_, pools := ledgerState(t, a, "j")
+			if got := len(pools); got != 0 && !regrant || got != 1 && regrant {
+				t.Fatalf("regrant=%v: quota pools=%v", regrant, pools)
+			}
+		})
+	}
+}
 
 // fenceJobStore models hk's conditional update: an omitted condition remains
 // an unfenced legacy update, while a stale condition changes nothing.
@@ -135,13 +213,13 @@ func TestJobOwnerFenceClaimAndLanding_t5067(t *testing.T) {
 	}
 	a.spawnedJobRecord(t.Context(), s, Seat{Family: "openai"}, Launch{}, "w:p1", "pool", "owner")
 	record := store.record(t, "j")
-	if record["state"] != "spawned" || record["owner_node"] != "test-host" || record["owner_epoch"] != float64(1) {
-		t.Fatalf("landed record=%v, want spawned owned by test-host epoch 1", record)
+	if record["state"] != "spawned" || record["owner_node"] != "" || record["owner_epoch"] != float64(0) {
+		t.Fatalf("landed record=%v, want spawned without a node-created owner", record)
 	}
 }
 
-// A job can already be running when an older hk is upgraded to the fence API.
-func TestJobOwnerFenceAdoptsRunningLegacyJob_t5067(t *testing.T) {
+// An empty owner remains a legacy job until the hub seeds an authoritative grant.
+func TestJobOwnerFenceUnownedLegacyDoesNotRevoke_t5067(t *testing.T) {
 	for _, epoch := range []uint64{1, 3} {
 		t.Run(strconv.FormatUint(epoch, 10), func(t *testing.T) {
 			jobs := filepath.Join(t.TempDir(), "jobs")
@@ -157,10 +235,14 @@ func TestJobOwnerFenceAdoptsRunningLegacyJob_t5067(t *testing.T) {
 			}
 			store := &fenceJobStore{fakeJobStore: base}
 			if err := PutOwnedJob(t.Context(), store, jobs, "test-host", "j", map[string]any{"model": "continued"}, nil); err != nil {
-				t.Fatalf("running job was not adopted: %v", err)
+				t.Fatalf("unowned legacy job could not continue: %v", err)
 			}
-			if record := base.record(t, "j"); record["owner_node"] != "test-host" || record["owner_epoch"] != float64(epoch) || record["model"] != "continued" {
-				t.Fatalf("record=%v, want adopted owner and update", record)
+			if record := base.record(t, "j"); record["owner_node"] != "" || record["owner_epoch"] != float64(0) || record["model"] != "continued" {
+				t.Fatalf("record=%v, want unfenced owner and update", record)
+			}
+			markers, err := filepath.Glob(filepath.Join(jobs, "j", "events", "*-job.revoked.json"))
+			if err != nil || len(markers) != 0 {
+				t.Fatalf("unowned legacy job was revoked: markers=%v err=%v", markers, err)
 			}
 		})
 	}
@@ -434,7 +516,7 @@ func TestJobOwnerFencePreLandingAbort_t5067(t *testing.T) {
 	}
 	a.abandonJobRecord(t.Context(), "j")
 	record := store.record(t, "j")
-	if record["state"] != "lost" || record["owner_node"] != "test-host" || record["owner_epoch"] != float64(1) || store.puts != 1 {
+	if record["state"] != "lost" || record["owner_node"] != "" || record["owner_epoch"] != float64(0) || store.puts != 1 {
 		t.Fatalf("pre-landing abort=%v puts=%d", record, store.puts)
 	}
 }

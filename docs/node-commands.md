@@ -635,8 +635,7 @@ without a heartbeat. Tests in
 [node_pane_close_epoch_test.go](../node_pane_close_epoch_test.go) exercise the
 fence, terminal races, epoch, and restart rules.
 
-The handoffkeep job record also carries an owner node and hub epoch. A node
-establishes its initial fence at landing (or with a pre-landing abort), and its
+The handoffkeep job record also carries an owner node and hub epoch. A node's
 completion, escalation, usage, model, quota-stop, sweep, reap, and report-pin writes
 condition their updates on that local grant. The node persists later hub
 assignments, so a restarted node keeps the issued epoch. Each operation keeps
@@ -652,17 +651,22 @@ owner before finishing an old pool action, including after restart.
 
 An older hk omits both owner fields from a job read. Panewire sends no fence
 fields to that server and logs once per streak while retaining legacy behavior.
-When hk gains fence support, the first write adopts an unfenced, non-terminal
-job with a conditional empty-owner update. Reassignment of an unfenced
-epoch-1 job also conditions its transfer on the empty owner.
+When hk gains fence support, the hub adopts a live, unfenced job only from an
+assignment it holds durably, with a conditional empty-owner update at the
+current epoch. It also checks persisted assignments after restart and on
+heartbeat. Nodes do not claim empty owners: they keep legacy writes without
+revoking the job. An assignment the hub no longer holds stays unfenced until
+the job ends. A later assignment back to the same node requires a fresh claim
+or spawn before that node's prior revocation is cleared.
 If the hub cannot read the job record, it refuses reassignment until it can
 establish whether fencing is supported. If hk rejects a terminal ownership
 transfer with `job_state_conflict`, the hub refuses the reassignment and names
 the reason; it does not bypass the fence.
-Before a fenced transfer, the hub stores an intent under its panewire state
-directory. Keep that directory across hub restarts: the successor's heartbeat
-redelivers the assignment only after hk confirms its node and epoch. Once the
-node reports the granted epoch, the intent is removed.
+The hub stores assignments and transfer intents alongside its SQLite inbox,
+or under its panewire state directory when it uses PostgreSQL or no inbox.
+Keep that directory across hub restarts: the successor's heartbeat redelivers
+an assignment only after hk confirms its node, epoch, and non-terminal state.
+Once the node reports the granted epoch, the intent is removed.
 
 Rollout order: deploy the hub with this guard, upgrade the node binaries,
 run `panewire node close-ops enable` on each node, then run

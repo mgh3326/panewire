@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -300,6 +301,9 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 	relay := ""
 	if !receipts.notified[in.digest+"\x00"+in.question] {
 		p := map[string]any{"report": in.report, "report_sha256": in.digest, "question": in.question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}
+		if j.OwnerEpoch > 1 {
+			p["owner_epoch"] = j.OwnerEpoch
+		}
 		if in.late {
 			p["late"] = true
 		}
@@ -475,7 +479,11 @@ func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, questio
 			last += " doc:" + doc
 		}
 	}
-	argsEmit := []string{"emit", "--kind", eventKind, "--job", j.ID, "--owner-lane", owner, "--epoch", "1", "--label", j.Label, "--host", a.machine(), "--pane", j.Pane, "--inbox-root", filepath.Dir(a.Jobs)}
+	epoch := j.OwnerEpoch
+	if epoch == 0 {
+		epoch = 1
+	}
+	argsEmit := []string{"emit", "--kind", eventKind, "--job", j.ID, "--owner-lane", owner, "--epoch", strconv.FormatUint(epoch, 10), "--label", j.Label, "--host", a.machine(), "--pane", j.Pane, "--inbox-root", filepath.Dir(a.Jobs)}
 	if late {
 		argsEmit = append(argsEmit, "--late", "--deliver", "inbox")
 	}
@@ -546,6 +554,9 @@ func (a *App) escalateReport(ctx context.Context, j Job, report, question string
 		a.jobRecordFailed(ctx, id, "escalated", e)
 	}
 	p := map[string]any{"report": report, "report_sha256": digest, "question": question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}
+	if j.OwnerEpoch > 1 {
+		p["owner_epoch"] = j.OwnerEpoch
+	}
 	if late {
 		p["late"] = true
 	}

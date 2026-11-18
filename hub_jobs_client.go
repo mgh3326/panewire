@@ -281,7 +281,10 @@ func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job 
 		}
 		epoch := event.Epoch
 		if epoch == 0 {
-			epoch = 1
+			epoch = event.Payload.OwnerEpoch
+			if epoch == 0 {
+				epoch = 1
+			}
 		}
 		// Every relayed job.* kind except a completion states why. This is
 		// also the echo guard: the hub's own revocation marker carries no
@@ -353,7 +356,10 @@ func hubJobHasFlatCompletion(events []hubIndexedEvent, epoch uint64) bool {
 		}
 		kind, recordEpoch := events[i].kind, event.Epoch
 		if recordEpoch == 0 {
-			recordEpoch = 1
+			recordEpoch = event.Payload.OwnerEpoch
+			if recordEpoch == 0 {
+				recordEpoch = 1
+			}
 		}
 		if (kind == "job.completed" || kind == "job.completion") && recordEpoch == epoch {
 			return true
@@ -394,7 +400,10 @@ func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 		if (kind == "job.completed" || kind == "job.completion") && !event.eventTime(entry, eventsDir).Before(time.Now().Add(-hubJobActiveMaxAge())) {
 			epoch := event.Epoch
 			if epoch == 0 {
-				epoch = 1
+				epoch = event.Payload.OwnerEpoch
+				if epoch == 0 {
+					epoch = 1
+				}
 			}
 			completed = HubActiveJob{JobID: jobID, Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: event.reportPath(), ReportLastLine: event.reportLastLine()}
 		}
@@ -433,6 +442,7 @@ type hubInboxEvent struct {
 	Truncated      bool   `json:"truncated"`
 	Ceiling        bool   `json:"ceiling,omitempty"`
 	Payload        struct {
+		OwnerEpoch     uint64 `json:"owner_epoch,omitempty"`
 		Late           bool   `json:"late,omitempty"`
 		AgentLabel     string `json:"agent_label"`
 		OwnerLane      string `json:"owner_lane"`

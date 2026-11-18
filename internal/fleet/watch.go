@@ -502,7 +502,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
 				if e := a.putJobRecord(withJobEpoch(ctx, j), id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 					if IsJobReassigned(e) {
-						return nil
+						return a.releaseReassignedQuota(ctx, j)
 					}
 					a.jobRecordFailed(ctx, id, "lost", e)
 				}
@@ -624,7 +624,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
 				if e := a.putJobRecord(withJobEpoch(ctx, j), id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 					if IsJobReassigned(e) {
-						return nil
+						return a.releaseReassignedQuota(ctx, j)
 					}
 					a.jobRecordFailed(ctx, id, "lost", e)
 				}
