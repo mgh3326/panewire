@@ -214,6 +214,12 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
 		}
 	}
+	if !*supersedeClose && *deliveryPolicyPath == "off" && (*inboxStorePath != "" || os.Getenv(hubDatabaseURLEnv) != "") {
+		// The kill switch never opens the inbox database, so this start could
+		// not record the revocation that --supersede-close=false promises
+		// (supersede_fence, hk 5195). Start once without the kill switch.
+		return nil, "", ExitUsage, errors.New("--supersede-close=false cannot be recorded with --delivery-policy=off, which never opens the inbox database; start once without the kill switch")
+	}
 	if *paneSweepInterval < 0 || (*paneSweepInterval > 0 && *paneSweepInterval < minTaskPaneSweepInterval) || *paneSweepAge < 0 || *paneSweepAge > time.Duration(nodePaneSweepMaxAgeSeconds)*time.Second {
 		return nil, "", ExitConditionInvalid, errors.New("hub pane sweep flags are invalid")
 	}

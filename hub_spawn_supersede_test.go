@@ -581,28 +581,73 @@ func TestSupersedeIntentIsCommittedWithTheSucceededSpawn(t *testing.T) {
 	})
 	t.Run("a failed intent write rolls the outcome back", func(t *testing.T) {
 		f := newSupersedeFixture(t, nil)
-		f.hub.inbox.store.landingIntent = f.hub.supersedeLandingOf
+		task := f.claimSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true)
 		if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `DROP TABLE supersede_landings`); err != nil {
-			t.Fatal(err)
-		}
-		request := durableSpawnRequest()
-		request.RequestID = "d676220b-e763-4af1-aefd-000000000002"
-		request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", f.successor, "--job", f.successor, "--t", "T1", "--parent-job", f.job, "--owner", "parent", "--role", "implementer", "--host", "auto", "--report-relative", f.successor + "/report.md"}
-		request.ParentJobExplicit = true
-		request.Repository.Worktree = f.successor + "-checkout"
-		request.Repository.Checkout.Dir = f.successor + "-checkout"
-		task, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, f.successor, "parent", time.Now())
-		if err != nil {
 			t.Fatal(err)
 		}
 		if changed, err := f.hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"}, time.Now()); err == nil || changed {
 			t.Fatalf("the outcome must not commit without its intent: changed=%v err=%v", changed, err)
 		}
-		saved, err := f.hub.inbox.store.spawnTask(t.Context(), request.RequestID)
+		saved, err := f.hub.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
 		if err != nil || saved.Status == "succeeded" {
 			t.Fatalf("the landing must stay uncommitted: %+v %v", saved, err)
 		}
 	})
+}
+
+// TestSupersedeLandingAcceptedWhileOffNeverBecomesAClose (review round 4): the
+// switch decision is taken when the request is accepted and fenced by the
+// generation, so replaying an uncommitted outcome under an enabled hub cannot
+// give an off-period landing a fresh intent.
+func TestSupersedeLandingAcceptedWhileOffNeverBecomesAClose(t *testing.T) {
+	t.Run("accepted while off", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.supersedeClose = false
+		task := f.claimSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true)
+		f.hub.supersedeClose = true // enabled before the outcome is replayed
+		f.completeSuccessor(t, task)
+		f.hub.sweepSupersedeLandings(t.Context())
+		if len(f.pendingLandings(t)) != 0 || len(f.rows(t)) != 0 {
+			t.Fatalf("an off-period acceptance must never close: %+v %+v", f.pendingLandings(t), f.rows(t))
+		}
+	})
+	t.Run("fence moved before the landing", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		task := f.claimSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true)
+		f.restartHubWith(t, false) // off start: the fence moves
+		f.restartHubWith(t, true)  // enabled start replays the node's result
+		f.completeSuccessor(t, task)
+		// The landing must not even become pending: the sweep's generation
+		// check is a second line of defense, not the first.
+		if pending := f.pendingLandings(t); len(pending) != 0 {
+			t.Fatalf("a landing armed before an off start must not become an intent: %+v", pending)
+		}
+		f.hub.sweepSupersedeLandings(t.Context())
+		if len(f.rows(t)) != 0 {
+			t.Fatalf("a landing armed before an off start must never close: %+v", f.rows(t))
+		}
+	})
+}
+
+// TestHubCLISupersedeOffWithTheKillSwitchIsRefused (review round 4): the
+// inbox kill switch never opens the database, so an off start there cannot
+// record the revocation and does not run.
+func TestHubCLISupersedeOffWithTheKillSwitchIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	authPath := filepath.Join(dir, "hub-auth.env")
+	if err := os.WriteFile(authPath, []byte("HUB_TOKEN_operator="+r6OperatorToken+"\nHUB_TOKEN_node-a="+r6NodeAToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := filepath.Join(dir, "inbox.sqlite3")
+	base := []string{"--hub-auth", authPath, "--delivery-policy", "off", "--inbox-store", store}
+	if _, _, code, err := newHubServerForCLI(append(base, "--supersede-close=false"), nil); err == nil || code != ExitUsage {
+		t.Fatalf("code=%d err=%v, want a usage refusal", code, err)
+	}
+	hub, _, code, err := newHubServerForCLI(base, nil)
+	if err != nil || code != ExitOK || hub == nil {
+		t.Fatalf("the kill switch alone still starts: code=%d err=%v", code, err)
+	}
+	_ = hub.Close()
 }
 
 // TestSupersedeNeverSendsReapOrWorktreeCommands: the hub no longer closes a
@@ -728,10 +773,9 @@ func TestSupersedeOffSwitchCancelsRowsThatSentNothing(t *testing.T) {
 	}
 }
 
-// landSuccessor lands an explicit (or implicit) implementer successor of the
-// fixture's parent through the real spawn store, with the landing hook run by
-// the test, and returns its task.
-func (f *supersedeFixture) landSuccessor(t *testing.T, id, job string, explicit bool) hubSpawnTask {
+// claimSuccessor accepts an explicit (or implicit) implementer successor of the
+// fixture's parent through the real spawn store.
+func (f *supersedeFixture) claimSuccessor(t *testing.T, id, job string, explicit bool) hubSpawnTask {
 	t.Helper()
 	request := durableSpawnRequest()
 	request.RequestID = id
@@ -743,9 +787,21 @@ func (f *supersedeFixture) landSuccessor(t *testing.T, id, job string, explicit 
 	if err != nil {
 		t.Fatal(err)
 	}
+	return task
+}
+
+func (f *supersedeFixture) completeSuccessor(t *testing.T, task hubSpawnTask) {
+	t.Helper()
 	if changed, err := f.hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"}, time.Now()); err != nil || !changed {
 		t.Fatalf("land: changed=%v err=%v", changed, err)
 	}
+}
+
+// landSuccessor accepts and lands a successor.
+func (f *supersedeFixture) landSuccessor(t *testing.T, id, job string, explicit bool) hubSpawnTask {
+	t.Helper()
+	task := f.claimSuccessor(t, id, job, explicit)
+	f.completeSuccessor(t, task)
 	return task
 }
 

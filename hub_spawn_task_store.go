@@ -314,10 +314,22 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
+	accepted := hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, Created: now, Deadline: deadline, Expires: expires, Attempt: 1}
+	// A successor that may owe its parent's close is armed with the fence
+	// generation current when it is accepted, in the same transaction: a
+	// request accepted while the switch is off is never armed, so replaying
+	// its landing later cannot create an intent (hk 5195).
+	if s.landingIntent != nil {
+		if landing, ok := s.landingIntent(accepted); ok {
+			if err = s.insertSupersedeLanding(ctx, tx, landing, supersedeLandingArmed); err != nil {
+				return hubSpawnTask{}, false, err
+			}
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return hubSpawnTask{}, false, err
 	}
-	return hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, Created: now, Deadline: deadline, Expires: expires, Attempt: 1}, true, nil
+	return accepted, true, nil
 }
 
 func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, now time.Time, deadlineSeconds int) error {
@@ -529,12 +541,13 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if status == "reconciling" {
 		return true, tx.Commit()
 	}
-	// A successor that owes its parent's close stores that intent in the same
-	// transaction as its outcome: a store failure here rolls the outcome back,
-	// so a landing is never committed without it (hk 5195).
+	// A successor armed at acceptance becomes a pending intent in the same
+	// transaction as its outcome, only while the fence is still the one it was
+	// armed under: a store failure here rolls the outcome back, so a landing
+	// is never committed without it (hk 5195).
 	if status == "succeeded" && s.landingIntent != nil {
 		if landing, ok := s.landingIntent(task); ok {
-			if err = s.insertSupersedeLanding(ctx, tx, landing); err != nil {
+			if err = s.activateSupersedeLanding(ctx, tx, landing.RequestID); err != nil {
 				return false, err
 			}
 		}

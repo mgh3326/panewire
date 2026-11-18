@@ -1159,13 +1159,16 @@ ends `lost` with `end_reason=superseded_by=<successor>` (written by the node's
 settlement, like every hub close), after `job.superseded` was recorded on it.
 The owner lane hears one `info` lane.event, `[panewire] closed <parent> on
 <host>: superseded by <successor>`, once the node proves the close settled.
-When an explicit implementer successor lands while the switch is on, the hub
-stores its intent in `supersede_landings` (Postgres migration
-`0025_supersede_landings.sql`) **in the same transaction that makes the spawn
-`succeeded`**: if the intent cannot be written, the outcome is rolled back and
-recovered through the usual bound-request reconciliation, so a landing is
-never committed without it. A landing while the switch is off stores no
-intent. The landing loop (its own goroutine, never the pool action
+When an explicit implementer successor request is accepted while the switch is
+on, the hub arms it in `supersede_landings` (Postgres migration
+`0025_supersede_landings.sql`) with the fence generation current at that
+moment. The row becomes a pending intent **in the same transaction that makes
+the spawn `succeeded`**, only if the fence has not moved: if that write fails,
+the outcome is rolled back and recovered through the usual bound-request
+reconciliation, so a landing is never committed without it. A request accepted
+while the switch is off is never armed, and one armed before an off start never
+becomes pending, so replaying an uncommitted outcome under an enabled hub
+cannot give an off-period landing a close. The landing loop (its own goroutine, never the pool action
 reconciler's) queues the row, retrying every minute, 50 intents per pass,
 least recently tried first (the try is recorded before any probe), for 48
 hours, until the row exists or the parent is definitively ineligible.
@@ -1182,7 +1185,9 @@ cancellation-only: its node is asked for status, a request that is `none` or
 retires it, so an offline node leaves it pending across restarts; a request
 the node already began closing is settled as usual. A cancelled row creates no
 replacement request. An enabled start only reads the fence, and keeps supersede
-dispatch closed when it cannot. The fence lives in the hub's inbox database
+dispatch closed when it cannot. `--supersede-close=false` together with
+`--delivery-policy off` is refused at startup: the kill switch never opens the
+inbox database, so that start could not record the fence. The fence lives in the hub's inbox database
 (the one durable store every hub of this deployment shares), not in a separate
 file. A retry of a refused close stays bound to the attempt the refused
 request named. The one gap: a hub that dies between the node's result and the

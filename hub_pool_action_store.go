@@ -311,7 +311,14 @@ const supersedeFenceSchema = `CREATE TABLE IF NOT EXISTS supersede_fence (
 const supersedeLandingSchema = `CREATE TABLE IF NOT EXISTS supersede_landings (
  request_id TEXT PRIMARY KEY, parent TEXT NOT NULL, successor TEXT NOT NULL, owner TEXT NOT NULL,
  created_ms BIGINT NOT NULL, tried_ms BIGINT NOT NULL DEFAULT 0, generation BIGINT NOT NULL,
- state TEXT NOT NULL CHECK(state IN ('pending','done')))`
+ state TEXT NOT NULL CHECK(state IN ('armed','pending','done')))`
+
+// A landing is armed when its successor request is accepted with the switch on,
+// pending once the successor has landed under the same fence, done when decided.
+const (
+	supersedeLandingArmed   = "armed"
+	supersedeLandingPending = "pending"
+)
 
 var errSupersedeFenced = errors.New("supersede generation fenced")
 
@@ -357,8 +364,8 @@ func (s *laneInboxStore) advanceSupersedeFence(parent context.Context) error {
 // insertSupersedeLanding stores the intent at the current generation; it
 // stores nothing when the fence row is absent, which the caller reads as an
 // error through the row count.
-func (s *laneInboxStore) insertSupersedeLanding(ctx context.Context, db sqlExecer, l supersedeLanding) error {
-	result, err := db.ExecContext(ctx, s.q(`INSERT INTO supersede_landings(request_id,parent,successor,owner,created_ms,tried_ms,generation,state) SELECT ?,?,?,?,?,0,generation,'pending' FROM supersede_fence WHERE singleton=1 ON CONFLICT(request_id) DO NOTHING`), l.RequestID, l.Parent, l.Successor, l.Owner, l.Created)
+func (s *laneInboxStore) insertSupersedeLanding(ctx context.Context, db sqlExecer, l supersedeLanding, state string) error {
+	result, err := db.ExecContext(ctx, s.q(`INSERT INTO supersede_landings(request_id,parent,successor,owner,created_ms,tried_ms,generation,state) SELECT ?,?,?,?,?,0,generation,? FROM supersede_fence WHERE singleton=1 ON CONFLICT(request_id) DO NOTHING`), l.RequestID, l.Parent, l.Successor, l.Owner, l.Created, state)
 	if err != nil {
 		return err
 	}
@@ -376,7 +383,16 @@ func (s *laneInboxStore) insertSupersedeLanding(ctx context.Context, db sqlExece
 func (s *laneInboxStore) recordSupersedeLanding(parent context.Context, l supersedeLanding) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	return s.insertSupersedeLanding(ctx, s.db, l)
+	return s.insertSupersedeLanding(ctx, s.db, l, supersedeLandingPending)
+}
+
+// activateSupersedeLanding turns an armed landing pending, only while the
+// fence is still the generation it was armed under. Anything else (accepted
+// while the switch was off, or a hub started off since) leaves it armed, and
+// the next end pass retires it: it never becomes a close.
+func (s *laneInboxStore) activateSupersedeLanding(ctx context.Context, db sqlExecer, id string) error {
+	_, err := db.ExecContext(ctx, s.q(`UPDATE supersede_landings SET state='pending' WHERE request_id=? AND state='armed' AND generation=(SELECT generation FROM supersede_fence WHERE singleton=1)`), id)
+	return err
 }
 
 // pendingSupersedeLandings lists up to limit undecided landings, least
@@ -424,7 +440,7 @@ func (s *laneInboxStore) endSupersedeLandings(parent context.Context, before tim
 	if before.IsZero() {
 		cutoff = 1<<62 - 1
 	}
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE supersede_landings SET state='done' WHERE state='pending' AND created_ms<?`), cutoff)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE supersede_landings SET state='done' WHERE state IN ('armed','pending') AND created_ms<?`), cutoff)
 	return err
 }
 
