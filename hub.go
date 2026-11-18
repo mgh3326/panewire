@@ -479,6 +479,10 @@ type HubServer struct {
 	// consultPlan resolves a consult seat and its spawn submission. Nil uses
 	// the hub's own fleet App (fleet.App.PlanConsult); tests inject one.
 	consultPlan func(context.Context, fleet.ConsultPlanInput) (fleet.ConsultPlan, error)
+	// consultTaskBinding reads the job a task is bound to, the repository
+	// evidence of a consult whose author job is unknown. Nil uses
+	// fleet.TaskBinding; tests inject one.
+	consultTaskBinding func(context.Context, string) (string, error)
 	// quotaReplacePoll overrides how often a quota-stop replacement looks for
 	// its successor's outcome; zero uses quotaReplacePoll.
 	quotaReplacePoll time.Duration
@@ -786,9 +790,11 @@ type HubServer struct {
 	oneTimeActions map[oneTimeActionKey]oneTimeActionState
 	// oneTimeDSN is the panewire Sentry DSN the ACTION NEEDED events go to; ""
 	// when reporting is not configured. oneTimeNotify, when set, replaces the
-	// Sentry send (tests only; hub_one_time_action.go).
+	// Sentry send (tests only). oneTimeQueue feeds the one notice worker that
+	// owns those sends (hub_one_time_notice.go).
 	oneTimeDSN    string
 	oneTimeNotify oneTimeNotifier
+	oneTimeQueue  oneTimeNotices
 	fleetLoadMu   sync.Mutex
 	fleetLoadAt   time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
@@ -1067,6 +1073,9 @@ func (h *HubServer) Close() error {
 	if h.closeCancel != nil {
 		h.closeCancel()
 	}
+	// The notice worker stops accepting observations, cancels its request and
+	// is joined here, so it releases its Sentry client before the store closes.
+	h.closeOneTimeNotices()
 	h.closeQuotaRefreshes()
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from

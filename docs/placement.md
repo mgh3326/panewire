@@ -363,10 +363,17 @@ ACTION NEEDED: oci codex — run codex once and choose Trust all and continue
 A need is a readiness `dialog` value or `login: missing`; a refusal above counts
 as a report of the same need. The text carries the host, the kind and the
 action only, never screen content. The hub tells each (host, kind, need) once
-while it stands, and records it as told only after the Sentry transport accepts
-and flushes the event (bounded at 2 s). With no Sentry DSN nothing is told, and
-the next report tries again. The told state is kept in the hub store (table
-`one_time_action_notices`, Postgres migration 0026) and read back at start, so a
+while it stands. One notice worker owns those sends: the refusal and readiness
+handlers hand it their observations and return at once, it coalesces repeat
+sightings, and it allows one delivery attempt per untold need at a time. A need
+is recorded as told only when that attempt's own request is answered 2xx, within
+a 2 s deadline derived from hub shutdown. A late 2xx for an earlier attempt, a
+drop, a rate-limit skip, a non-2xx, a network error, a timeout or shutdown leaves
+the need untold, and the next sighting tries again. Hub shutdown stops the
+worker, cancels its request and joins it before the store closes. With no Sentry
+DSN nothing is told, and the next report tries again. The told state is kept in
+the hub store (table `one_time_action_notices`, Postgres migration 0026) and
+read back at start, so a
 hub restart does not tell a standing need again. A need clears only when a
 readiness report shows it gone and it stays gone for one full readiness cycle
 (5 minutes): a report that shows it again inside that cycle cancels the clear
