@@ -183,6 +183,10 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 		}
 	}
 	h.mu.Unlock()
+	// The node's own resumes of this job count against the same one-resume
+	// limit: its quota-stop manager waited and resumed, and the hub's wait rows
+	// do not show it (review 4610713976).
+	waits += h.nodeResumes(ctx, spawnHolderHost(task), task.Job)
 	decision, why := quotaDecisionJob(in.policy, in.policyOK, in.priority, in.expected, started, waits, quotaStop{Reset: exhaustion.Reset}, h.now())
 	if decision == "wait" {
 		return h.waitPoolStop(ctx, exhaustion, task, why)
@@ -204,6 +208,32 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 		return poolJobSkip(role, "handover_not_queued")
 	}
 	return poolJobResult{action: poolJobQueued, role: role, why: why}
+}
+
+// nodeResumes is how many quota-stop resumes host's node recorded for job,
+// read through job.result. A record the hub cannot read counts as one resume
+// already taken: the stop then hands over instead of waiting again. That also
+// covers a node that predates quota_resumes.
+func (h *HubServer) nodeResumes(ctx context.Context, host, job string) int {
+	var ledger nodeJobResult
+	if !h.nodeCall(ctx, host, nodeCommandJobResult, nodeJobResultArgs{Job: job}, spawnHeldPaneProbeWait, &ledger) || ledger.QuotaResumes == nil {
+		return 1
+	}
+	return *ledger.QuotaResumes
+}
+
+// otherHostCanTakeSuccessor reports whether a host other than machine has an
+// open node connection and accepts work, so a successor kept off machine has
+// somewhere to be placed.
+func (h *HubServer) otherHostCanTakeSuccessor(machine string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for name, record := range h.nodes {
+		if name != machine && record != nil && record.agent != nil && h.acceptingEffectiveLocked(name, record.accepting) {
+			return true
+		}
+	}
+	return false
 }
 
 // notifyPoolExhausted is today's owner notice, now the exception.
@@ -312,6 +342,13 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 		// The pane sits in another checkout than the job's own.
 		return nil, "worktree_mismatch"
 	}
+	if !h.otherHostCanTakeSuccessor(host) {
+		// The old worktree keeps the branch on this host until the close
+		// settles, and the successor's checkout is refused branch_in_use there
+		// (node_worktree.go nodePrepareSuccessor). With no other host to place
+		// it on, refuse before any close (review 4611190394).
+		return nil, "branch_in_use"
+	}
 	request, err := handoverSuccessorRequest(old, task.Job, newJob, handoverExclude(exhaustion), host, exhaustion, read)
 	if err != nil {
 		return nil, "invalid_successor"
@@ -345,6 +382,22 @@ func handoverExclude(exhaustion poolExhaustion) string {
 		return fleet.BandKey(exhaustion.Pool)
 	}
 	return exhaustion.Pool
+}
+
+// excludeHostArg adds host to the --exclude-host list of args, keeping the
+// hosts the replaced submission already excludes.
+func excludeHostArg(args []string, host string) []string {
+	var hosts []string
+	if raw := hubSpawnArg(args, "--exclude-host"); raw != "" {
+		hosts = strings.Split(raw, ",")
+	}
+	if !slices.Contains(hosts, host) {
+		hosts = append(hosts, host)
+	}
+	for i := slices.Index(args, "--exclude-host"); i >= 0 && i+1 < len(args); i = slices.Index(args, "--exclude-host") {
+		args = slices.Delete(args, i, i+2)
+	}
+	return append(args, "--exclude-host", strings.Join(hosts, ","))
 }
 
 // hkRecordTaskID is the task an hk job record names.
@@ -382,6 +435,10 @@ func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude, hos
 		}
 	}
 	next.Args = append(next.Args, "--parent-job", oldJob)
+	// The old worktree keeps the branch on this host until the close settles,
+	// so the successor must not be placed here: its checkout would be refused
+	// branch_in_use (hk 5311). prepareHandover checks another host exists.
+	next.Args = excludeHostArg(next.Args, host)
 	if !strings.HasPrefix(hubSpawnArg(next.Args, "--report-relative"), newJob+"/") {
 		// A --parent-job spawn requires a report under its own job or its
 		// parent's: it lives in the successor's own job directory, whatever

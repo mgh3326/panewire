@@ -1406,3 +1406,9 @@ bookkeeping: `job.claim`, `job.reclaim`, `job.placement`, `job.task_link`,
 claim. A node that predates the field omits it; a caller reads that as unknown,
 never as 0. The hub uses it to release the task reservation of a spawn whose
 brief never landed ([hub-spawn-operations.md](hub-spawn-operations.md)).
+`quota_resumes` counts the quota-stop resumes this node recorded for the job
+(its `quota_stop_decisions` rows with `attempted=1`), whether or not the job's
+directory exists. It is omitted when the node has no store attached or predates
+the field; a caller reads that as unknown, never as 0. The hub's pool sweep
+counts it against the one-resume limit and reads unknown as one resume taken
+([quota-stop.md](quota-stop.md#an-exhausted-pool)).
