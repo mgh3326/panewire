@@ -142,3 +142,28 @@ func TestQuotaStopAnnounceEndLockWaitIsBounded_t4761(t *testing.T) {
 		t.Fatalf("wait took %v", took)
 	}
 }
+
+// A hub revocation that took the same sequence number as a spawn published
+// before it sorts first by name; the tie is treated as an end (#690 review r2).
+func TestQuotaStopAnnounceRefusedOnRevocationSpawnTie_t4761(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	writeLedgerFile(t, a, "00090-job.spawned.json", `{"created_at":"2026-01-01T00:00:02Z","job_id":"j","kind":"job.spawned","payload":{"pane_id":"w:p1","label":"agent-a","role":"reviewer"},"seq":90}`)
+	writeLedgerFile(t, a, "00090-job.revoked.json", `{"created_at":"2026-01-01T00:00:03Z","job_id":"j","kind":"job.revoked","payload":{"pane_id":"w:p1"},"seq":90}`)
+	if err := a.quotaStopAnnounce(context.Background(), Job{ID: "j", Pane: "w:p1"}, quotastop.Stop{Pool: "claude"}); !errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("announce after a tied revocation: %v, want errQuotaStopSuperseded", err)
+	}
+}
+
+// A reap stays an end across a stale re-prompt; only a new claim or spawn
+// revives a reaped job (#690 review r2).
+func TestQuotaStopAnnounceReapIsStickyAcrossReprompt_t4761(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	for _, k := range []string{"job.reaped", "job.reprompted"} {
+		if err := a.event(context.Background(), "j", k, map[string]any{"pane_id": "w:p1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.quotaStopAnnounce(context.Background(), Job{ID: "j", Pane: "w:p1"}, quotastop.Stop{Pool: "claude"}); !errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("announce after reap and re-prompt: %v, want errQuotaStopSuperseded", err)
+	}
+}

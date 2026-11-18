@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/quota/devin"
@@ -444,21 +446,56 @@ func (a *App) attemptEndedBeforeAnnouncement(id string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ended := false
-	for _, ev := range ledgerOrder(evs) {
+	ordered := ledgerOrder(evs)
+	// A hub revocation allocates its sequence without the ledger lock (hk
+	// 5044), so it can share a number with an event published before it and
+	// sort first. A revocation tied with another event is an end whatever
+	// the order: fail closed.
+	seqs := map[string]int{}
+	for _, ev := range ordered {
+		seqs[ledgerSeqPrefix(ev.name)]++
+	}
+	ended, reaped := false, false
+	for _, ev := range ordered {
 		switch ev.Kind {
-		case "job.claim", "job.claimed", "job.reclaim", "job.spawned", "job.reprompted":
+		case "job.claim", "job.claimed", "job.reclaim", "job.spawned":
+			ended, reaped = false, false
+		case "job.reprompted":
+			// A re-prompt revives a live attempt, not a reaped one (foldJob
+			// keeps Reaped until a new claim or spawn).
 			ended = false
 		case "job.completed", "job.completion", eventRecordSettled, "job.escalate", "job.joined",
-			"job.revoked", "job.handed_off", "job.reaped":
+			"job.revoked", "job.handed_off":
 			ended = true
+		case "job.reaped":
+			reaped = true
 		case "job.lost":
 			if str(ev.Payload, "reason") != "quota_stop" || boolean(ev.Payload, "final", false) {
 				ended = true
 			}
 		}
 	}
+	for _, ev := range ordered {
+		if ev.Kind == "job.revoked" && seqs[ledgerSeqPrefix(ev.name)] > 1 {
+			return true, nil
+		}
+	}
+	ended = ended || reaped
 	return ended, nil
+}
+
+// ledgerSeqPrefix is the numeric sequence prefix of a ledger file name,
+// normalized so "0007" and "00007" compare equal; "" when there is none.
+func ledgerSeqPrefix(name string) string {
+	i := strings.IndexByte(name, '-')
+	if i <= 0 {
+		return ""
+	}
+	n, err := strconv.Atoi(name[:i])
+	if err != nil {
+		return ""
+	}
+	return strconv.Itoa(n)
 }
 
 // quotaRecordLockWait bounds how long a quota-stop record waits for the job's
