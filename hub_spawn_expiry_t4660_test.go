@@ -393,7 +393,7 @@ func TestStagedActivationRespectsTheLimit_t4660(t *testing.T) {
 		request.Args = replaceSpawnArg(append([]string(nil), request.Args...), "--task", strconv.Itoa(4700+n))
 		request.Args = replaceSpawnArg(request.Args, "--job", "staged-"+strconv.Itoa(n))
 		request.Args = replaceSpawnArg(request.Args, "-l", "staged-"+strconv.Itoa(n))
-		task, _, err := h.inbox.store.claimSpawnReplacing(t.Context(), request, "staged-"+strconv.Itoa(n), "parent", *clock, "", "", "staged")
+		task, _, err := h.inbox.store.claimSpawnReplacing(t.Context(), request, "staged-"+strconv.Itoa(n), "parent", *clock, "", "", "staged", "")
 		if err != nil {
 			t.Fatal(err)
 		}
