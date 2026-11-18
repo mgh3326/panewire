@@ -66,8 +66,9 @@ This increments a hub-issued job epoch and records `job.reassigned`. The hub
 retains every prior owner in its in-memory fence history; a heartbeat cannot
 raise its own epoch or retake ownership. While a fenced predecessor is online,
 or after it reconnects and heartbeats, the hub retries `job.revoked` until that
-node confirms its local marker write. Its daemon then writes
-`NNNNN-job.revoked.json` locally. The spawner-side hook owns the resulting pane
+node confirms its local marker write. Its daemon then allocates the event
+sequence and writes `NNNNN-job.revoked.json` locally under `.wrk-events.lock`.
+The spawner-side hook owns the resulting pane
 message:
 
 `[REVOKED — 다른 노드에 재배정됨, 즉시 중단·push 금지]`
