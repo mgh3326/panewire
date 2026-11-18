@@ -41,6 +41,9 @@ type poolActionData struct {
 	RetryID                   string
 	RetryAfter                int64
 	RetryCount                uint8
+	// Acked is set once the node confirmed the hub's ack of its
+	// intent_cancelled answer (hk 5073); a guarded action then asks no more.
+	Acked bool
 	// Kind is "" for a close (reviewer, consult), poolActionKindHandover for
 	// an implementer hand-over and poolActionKindWait for a waited stop.
 	Kind     string        `json:",omitempty"`

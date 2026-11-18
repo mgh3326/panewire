@@ -338,6 +338,33 @@ func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolActio
 // Keep I1 until the record is terminal; no close, notice or role release is
 // issued while this guard remains.
 func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolAction) error {
+	// The action is stored guarded, so the node may now be told it can stop
+	// owing the intent_cancelled answer (hk 5073): its rollback drain waits
+	// for this ack. It is repeated every pass until the node confirms it, and
+	// the action is not finished before that, so a failed or lost ack is
+	// retried even once the hk record is terminal. Only a node that rejects
+	// the argument (invalid_args: it predates the ack, so it never owed one)
+	// is let go without it. A node that does not answer is retried; the
+	// fence it holds is the safe side.
+	acked := action.Data.Acked
+	var rejected bool
+	askNode := func() (status nodeCloseOpStatusResult, answered bool) {
+		nodeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job, Ack: !acked}
+		var code string
+		answered, code = h.nodeCallCode(nodeCtx, action.Node, nodeCommandPaneCloseStatus, ref, time.Second, &status, nil)
+		rejected = !answered && code == "invalid_args"
+		if answered && !acked && status.State == nodeCloseIntentCancelled {
+			// The node answered the ack: no later pass repeats it.
+			acked = true
+			action.Data.Acked = true
+			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+				h.logger.Warn("pool action ack not saved", "job", action.Job, "action", action.ID, "error", h.inbox.store.loggable("pool action", err))
+			}
+		}
+		return status, answered
+	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	exists := false
 	if err == nil {
@@ -347,16 +374,17 @@ func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolA
 		cancel()
 		state, _ := record["state"].(string)
 		if err == nil && exists && hkTerminalState(state) {
+			if !acked {
+				if _, answered := askNode(); !answered && !rejected {
+					return errors.New("guard ack unconfirmed")
+				}
+			}
 			return h.refusePoolAction(ctx, action)
 		}
 	}
 	// A node may also prove the old request's final job.lost was synced. A
 	// withdrawn or rolled-back node may not answer; never block the sweep on it.
-	nodeCtx, cancel := context.WithTimeout(ctx, time.Second)
-	var status nodeCloseOpStatusResult
-	answered := h.nodeCall(nodeCtx, action.Node, nodeCommandPaneCloseStatus, nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}, time.Second, &status)
-	cancel()
-	if answered && status.Settled {
+	if status, answered := askNode(); answered && status.Settled {
 		return h.refusePoolAction(ctx, action)
 	}
 	if err != nil || !exists {

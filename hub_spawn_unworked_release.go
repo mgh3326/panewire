@@ -44,22 +44,30 @@ func (h *HubServer) nodeCall(ctx context.Context, machine, op string, args any, 
 }
 
 func (h *HubServer) nodeCallWhere(ctx context.Context, machine, op string, args any, wait time.Duration, out any, allowed func() bool) bool {
+	ok, _ := h.nodeCallCode(ctx, machine, op, args, wait, out, allowed)
+	return ok
+}
+
+// nodeCallCode is nodeCallWhere that also reports the node's error code when
+// it answered one; the code is empty for an answer with a result and for a
+// command that was not sent, timed out or returned an unreadable result.
+func (h *HubServer) nodeCallCode(ctx context.Context, machine, op string, args any, wait time.Duration, out any, allowed func() bool) (bool, string) {
 	raw, err := json.Marshal(args)
 	if err != nil {
-		return false
+		return false, ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	pending, id, _, sent := h.sendNodeCommandWhere(ctx, machine, op, raw, allowed)
 	if !sent {
-		return false
+		return false, ""
 	}
 	defer h.forgetNodeCommand(id)
 	select {
 	case reply := <-pending.done:
-		return reply.Error == "" && json.Unmarshal(reply.Result, out) == nil
+		return reply.Error == "" && json.Unmarshal(reply.Result, out) == nil, reply.Error
 	case <-ctx.Done():
-		return false
+		return false, ""
 	}
 }
 

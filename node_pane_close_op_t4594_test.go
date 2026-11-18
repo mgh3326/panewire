@@ -59,6 +59,7 @@ type fakeHubClose struct {
 	notReady bool
 	intents  []fleet.HubCloseIntent
 	cancels  []string
+	acks     []string
 	settled  []string
 	state    fleet.HubCloseState
 	record   func(job string, in fleet.HubCloseIntent) error
@@ -88,6 +89,11 @@ func (f *fakeHubClose) Settle(_ context.Context, job string) (fleet.HubCloseStat
 }
 func (f *fakeHubClose) CancelIntent(_ context.Context, job, id string) error {
 	f.cancels = append(f.cancels, job+" "+id)
+	return nil
+}
+
+func (f *fakeHubClose) AckIntentCancel(_ context.Context, job, id string) error {
+	f.acks = append(f.acks, job+" "+id)
 	return nil
 }
 

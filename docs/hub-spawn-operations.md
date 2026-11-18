@@ -528,10 +528,17 @@ superset that is never wrong. The node answers `checkout_mode` (`sparse` or
 `checkout_sparse_v1` in the once-per-connection `hub.features` frame too: a
 node sends `checkout_mode` in its spawn result only to a hub that listed it,
 because an older hub's strict result parser drops the whole answer for one
-unknown key. The lists are not part of a spawn's replay identity
+unknown key. The lists are not part of a spawn's base replay identity
 (`spawnFingerprint`): they are added or dropped with the target node's
 capability, so a replay after that node's upgrade or rollback still matches its
-journaled request.
+journaled request. The journal separately preserves the sparse checkout
+identity (`sparse_hash`) and `checkout_mode` durably across capability
+filtering, restart and replay (hk 5104 / hk 5211): a replay whose lists were
+stripped or added across capability filtering (one side empty) is accepted,
+preserving the truthful execution mode of the executed row (a stripped replay
+of a sparse row does not report sparse, while a replay of a stripped row
+reports full); a replay whose lists are present on both sides and differ
+conflicts (`journal_conflict`).
 
 A spec may also be a successor checkout (hk 5118): an implementer request whose
 `--checkout-ref` is `refs/heads/<branch>` carries `checkout` mode `successor`,

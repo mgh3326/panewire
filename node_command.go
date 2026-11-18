@@ -369,7 +369,8 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalEndReason := op == nodeCommandJobMarkLost && nodeCommandHasFields(raw, append(append([]string(nil), names...), "end_reason"))
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect) {
+	optionalAck := op == nodeCommandPaneCloseStatus && nodeCommandHasFields(raw, append(append([]string(nil), names...), "ack"))
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck) {
 		return nil, false
 	}
 	switch op {
