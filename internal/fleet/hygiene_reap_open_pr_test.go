@@ -125,23 +125,31 @@ func TestReapClosesAnAbandonedJobEvenWithAnOpenPR(t *testing.T) {
 	}
 }
 
-// A worktree whose HEAD cannot be read keeps a completed author's pane even
-// when hk lists no open PR for its task: the head that would match one is
-// unknown.
-func TestReapKeepsACompletedAuthorWhoseWorktreeCannotBeRead(t *testing.T) {
+// A completed author with no open PR left closes even if its worktree's HEAD
+// cannot be read (hk 4962): nothing waits on a PR.
+func TestReapClosesACompletedAuthorWhenPRsAreMergedEvenIfWorktreeCannotBeRead(t *testing.T) {
 	for _, tc := range []struct{ name, changes string }{
 		{"empty change list", `{"changes":[]}`},
 		{"merged only", `{"changes":[{"pr_number":306,"state":"merged","head_sha":"` + paneSweepPRHead + `"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, out, closed := reapPRJob(t, reapPRCase{terminal: map[string]any{"kind": "job.completed"}, status: http.StatusOK, changes: tc.changes, brokenHead: true})
-			if len(closed) != 0 || slices.Contains(eventKindsOf(t, a, "j"), "job.reaped") {
-				t.Fatalf("reap closed a completed author whose worktree cannot be read: closed %v", closed)
-			}
-			if !strings.Contains(out, "job=j pane=w:p1 action=keep reason=pr_state_unknown") {
-				t.Fatalf("reap output = %q", out)
+			if !slices.Equal(closed, []string{"pane close w:p1"}) || !slices.Contains(eventKindsOf(t, a, "j"), "job.reaped") {
+				t.Fatalf("reap did not close a completed author with no open PR: closed %v, out %q", closed, out)
 			}
 		})
+	}
+}
+
+// When the task has an open PR, an unreadable worktree keeps the completed
+// author's pane as pr_state_unknown.
+func TestReapKeepsACompletedAuthorWhoseWorktreeCannotBeReadWhenPROpen(t *testing.T) {
+	a, out, closed := reapPRJob(t, reapPRCase{terminal: map[string]any{"kind": "job.completed"}, status: http.StatusOK, changes: reapOpenPRChanges, brokenHead: true})
+	if len(closed) != 0 || slices.Contains(eventKindsOf(t, a, "j"), "job.reaped") {
+		t.Fatalf("reap closed a completed author whose worktree cannot be read while an open PR exists: closed %v", closed)
+	}
+	if !strings.Contains(out, "job=j pane=w:p1 action=keep reason=pr_state_unknown") {
+		t.Fatalf("reap output = %q", out)
 	}
 }
 
