@@ -155,6 +155,7 @@ func (s *laneInboxStore) fileUnread(now time.Time, where string, args ...any) ([
 		return nil, err
 	}
 	if len(ids) > 0 {
+		s.noteWorkChanged()
 		close(s.notify)
 		s.notify = make(chan struct{})
 	}

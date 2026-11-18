@@ -237,6 +237,14 @@ func (a *App) claimJobRecord(ctx context.Context, s Spawn) error {
 	if st, _ := rec["state"].(string); st != "claimed" {
 		return fail(exitDuplicate, "job id %s already used (record state %q)", s.Job, st)
 	}
+	owner, supported, err := JobOwnerFromRecord(rec)
+	if err != nil {
+		return fail(exitConfig, "job record owner unreadable: %v", err)
+	}
+	a.noteJobFenceSupport(supported)
+	if supported && owner != (JobOwner{}) && owner != (JobOwner{Node: host, Epoch: 1}) {
+		return fail(exitDuplicate, "job id %s is owned by %s at epoch %d", s.Job, owner.Node, owner.Epoch)
+	}
 	return nil
 }
 
@@ -263,13 +271,43 @@ func (a *App) putJobRecord(ctx context.Context, id string, fields map[string]any
 	if e != nil {
 		return e
 	}
-	return store.Put(ctx, id, fields)
+	node := a.JobOwnerNode
+	if node == "" {
+		node, _ = a.nodeID()
+	}
+	return PutOwnedJob(ctx, store, a.Jobs, node, id, fields, a.noteJobFenceSupport)
+}
+
+func (a *App) noteJobFenceSupport(supported bool) {
+	if a.JobFenceCapability != nil {
+		a.JobFenceCapability(supported)
+		return
+	}
+	jobFenceInit.Lock()
+	if a.jobFence == nil {
+		a.jobFence = &jobFenceWarnings{}
+	}
+	state := a.jobFence
+	jobFenceInit.Unlock()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if supported {
+		state.legacy = false
+	} else if !state.legacy {
+		state.legacy = true
+		if a.Err != nil {
+			a.warn("handoffkeep job owner fencing unavailable; using legacy job writes")
+		}
+	}
 }
 
 // jobRecordFailed records a best-effort record-write failure: the durable
 // job.record_failed event plus a warning, as hk doc §2.4 specifies for writes
 // after the pane exists.
 func (a *App) jobRecordFailed(ctx context.Context, id, op string, e error) {
+	if IsJobOwnerMismatch(e) || errors.Is(e, errJobReassigned) {
+		return
+	}
 	a.warn("job record %s write failed: %v", op, e)
 	_ = a.event(ctx, id, "job.record_failed", map[string]any{"op": op})
 }

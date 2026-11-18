@@ -26,6 +26,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/jobowner"
 	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
@@ -166,11 +167,13 @@ type HubClient struct {
 	now func() time.Time
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleetEvent).
-	fleetEvents  func(time.Time, fleetEvent) bool
-	assignedJobs map[string]uint64
-	assignmentMu sync.Mutex
-	panesAlive   panesAliveFunc
-	panesAliveMu sync.Mutex
+	fleetEvents    func(time.Time, fleetEvent) bool
+	assignedJobs   map[string]uint64
+	assignmentMu   sync.Mutex
+	jobFenceMu     sync.Mutex
+	jobFenceLegacy bool
+	panesAlive     panesAliveFunc
+	panesAliveMu   sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
 	paneIdleSince        map[string]time.Time
@@ -2526,10 +2529,18 @@ func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubC
 			return err
 		}
 	case "job.assigned":
+		if client.jobsInboxRoot == "" {
+			client.warnMessage("job assignment local root unavailable: " + message.JobID)
+			return nil
+		}
+		if err := jobowner.Assign(filepath.Join(client.jobsInboxRoot, "jobs"), message.JobID, message.Epoch); err != nil {
+			client.warnMessage("job assignment local write unavailable: " + message.JobID)
+			return nil
+		}
 		// Monotonic: a superseded session's drain can still run while a newer
 		// session already recorded a later epoch for the same job, and the
-		// read side only ever raises a scanned epoch (heartbeatEvent,
-		// jobCompletionEvents), never lowers it.
+		// heartbeat read side only raises a scanned epoch, never lowers it.
+		// Completion records keep the epoch of the producing attempt.
 		client.assignmentMu.Lock()
 		if message.Epoch > client.assignedJobs[message.JobID] {
 			client.assignedJobs[message.JobID] = message.Epoch
@@ -2624,6 +2635,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	scanned := scanHubActiveJobsWithPanes(ctx, client.jobsInboxRoot, client.panesAliveHook())
 	client.assignmentMu.Lock()
 	for i := range scanned {
+		if epoch, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), scanned[i].JobID); err == nil && epoch > scanned[i].Epoch {
+			scanned[i].Epoch = epoch
+		}
 		if epoch := client.assignedJobs[scanned[i].JobID]; epoch > scanned[i].Epoch {
 			scanned[i].Epoch = epoch
 		}
@@ -2807,13 +2821,6 @@ func (client *HubClient) nowUTC() time.Time {
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	completed := scanHubRelayEventsWithin(client.jobsInboxRoot, relayOutboxMaxAge())
-	client.assignmentMu.Lock()
-	for index := range completed {
-		if assigned := client.assignedJobs[completed[index].JobID]; assigned > completed[index].Epoch {
-			completed[index].Epoch = assigned
-		}
-	}
-	client.assignmentMu.Unlock()
 	events := make([]hubClientEvent, 0, len(completed))
 	for _, job := range completed {
 		if event, ok := client.relayEventForSend(job); ok {
@@ -2835,10 +2842,11 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	if client.outbox != nil {
 		if outstanding, found, err := client.outbox.UnpersistedRelayOutboxKey(context.Background(), key); err != nil {
 			client.warnMessage("relay outbox outstanding key unavailable")
-		} else if found {
-			// The scanner's assignment epoch is process memory. Reuse the one
-			// outstanding row so the same retained event file is re-presented.
-			key, job.Epoch = outstanding, outstanding.Epoch
+		} else if found && outstanding.Epoch == job.Epoch {
+			// The event file owns its epoch. An older sender may have saved
+			// a later assignment on this same outbox row; never replay that
+			// later epoch as if this attempt had produced it.
+			key = outstanding
 		}
 	}
 	send, replay := client.selectRelayEvent(key)

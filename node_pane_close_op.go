@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 // hubCapabilityCloseOps names the close operations in hello. A node
@@ -21,6 +22,12 @@ import (
 // hello and while connected, and registers again when the answer changes
 // (closeOpsRecheckInterval).
 const hubCapabilityCloseOps = "close_ops_v1"
+
+// hubCapabilityCloseMissing names the missing-job answer of pane.close_status
+// (hk 5296, docs/node-commands.md "A missing job"). A node advertises it with
+// close_ops_v1; the hub sends the status `epoch` argument, and accepts the
+// answer, only for a node that does.
+const hubCapabilityCloseMissing = "close_missing_v1"
 
 // closeOpsRecheckInterval paces the connected node's re-check of close-op
 // readiness (a process listing); a change sends a fresh hello.
@@ -47,7 +54,7 @@ func (client *HubClient) spawnHelloCapabilities(ctx context.Context) []string {
 	client.closeOpsAdvertised.Store(ready)
 	capabilities := slices.Clone(hubSpawnCapabilities)
 	if ready {
-		capabilities = append(capabilities, hubCapabilityCloseOps, hubCapabilityHandoverCheck)
+		capabilities = append(capabilities, hubCapabilityCloseOps, hubCapabilityHandoverCheck, hubCapabilityCloseMissing)
 	}
 	if client.checkoutSparseReady(ctx) {
 		capabilities = append(capabilities, hubCapabilityCheckoutSparse)
@@ -133,6 +140,11 @@ type nodeCloseOpRefArgs struct {
 	// durably, which lets a rollback drain finish. The hub sends it only
 	// after its guarded action is saved.
 	Ack bool `json:"ack,omitempty"`
+	// Epoch, on pane.close_status only, is the ownership epoch of the hub's
+	// action (hk 5296). It asks the node for the missing-job answer when the
+	// job directory is gone; the hub sends it only to a node that advertises
+	// close_missing_v1, since an older node refuses an unknown argument.
+	Epoch uint64 `json:"epoch,omitempty"`
 }
 
 // nodeCloseOpReleaseArgs is pane.close_release's decoded arguments, a distinct
@@ -149,6 +161,13 @@ type nodeCloseOpStatusResult struct {
 	// for it must name; empty when the job has no readable attempt.
 	Attempt string `json:"attempt"`
 	Reason  string `json:"reason,omitempty"`
+	// MissingEpoch is the missing-job proof (hk 5296): the job's directory is
+	// gone, and the node holds a durable tombstone for this request that
+	// fences it, so a delayed pane.close_op under the id can never act on a
+	// directory recreated later. It is the epoch the request was issued at.
+	// Only a status asked with an epoch is answered with it; zero is no
+	// proof, which is also what an older node answers.
+	MissingEpoch uint64 `json:"missing_epoch,omitempty"`
 }
 
 func validNodePaneCloseOpArgs(args nodePaneCloseOpArgs) bool {
@@ -185,6 +204,9 @@ func validNodePaneCloseOpResult(result nodePaneCloseOpResult) bool {
 }
 
 func validNodeCloseOpStatusResult(result nodeCloseOpStatusResult) bool {
+	if result.MissingEpoch != 0 && (result.State != nodeCloseOpNone || result.Attempt != "" || result.Released || result.Settled || result.Reason != "") {
+		return false
+	}
 	if !validHandoverCloseReason(result.Reason) || result.Reason != "" && result.State != fleet.CloseOpRefused {
 		return false
 	}
@@ -238,6 +260,15 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 	client.assignmentMu.Lock()
 	epoch := client.assignedJobs[args.Job]
 	client.assignmentMu.Unlock()
+	if client.jobsInboxRoot != "" {
+		stored, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+		if err != nil {
+			return nil, "epoch_mismatch"
+		}
+		if stored > epoch {
+			epoch = stored
+		}
+	}
 	if epoch > args.Epoch {
 		return nil, "epoch_mismatch"
 	}
@@ -265,6 +296,15 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 }
 
 func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseOpArgs, requireEpochProof bool) (any, string) {
+	if fenced, code := client.missingJobFence(args); code != "" || fenced {
+		if code != "" {
+			return nil, code
+		}
+		// The request was fenced while its job directory was gone (hk 5296):
+		// whatever stands under the job's name now belongs to a later attempt,
+		// and a replay of a released request touches no pane.
+		return nodePaneCloseOpResult{Outcome: fleet.CloseOpCancelled, Replayed: true}, ""
+	}
 	job, jobDir, found, code := client.openCloseOpJobDir(args.Job)
 	if code != "" {
 		return nil, code
@@ -343,7 +383,19 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 		closeArgs.QuestionJob = args.Job
 	}
 	var prepared nodeHandoverPrepared
+	checkEpoch := func() error {
+		if client.jobsInboxRoot != "" {
+			epoch, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+			if err != nil || epoch > args.Epoch {
+				return nodeCloseHookStop{code: "epoch_mismatch"}
+			}
+		}
+		return nil
+	}
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
+		if err := checkEpoch(); err != nil {
+			return err
+		}
 		// The proof is read again after the settle: the job's watcher, a
 		// separate process, may have recorded a re-prompt or an end of the
 		// attempt meanwhile.
@@ -387,11 +439,18 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
 			}
 		}
+		if err := checkEpoch(); err != nil {
+			op.State, op.Updated = fleet.CloseOpPreempted, client.nowUTC()
+			if writeErr := fleet.WriteCloseOp(job, op); writeErr != nil {
+				return writeErr
+			}
+			return err
+		}
 		return nil
 	})
 	if code != "" {
-		// The journal keeps registered or closing; a repeat of this request
-		// id settles it.
+		// The journal retains its latest state; a repeat of this request id
+		// settles or replays it.
 		return nil, code
 	}
 	switch result.Outcome {
@@ -707,7 +766,10 @@ func (l nodeFleetHubClose) Settle(ctx context.Context, job string) (fleet.HubClo
 	// The hk store is resolved only by a step that reads or writes hk: a
 	// close that closed nothing is cancelled locally even when the node has
 	// no handoffkeep_env.
-	return fleet.NewHubCloseSettlement(l.jobs, home, l.client.nodeJobStoreForCommand, l.client.nowUTC, listed, slogWarnWriter{}).Settle(ctx, job)
+	settlement := fleet.NewHubCloseSettlement(l.jobs, home, l.client.nodeJobStoreForCommand, l.client.nowUTC, listed, slogWarnWriter{})
+	settlement.App.JobOwnerNode = l.client.machineID
+	settlement.App.JobFenceCapability = l.client.noteJobFenceSupport
+	return settlement.Settle(ctx, job)
 }
 
 func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {
@@ -1109,6 +1171,9 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 		return nil, code
 	}
 	if !found {
+		if !release && args.Epoch > 0 {
+			return client.missingJobAnswer(args)
+		}
 		return nodeCloseOpStatusResult{State: nodeCloseOpNone}, ""
 	}
 	defer job.Close()
@@ -1237,6 +1302,49 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 		}
 	}
 	return nodeCloseOpStatusResult{State: op.State, Released: op.Released != nil, Settled: settled, Attempt: currentAttempt(job), Reason: op.Reason}, ""
+}
+
+// missingJobAnswer answers a pane.close_status that carries the hub's epoch
+// for a job whose directory is not there (hk 5296). Only a proved absence is
+// answered as missing: the node fences the request with a durable tombstone
+// outside every job directory first, then reports the epoch it holds. A
+// directory it cannot prove gone (an unreadable or missing jobs root, an
+// entry that is not a directory, no identity record, a failed write) is the
+// plain none answer, or journal_failed when a read or write failed, and the
+// hub keeps its hold. The caller holds nodeCommandMu.
+func (client *HubClient) missingJobAnswer(args nodeCloseOpRefArgs) (any, string) {
+	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
+	missing, err := fleet.JobDirMissingProof(jobsRoot, args.Job)
+	if err != nil {
+		return nil, "journal_failed"
+	}
+	if !missing {
+		return nodeCloseOpStatusResult{State: nodeCloseOpNone}, ""
+	}
+	tombstone, err := fleet.WriteMissingJobTombstone(jobsRoot, fleet.MissingJobTombstone{RequestID: args.RequestID, Job: args.Job, Epoch: args.Epoch, Created: client.nowUTC()})
+	if err != nil {
+		return nil, "journal_failed"
+	}
+	return nodeCloseOpStatusResult{State: nodeCloseOpNone, MissingEpoch: tombstone.Epoch}, ""
+}
+
+// missingJobFence reports whether the node fenced this request while its job
+// directory was gone. A tombstone that names another job, or an older epoch
+// than the request's, answers invalid_args like any other reuse of an id.
+func (client *HubClient) missingJobFence(args nodePaneCloseOpArgs) (bool, string) {
+	if client.jobsInboxRoot == "" {
+		return false, ""
+	}
+	tombstone, found, err := fleet.ReadMissingJobTombstone(filepath.Join(client.jobsInboxRoot, "jobs"), args.RequestID)
+	switch {
+	case err != nil:
+		return false, "journal_failed"
+	case !found:
+		return false, ""
+	case tombstone.Job != args.Job || args.Epoch > tombstone.Epoch:
+		return false, "invalid_args"
+	}
+	return true, ""
 }
 
 // cancelUnregisteredIntent fences a request the hub released before the node

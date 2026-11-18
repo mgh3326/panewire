@@ -256,7 +256,7 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 		if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "OK job=j report="+path+" kind=job.completed") {
 			t.Fatalf("out=%q", out)
 		}
-		if errs := a.Err.(*bytes.Buffer).String(); errs != "" {
+		if errs := a.Err.(*bytes.Buffer).String(); errs != "panewire: warning: handoffkeep job owner fencing unavailable; using legacy job writes\n" {
 			t.Fatalf("warnings=%q", errs)
 		}
 		rec := a.JobStore.(*fakeJobStore).record(t, "j")

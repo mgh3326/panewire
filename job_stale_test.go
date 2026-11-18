@@ -70,6 +70,7 @@ func TestJobStaleHubRegistryDropsSilentRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	useLegacyOwnerStore(hub)
 	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "t770", "fixture", agent, false)
 	stale := HubActiveJob{JobID: "job-stale", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
@@ -122,6 +123,7 @@ func TestJobStaleHubRegistryNeverDropsOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	useLegacyOwnerStore(hub)
 	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "t770", "fixture", agent, false)
 	job := HubActiveJob{JobID: "job-orphan", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}

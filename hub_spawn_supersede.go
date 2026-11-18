@@ -148,7 +148,7 @@ func (h *HubServer) initSupersedeFence() error {
 		// ignores (a rollback must not dispatch a revoked row). Rows with a
 		// stored request stay for the node release (docs/config.md, rolling
 		// back).
-		if err := h.inbox.store.refuseUnsentSupersedeActions(ctx); err != nil {
+		if err := h.inbox.store.refuseUnsentSupersedeActions(ctx, h.now().UTC()); err != nil {
 			return fmt.Errorf("supersede rows not cancelled: %w", err)
 		}
 		return nil
@@ -364,7 +364,7 @@ func (h *HubServer) createSupersedeAction(ctx context.Context, landing supersede
 		Text: fmt.Sprintf("[panewire] closed %s on %s: superseded by %s", parent, node, successor),
 		Kind: poolActionKindSupersedeClose, Supersede: &poolSupersede{Successor: successor, Fence: landing.Generation},
 	}}
-	if err := h.inbox.store.insertSupersedeAction(ctx, action, landing.Generation); err != nil {
+	if err := h.inbox.store.insertSupersedeAction(ctx, action, landing.Generation, h.now().UTC()); err != nil {
 		// A fenced landing is cancelled, never retried: a hub started with the
 		// switch off revoked it between the sweep's read and this insert.
 		return errors.Is(err, errSupersedeFenced) == false, err
@@ -452,7 +452,7 @@ func (h *HubServer) refuseCloseAction(ctx context.Context, action poolAction) er
 	next.Data.Args, next.Data.RetryID, next.Data.RetryAfter, next.Data.RetryCount = nil, "", 0, 0
 	next.Data.Supersede = &poolSupersede{Successor: data.Successor, Generation: data.Generation + 1, Fence: data.Fence}
 	action.Phase = poolActionRefused
-	if err := h.inbox.store.replaceSupersedeAction(ctx, action, next); err != nil {
+	if err := h.inbox.store.replaceSupersedeAction(ctx, action, next, h.now().UTC()); err != nil {
 		return err
 	}
 	h.poolActionObserved.Delete(action.ID)

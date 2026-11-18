@@ -224,6 +224,12 @@ window:** a writer holding a file descriptor it opened in the directory
 before the rename can still write into the tombstone after step 3, and that
 write is deleted with it.
 
+The jobs root also holds `.close-missing/<request_id>.json`: the node's fence
+for a hub close request it proved a deleted job dir for
+([node-commands.md](node-commands.md#close-operations), "A missing job"). It is
+not a job and a pass never reads it as one. It is the one record of the request
+that survives this deletion.
+
 A pass lists any `.expiring-*` tombstone it finds as `keep reason=tombstone`.
 It never deletes one and never renames one back; the operator decides.
 `panewire artifacts sweep` and `panewire lanes-missing` skip a tombstone: it

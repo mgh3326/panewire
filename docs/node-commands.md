@@ -264,6 +264,49 @@ dropped when rechecked under that lock (see the stale-decision rule below).
 intent was cancelled. The operation journal remains unchanged. A cancelled
 intent alone does not prove that its pane or watcher has stopped writing hk.
 
+**A missing job** (hk 5296). The close journal lives in the job's directory,
+so a directory the job-dir TTL removed takes its release tombstone with it,
+and a bare "no such directory" answer is not proof: a delayed `pane.close_op`
+could meet a directory recreated for a later attempt under the same id, and an
+unmounted or unreadable jobs root looks the same. `pane.close_status` takes an
+optional `epoch` (the hub's ownership epoch of the action) and a node that
+advertises `close_missing_v1` (with `close_ops_v1`) answers a job whose
+directory is gone with `missing_epoch` set, only when it can prove the
+absence: the jobs root is a readable directory, no entry of that name exists
+(letter case included), and the job's identity record (`jobs/.job-ids/<id>`,
+which outlives the directory) names exactly that job, so the job was claimed
+on this node and its directory has since gone. Before it answers, the node
+writes a durable tombstone for the request, outside every job directory
+(`jobs/.close-missing/<request_id>.json`, mode 0600, fsynced), naming the job
+and the epoch. The answer is `{"state":"none","released":false,"settled":false,"attempt":"","missing_epoch":<epoch>}`;
+`missing_epoch` is the highest epoch recorded for the request and is never
+lowered.
+
+**Invariant.** From the moment `missing_epoch` is answered for a request, a
+`pane.close_op` under that `request_id` never acts: it answers `cancelled`,
+`replayed:true`, before any journal or herdr read, whether the directory is
+still missing or has been recreated for a later attempt (even with the same
+attempt token, pane and epoch), and across a node restart, since the tombstone
+is a file. Naming another job, or a later epoch than the tombstone's, under a
+fenced id is `invalid_args`. So a delayed close for that epoch can never act on
+a later job with the same id; a later job is closed only by a new request id
+the hub issues for its own epoch.
+
+**What the hub does with it.** The hub sends `epoch` only to a node that
+advertises `close_missing_v1`, and finishes a pool close or hand-over row from
+a missing-job answer only when the answer is plain `none` with no attempt and a
+`missing_epoch` no lower than the row's epoch. The row ends refused: the fence
+is released, the owner is told (a hand-over ends `handover_failed` with reason
+`job_missing`, by the finality rule I2 of [quota-stop.md](quota-stop.md); any
+other pool close sends one `pool-action-missing:<row>` info line), and nothing
+is closed. Everything else keeps today's behaviour: a node without the
+capability, a bare `none` (no proof), a proof below the row's epoch, an
+unreadable job ledger (the directory is there, so the node never answers it as
+missing) and an unreadable identity record or jobs root all leave the row
+pending, the job fenced, and the 30-minute owner notice (`pool-action-stuck:`).
+`supersede_close` rows are unchanged. `pane.close_release` takes no `epoch`
+and answers a missing job as before.
+
 **The hub's acknowledgement** (hk 5073). `pane.close_status` also takes
 `ack:true` (`{"request_id","job","ack":true}`; `pane.close_release` refuses
 it). The hub sends it only for an action it has already stored `guarded`, so
@@ -622,7 +665,8 @@ ends the old action without a notice and permits a later sweep of the new
 attempt. `intent_cancelled` stops the close action without a notice or role
 release but keeps its reassignment fence until hk is terminal or the node
 reports synced settlement. A mismatch or `not-a-job` stays pending until release
-provides a durable tombstone. `reassignJob` refuses while any action for the
+provides a durable tombstone, or, for a job whose directory is gone, until the
+node's missing-job answer (above) fences the request. `reassignJob` refuses while any action for the
 job remains pending or guarded; a configured store error fails closed. An
 inbox-less hub allows reassignment and logs that it cannot check close-action
 finality. Do not remove an inbox store with unresolved actions: disabling it
@@ -634,6 +678,58 @@ without a heartbeat. Tests in
 [hub_pool_action_test.go](../hub_pool_action_test.go) and
 [node_pane_close_epoch_test.go](../node_pane_close_epoch_test.go) exercise the
 fence, terminal races, epoch, and restart rules.
+
+The handoffkeep job record also carries an owner node and hub epoch. A node's
+completion, escalation, usage, model, quota-stop, sweep, reap, and report-pin writes
+condition their updates on that local grant. The node persists later hub
+assignments, so a restarted node keeps the issued epoch. Each operation keeps
+the grant it started with, even if the job is later assigned back to the same
+node at a newer epoch. Before delivering a reassignment, the hub atomically
+transfers the hk owner with the old owner as `expected_owner`; a stale transfer
+is refused and names the current owner.
+A node that receives `409 job_owner_mismatch` reads the owner again. If the
+hub seeded this same node at its current grant epoch, it retries once with that
+owner as the condition. If hk names a newer grant to the same node that is not
+yet persisted locally, the write waits for a later assignment directive without
+revoking the job. Other mismatches record the same local revocation as a hub
+notice: the attempt makes no further job-record writes and the existing pane
+sweep closes the local pane. A delayed refusal or hub revocation cannot revoke a
+newer local grant. The hub checks the durable hk owner before finishing an old
+pool action, including after restart.
+Local quota cleanup releases a pool only while the captured grant is still
+current. If the grant has advanced, it logs and retains the ambiguous row;
+hk 5294 tracks recording the acquisition epoch needed to reclaim it safely.
+
+An older hk omits both owner fields from a job read. Panewire sends no fence
+fields to that server and logs once per streak while retaining legacy behavior.
+When hk gains fence support, the hub adopts a live, unfenced job only from an
+assignment it holds durably, with a conditional empty-owner update at the
+current epoch. The hub seeds asynchronously after landing and also checks
+persisted assignments after restart and on heartbeat. Between the node's HK
+claim and that seed, upgraded nodes condition their writes on an empty owner;
+they never claim it. Before reassigning an empty-owner job, the hub first seeds
+its current owner and then transfers the fence. Without a durable assignment,
+the hub leaves the job unfenced and cannot reassign it; jobs dispatched by an
+older hub without a held assignment must finish before this limitation clears.
+A later assignment back to the same node requires a fresh claim or spawn
+before that node's prior revocation is cleared.
+Older node binaries can still issue an unconditional write while being upgraded.
+Upgrade every node before advertising `close_ops_v1`: the current rollout is
+v0.0.540 followed by the release containing this fence.
+An old attempt still running when the same node receives a later grant can emit
+an event under that later epoch; launch-bound attempt identity is tracked in
+hk 5310.
+If the hub cannot read the job record, it refuses reassignment until it can
+establish whether fencing is supported. If hk rejects a terminal ownership
+transfer with `job_state_conflict`, the hub refuses the reassignment and names
+the reason; it does not bypass the fence. Conditional terminal owner-only
+transfers await deployment of hk 5303.
+The hub stores assignments and transfer intents alongside its SQLite inbox,
+or under its panewire state directory when it uses PostgreSQL or no inbox.
+Keep that directory across hub restarts: recovery checks hk's node, epoch, and
+non-terminal state before redelivering a successor's durable assignment. It
+removes the transfer intent after persisting that assignment, which also retains
+the predecessors needed to restore revocation delivery after another restart.
 
 Rollout order: deploy the hub with this guard, upgrade the node binaries,
 run `panewire node close-ops enable` on each node, then run

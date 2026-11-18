@@ -787,8 +787,22 @@ func (h *HubServer) cancelConsultJob(ctx context.Context, c hubConsult) {
 		return
 	}
 	if app, err := h.newSpawnApp(io.Discard, io.Discard); err == nil {
-		if err := app.MarkJobLost(ctx, c.Job); err != nil {
-			h.logger.Warn("consult job not marked lost after pane close", "consult", c.ID, "job", c.Job, "error", err)
+		record, exists, readErr := app.ExistingJob(ctx, c.Job)
+		if readErr != nil || !exists {
+			h.logger.Warn("consult job owner unavailable after pane close", "consult", c.ID, "job", c.Job)
+			return
+		}
+		_, supported, readErr := fleet.JobOwnerFromRecord(record)
+		if readErr != nil {
+			h.logger.Warn("consult job owner unavailable after pane close", "consult", c.ID, "job", c.Job)
+			return
+		}
+		if !supported {
+			if err := app.MarkJobLost(ctx, c.Job); err != nil {
+				h.logger.Warn("consult job not marked lost after pane close", "consult", c.ID, "job", c.Job, "error", err)
+			}
+		} else if lost, reason := h.markHolderJobLost(ctx, app, task, c.Job); !lost {
+			h.logger.Warn("consult job not marked lost after pane close", "consult", c.ID, "job", c.Job, "reason", reason)
 		}
 	}
 }

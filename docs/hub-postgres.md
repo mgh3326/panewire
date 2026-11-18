@@ -72,6 +72,12 @@ way.
   full scans a second of both batch tables; on live that was 441 scans of each
   in 40 s, 93,492 rows of `lane_inbox_batch_quarantine` and 281,358 of
   `lane_inbox_batches`.
+- The same gating covers batch building (hk 5301). `makeHeldBatches` and
+  `makeBatchesDue` each opened a transaction and scanned the hold, digest and
+  escalation sets of `lane_inbox` on every 100 ms tick, so they now run only
+  after a noted write, at the earliest known hold-release, digest or escalation
+  time kept in memory, when a watched held lane stops working, or at a 60 s
+  safety fallback. See "Batch building is gated too" in `quiet-delivery.md`.
 
 The migration uses plain `CREATE INDEX`, inside the migration transaction: the
 tables hold thousands of rows, and an index build is far below the startup

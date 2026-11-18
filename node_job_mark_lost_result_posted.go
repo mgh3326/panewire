@@ -155,7 +155,10 @@ func (client *HubClient) nodeJobMarkReviewerResultPosted(ctx context.Context, ar
 		return refuse(nodeJobMarkLostResultSettling)
 	}
 
-	if err := store.Put(ctx, args.Job, map[string]any{"state": "lost", "at": client.nowUTC(), "end_reason": reviewerResultPosted}); err != nil {
+	if err := client.putOwnedNodeJob(ctx, store, args.Job, map[string]any{"state": "lost", "at": client.nowUTC(), "end_reason": reviewerResultPosted}); err != nil {
+		if fleet.IsJobReassigned(err) {
+			return refuse(nodeJobMarkLostNewerClaim)
+		}
 		return nil, "mark_lost_failed"
 	}
 	return client.recordReviewerResultEnd(ctx, args, target)
