@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -967,6 +968,7 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 	if h.inbox == nil {
 		return
 	}
+	h.loopTick(loopPlacementRecords)
 	if !h.pendingPlacementRecords(ctx) && !h.hasDeferredTraceSaves() {
 		return
 	}
@@ -978,8 +980,13 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 	}
 	pending, err := h.inbox.store.pendingPlacementSnapshots(h.closeCtx)
 	if err != nil {
+		h.loopNoteSilentError(loopPlacementRecords, "hub_placement_record.go:pendingPlacementSnapshots", err)
 		h.logger.Warn("placement snapshots could not be listed; records stay pending", "error", err)
 		return
+	}
+	h.loopClearSilent("hub_placement_record.go:pendingPlacementSnapshots")
+	for _, row := range pending {
+		h.loopNoteMade(loopPlacementRecords, row.RequestID+"/"+strconv.Itoa(row.Attempt))
 	}
 	if len(pending) == 0 {
 		return

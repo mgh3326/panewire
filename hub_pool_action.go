@@ -111,11 +111,17 @@ func (h *HubServer) reconcilePoolActions(ctx context.Context) {
 		return
 	}
 	defer h.poolActionMu.Unlock()
+	h.loopTick(loopPoolActions)
 	started := h.now().UTC()
 	actions, err := h.inbox.store.activePoolActions(ctx)
 	if err != nil {
+		h.loopNoteSilentError(loopPoolActions, "hub_pool_action.go:activePoolActions", err)
 		h.logger.Warn("pool actions unavailable", "error", h.inbox.store.loggable("pool actions", err))
 		return
+	}
+	h.loopClearSilent("hub_pool_action.go:activePoolActions")
+	for _, action := range actions {
+		h.loopNoteMade(loopPoolActions, action.ID)
 	}
 	// Inventory the whole snapshot before any potentially slow node call. The
 	// count lets a rollback operator detect missing log entries; see the runbook.
@@ -351,6 +357,9 @@ func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, 
 	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
 		return err
 	}
+	// The durable terminal transition is the action's exit: settled,
+	// guarded or refused outcomes all land here.
+	h.loopNoteDone(loopPoolActions, action.ID)
 	h.poolActionObserved.Store(action.ID, struct{}{})
 	h.logger.Info("pool close action finalized", "node", action.Node, "job", action.Job, "action", action.ID, "outcome", outcome)
 	return nil
@@ -374,6 +383,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 			return err
 		}
 		h.poolActionObserved.Delete(action.ID)
+		h.loopNoteDone(loopPoolActions, action.ID)
 		return nil
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
@@ -409,5 +419,6 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		return err
 	}
 	h.poolActionObserved.Delete(action.ID)
+	h.loopNoteDone(loopPoolActions, action.ID)
 	return nil
 }

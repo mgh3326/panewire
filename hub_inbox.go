@@ -587,9 +587,16 @@ func (h *HubServer) flushInbox() {
 		return
 	}
 	defer h.inbox.flushMu.Unlock()
+	h.loopTick(loopInbox)
 	if h.inbox.persistDisabled || h.closeCtx.Err() != nil || h.now().Before(h.inbox.nextAttempt) {
+		if h.inbox.persistDisabled {
+			h.loopNoteSilentError(loopInbox, "hub_inbox.go:persistDisabled", nil)
+		} else {
+			h.loopClearSilent("hub_inbox.go:persistDisabled")
+		}
 		return
 	}
+	h.loopClearSilent("hub_inbox.go:persistDisabled")
 	failed := false
 	defer func() { h.noteInboxFlushResult(failed) }()
 	// A held-batching failure must not starve ordinary digests or batches
@@ -622,9 +629,14 @@ func (h *HubServer) flushInbox() {
 		if h.closeCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			return
 		}
+		h.loopNoteSilentError(loopInbox, "hub_inbox.go:pendingBatches", err)
 		h.logger.Error("inbox batch listing failed")
 		failed = true
 		return
+	}
+	h.loopClearSilent("hub_inbox.go:pendingBatches")
+	for _, b := range batches {
+		h.loopNoteMade(loopInbox, b.ID)
 	}
 	// A held batch that cannot be prepared (no document store, or the PUT keeps
 	// failing) stays retained and blocks only its own lane; other lanes flush.
@@ -703,6 +715,7 @@ func (h *HubServer) flushInbox() {
 				failed = true
 				return
 			}
+			h.loopNoteDone(loopInbox, b.ID)
 			continue
 		}
 		if !result.PersistFailed {

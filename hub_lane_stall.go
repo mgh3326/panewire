@@ -113,7 +113,8 @@ func (h *HubServer) laneStallBaseContext() context.Context {
 func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	var notifications []hubNotification
-	for _, lane := range h.laneStallCandidates(routes) {
+	candidates := h.laneStallCandidates(routes)
+	for _, lane := range candidates {
 		if ctx.Err() != nil {
 			// Budget spent: lanes not yet evaluated are unobserved — the same
 			// neutral rule as a read error, so an exhausted run neither opens

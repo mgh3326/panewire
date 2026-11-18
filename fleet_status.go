@@ -120,6 +120,7 @@ func (h *HubServer) runFleetStatus(ctx context.Context) {
 // failure is logged once; the next cycle retries.
 func (h *HubServer) publishFleetStatus(ctx context.Context) {
 	now := h.now().UTC()
+	h.loopTick(loopFleetStatus)
 	body, err := h.fleetStatusDocument(ctx, now).body()
 	if err == nil {
 		writeCtx, cancel := context.WithTimeout(ctx, fleetStatusWriteTimeout)
@@ -127,7 +128,9 @@ func (h *HubServer) publishFleetStatus(ctx context.Context) {
 		cancel()
 	}
 	if err != nil {
+		h.loopNoteError(loopFleetStatus)
 		h.logger.Warn("fleet status snapshot not written; retrying next cycle", "key", fleetStatusDocKey, "error", err)
+		return
 	}
 }
 
