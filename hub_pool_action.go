@@ -70,7 +70,7 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 	if pending, err := h.inbox.store.pendingPoolAction(ctx, task.Job); err != nil || pending != "" {
 		return errors.New("job already has a pending close action")
 	}
-	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.insertPoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	h.poolActionObserved.Store(action.ID, struct{}{})
@@ -252,7 +252,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 				// a new attempt while it works is released above, never
 				// closed by this intent.
 				action.Data.TargetAttempt = status.Attempt
-				if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+				if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 					return err
 				}
 			}
@@ -277,7 +277,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 				return h.releasePoolAction(ctx, action)
 			}
 			action.Data.Args = args
-			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 				return err
 			}
 		}
@@ -382,7 +382,7 @@ func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolA
 			// The node answered the ack: no later pass repeats it.
 			acked = true
 			action.Data.Acked = true
-			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 				h.logger.Warn("pool action ack not saved", "job", action.Job, "action", action.ID, "error", h.inbox.store.loggable("pool action", err))
 			}
 		}
@@ -449,7 +449,7 @@ func (h *HubServer) logObservedPoolAction(action poolAction) {
 }
 
 func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, outcome string) error {
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	// The durable terminal transition is the action's exit: settled,
@@ -474,7 +474,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		// Settlement permits reassignment. Once another owner has the job,
 		// this old action must not release its role or announce its end.
 		action.Phase = poolActionDone
-		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 			return err
 		}
 		h.poolActionObserved.Delete(action.ID)
@@ -513,7 +513,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		}
 	}
 	action.Phase = poolActionDone
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	h.poolActionObserved.Delete(action.ID)

@@ -954,7 +954,7 @@ func TestSupersedeOffSwitchFencesAStoredButUnsentRequest(t *testing.T) {
 			// save and the send leaves it.
 			row := f.onlyRow(t)
 			row.Data.Args = &nodePaneCloseOpArgs{RequestID: row.ID, Job: f.job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project", EndReason: row.Data.EndReason}
-			if err := f.hub.inbox.store.savePoolAction(t.Context(), row); err != nil {
+			if err := f.hub.inbox.store.savePoolAction(t.Context(), row, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			f.hub.supersedeClose = false
@@ -1047,7 +1047,7 @@ func (f *supersedeFixture) storeUnsentRequest(t *testing.T) {
 	t.Helper()
 	row := f.onlyRow(t)
 	row.Data.Args = &nodePaneCloseOpArgs{RequestID: row.ID, Job: f.job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project", EndReason: row.Data.EndReason}
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), row); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), row, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1252,7 +1252,7 @@ func TestSupersedeRetriesShareOneChainAndBudget(t *testing.T) {
 	// already named its successor, still mints nothing, and a chain that
 	// reached the cap in a final row mints nothing either.
 	second.Phase = poolActionRefused
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), second); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), second, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	rows = f.rows(t)
@@ -1273,7 +1273,7 @@ func TestSupersedeRetriesShareOneChainAndBudget(t *testing.T) {
 	deep.ID = "deep-final-row"
 	deep.Data.Supersede = &poolSupersede{Generation: supersedeMaxGenerations - 1, Fence: first.Data.Supersede.Fence, Successor: f.successor}
 	deep.Data.Args = nil
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), deep); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), deep, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	fresh := first

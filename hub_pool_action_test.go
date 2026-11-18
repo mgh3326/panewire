@@ -27,7 +27,7 @@ func poolActionFixture(t *testing.T) (*quotaReplaceFixture, poolAction) {
 	args := &nodePaneCloseOpArgs{RequestID: "action-1", Job: f.job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project", EndReason: "quota_stop pool=claude"}
 	action := poolAction{ID: args.RequestID, Job: f.job, Node: "machine-a", Epoch: 1, Phase: poolActionPending,
 		Data: poolActionData{Owner: "parent", Text: "The job ended.", SpawnRequest: f.holder.Request.RequestID, Pane: args.PaneID, Label: args.Name, EndReason: args.EndReason, Args: args}}
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return f, action
@@ -376,7 +376,7 @@ func TestPoolActionNoticeWaitsForEveryPendingRequest(t *testing.T) {
 	}
 	settled := pending
 	settled.ID, settled.Phase = "settled-retry", poolActionSettled
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), settled); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), settled, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.jobs.mu.Lock()
@@ -504,7 +504,7 @@ func TestPoolActionRestartAfterCloseAndBeforeNotice(t *testing.T) {
 	// Simulate a crash after the relay accepted the notice but before the
 	// action's done update was committed.
 	action.Phase = poolActionSettled
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f)
@@ -542,7 +542,7 @@ func TestPoolActionCompletionRaceKeepsCompletedRecord(t *testing.T) {
 func TestPoolActionCompletionBeforeCloseReleasesUnsentIntent(t *testing.T) {
 	f, action := poolActionFixture(t)
 	action.Data.Args = nil
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.jobs.mu.Lock()

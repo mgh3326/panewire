@@ -175,7 +175,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	ctx, done := s.op(s.life)
 	defer done()
 	for _, statement := range []string{
-		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,conditions_met_ms BIGINT NOT NULL DEFAULT 0,condition_result TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS spawn_operations (request_id TEXT PRIMARY KEY,job TEXT NOT NULL,owner TEXT NOT NULL,fingerprint TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,created_ms BIGINT NOT NULL,deadline_ms BIGINT NOT NULL,node_id TEXT UNIQUE,node_payload TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '{}',trace_recorded INTEGER NOT NULL DEFAULT 0,last_run_ms BIGINT NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,conditions_met_ms BIGINT NOT NULL DEFAULT 0,condition_result TEXT NOT NULL DEFAULT '',terminal_ms BIGINT NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS spawn_reservations (job TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,task_role TEXT UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS spawn_notifications (event_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,job TEXT NOT NULL,owner TEXT NOT NULL,result TEXT NOT NULL,created_ms BIGINT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0,telemetry_recorded INTEGER NOT NULL DEFAULT 0)`,
 		spawnAttemptGrantsTable,
@@ -204,6 +204,28 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		if err := ignoreDuplicateColumn(err); err != nil {
 			return err
 		}
+	}
+	// The retention clocks (hk 5297; Postgres 0028): when an operation became
+	// terminal, and when a pool action became final. Rows final before the
+	// column exists are dated at this start, so they keep a full window.
+	for _, column := range []string{`ALTER TABLE spawn_operations ADD COLUMN terminal_ms BIGINT NOT NULL DEFAULT 0`, `ALTER TABLE pool_actions ADD COLUMN final_ms BIGINT NOT NULL DEFAULT 0`} {
+		if _, err := s.db.ExecContext(ctx, column); err != nil {
+			if err := ignoreDuplicateColumn(err); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET terminal_ms=? WHERE terminal_ms=0 AND status IN (`+spawnTerminalStatuses+`)`, time.Now().UTC().UnixMilli()); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE pool_actions SET final_ms=? WHERE final_ms=0 AND phase IN ('done','refused')`, time.Now().UTC().UnixMilli()); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS spawn_operations_terminal ON spawn_operations(terminal_ms) WHERE status IN (`+spawnTerminalStatuses+`)`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS pool_actions_final ON pool_actions(final_ms) WHERE phase IN ('done','refused')`); err != nil {
+		return err
 	}
 	// The coordinator's periodic spawn scans, indexed the way the Postgres
 	// twin is (hk 4889, migration 0020): each statement reads one small key
@@ -544,6 +566,12 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return false, nil
+	}
+	if spawnTerminalStatus(status) {
+		// The retention clock starts at the terminal write (hk 5297).
+		if _, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET terminal_ms=? WHERE request_id=? AND attempt=? AND terminal_ms=0`), now.UnixMilli(), task.Request.RequestID, task.Attempt); err != nil {
+			return false, err
+		}
 	}
 	if status == "retryable" && spawnAttemptEndedUnstarted(task, outcome, now) {
 		// An attempt that ended with the start provably absent no longer ends

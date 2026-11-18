@@ -51,7 +51,7 @@ func TestPoolActionReassignFailsOnConfiguredStoreError(t *testing.T) {
 func TestPoolActionRoleReleaseRejectsAReassignedHolder(t *testing.T) {
 	f, action := poolActionFixture(t)
 	action.Phase = poolActionRefused
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.hub.reassignJob(action.Job, "machine-b"); err != nil {
@@ -71,7 +71,7 @@ func TestPoolActionRoleReleaseRejectsAReassignedHolder(t *testing.T) {
 func TestPoolActionReassignmentWaitsForRoleRelease(t *testing.T) {
 	f, action := poolActionFixture(t)
 	action.Phase = poolActionRefused
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	unlock, ok := f.hub.lockWithoutPoolAction(t.Context(), action.Job)
@@ -110,7 +110,7 @@ func TestPoolActionSettledReassignmentSuppressesOldNotice(t *testing.T) {
 		t.Fatal(err)
 	}
 	action.Phase = poolActionSettled
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.jobs.mu.Lock()
