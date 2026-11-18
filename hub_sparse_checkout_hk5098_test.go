@@ -326,3 +326,22 @@ func TestSpawnResultHidesCheckoutModeFromAnOldHub(t *testing.T) {
 		t.Fatalf("old hub wire=%s", raw)
 	}
 }
+
+// The asynchronous operation's stored outcome keeps the node's checkout mode,
+// so a status read after the immediate answer still says which checkout ran
+// (hk 5098 review).
+func TestStoredSpawnOutcomeCarriesCheckoutMode(t *testing.T) {
+	task := hubSpawnTask{Request: fleet.Submission{RequestID: t14RequestID(956)}}
+	node := hubSpawnRequest{RequestID: t14RequestID(956), Machine: "machine-a", Args: []string{"--job", "job-a"}}
+	outcome := spawnNodeOutcome(task, node, hubSpawnResult{RC: 0, CheckoutMode: nodeCheckoutSparse})
+	if outcome.CheckoutMode != nodeCheckoutSparse {
+		t.Fatalf("stored outcome = %+v, want checkout_mode sparse", outcome)
+	}
+	raw, err := json.Marshal(outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"checkout_mode":"sparse"`) {
+		t.Fatalf("stored outcome JSON = %s", raw)
+	}
+}

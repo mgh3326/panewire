@@ -39,6 +39,10 @@ type hubSpawnOutcome struct {
 	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
 	Retryable        bool `json:"retryable,omitempty"`
 	NodeResult       bool `json:"node_result,omitempty"`
+	// CheckoutMode is the node's answer for a checkout spec, "sparse" or
+	// "full" (hk 5098): the stored outcome keeps it for a status read after
+	// the immediate spawn answer is gone.
+	CheckoutMode string `json:"checkout_mode,omitempty"`
 	// QuotaRefresh names the shared quota refresh a timeout waited on and its
 	// last recorded failure (hub_quota_refresh.go). It is set only when the
 	// deadline expired before any node binding.
