@@ -1317,7 +1317,8 @@ a bound request past its deadline (`deadline_exceeded`) notifies nothing, becaus
 it is not final (hk 5267). Its outcome is decided by one of three things, and
 then the owner hears it once:
 
-- a late node result or a completed hk job settles it: `SPAWNED`
+- a late node result, or a completed hk job whose record carries the request's
+  host, a pane and the request's `--task` id, settles it: `SPAWNED`
   (`<request_id>:<attempt>:succeeded`); a late failure settles it `SPAWN_FAILED`
   with that failure;
 - the stale probe's horizon, 30 minutes past the deadline
@@ -1328,7 +1329,11 @@ then the owner hears it once:
   once.
 - a landing after that unresolved notice: one correcting `SPAWNED … request=<id>
   (after an earlier unresolved notice)` under the same request id, as the
-  request's last outcome. Its event id is the ordinary `…:succeeded`.
+  request's last outcome, to every recipient the unresolved notice reached
+  (owner and submitter). Its event id is the ordinary `…:succeeded` (plus
+  `:<lane>` for a submitter copy). A correction is not routed while the
+  unresolved notice it corrects is still undelivered for that recipient, so a
+  lane never reads the success before the failure it corrects.
 
 An unbound timeout (the node never took the request) is not held by this rule.
 Each event id is fixed and unique per attempt, so a restart never repeats a

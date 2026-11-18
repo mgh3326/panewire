@@ -591,12 +591,14 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	// the plain outcome. The status UPDATE above holds the row's write lock, so
 	// the unresolved notice either committed before this check or never will.
 	noticeRaw := string(raw)
+	afterUnresolved := false
 	if status == "succeeded" && task.Node != nil {
 		noticed, err := spawnUnresolvedNoticed(ctx, s, tx, task)
 		if err != nil {
 			return false, err
 		}
 		if noticed {
+			afterUnresolved = true
 			outcome.AfterUnresolved = true
 			corrected, err := json.Marshal(outcome)
 			if err != nil {
@@ -605,7 +607,7 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 			noticeRaw = string(corrected)
 		}
 	}
-	if err = queueSpawnNotifications(ctx, s, tx, task, status, noticeRaw, now); err != nil {
+	if err = queueSpawnNotifications(ctx, s, tx, task, status, noticeRaw, now, afterUnresolved); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
@@ -614,9 +616,11 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 // queueSpawnNotifications writes the outbox rows an outcome owes: one for the
 // owner lane, and for a refusal or an unstarted end one for the submitting
 // lane too.
-func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx, task hubSpawnTask, status, raw string, now time.Time) error {
+func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx, task hubSpawnTask, status, raw string, now time.Time, afterUnresolved bool) error {
 	eventID := fmt.Sprintf("%s:%d:%s", task.Request.RequestID, task.Attempt, status)
-	submitterCopy := status == "failed" || status == "retryable" || status == "given_up" || status == "refused" || status == "cancelled"
+	// A correction goes to every recipient that was told the unresolved
+	// failure, the submitter included (hk 5267 review).
+	submitterCopy := afterUnresolved || status == "failed" || status == "retryable" || status == "given_up" || status == "refused" || status == "cancelled"
 	return queueSpawnNoticeRows(ctx, s, tx, task, eventID, raw, now, submitterCopy)
 }
 

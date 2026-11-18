@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -105,7 +106,9 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	if pane == "" || spawnRecordString(record, "host") != task.Node.Machine {
 		return false
 	}
-	if want := hubSpawnArg(task.Request.Args, "--task"); want != "" && fmt.Sprint(record["task_id"]) != want {
+	// The task identity is required: a request without --task has no proof
+	// that this completed job is its own (hk 5267 review).
+	if want := hubSpawnArg(task.Request.Args, "--task"); want == "" || spawnRecordTaskID(record) != want {
 		return false
 	}
 	outcome := hubSpawnOutcome{RC: 0, Stage: "landing", Host: task.Node.Machine, Pane: pane, Profile: spawnRecordString(record, "profile"), Model: spawnRecordString(record, "model"), E6Arm: task.Request.E6Arm}
@@ -116,6 +119,47 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	h.recordSpawnTrace(task, outcome)
 	h.logger.Info("hub settled a spawn from its completed job", "request_id", task.Request.RequestID, "job", task.Job, "host", task.Node.Machine, "pane", pane)
 	return true
+}
+
+// spawnRecordTaskID renders a job record's task id as a plain decimal. Job
+// records decode JSON numbers as float64, which prints large ids in exponent
+// form (1e+06) and would never match the --task argument.
+func spawnRecordTaskID(record map[string]any) string {
+	switch v := record["task_id"].(type) {
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case string:
+		return v
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// correctionAwaitsUnresolved reports whether pending row n is a correcting
+// SPAWNED whose unresolved notice, for the same recipient, is still undelivered.
+// Such a correction waits so the lane never reads the success before the
+// failure it corrects (hk 5267 review). Other rows are never held.
+func (h *HubServer) correctionAwaitsUnresolved(ctx context.Context, n spawnNotification) bool {
+	var result hubSpawnOutcome
+	if json.Unmarshal([]byte(n.raw), &result) != nil || !result.AfterUnresolved {
+		return false
+	}
+	attempt := spawnNoticeAttempt(n.id)
+	base := fmt.Sprintf("%s:%d:", n.request, attempt)
+	// The correction's id is <request>:<attempt>:succeeded, plus ":<lane>" for a
+	// submitter copy; the unresolved id carries the same suffix.
+	suffix := strings.TrimPrefix(n.id, base+"succeeded")
+	unresolved := base + spawnUnresolvedStatus + suffix
+	store := h.inbox.store
+	op, done := store.op(ctx)
+	defer done()
+	var delivered int
+	if err := store.db.QueryRowContext(op, store.q(`SELECT delivered FROM spawn_notifications WHERE event_id=?`), unresolved).Scan(&delivered); err != nil {
+		return false
+	}
+	return delivered != spawnNoticeDone
 }
 
 func spawnRecordString(record map[string]any, key string) string {

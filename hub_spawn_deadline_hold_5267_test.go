@@ -159,17 +159,24 @@ func TestUnresolvedThenCorrectedOnceEach_5267(t *testing.T) {
 	if changed, err := s.completeSpawn(t.Context(), task, success, time.Now()); err != nil || !changed {
 		t.Fatalf("late landing changed=%v err=%v", changed, err)
 	}
-	landed := spawnOutboxRow{}
+	// One correction per recipient: the owner's, and the submitter's, which
+	// was told the unresolved failure too (hk 5267 review).
+	landed := map[string]spawnOutboxRow{}
 	for _, row := range spawnOutbox(t, s, request) {
 		if strings.HasPrefix(row.Text, "[panewire] SPAWNED ") {
-			if landed.ID != "" && landed.ID != row.ID {
-				t.Fatalf("more than one SPAWNED row: %+v", row)
+			if _, dup := landed[row.ID]; dup {
+				t.Fatalf("more than one SPAWNED row for %s: %+v", row.ID, row)
 			}
-			landed = row
+			landed[row.ID] = row
 		}
 	}
-	if landed.ID == "" || !strings.Contains(landed.Text, "request="+request) || !strings.Contains(landed.Text, "(after an earlier unresolved notice)") {
-		t.Fatalf("correcting SPAWNED = %+v, want request=%s and the correction marker", landed, request)
+	if len(landed) != 2 {
+		t.Fatalf("correcting SPAWNED rows = %+v, want the owner's and the submitter's", landed)
+	}
+	for id, row := range landed {
+		if !strings.Contains(row.Text, "request="+request) || !strings.Contains(row.Text, "(after an earlier unresolved notice)") {
+			t.Fatalf("correcting SPAWNED %s = %+v, want request=%s and the correction marker", id, row, request)
+		}
 	}
 	if changed, err := s.completeSpawn(t.Context(), task, success, time.Now()); err != nil || changed {
 		t.Fatalf("duplicate landing changed=%v err=%v", changed, err)
@@ -398,5 +405,95 @@ func TestStrandedCompletedJobAfterHorizonCorrectsUnresolved_5267(t *testing.T) {
 	}
 	if n := spawnOutboxCount(t, store, request, unresolved); n != 1 {
 		t.Fatalf("unresolved rows after the correction = %d, want 1", n)
+	}
+}
+
+// A correction waits while the unresolved notice it corrects is undelivered for
+// the same recipient, and it reaches the submitter who was told the failure.
+// The owner's relay is held for two passes, while the submitter's and the
+// success land (hk 5267 review).
+func TestCorrectionWaitsForItsUnresolvedAndReachesSubmitter_5267(t *testing.T) {
+	h, _, destination := spawnNotifyHubLanes(t, "", "parent", "submitter")
+	task, _ := bindDispatch(t, h, reconcilingRequest())
+	s := h.inbox.store
+	request := task.Request.RequestID
+	ownerUnresolved := spawnUnresolvedEventID(task)
+	holdOwner := true
+	h.spawnNoticeRelayFilter = func(id string) bool { return holdOwner && id == ownerUnresolved }
+	if _, err := s.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := s.noteUnresolvedSpawn(t.Context(), task, time.Now()); err != nil || !queued {
+		t.Fatalf("unresolved queued=%v err=%v", queued, err)
+	}
+	first := deliveredSpawnTexts(t, h, destination)
+	if len(first) != 1 || first[0].Pane != "w1:p2" || !strings.Contains(first[0].Text, "deadline_exceeded_unresolved") {
+		t.Fatalf("first pass = %+v, want the submitter's unresolved notice only", first)
+	}
+	if _, err := s.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p1", Profile: "codex-sol"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// The owner's unresolved notice is still held, so its correction must wait.
+	second := deliveredSpawnTexts(t, h, destination)
+	if len(second) != 1 || second[0].Pane != "w1:p2" || !strings.Contains(second[0].Text, "after an earlier unresolved notice") {
+		t.Fatalf("second pass = %+v, want only the submitter's correction", second)
+	}
+	holdOwner = false
+	third := deliveredSpawnTexts(t, h, destination)
+	if len(third) != 2 || third[0].Pane != "w1:p1" || third[1].Pane != "w1:p1" ||
+		!strings.Contains(third[0].Text, "deadline_exceeded_unresolved") || !strings.Contains(third[1].Text, "after an earlier unresolved notice") ||
+		!strings.Contains(third[1].Text, "request="+request) {
+		t.Fatalf("third pass = %+v, want the owner's unresolved notice then its correction", third)
+	}
+}
+
+// A task id from a job record renders as a plain decimal, so a large id
+// matches its --task argument (CodeRabbit review on hk 5267).
+func TestSpawnRecordTaskIDIsDecimal_5267(t *testing.T) {
+	for _, tc := range []struct {
+		value any
+		want  string
+	}{{float64(42), "42"}, {float64(1000000), "1000000"}, {"7", "7"}, {nil, ""}} {
+		if got := spawnRecordTaskID(map[string]any{"task_id": tc.value}); got != tc.want {
+			t.Fatalf("task_id %v = %q, want %q", tc.value, got, tc.want)
+		}
+	}
+}
+
+// A completed job settles a request whose --task is a large id (float64 in the
+// job record), as the earlier completed-job test does for a small one.
+func TestStrandedCompletedJobLargeTaskIDSettles_5267(t *testing.T) {
+	s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
+	for i, arg := range s.task.Request.Args {
+		if arg == "--task" && i+1 < len(s.task.Request.Args) {
+			s.task.Request.Args[i+1] = "1000000"
+		}
+	}
+	record := completedJobRecord("machine-a")
+	record["task_id"] = float64(1000000)
+	useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: record})
+	s.run(t)()
+	if got := s.status(t); got.Status != "succeeded" {
+		t.Fatalf("large task id did not settle: status=%s", got.Status)
+	}
+}
+
+// Without a --task on the request there is no task identity to check a
+// completed job against, so the job does not settle the request (hk 5267 review).
+func TestStrandedCompletedJobWithoutTaskArgRefuses_5267(t *testing.T) {
+	s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
+	args := []string{}
+	for i := 0; i < len(s.task.Request.Args); i++ {
+		if s.task.Request.Args[i] == "--task" {
+			i++
+			continue
+		}
+		args = append(args, s.task.Request.Args[i])
+	}
+	s.task.Request.Args = args
+	useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: completedJobRecord("machine-a")})
+	s.run(t)()
+	if got := s.status(t); got.Status != "deadline_exceeded" {
+		t.Fatalf("a request without --task settled from a job: status=%s", got.Status)
 	}
 }
