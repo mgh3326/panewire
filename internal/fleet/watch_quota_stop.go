@@ -439,22 +439,27 @@ func (a *App) quotaStopAnnounceEndLocked(ctx context.Context, j Job, stop quotas
 // repeat announcement may follow. A job with no ledger directory has nothing
 // to read; any other unreadable ledger is an error, never permission.
 func (a *App) attemptEndedBeforeAnnouncement(id string) (bool, error) {
-	evs, err := a.events(id)
-	if errors.Is(err, os.ErrNotExist) {
+	// Only a ledger whose events directory is absent has nothing to read; a
+	// listed event that vanished or failed to read is missing evidence.
+	if _, err := os.Lstat(filepath.Join(a.Jobs, id, "events")); errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
+	evs, err := a.events(id)
 	if err != nil {
 		return false, err
 	}
-	ordered := ledgerOrder(evs)
 	// A hub revocation allocates its sequence without the ledger lock (hk
-	// 5044), so it can share a number with an event published before it and
-	// sort first. A revocation tied with another event is an end whatever
-	// the order: fail closed.
-	seqs := map[string]int{}
-	for _, ev := range ordered {
-		seqs[ledgerSeqPrefix(ev.name)]++
-	}
+	// 5044), so it can share a number with an event published before it.
+	// Within one sequence number, a revocation is folded after every other
+	// event, so it ends an attempt started at that number; a real start at a
+	// strictly later number clears it.
+	ordered := ledgerOrder(evs)
+	slices.SortStableFunc(ordered, func(x, y Event) int {
+		if c := cmpSeqPrefix(x.name, y.name); c != 0 {
+			return c
+		}
+		return revokedLast(x) - revokedLast(y)
+	})
 	ended, reaped := false, false
 	for _, ev := range ordered {
 		switch ev.Kind {
@@ -475,27 +480,32 @@ func (a *App) attemptEndedBeforeAnnouncement(id string) (bool, error) {
 			}
 		}
 	}
-	for _, ev := range ordered {
-		if ev.Kind == "job.revoked" && seqs[ledgerSeqPrefix(ev.name)] > 1 {
-			return true, nil
-		}
-	}
 	ended = ended || reaped
 	return ended, nil
 }
 
-// ledgerSeqPrefix is the numeric sequence prefix of a ledger file name,
-// normalized so "0007" and "00007" compare equal; "" when there is none.
-func ledgerSeqPrefix(name string) string {
-	i := strings.IndexByte(name, '-')
-	if i <= 0 {
-		return ""
+// cmpSeqPrefix compares two ledger file names by numeric sequence prefix
+// alone; names without one compare equal.
+func cmpSeqPrefix(x, y string) int {
+	seq := func(name string) int {
+		i := strings.IndexByte(name, '-')
+		if i <= 0 {
+			return -1
+		}
+		n, err := strconv.Atoi(name[:i])
+		if err != nil {
+			return -1
+		}
+		return n
 	}
-	n, err := strconv.Atoi(name[:i])
-	if err != nil {
-		return ""
+	return seq(x) - seq(y)
+}
+
+func revokedLast(ev Event) int {
+	if ev.Kind == "job.revoked" {
+		return 1
 	}
-	return strconv.Itoa(n)
+	return 0
 }
 
 // quotaRecordLockWait bounds how long a quota-stop record waits for the job's

@@ -167,3 +167,28 @@ func TestQuotaStopAnnounceReapIsStickyAcrossReprompt_t4761(t *testing.T) {
 		t.Fatalf("announce after reap and re-prompt: %v, want errQuotaStopSuperseded", err)
 	}
 }
+
+// A tied revocation ends only the attempt it ties with: a reclaim and spawn
+// at strictly later sequence numbers start a live attempt that can announce
+// (#690 review r3).
+func TestQuotaStopAnnounceTieClearedByLaterSpawn_t4761(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	writeLedgerFile(t, a, "00090-job.spawned.json", `{"created_at":"2026-01-01T00:00:02Z","job_id":"j","kind":"job.spawned","payload":{"pane_id":"w:p1","label":"agent-a","role":"reviewer"},"seq":90}`)
+	writeLedgerFile(t, a, "00090-job.revoked.json", `{"created_at":"2026-01-01T00:00:03Z","job_id":"j","kind":"job.revoked","payload":{"pane_id":"w:p1"},"seq":90}`)
+	writeLedgerFile(t, a, "00091-job.reclaim.json", `{"created_at":"2026-01-01T00:00:01Z","job_id":"j","kind":"job.reclaim","payload":{"agent_label":"agent-a"},"seq":91}`)
+	writeLedgerFile(t, a, "00092-job.spawned.json", `{"created_at":"2026-01-01T00:00:01Z","job_id":"j","kind":"job.spawned","payload":{"pane_id":"w:p1","label":"agent-a","role":"reviewer"},"seq":92}`)
+	if ended, err := a.attemptEndedBeforeAnnouncement("j"); err != nil || ended {
+		t.Fatalf("later attempt: ended=%v err=%v, want live", ended, err)
+	}
+}
+
+// A listed event that cannot be read is an error, not an absent ledger.
+func TestQuotaStopAnnounceListedEventUnreadable_t4761(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	if err := os.Symlink(filepath.Join(a.Jobs, "j", "missing"), filepath.Join(a.Jobs, "j", "events", "00090-job.revoked.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.attemptEndedBeforeAnnouncement("j"); err == nil {
+		t.Fatal("unreadable listed event: want an error")
+	}
+}
