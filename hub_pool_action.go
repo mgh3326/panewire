@@ -104,6 +104,7 @@ func (h *HubServer) runPoolActions(parent context.Context) {
 	defer ticker.Stop()
 	for {
 		h.reconcilePoolActions(ctx)
+		h.retrySupersedeLandings(ctx)
 		select {
 		case <-ctx.Done():
 			return

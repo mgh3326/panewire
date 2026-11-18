@@ -77,26 +77,42 @@ func supersedeCloseStatus(status string) bool {
 	return status == "idle" || status == "done"
 }
 
+// supersedeLandingWindow bounds how long after a spawn was accepted the hub
+// keeps retrying to queue its parent's close. A request lives at most 24 hours
+// before it lands, plus the run time of its attempt.
+const supersedeLandingWindow = 48 * time.Hour
+
+// supersedeScanInterval paces the retry pass over recent landings.
+const supersedeScanInterval = time.Minute
+
 // maybeSupersedeParent queues the parent's close after a landed spawn. It
-// never fails the spawn: every failure is one warn.
+// never fails the spawn. A landing that cannot be decided yet (the parent's
+// node is offline, hk or the store is unavailable) is retried by
+// retrySupersedeLandings from the succeeded spawn operation itself.
 func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
+	h.trySupersedeParent(task)
+}
+
+// trySupersedeParent reports done when the landing is decided: its row is
+// queued or it is definitively ineligible. A transient failure reports false.
+func (h *HubServer) trySupersedeParent(task hubSpawnTask) (done bool) {
 	if !h.supersedeClose || h.inbox == nil {
-		return
+		return true
 	}
 	parent := supersededParentOf(task)
 	successor := task.Job
 	if parent == "" || successor == "" || parent == successor {
-		return
+		return true
 	}
 	// An implicit parent (ARBITER_JOB) never closes anything: nobody asked
 	// for a replacement.
 	if !task.Request.ParentJobExplicit {
-		return
+		return true
 	}
 	// Only an implementer successor takes over: a reviewer or consult child
 	// must never close its parent's pane (docs/config.md).
 	if hubSpawnFlagArg(task.Request.Args, "--role") != "implementer" {
-		return
+		return true
 	}
 	succOwner := task.Owner
 	if succOwner == "" {
@@ -104,96 +120,138 @@ func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
 	}
 	ctx, cancel := context.WithTimeout(h.closeCtx, 30*time.Second)
 	defer cancel()
-	if err := h.createSupersedeAction(ctx, parent, successor, succOwner); err != nil {
-		h.logger.Warn("successor close not queued", "parent", parent, "successor", successor, "reason", err.Error())
+	retry, err := h.createSupersedeAction(ctx, parent, successor, succOwner)
+	if err != nil {
+		// One warn per request: a retried landing must not repeat it.
+		if _, seen := h.supersedeWarned.LoadOrStore(task.Request.RequestID, struct{}{}); !seen {
+			h.logger.Warn("successor close not queued", "parent", parent, "successor", successor, "retry", retry, "reason", err.Error())
+		}
+	}
+	return !retry
+}
+
+// retrySupersedeLandings queues the close of every recent explicit landing
+// whose first attempt could not decide, so a parent whose node reconnects
+// later, or a hub that restarted between the landing and the row insert, is
+// not lost. It runs on the pool action loop, at most once a minute.
+func (h *HubServer) retrySupersedeLandings(ctx context.Context) {
+	if !h.supersedeClose || h.inbox == nil {
+		return
+	}
+	now := h.now().UnixMilli()
+	if last := h.supersedeScanned.Load(); now-last < supersedeScanInterval.Milliseconds() || !h.supersedeScanned.CompareAndSwap(last, now) {
+		return
+	}
+	tasks, err := h.inbox.store.recentExplicitParentSpawns(ctx, h.now().Add(-supersedeLandingWindow))
+	if err != nil {
+		h.logger.Warn("successor close landings unavailable", "error", h.inbox.store.loggable("successor close landings", err))
+		return
+	}
+	for _, task := range tasks {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, decided := h.supersedeDecided.Load(task.Request.RequestID); decided {
+			continue
+		}
+		if h.trySupersedeParent(task) {
+			h.supersedeDecided.Store(task.Request.RequestID, struct{}{})
+		}
 	}
 }
 
-// createSupersedeAction stores the durable close intent for parent. A nil
-// error with no row is an expected no-op (unknown or ended parent, --keep, a
-// row already exists); an error is one warn for the caller.
-func (h *HubServer) createSupersedeAction(ctx context.Context, parent, successor, succOwner string) error {
+// createSupersedeAction stores the durable close intent for parent. retry
+// reports a transient obstacle (the parent's node or hk or the store is
+// unavailable, or the parent is not known yet): the landing is tried again.
+// A nil error with no retry and no row is an expected no-op (ended parent,
+// --keep, a row already exists); an error without retry is a definitive
+// refusal. Both errors are one warn for the caller.
+func (h *HubServer) createSupersedeAction(ctx context.Context, parent, successor, succOwner string) (retry bool, err error) {
 	unlock, err := h.poolActionLocks.lock(ctx, parent)
 	if err != nil {
-		return err
+		return true, err
 	}
 	defer unlock()
 	h.mu.Lock()
 	job := h.jobs[parent]
 	var node, owner, pane string
 	var epoch uint64
-	live := false
-	if job != nil && !job.Completed && !job.Orphaned {
-		node, owner, pane, epoch, live = job.Node, job.OwnerLane, job.Pane, job.Epoch, true
+	known, ended := job != nil, job != nil && job.Completed
+	if known && !ended {
+		node, owner, pane, epoch = job.Node, job.OwnerLane, job.Pane, job.Epoch
 	}
 	record := h.nodes[node]
 	closeOps := record != nil && record.agent != nil && record.capabilities[hubCapabilityCloseOps]
+	orphaned := known && job.Orphaned
 	h.mu.Unlock()
-	if !live || node == "" || owner == "" {
-		return nil
+	if ended {
+		return false, nil
+	}
+	if !known || orphaned || node == "" || owner == "" {
+		return true, errors.New("parent job not known on a live node yet")
 	}
 	// The successor may only end a parent it owns: a blocked pane of another
 	// lane is usually an open operator decision.
 	if succOwner != owner {
-		return fmt.Errorf("successor owner %q differs from the parent's lane %q", succOwner, owner)
+		return false, fmt.Errorf("successor owner %q differs from the parent's lane %q", succOwner, owner)
 	}
 	if epoch == 0 || !closeOps {
-		return errors.New("close ops unavailable on the parent's node")
+		return true, errors.New("close ops unavailable on the parent's node")
 	}
 	// Only a parent this hub spawned is known not to be --keep: the flag
 	// lives in its spawn request, not in the node's heartbeat.
 	parentSpawn, err := h.inbox.store.latestSpawnForJob(ctx, parent)
 	if errors.Is(err, sql.ErrNoRows) {
-		return errors.New("parent has no spawn record on this hub")
+		return false, errors.New("parent has no spawn record on this hub")
 	}
 	if err != nil {
-		return err
+		return true, err
 	}
 	if hubSpawnHasBoolFlag(parentSpawn.Request.Args, "--keep") {
-		return nil
+		return false, nil
 	}
 	if spawnHolderHost(parentSpawn) != node {
-		return errors.New("parent's node differs from its spawn record")
+		return false, errors.New("parent's node differs from its spawn record")
 	}
 	if parentSpawn.Outcome.Pane != "" {
 		pane = parentSpawn.Outcome.Pane
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
-		return err
+		return true, err
 	}
 	if err := app.CheckTrust(); err != nil {
-		return err
+		return true, err
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	hkRecord, exists, err := app.ExistingJob(readCtx, parent)
 	cancel()
 	state, _ := hkRecord["state"].(string)
 	if err != nil {
-		return err
+		return true, err
 	}
 	if !exists || (state != "claimed" && state != "spawned") {
-		return nil
+		return false, nil
 	}
 	label := heldAgentName(parentSpawn, hkRecord)
 	endReason := supersedeEndReason(successor)
 	if !validNodeEndReason(endReason) || !validNodePaneName(label) || !nodeCommandPaneIDPattern.MatchString(pane) || !validLaneReference(owner) {
-		return errors.New("invalid close target")
+		return false, errors.New("invalid close target")
 	}
 	if rows, err := h.inbox.store.supersedeActionsOf(ctx, parent); err != nil {
-		return err
+		return true, err
 	} else if len(rows) > 0 {
-		return nil
+		return false, nil
 	}
 	if pending, err := h.inbox.store.pendingPoolAction(ctx, parent); err != nil || pending != "" {
 		if err == nil {
 			err = errors.New("parent already has a pending close action")
 		}
-		return err
+		return true, err
 	}
 	id, err := fleet.NewRequestID()
 	if err != nil {
-		return err
+		return true, err
 	}
 	action := poolAction{ID: id, Job: parent, Node: node, Epoch: epoch, Phase: poolActionPending, Data: poolActionData{
 		Owner: owner, Pane: pane, Label: label, EndReason: endReason,
@@ -201,11 +259,11 @@ func (h *HubServer) createSupersedeAction(ctx context.Context, parent, successor
 		Kind: poolActionKindSupersedeClose, Supersede: &poolSupersede{Successor: successor},
 	}}
 	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
-		return err
+		return true, err
 	}
 	h.poolActionObserved.Store(action.ID, struct{}{})
 	h.logger.Info("successor close action created", "node", node, "job", parent, "successor", successor, "action", action.ID)
-	return nil
+	return false, nil
 }
 
 // prepareSupersedeClose runs the supersede-specific steps of a pending row
@@ -220,6 +278,14 @@ func (h *HubServer) prepareSupersedeClose(ctx context.Context, action *poolActio
 	if action.Data.Args != nil {
 		// A close request exists: the protocol, not this check, decides.
 		return false, nil
+	}
+	if !h.supersedeClose {
+		// The off switch also cancels a row that has sent nothing yet (it
+		// may have been queued before the flag was turned off, or waited on
+		// a working pane). A request already dispatched is finished by the
+		// protocol above, which fences it safely.
+		h.logger.Info("successor close action cancelled: --supersede-close is off", "job", action.Job, "action", action.ID)
+		return true, h.refusePoolAction(ctx, *action)
 	}
 	h.mu.Lock()
 	job := h.jobs[action.Job]

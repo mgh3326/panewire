@@ -352,6 +352,7 @@ func TestSupersedeRowSurvivesHubRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f.quotaReplaceFixture)
+	f.hub.supersedeClose = true
 	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionPending {
 		t.Fatalf("the row must outlive the hub: %+v", rows)
 	}
@@ -378,6 +379,7 @@ func TestSupersedeRestartAfterCloseRequestResumesIt(t *testing.T) {
 		t.Fatal("the request is stored before it is sent")
 	}
 	restartPoolActionHub(t, f.quotaReplaceFixture)
+	f.hub.supersedeClose = true
 	if err := f.step(t, poolStatus(fleet.CloseOpClosing, false, false), supersedeClosed); err != nil {
 		t.Fatal(err)
 	}
@@ -658,5 +660,113 @@ func TestSupersedeCloseIsOnByDefaultOnTheHubCommandLine(t *testing.T) {
 			t.Fatalf("args %v: supersedeClose=%v, want %v", tc.args, hub.supersedeClose, tc.want)
 		}
 		_ = hub.Close()
+	}
+}
+
+// TestSupersedeOffSwitchCancelsRowsThatSentNothing: turning --supersede-close
+// off stops a queued row that is still waiting on a working pane, and never
+// touches a request already dispatched.
+func TestSupersedeOffSwitchCancelsRowsThatSentNothing(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	if err := f.step(t, supersedeNoneStatus, supersedeProbe("working")); err != nil {
+		t.Fatal(err)
+	}
+	restartPoolActionHub(t, f.quotaReplaceFixture)
+	f.hub.supersedeClose = false
+	// The parent has stopped, but the switch is off: no node command at all.
+	if err := f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)); err != nil {
+		t.Fatal(err)
+	}
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
+		t.Fatalf("an unsent row must end when the switch is off: %+v", rows)
+	}
+	f.noMoreCommands(t)
+
+	// A dispatched request is finished, not abandoned.
+	g := newSupersedeFixture(t, nil)
+	g.hub.maybeSupersedeParent(g.successorTask("implementer", "parent", true))
+	if err := g.step(t, supersedeNoneStatus, supersedeProbe("idle"), supersedeClosed); err != nil {
+		t.Fatal(err)
+	}
+	g.hub.supersedeClose = false
+	if err := g.step(t, poolStatus(fleet.CloseOpClosed, false, true)); err != nil {
+		t.Fatal(err)
+	}
+	if row := g.onlyRow(t); row.Phase != poolActionSettled {
+		t.Fatalf("a dispatched close must still settle with the switch off: %+v", row)
+	}
+}
+
+// TestSupersedeLandingThatCouldNotDecideIsRetried: the successor landed while
+// the parent's node was away or hk failed; the row is queued by a later pass
+// from the succeeded spawn operation itself, once, and only for an explicit
+// request.
+func TestSupersedeLandingThatCouldNotDecideIsRetried(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	// The parent is not known on any node when the successor lands.
+	f.hub.mu.Lock()
+	parentRecord := f.hub.jobs[f.job]
+	delete(f.hub.jobs, f.job)
+	f.hub.mu.Unlock()
+	land := func(id string, explicit bool) hubSpawnTask {
+		request := durableSpawnRequest()
+		request.RequestID = id
+		request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", f.successor, "--job", f.successor, "--t", "T1", "--parent-job", f.job, "--owner", "parent", "--role", "implementer", "--host", "auto", "--report-relative", f.successor + "/report.md"}
+		request.ParentJobExplicit = explicit
+		request.Repository.Worktree = f.successor + "-checkout"
+		request.Repository.Checkout.Dir = f.successor + "-checkout"
+		task, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, f.successor, "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if changed, err := f.hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"}, time.Now()); err != nil || !changed {
+			t.Fatalf("land: changed=%v err=%v", changed, err)
+		}
+		return task
+	}
+	task := land("d676220b-e763-4af1-aefd-000000000002", true)
+	if f.hub.trySupersedeParent(task) {
+		t.Fatal("an unknown parent is not a decision")
+	}
+	if rows := f.rows(t); len(rows) != 0 {
+		t.Fatalf("no row while the parent is unknown: %+v", rows)
+	}
+	f.hub.retrySupersedeLandings(t.Context())
+	if rows := f.rows(t); len(rows) != 0 {
+		t.Fatalf("still unknown: %+v", rows)
+	}
+	// The node reports the parent; the next pass (after the pacing interval)
+	// queues the row without any new landing.
+	f.hub.mu.Lock()
+	f.hub.jobs[f.job] = parentRecord
+	f.hub.mu.Unlock()
+	f.hub.supersedeScanned.Store(0)
+	f.hub.retrySupersedeLandings(t.Context())
+	f.onlyRow(t)
+	f.hub.supersedeScanned.Store(0)
+	f.hub.retrySupersedeLandings(t.Context())
+	f.onlyRow(t) // decided: no second row
+}
+
+// TestSupersedeRetryPassSkipsImplicitLandings: the retry pass reads only
+// explicit requests.
+func TestSupersedeRetryPassSkipsImplicitLandings(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	request := durableSpawnRequest()
+	request.RequestID = "d676220b-e763-4af1-aefd-000000000003"
+	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", f.successor, "--job", f.successor, "--t", "T1", "--parent-job", f.job, "--owner", "parent", "--role", "implementer", "--host", "auto", "--report-relative", f.successor + "/report.md"}
+	request.Repository.Worktree = f.successor + "-checkout"
+	request.Repository.Checkout.Dir = f.successor + "-checkout"
+	task, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, f.successor, "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.retrySupersedeLandings(t.Context())
+	if rows := f.rows(t); len(rows) != 0 {
+		t.Fatalf("an implicit landing must queue nothing: %+v", rows)
 	}
 }

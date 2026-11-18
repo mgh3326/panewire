@@ -302,3 +302,27 @@ func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, nex
 	}
 	return tx.Commit()
 }
+
+// recentExplicitParentSpawns lists the succeeded spawns accepted since the
+// cutoff whose --parent-job was typed explicitly: the landings a supersede
+// close may still owe (hub_spawn_supersede.go).
+func (s *laneInboxStore) recentExplicitParentSpawns(parent context.Context, since time.Time) ([]hubSpawnTask, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status='succeeded' AND created_ms>=? AND payload LIKE ? ORDER BY created_ms DESC LIMIT 500`), since.UnixMilli(), `%"parent_job_explicit":true%`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		if task.Request.ParentJobExplicit {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks, rows.Err()
+}

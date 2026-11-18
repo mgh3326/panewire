@@ -709,9 +709,16 @@ type HubServer struct {
 	spawnGrantDrain    bool
 	spawnRollbackDrain bool
 	supersedeClose     bool
-	nodeCommandWait    time.Duration // fixture seam; zero is hubNodeCommandWait.
-	checkoutPullWait   time.Duration // fixture seam; zero is hubCheckoutPullWait.
-	nodeAgentsWait     time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	// supersedeWarned and supersedeDecided keep a retried landing from
+	// repeating its warn or its evaluation; supersedeScanned paces the retry
+	// pass (hub_spawn_supersede.go). In memory only: the durable intent is
+	// the pool_actions row, and a restart merely re-evaluates.
+	supersedeWarned  sync.Map
+	supersedeDecided sync.Map
+	supersedeScanned atomic.Int64
+	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
+	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
+	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.
 
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
