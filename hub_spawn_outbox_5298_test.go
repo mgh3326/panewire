@@ -354,3 +354,28 @@ func TestSpawnOutboxReconcileReadsOwedRowsByIndex_t5298(t *testing.T) {
 		}
 	})
 }
+
+// The start-up reconcile copies the owed history rows, which can outlast the
+// ordinary 10 s call deadline on a large store. It runs under the start-up
+// deadline on both dialects, not under what is left of ensureSpawnTasks's
+// ordinary one (review of hk 5298).
+func TestSpawnOutboxReconcileRunsUnderTheStartupDeadline_t5298(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		var remaining time.Duration
+		s.outboxReconcileCtx = func(ctx context.Context) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Error("start-up reconcile has no deadline")
+				return
+			}
+			remaining = time.Until(deadline)
+		}
+		if err := s.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		if remaining <= laneInboxOpTimeout {
+			t.Fatalf("reconcile deadline in %v, want the start-up budget (more than %v)", remaining, laneInboxOpTimeout)
+		}
+	})
+}

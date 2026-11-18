@@ -47,6 +47,9 @@ type laneInboxStore struct {
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration
+	// outboxReconcileCtx, set by a test, sees the context the start-up outbox
+	// reconcile runs under (hk 5298).
+	outboxReconcileCtx func(context.Context)
 	// landingIntent, set by the hub, decides inside the spawn completion
 	// transaction whether a succeeded successor owes a supersede close.
 	landingIntent func(hubSpawnTask) (supersedeLanding, bool)

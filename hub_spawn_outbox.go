@@ -116,6 +116,9 @@ func (s *laneInboxStore) ensureSpawnOutboxes(parent context.Context) error {
 // it finished. All four statements commit together. The caller gives it the
 // startup deadline, not the ordinary per-operation one.
 func (s *laneInboxStore) reconcileSpawnOutboxes(ctx context.Context) error {
+	if s.outboxReconcileCtx != nil {
+		s.outboxReconcileCtx(ctx)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
