@@ -208,6 +208,49 @@ would meet this row's own text and press a second return.
 `panewire prompt --to <cmd pane>` takes the same transport, so a hand relay
 through panewire reaches a cmd worker too.
 
+## agy busy check (hk 5241)
+
+herdr's `agent_status` for agy (Antigravity CLI, herdr agent `agy`) can read
+`done` between long tool runs while the agent still works. Workers sat at
+`done` between tool runs (pw-closeops-followups-5063), and a mergewake reviewer
+panel was read as finished 6 minutes into a run that reported 10.5 minutes
+later (mwr-490-1613996-p1/-p2, hk 5237). So a reap, idle-wake or pane sweep
+that trusts herdr's status alone can end a working agy pane.
+
+The check is `internal/agybusy`, and it has the same shape as devin's
+(`devinBusy`, `hub_client.go`): herdr's status first, then the screen.
+
+- Only an agy pane herdr reports `idle` or `done` is read. `working`,
+  `blocked` and `unknown` are never changed, and no other harness is read.
+- The visible screen (`agent read --source visible`, 40 lines, or the socket's
+  `agent.read`) is busy when the bottom of it shows a working turn:
+  `esc to cancel` as the footer under the prompt box (the last 2 non-empty
+  rows), or a braille spinner row (`⠋ Running tools · 42s`) in the last 12
+  non-empty rows.
+- An unreadable screen, a read error or a blank screen is busy: nothing
+  readable is not proof of an end of turn. An end-of-turn screen
+  (`? for shortcuts` under the prompt box, no spinner, no footer) keeps `done`.
+- A busy agy pane reads `working`. The rule only ever adds `working`; it never
+  turns a `working` pane idle.
+
+The judgement is applied where panewire learns a pane's status: the node's
+agent and pane listing (`readNodeAgentsInSession` and `nodeAgentsListInSession`,
+which the hub serves to reap and close checks), the local fleet's `App.agents`
+(pane sweep, watch, hygiene), and the daemon's `pane.agent_status_changed`
+path that feeds idle-wake and stall safety (`HerdrClient.agyEventStatus`).
+
+Evidence. The markers are herdr 0.9.5's own agy rules: herdr's evidence
+comment for `agy` says a working turn draws a braille spinner above the prompt
+box and `esc to cancel` under its bottom border, and an idle prompt shows
+`? for shortcuts`. No live capture of an agy pane during a long tool run was
+available when this check was written, so the test screens in
+`agy_busy_test.go`, `internal/fleet/agy_busy_test.go` and
+`internal/agybusy/agybusy_test.go` are reconstructions from that evidence, not
+captures. Whether the same markers appear in the bottom rows during a tool run,
+where herdr reported `done`, is not yet shown by a capture. A live mid-tool-run
+screen read (herdr's `agent_status` and `agent read` together) is what settles
+it; until then this check is a conservative second source, not a proof.
+
 ## What "delivered" means
 
 `relay.delivered` is emitted, and the durable row closed, only on the proof in

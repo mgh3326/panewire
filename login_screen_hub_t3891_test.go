@@ -55,7 +55,7 @@ func TestLoginScreenAuthUnavailablePinsTheHostT3891(t *testing.T) {
 	}
 	var notices []string
 	eventually(t, 5*time.Second, "agy login notice", func() bool {
-		notices = oneTimeMessages(sentryEvents)
+		notices = oneTimeMessages(t, h, sentryEvents)
 		return len(notices) > 0
 	})
 	want := "ACTION NEEDED: machine-a agy — log in"

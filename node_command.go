@@ -1051,11 +1051,19 @@ func nodeAgentRows(rows []nodeHerdrRow) []nodeAgentRow {
 }
 
 func (client *HubClient) readNodeAgentsInSession(ctx context.Context, session string) ([]nodeHerdrRow, error) {
-	output, err := client.nodeHerdrRunnerForSession(session)(ctx, "agent", "list")
+	run := client.nodeHerdrRunnerForSession(session)
+	output, err := run(ctx, "agent", "list")
 	if err != nil {
 		return nil, err
 	}
-	return nodeHerdrRows(output, "agents")
+	rows, err := nodeHerdrRows(output, "agents")
+	if err != nil {
+		return nil, err
+	}
+	for index := range rows {
+		agyBusyRow(ctx, run, &rows[index].nodeAgentRow)
+	}
+	return rows, nil
 }
 
 func (client *HubClient) readNodeAgents(ctx context.Context) ([]nodeHerdrRow, error) {
@@ -1071,9 +1079,11 @@ func (client *HubClient) nodeAgentsListInSession(ctx context.Context, session st
 	if output, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "list"); err == nil {
 		if rows, err := nodeHerdrRows(output, "panes"); err == nil {
 			panes := nodeAgentRows(rows)
+			run := client.nodeHerdrRunnerForSession(session)
 			for index := range panes {
 				// pane list carries a label, not the agent name.
 				panes[index].Name = ""
+				agyBusyRow(ctx, run, &panes[index])
 			}
 			result.Panes, result.PanesOK = panes, true
 		}

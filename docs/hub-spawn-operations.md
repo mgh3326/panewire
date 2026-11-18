@@ -1190,6 +1190,16 @@ entry executing until the node settles it from the pane (see
 answers such a replay `unknown` instead of `reconciling` (an older hub ignores
 that answer and keeps the request pending, as before).
 
+A completed hk job also settles a request past its deadline (hk 5267): when the
+job record reads `completed` with a pane, the request's node host, and the
+request's task identity (its `--task`, or for a `--parent-job` request a
+`parent_job` naming that parent; a task id at or past 2^53 is refused, since
+the record's number may be rounded), and its `ended_at` is at or after the
+request's creation (job ids are reusable; a missing stamp refuses), the hub settles the request `succeeded` at the next probe
+(`settleCompletedSpawn`), without a node connection. A landing receipt that
+never reached the hub is therefore not required. Then a correcting `SPAWNED`
+follows any unresolved notice already sent.
+
 Past the deadline, an `unknown` answer from the bound, connected node makes the
 hub read that node's panes (`agents.list`, at most once a minute per request):
 
@@ -1213,7 +1223,8 @@ hub read that node's panes (`agents.list`, at most once a minute per request):
 `--hub-url`, `--hub-token-env`, `--hub-cf-env`, defaulting to
 `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV`, `PANEWIRE_HUB_CF_ENV`) calls
 `POST /v1/spawns/<request_id>/abandon` with `{"reason": TEXT}` (operator
-credential). It applies to a pending request bound to a node. A `bound` request
+credential). It applies to a pending request bound to a node, and to an
+unbound one (below). A `bound` request
 has not crossed the send boundary, so the hub skips the pane probe. It still
 checks for a non-terminal hk job from a prior attempt and, if one exists, marks
 it lost through its owning node before releasing the reservation. For a possibly
@@ -1226,8 +1237,20 @@ WARN line `hub spawn abandon` with the request, job, host, verdict and reason.
 A send or another abandonment in progress, a live labelled pane, an unreachable
 node or a refused lost write answers 409
 `spawn_abandon_refused` with the check that held it; a finished request answers
-409 `spawn_not_pending`, an unbound one 409 `spawn_not_bound` (it releases
-itself at its deadline). The CLI exits 5 on a refusal. Abandon does not stop a
+409 `spawn_not_pending`.
+
+An unbound pending request (`accepted`: no node has bound it yet) needs no pane
+probe, since nothing was sent. It ends `failed` with reason
+`operator_abandoned: <TEXT>`, its (task, role) reservation is released in the
+same transaction, and its owner lane gets one `SPAWN_FAILED`. The owner lane
+may withdraw it with its own node credential (`Authorization: Bearer <node
+token>` and `X-Panewire-Machine-ID`) when the lane is routed to that node; a
+node that does not route the lane gets 403 `lane_not_routed_to_caller`. The
+operator CLI carries only the operator token, so a lane withdraws over the
+HTTP route. A request that holds an hk job claim on a host answers 409
+`spawn_abandon_refused` with `reason: claimed_host` and stays with that host.
+A node credential on a bound request answers 401. A request that is already
+withdrawn answers 409 `spawn_not_pending`. The CLI exits 5 on a refusal. Abandon does not stop a
 spawn the node may still be running before its pane exists; use it for a
 request whose node has restarted or whose deadline has passed.
 
@@ -1293,9 +1316,32 @@ The outbox hands each record to lane delivery, which stores one handoffkeep
 parent lane, then injects it. A restarted hub retries undelivered rows. Delivery
 is at least once; consumers use the event id
 (`<request_id>:<attempt>:<status>`) to deduplicate. Timeout emits
-`SPAWN_FAILED … reason=timeout` as an observation with `deadline_exceeded`, not
-proof of cleanup. A later verified landing may emit a distinct `SPAWNED`
-reconciliation event.
+a bound request past its deadline (`deadline_exceeded`) notifies nothing, because
+it is not final (hk 5267). Its outcome is decided by one of three things, and
+then the owner hears it once:
+
+- a late node result, or a completed hk job whose record carries the request's
+  host, a pane and the request's task identity (its `--task`, or for a
+  `--parent-job` request a `parent_job` naming that parent) settles it: `SPAWNED`
+  (`<request_id>:<attempt>:succeeded`); a late failure settles it `SPAWN_FAILED`
+  with that failure;
+- the stale probe's horizon, 30 minutes past the deadline
+  (`spawnStuckAfter`), with no answer and no final proof: one unresolved
+  `SPAWN_FAILED … stage=landing reason=deadline_exceeded_unresolved replay=no`
+  (`<request_id>:<attempt>:deadline_unresolved`, plus `:<lane>` for the
+  submitting lane). Ownership is kept. Its SPAWN_FAILED error event is recorded
+  once.
+- a landing after that unresolved notice: one correcting `SPAWNED … request=<id>
+  (after an earlier unresolved notice)` under the same request id, as the
+  request's last outcome, to every recipient the unresolved notice reached
+  (owner and submitter). Its event id is the ordinary `…:succeeded` (plus
+  `:<lane>` for a submitter copy). A correction is not routed while the
+  unresolved notice it corrects is still undelivered for that recipient, so a
+  lane never reads the success before the failure it corrects.
+
+An unbound timeout (the node never took the request) is not held by this rule.
+Each event id is fixed and unique per attempt, so a restart never repeats a
+notice.
 
 `SPAWN_FAILED` names the job, request, exit status, stage, `replay=yes|no`
 (whether replaying the saved request can help), reason and fix. It has
@@ -1362,8 +1408,9 @@ the requester's copy is an ordinary lane event. A design session's own spawns, a
 
 `reconciling` (the node's answer is unknown, or the node is disconnected) writes
 no `spawn_notifications` row, so neither lane is notified. The owner keeps
-ownership. A request that later lands notifies one `SPAWNED`; one that fails or
-passes its deadline notifies one `SPAWN_FAILED`, as above. The hub journal logs
+ownership. A request that later lands notifies one `SPAWNED`; one that fails
+notifies one `SPAWN_FAILED`. A bound deadline notifies nothing until it is final
+(see Notifications and telemetry, hk 5267). The hub journal logs
 the transition as `hub spawn reconciling`, not as a refusal, and captures no
 Sentry event for it.
 

@@ -53,6 +53,13 @@ func (r *fleetEventRecorder) all() []fleetEvent {
 
 func newStrandedSpawn(t *testing.T) *strandedSpawn {
 	t.Helper()
+	return newStrandedSpawnClaimedAgo(t, 11*time.Minute)
+}
+
+// newStrandedSpawnClaimedAgo is newStrandedSpawn with its claim made ago before
+// now, so its deadline (ten minutes after the claim) passed ago-10m ago.
+func newStrandedSpawnClaimedAgo(t *testing.T, ago time.Duration) *strandedSpawn {
+	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
 	if err != nil {
@@ -68,7 +75,7 @@ func newStrandedSpawn(t *testing.T) *strandedSpawn {
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
 	request := durableSpawnRequest()
-	task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now().Add(-11*time.Minute))
+	task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now().Add(-ago))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +336,9 @@ func TestStrandedSpawnWarnsOnceWhenStuck(t *testing.T) {
 	}
 	s.run(t)()
 	s.run(t)()
-	if got := stuck(); len(got) != 1 || got[0] != "spawn-ownership-stuck" {
+	// The horizon also queues the unresolved notice, whose SPAWN_FAILED error
+	// event is the one failure event (hk 5267); the warning is still once.
+	if got := stuck(); len(got) != 2 || got[0] != "spawn-ownership-stuck" || got[1] != "spawn:landing:"+spawnUnresolvedReason {
 		t.Fatalf("sentry fingerprints=%v", got)
 	}
 	events := s.events.all()

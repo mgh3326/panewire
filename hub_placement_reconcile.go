@@ -67,7 +67,7 @@ func (h *HubServer) recoverDeferredPlacementSnapshot(parent context.Context, d p
 	if err := json.Unmarshal(d.Payload, &deferred); err != nil {
 		return false, base, err
 	}
-	merged := continueSpawnPlacementTrace(previous, deferred, task.Exclusions)
+	merged := continueSpawnPlacementTrace(previous, deferred, task.Exclusions, h.now())
 	if merged.Record == nil && previous.Record != nil {
 		record := *previous.Record
 		record.Candidates = merged.Candidates

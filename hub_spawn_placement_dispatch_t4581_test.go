@@ -566,8 +566,10 @@ func TestDispatchPlacementRecordSurvivesRefusalAndRestart_t4581(t *testing.T) {
 			firstReason = candidate.Reason
 		}
 	}
-	if firstReason != "hub_cwd_unmapped" {
-		t.Fatalf("refused host reason=%q, want hub_cwd_unmapped", firstReason)
+	// The refusal is host-local, so the record names how long it still holds
+	// (hk 5214); the backoff is not elapsed when the record is written.
+	if !strings.HasPrefix(firstReason, "hub_cwd_unmapped_retry_in_") || !strings.HasSuffix(firstReason, "s") {
+		t.Fatalf("refused host reason=%q, want hub_cwd_unmapped with its remaining backoff", firstReason)
 	}
 	h.flushPlacementRecords(t.Context())
 	if count := len(hk.snapshot()); count != 1 {
