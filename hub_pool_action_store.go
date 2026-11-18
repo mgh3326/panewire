@@ -45,6 +45,9 @@ type poolActionData struct {
 	// for a successor closing its parent (hub_spawn_supersede.go).
 	Kind      string         `json:",omitempty"`
 	Supersede *poolSupersede `json:",omitempty"`
+	// Acked is set once the node confirmed the hub's ack of its
+	// intent_cancelled answer (hk 5073); a guarded action then asks no more.
+	Acked bool
 }
 
 // retryPoolAction atomically keeps the uncertain request fenced and records
