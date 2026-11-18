@@ -145,6 +145,12 @@ func (h *HubServer) handOffAccountCreditStopped(ctx context.Context, task hubSpa
 		h.logger.Warn("account credit exhausted job has no holder", "job", task.Job, "account", exhaustion.Account)
 		return false
 	}
+	if h.spawnGrantDrain || h.spawnRollbackDrain {
+		// The same drain guard startQuotaReplacement applies: no successor may
+		// be created while grant rows drain. The sweep retries after the drain.
+		h.logger.Warn("account credit hand-off skipped while draining grant rows", "job", task.Job, "account", exhaustion.Account)
+		return false
+	}
 	event := hubJobEventPayload{
 		JobID:     task.Job,
 		Epoch:     1,

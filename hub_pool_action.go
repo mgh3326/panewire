@@ -43,7 +43,9 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 		return errors.New("invalid close target")
 	}
 	text := fmt.Sprintf("Pool %s is exhausted; job %s ended. Respawn it on another pool.", exhaustion.Pool, task.Job)
-	if exhaustion.Account != "" {
+	if exhaustion.accountCredit() {
+		// Only a provider credit rejection speaks about the account's credits;
+		// a free-limit or window exhaustion also names an account.
 		text = fmt.Sprintf("Account %s has no provider credit left; job %s ended. Respawn it on another account.", exhaustion.Account, task.Job)
 	}
 	action := poolAction{ID: id, Job: task.Job, Phase: poolActionPending, Data: poolActionData{
