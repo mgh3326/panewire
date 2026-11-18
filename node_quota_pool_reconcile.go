@@ -228,7 +228,7 @@ func nodeJobHoldsPane(events []nodeJobLedgerEvent, pane string) bool {
 	boundPane, ended := "", false
 	for _, event := range events {
 		switch {
-		case event.kind == "job.spawned" || nodeJobClaimKind(event.kind):
+		case event.kind == "job.spawned" || nodeJobClaimKind(event.kind) || event.kind == "job.reprompted":
 			if event.pane != "" {
 				boundPane = event.pane
 			}
@@ -240,11 +240,12 @@ func nodeJobHoldsPane(events []nodeJobLedgerEvent, pane string) bool {
 	return boundPane == pane && !ended
 }
 
-// nodeJobEndKind is a ledger event that ends a job's attempt, as the pane
-// index reads it.
+// nodeJobEndKind is a ledger event that ends a job's attempt for pane
+// ownership. The pane index also reads job.joined as an end; pane ownership
+// does not, because a joined job still owns its live pane (docs/pane-sweep.md).
 func nodeJobEndKind(kind string) bool {
 	switch kind {
-	case "job.completed", "job.lost", "job.revoked", "job.handed_off", "job.joined":
+	case "job.completed", "job.lost", "job.revoked", "job.handed_off":
 		return true
 	}
 	return false
