@@ -916,9 +916,12 @@ The old node's half of the hub's implementer hand-over (hk 4633,
 `branch`) the node reads the branch's last pushed commit with
 `git ls-remote origin`, or the merge-base with origin's default branch when
 nothing was pushed. Without `keep` it only reads. With `keep` it reads HEAD
-and the paths `git status` names (untracked included) and writes
+and the paths `git status` names (untracked included) plus the paths marked
+assume-unchanged. Under the clone's git-op lock it writes
 `jobs/<job>/handover-keep`, which keeps the worktree from every sweep,
-`worktree.remove` and the job-directory TTL. It never commits or pushes.
+`worktree.remove` (checked again under the same lock) and the job-directory
+TTL, and locks a linked worktree with `git worktree lock`, which also holds
+against an older node binary after a rollback. It never commits or pushes.
 Result: `outcome` (`ok`, `not-a-job`, `branch_mismatch`, `git_failed`,
 `diverged`), `branch`, `top`, `pushed`, `base`, `base_ref`, `head`, `dirty`,
 `uncommitted` (at most 50 names and 8 KiB), `uncommitted_more`, `kept`.

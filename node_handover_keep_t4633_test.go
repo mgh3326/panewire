@@ -241,3 +241,92 @@ func TestCloseOpKeepsTheQuestionGuardForAnImplementer(t *testing.T) {
 		})
 	}
 }
+
+// An edit to a path marked assume-unchanged is hidden from git status, but
+// the kept worktree may hold its only copy: it is listed and makes the
+// worktree dirty, so the note never says the worktree held no other work.
+func TestNodeHandoverKeepListsAnAssumeUnchangedEdit(t *testing.T) {
+	work, _ := handoverRepo(t, true)
+	handoverGit(t, work, "checkout", "--", "a.txt")
+	if err := os.Remove(filepath.Join(work, "new.txt")); err != nil {
+		t.Fatal(err)
+	}
+	handoverGit(t, work, "update-index", "--assume-unchanged", "a.txt")
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hidden edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if status := handoverGit(t, work, "status", "--porcelain"); status != "" {
+		t.Fatalf("fixture: git status shows %q", status)
+	}
+	result, _ := handoverKeepRun(t, work, true)
+	if result["dirty"] != true || fmt.Sprint(result["uncommitted"]) != "[a.txt]" {
+		t.Fatalf("result=%v", result)
+	}
+}
+
+// The keep also takes a git worktree lock: a node binary that predates the
+// mark (a rollback) removes with a single --force, which git refuses.
+func TestNodeHandoverKeepLocksALinkedWorktree(t *testing.T) {
+	work, _ := handoverRepo(t, true)
+	handoverGit(t, work, "stash", "push", "-u", "-m", "fixture")
+	handoverGit(t, work, "checkout", "main")
+	linked := filepath.Join(filepath.Dir(work), "linked")
+	handoverGit(t, work, "worktree", "add", linked, "wk/task")
+	if err := os.WriteFile(filepath.Join(linked, "local.env"), []byte("x\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, _ := handoverKeepRun(t, linked, true)
+	if result["kept"] != true {
+		t.Fatalf("result=%v", result)
+	}
+	if !handoverWorktreeLocked(handoverGit(t, work, "worktree", "list", "--porcelain"), linked) {
+		t.Fatal("the kept worktree is not locked")
+	}
+	if err := exec.Command("git", "-C", work, "worktree", "remove", "--force", linked).Run(); err == nil {
+		t.Fatal("a single --force removed the kept worktree")
+	}
+	// A second keep of the same worktree finds its lock and succeeds.
+	if again, _ := handoverKeepRun(t, linked, true); again["kept"] != true {
+		t.Fatalf("again=%v", again)
+	}
+}
+
+// A removal that waited on the clone's git-op lock while a hand-over
+// published its mark rechecks the mark once it holds the lock.
+func TestNodeWorktreeRemoveRechecksTheKeepMarkUnderTheLock(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	fixture.cloneRepo(t)
+	client := fixture.client()
+	client.jobsInboxRoot = t.TempDir()
+	client.nodeGitLockWait = 30 * time.Second
+	dir, head := fixture.addWorktree(t, "kept")
+	jobDir := filepath.Join(client.jobsInboxRoot, "jobs", "old-job")
+	if err := os.MkdirAll(jobDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	lockPath, err := nodeGitOpLockPath(fixture.clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := acquireNodeGitOpLock(t.Context(), lockPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan map[string]any, 1)
+	go func() {
+		result, _ := nodeRun(t, client, nodeCommandWorktreeRemove, fixture.removeArgs(dir, head, nil))
+		done <- result
+	}()
+	// Fixture pacing: let the removal pass its first check and wait on the lock.
+	time.Sleep(300 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(jobDir, fleet.HandoverKeepFile), []byte(dir+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if result := <-done; result["outcome"] != nodeRemoveHandoverKept {
+		t.Fatalf("outcome=%v", result["outcome"])
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the kept worktree is gone: %v", err)
+	}
+}

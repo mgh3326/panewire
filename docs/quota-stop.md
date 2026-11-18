@@ -169,8 +169,11 @@ decides with the §Implementer rule (the job's start, the task's priority and
        until the pane is idle;
      - then has the old node run `worktree.handover_keep` with `keep`: from
        the top level (never the pane's subdirectory) it reads HEAD and the
-       paths `git status` names (untracked included; at most 50 names and
-       8 KiB, the rest counted) and writes `jobs/<old>/handover-keep`.
+       paths `git status` names (untracked included) plus every path marked
+       assume-unchanged, which `git status` hides (at most 50 names and
+       8 KiB, the rest counted). Holding the clone's git-op lock, it writes
+       `jobs/<old>/handover-keep` and locks a linked worktree with
+       `git worktree lock` (reason `panewire handover-keep`).
        **Nothing is committed or pushed**, so no file leaves the host; a ref
        snapshot of the work is hk 5259. A pushed tip no longer in the
        worktree's history (`diverged`) or a start point that moved releases
@@ -181,7 +184,11 @@ decides with the §Implementer rule (the job's start, the task's priority and
        it, or one containing it) keeps it from the pane sweep and
        `checkout.sweep` (`handover_kept`), from `worktree.remove`
        (`handover-kept`), and the job directory holding the mark from the
-       job-directory TTL. Clearing the mark is hk 5246.
+       job-directory TTL. `worktree.remove` checks the mark again under
+       the git-op lock. The git lock also holds after a rollback to a node
+       binary that predates the mark: its removals pass one `--force`, which
+       git refuses for a locked worktree. Clearing the mark and the lock is
+       hk 5246.
      - The stored successor's continuation note is rewritten to name the
        kept worktree as `host:path`, the unpushed HEAD when there is one, and
        the uncommitted paths (quoted, up to 2 KiB, then a count); the

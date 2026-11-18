@@ -1618,6 +1618,10 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeChanged}, ""
 	}
 	main = currentMain
+	if client.jobsInboxRoot != "" && fleet.HandoverKeeps(filepath.Join(client.jobsInboxRoot, "jobs"), worktree.Path) {
+		// Rechecked under the git-op lock a hand-over publishes its mark under.
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveHandoverKept}, ""
+	}
 	entries, err := nodeListWorktrees(ctx, git, main)
 	if err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""

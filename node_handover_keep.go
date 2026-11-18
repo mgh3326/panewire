@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"unicode"
@@ -194,14 +195,33 @@ func (client *HubClient) nodeHandoverKeep(ctx context.Context, args nodeHandover
 	if !args.Keep {
 		return result, ""
 	}
+	// The mark and the git lock are published under the clone's git-op lock,
+	// the one worktree.remove holds while it rechecks both before deleting.
+	common, ok := read("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if !ok {
+		return refuse(nodeHandoverKeepGitError)
+	}
+	lockPath, err := nodeGitOpLockPath(filepath.Dir(strings.TrimSpace(common)))
+	if err != nil {
+		return refuse(nodeHandoverKeepGitError)
+	}
+	release, err := acquireNodeGitOpLock(ctx, lockPath, client.nodeGitOpWait())
+	if err != nil {
+		// Busy or cancelled: the hub retries the keep.
+		return refuse(nodeHandoverKeepGitError)
+	}
+	defer release()
 	status, ok1 := read("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
 	head, ok2 := read("rev-parse", "HEAD")
-	if !ok1 || !ok2 {
+	files, ok3 := read("ls-files", "-v", "-z")
+	if !ok1 || !ok2 || !ok3 {
 		return refuse(nodeHandoverKeepGitError)
 	}
 	result.Head = strings.ToLower(strings.TrimSpace(head))
 	listed := 0
-	for _, path := range handoverStatusPaths(status) {
+	// git status hides an edit to a path marked assume-unchanged: list
+	// every such path, since the kept worktree may hold its only copy.
+	for _, path := range append(handoverStatusPaths(status), handoverAssumedPaths(files)...) {
 		if len(result.Uncommitted) < nodeHandoverKeepMaxListed && validHandoverListedPath(path) && listed+len(path) <= nodeHandoverKeepListBytes {
 			result.Uncommitted = append(result.Uncommitted, path)
 			listed += len(path)
@@ -215,6 +235,18 @@ func (client *HubClient) nodeHandoverKeep(ctx context.Context, args nodeHandover
 	// recovered from it. The mark stays until it is cleared (hk 5246).
 	if err := replaceFileAtomicallyInRoot(job, fleet.HandoverKeepFile, []byte(top+"\n"), 0600); err != nil {
 		return nil, "capture_failed"
+	}
+	// A git worktree lock also holds against node binaries that predate the
+	// mark (a rollback): their removals pass a single --force, which git
+	// refuses for a locked worktree. A main checkout cannot be locked and
+	// no sweep removes it.
+	gitDir, _ := read("rev-parse", "--path-format=absolute", "--git-dir")
+	if strings.TrimSpace(gitDir) != strings.TrimSpace(common) {
+		if _, locked := read("worktree", "lock", "--reason", nodeHandoverKeepLockReason, top); !locked {
+			if list, ok := read("worktree", "list", "--porcelain"); !ok || !handoverWorktreeLocked(list, top) {
+				return refuse(nodeHandoverKeepGitError)
+			}
+		}
 	}
 	result.Kept = true
 	return result, ""
@@ -236,4 +268,36 @@ func handoverStatusPaths(status string) []string {
 		}
 	}
 	return paths
+}
+
+// nodeHandoverKeepLockReason is the git worktree lock reason a hand-over sets.
+const nodeHandoverKeepLockReason = "panewire handover-keep"
+
+// handoverAssumedPaths reads git ls-files -v -z and returns the paths marked
+// assume-unchanged (a lowercase tag), whose edits git status does not show.
+func handoverAssumedPaths(files string) []string {
+	var paths []string
+	for _, record := range strings.Split(files, "\x00") {
+		if len(record) > 2 && record[0] >= 'a' && record[0] <= 'z' && record[1] == ' ' {
+			paths = append(paths, record[2:])
+		}
+	}
+	return paths
+}
+
+// handoverWorktreeLocked reports whether git worktree list --porcelain shows
+// path as locked (a lock left by an earlier keep of the same worktree).
+func handoverWorktreeLocked(list, path string) bool {
+	for _, block := range strings.Split(list, "\n\n") {
+		lines := strings.Split(block, "\n")
+		if lines[0] != "worktree "+path {
+			continue
+		}
+		for _, line := range lines[1:] {
+			if line == "locked" || strings.HasPrefix(line, "locked ") {
+				return true
+			}
+		}
+	}
+	return false
 }
