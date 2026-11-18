@@ -188,3 +188,25 @@ func TestCommandcodeGeneric400DoesNotMark(t *testing.T) {
 		t.Fatalf("a generic 400 ran %d sweeps", sweeps)
 	}
 }
+
+// hk 5138 review: when the successor cannot be placed (here the pane is still
+// working), the sweep reports the job skipped so the caller releases it and the
+// next pass retries while the account mark holds.
+func TestCommandcodeAccountHandoverRetriesAfterFailure(t *testing.T) {
+	f := newSweepFixture(t)
+	job := f.addNamedJob(t, "cmd-dsflash41", "implementer", "commandcode", ccMarkAccountA, "idle", "sweep-1", 1)
+	f.node2.setStatus("w11:p1", "working")
+	if err := f.hub.markAccountCreditExhausted("commandcode", ccMarkAccountA, f.hub.now()); err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := poolExhaustion{Pool: "commandcode", Account: ccMarkAccountA, Cause: poolCauseCreditExhausted}
+	for pass := 0; pass < 2; pass++ {
+		if result := f.hub.sweepPoolJob(t.Context(), e, task); result.action != poolJobSkipped || result.why != "handover_failed" {
+			t.Fatalf("pass %d = %+v, want skipped/handover_failed so the job is released and retried", pass, result)
+		}
+	}
+}

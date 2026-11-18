@@ -108,6 +108,23 @@ func TestCommandcodeBalanceSelection_t5138(t *testing.T) {
 		}
 	})
 
+	t.Run("a stale reading before the mark does not lift it", func(t *testing.T) {
+		a, s := ccAccountsFixture(t, map[string]*PoolView{
+			ccKeyA: withBalance(ccView(now, 10, 30, 3), ptrF(12)),
+			ccKeyB: withBalance(ccView(now, 10, 40, 3), ptrF(17)),
+		})
+		// The fixture's reading is measured now-1m; a mark 30 s ago is newer,
+		// so the cached balance predates the rejection and must not lift it.
+		a.State = &fakeStateReader{snap: FleetSnapshot{V: 1, At: now, AccountCreditExhausted: map[string]time.Time{ccKeyA: now.Add(-30 * time.Second)}}}
+		sel, err := a.selectProfile(context.Background(), s)
+		if err != nil || sel.chosen == nil {
+			t.Fatalf("no choice: %v", err)
+		}
+		if c := ccCandidates(sel)[ccKeyA]; c.outcome != "dropped:credit_exhausted account="+ccKeyA {
+			t.Fatalf("a pre-mark reading lifted the mark: %s", c.outcome)
+		}
+	})
+
 	t.Run("a reading with credits lifts the mark", func(t *testing.T) {
 		a, s := ccAccountsFixture(t, map[string]*PoolView{
 			ccKeyA: withBalance(ccView(now, 10, 30, 3), ptrF(2)),

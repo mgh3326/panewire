@@ -56,11 +56,13 @@ func (s *laneInboxStore) accountCreditMarks(parent context.Context) (map[string]
 }
 
 // deleteAccountCreditMark drops a mark that has lifted, so a hub restart does
-// not read it as still holding after its reason is gone.
-func (s *laneInboxStore) deleteAccountCreditMark(parent context.Context, account string) error {
+// not read it as still holding after its reason is gone. The marked time is
+// part of the predicate: a new episode written between the lift decision and
+// this delete keeps its row.
+func (s *laneInboxStore) deleteAccountCreditMark(parent context.Context, account string, marked time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM account_credit_marks WHERE account_key=?`), account)
+	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM account_credit_marks WHERE account_key=? AND marked_ms=?`), account, marked.UnixMilli())
 	return err
 }
 

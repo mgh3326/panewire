@@ -415,23 +415,25 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	} else {
 		if c.row.Pool == "commandcode" {
 			// A credit stop keeps this account off placement while the pool's
-			// other accounts stay candidates (hk 5138). The reading's own
-			// balance decides first: below one credit the provider refuses the
-			// next request (decision 403), at one credit or more the reading
-			// has lifted the pane rejection's mark. A reading with no balance
+			// other accounts stay candidates (hk 5138). A reading below one
+			// credit refuses the account whatever the mark says (decision 403).
+			// A mark holds until a reading *observed after it* reports credits:
+			// the store caches readings, so the balance at hand can predate the
+			// rejection and must not lift the mark. A reading with no balance
 			// says nothing, so the mark holds.
-			if v.Balance != nil {
-				if *v.Balance < 1 {
-					c.reason = fmt.Sprintf("credit_exhausted balance=%g", *v.Balance)
-					c.code, c.outcome = outcomeQuotaExhausted, "dropped:"+c.reason
-					c.tier = -1
+			if v.Balance != nil && *v.Balance < 1 {
+				c.reason = fmt.Sprintf("credit_exhausted balance=%g", *v.Balance)
+				c.code, c.outcome = outcomeQuotaExhausted, "dropped:"+c.reason
+				c.tier = -1
+				return
+			}
+			if at, held := p.creditExhaustedAccount(c.accountKey); held {
+				if v.Balance == nil || !c.measuredAt.After(at) {
+					c.reason = fmt.Sprintf("credit_exhausted account=%s", c.accountKey)
+					c.code, c.outcome = outcomeQuotaExhausted, "dropped:credit_exhausted account="+c.accountKey
+					c.tier, c.creditSince = -1, at
 					return
 				}
-			} else if at, held := p.creditExhaustedAccount(c.accountKey); held {
-				c.reason = fmt.Sprintf("credit_exhausted account=%s", c.accountKey)
-				c.code, c.outcome = outcomeQuotaExhausted, "dropped:credit_exhausted account="+c.accountKey
-				c.tier, c.creditSince = -1, at
-				return
 			}
 			cutoff := p.poolCutoff(c.row.Pool)
 			if v.Blocking != nil && *v.Blocking >= cutoff {

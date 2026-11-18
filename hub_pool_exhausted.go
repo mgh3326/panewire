@@ -454,8 +454,14 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 		}
 		if role == "implementer" && exhaustion.accountCredit() {
 			// A commandcode account out of credit is handed over exactly as a
-			// quota stop is: the quota-stop flow's successor (hk 5138).
-			h.handOffAccountCreditStopped(ctx, task, exhaustion)
+			// quota stop is: the quota-stop flow's successor (hk 5138). When the
+			// replacement does not place (pane busy, claim refused, …) the job
+			// is released so the next pass retries while the mark holds, rather
+			// than staying claimed on the spent account. The owner notice above
+			// is not repeated: its event id is fixed per job.
+			if !h.handOffAccountCreditStopped(ctx, task, exhaustion) {
+				return poolJobSkip(role, "handover_failed")
+			}
 		}
 		return poolJobResult{action: poolJobNotified, role: role}
 	default:

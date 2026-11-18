@@ -934,7 +934,14 @@ func TestLaneInboxStoreContractAccountCreditMarks_t5138(t *testing.T) {
 			t.Fatalf("replaced mark = %+v, %v; want %v", marks, err, later.Marked)
 		}
 
-		if err := reopened.deleteAccountCreditMark(t.Context(), first.Account); err != nil {
+		// The delete names the marked time: a newer episode keeps its row.
+		if err := reopened.deleteAccountCreditMark(t.Context(), later.Account, at); err != nil {
+			t.Fatal(err)
+		}
+		if marks, err = reopened.accountCreditMarks(t.Context()); err != nil || !marks[later.Account].Marked.Equal(later.Marked) {
+			t.Fatalf("a stale delete dropped the new mark: %+v, %v", marks, err)
+		}
+		if err := reopened.deleteAccountCreditMark(t.Context(), later.Account, later.Marked); err != nil {
 			t.Fatal(err)
 		}
 		if marks, err = open().accountCreditMarks(t.Context()); err != nil || len(marks) != 0 {

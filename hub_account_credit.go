@@ -115,11 +115,11 @@ func (h *HubServer) accountCreditMarkHeld(account string, now time.Time) bool {
 // handed_over_to and the successor carries the same task and brief. No pool is
 // excluded: the account mark keeps the successor off the spent account while
 // the pool's other accounts stay placeable.
-func (h *HubServer) handOffAccountCreditStopped(ctx context.Context, task hubSpawnTask, exhaustion poolExhaustion) {
+func (h *HubServer) handOffAccountCreditStopped(ctx context.Context, task hubSpawnTask, exhaustion poolExhaustion) bool {
 	machine := spawnHolderHost(task)
 	if machine == "" {
 		h.logger.Warn("account credit exhausted job has no holder", "job", task.Job, "account", exhaustion.Account)
-		return
+		return false
 	}
 	event := hubJobEventPayload{
 		JobID:     task.Job,
@@ -130,9 +130,10 @@ func (h *HubServer) handOffAccountCreditStopped(ctx context.Context, task hubSpa
 	}
 	if next, ok := h.replaceQuotaStopped(ctx, machine, event); ok {
 		h.logger.Info("account credit exhausted job handed over", "job", task.Job, "replacement", next, "pool", exhaustion.Pool, "account", exhaustion.Account)
-		return
+		return true
 	}
 	h.logger.Info("account credit exhausted job not handed over", "job", task.Job, "pool", exhaustion.Pool, "account", exhaustion.Account)
+	return false
 }
 
 // snapshotAccountCreditMarks answers the marks still holding at now for the
@@ -142,7 +143,7 @@ func (h *HubServer) snapshotAccountCreditMarks(now time.Time) map[string]time.Ti
 	h.accountCreditOnce.Do(h.loadAccountCreditMarks)
 	h.mu.Lock()
 	var active map[string]time.Time
-	var lifted []string
+	var lifted []accountCreditMark
 	for account, mark := range h.accountCreditMarks {
 		if h.accountCreditMarkActive(account, mark, now) {
 			if active == nil {
@@ -152,7 +153,7 @@ func (h *HubServer) snapshotAccountCreditMarks(now time.Time) map[string]time.Ti
 			continue
 		}
 		delete(h.accountCreditMarks, account)
-		lifted = append(lifted, account)
+		lifted = append(lifted, mark)
 	}
 	h.mu.Unlock()
 	if h.inbox == nil || len(lifted) == 0 {
@@ -160,9 +161,9 @@ func (h *HubServer) snapshotAccountCreditMarks(now time.Time) map[string]time.Ti
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	for _, account := range lifted {
-		if err := h.inbox.store.deleteAccountCreditMark(ctx, account); err != nil {
-			h.logger.Warn("lifted account credit mark could not be deleted", "account", account, "error", err)
+	for _, mark := range lifted {
+		if err := h.inbox.store.deleteAccountCreditMark(ctx, mark.Account, mark.Marked); err != nil {
+			h.logger.Warn("lifted account credit mark could not be deleted", "account", mark.Account, "error", err)
 		}
 	}
 	return active
