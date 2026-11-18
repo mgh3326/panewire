@@ -35,6 +35,15 @@ const hubPostgresMigrationLock = 0x70616e6577697265 // "panewire"
 
 const hubPostgresConnectTimeout = 10 * time.Second
 
+// hubPostgresMigrationContext bounds one migration run. A migration may read
+// whole history tables (the outbox migration builds partial indexes and copies
+// owed rows, hk 5298), so it gets the start-up budget, not the connect one: a
+// run cut off at the connect timeout rolls back and the next start repeats the
+// same scan.
+func hubPostgresMigrationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, laneInboxStartupTimeout)
+}
+
 // errHubDatabaseURL deliberately carries no detail: pgx parse errors can
 // quote parts of the connection string.
 var errHubDatabaseURL = errors.New("hub database URL is invalid")
@@ -94,7 +103,7 @@ func openLaneInboxStorePostgresConfig(ctx context.Context, config *pgx.ConnConfi
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, hubPostgresConnectTimeout)
+	ctx, cancel := hubPostgresMigrationContext(ctx)
 	defer cancel()
 	if err := migrateHubPostgres(ctx, db); err != nil {
 		db.Close()
