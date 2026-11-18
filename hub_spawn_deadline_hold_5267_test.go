@@ -554,3 +554,51 @@ func TestStrandedCompletedJobTaskFlagNotShadowed_5267(t *testing.T) {
 		t.Fatalf("a --task= value in free text refused a valid landing: status=%s", got.Status)
 	}
 }
+
+// A lookup error holds a correction; it is never released on the error
+// (mergewake review, hk 5267). A canceled read stands in for a failed lookup.
+func TestCorrectionHoldsOnLookupError_5267(t *testing.T) {
+	h, _, _ := spawnNotifyHubLanes(t, "", "parent")
+	task, _ := bindDispatch(t, h, durableSpawnRequest())
+	s := h.inbox.store
+	if _, err := s.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := s.noteUnresolvedSpawn(t.Context(), task, time.Now()); err != nil || !queued {
+		t.Fatalf("unresolved queued=%v err=%v", queued, err)
+	}
+	if _, err := s.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p1", Profile: "codex-sol"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := s.db.QueryRow(`SELECT result FROM spawn_notifications WHERE event_id=?`, task.Request.RequestID+":1:succeeded").Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	correction := spawnNotification{id: task.Request.RequestID + ":1:succeeded", request: task.Request.RequestID, raw: raw}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if !h.correctionAwaitsUnresolved(canceled, correction) {
+		t.Fatal("a lookup error released the correction before its unresolved notice was delivered")
+	}
+	if h.correctionAwaitsUnresolved(t.Context(), correction) == false {
+		t.Fatal("the correction was released while its unresolved notice is still pending")
+	}
+}
+
+// A task id at or past 2^53 is refused rather than matched: the job record's
+// float64 may have rounded it, so the settle fails closed (mergewake review).
+func TestStrandedCompletedJobUnsafeTaskIDRefuses_5267(t *testing.T) {
+	s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
+	for i, arg := range s.task.Request.Args {
+		if arg == "--task" && i+1 < len(s.task.Request.Args) {
+			s.task.Request.Args[i+1] = "9007199254740992"
+		}
+	}
+	record := completedJobRecord("machine-a")
+	record["task_id"] = float64(9007199254740992)
+	useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: record})
+	s.run(t)()
+	if got := s.status(t); got.Status != "deadline_exceeded" {
+		t.Fatalf("an unsafe task id settled the request: status=%s", got.Status)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -141,10 +142,15 @@ func spawnRecordMatchesRequest(task hubSpawnTask, record map[string]any) bool {
 
 // spawnRecordTaskID renders a job record's task id as a plain decimal. Job
 // records decode JSON numbers as float64, which prints large ids in exponent
-// form (1e+06) and would never match the --task argument.
+// form (1e+06) and would never match the --task argument. A number at or past
+// 2^53 may already be rounded (9007199254740993 reads back as ...992), so it
+// is refused rather than matched: the settle fails closed (mergewake review).
 func spawnRecordTaskID(record map[string]any) string {
 	switch v := record["task_id"].(type) {
 	case float64:
+		if v >= 1<<53 || v < 0 {
+			return ""
+		}
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	case string:
 		return v
@@ -174,8 +180,12 @@ func (h *HubServer) correctionAwaitsUnresolved(ctx context.Context, n spawnNotif
 	op, done := store.op(ctx)
 	defer done()
 	var delivered int
-	if err := store.db.QueryRowContext(op, store.q(`SELECT delivered FROM spawn_notifications WHERE event_id=?`), unresolved).Scan(&delivered); err != nil {
-		return false
+	err := store.db.QueryRowContext(op, store.q(`SELECT delivered FROM spawn_notifications WHERE event_id=?`), unresolved).Scan(&delivered)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false // explicitly absent: nothing to wait for
+	}
+	if err != nil {
+		return true // unknown: keep waiting, never release on a lookup error
 	}
 	return delivered != spawnNoticeDone
 }
