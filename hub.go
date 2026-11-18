@@ -540,12 +540,18 @@ type HubServer struct {
 	waitingCheckedAt  time.Time
 	waitingReadFailed bool
 	// spawnTaskFailMu guards the spawn-failure task comment's once-per-streak
-	// post failure log (hub_spawn_task_fail.go). spawnTaskFailRetry overrides
-	// the hk post backoff; zero is the hubretry default, negative disables
-	// retries so a fixture can count exact attempts.
-	spawnTaskFailMu     sync.Mutex
-	spawnTaskFailWarned bool
-	spawnTaskFailRetry  hubretry.Policy
+	// post failure log and its per-row retry backoff (hub_spawn_task_fail.go).
+	// spawnTaskFailRetry overrides the hk post backoff; zero is the hubretry
+	// default, negative disables retries so a fixture can count exact attempts.
+	// spawnTaskFailBackoffBase is the first retry delay for a row hk did not
+	// take; zero is the default. It doubles per consecutive failure to a
+	// 10-minute cap.
+	spawnTaskFailMu          sync.Mutex
+	spawnTaskFailWarned      bool
+	spawnTaskFailRetry       hubretry.Policy
+	spawnTaskFailBackoffBase time.Duration
+	spawnTaskFailNext        map[string]time.Time
+	spawnTaskFailFails       map[string]int
 	// parkNoticeMu guards the parked-request owner notice's poll time and its
 	// candidate cursor (hub_spawn_park_notice.go).
 	parkNoticeMu        sync.Mutex

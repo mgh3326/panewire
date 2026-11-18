@@ -159,10 +159,8 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Stores from before hk 4460 lack the placement columns (postgres: the
 	// 0008 migration). A restart restores counts from these two columns, and
 	// refresh_waits arrived with hk 4600 (postgres: 0011). The four parked
-	// notice columns are hk 4662's (postgres: 0019). The spawn-failure task
-	// comment mark is hk 5137's (postgres: 0022): when its hk task comment was
-	// posted (or judged not owed), so a restart never reposts and never loses
-	// one.
+	// notice columns are hk 4662's (postgres: 0019), and task_fail_notice_ms
+	// is hk 5137's (postgres: 0022).
 	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
@@ -201,6 +199,16 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// node_id IS NULL keeps a bound legacy row on its own guard; a bound
 	// deadline_exceeded row may still be running on its node.
 	if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET status='waiting' WHERE status IN ('accepted','deadline_exceeded','deadline_exceeded_grant') AND node_id IS NULL AND conditions_met_ms=0 AND payload LIKE '%"start_conditions":%'`); err != nil {
+		return err
+	}
+	// The spawn-failure task comment mark is hk 5137's (postgres: 0022): when
+	// the sweep judged the row's terminal failure. Terminal rows that predate
+	// the column are stamped judged once, so the first sweep after deploy
+	// does not repost history; rows that turn terminal later keep mark 0 and
+	// post normally. The mark suppresses a repost once its write lands; a hub
+	// that stops between the hk post and the mark reposts on the next sweep,
+	// so the guarantee is at-least-once across that window.
+	if err := s.backfillSpawnTaskFailNotices(ctx, time.Now().UTC()); err != nil {
 		return err
 	}
 	return nil

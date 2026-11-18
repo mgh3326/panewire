@@ -293,9 +293,11 @@ func (c *handoffkeepRelayClient) appendEvent(ctx context.Context, event handoffk
 
 // postTaskComment appends one comment to an hk task. 201 is the new comment;
 // 200 covers a server that answers an already-recorded write as success. The
-// route takes no idempotency key, so the caller owns exactly-once: the spawn
-// task-fail sweep claims its durable posted-at mark around this call and never
-// retries an unknown outcome into a second comment blindly.
+// route takes no idempotency key: the caller owns de-duplication through its
+// durable posted-at mark, and retries an unknown outcome only inside its
+// bounded backoff. An hk answer lost after hk stored the write, or a hub
+// that stops between the post and the mark, reposts once: exactly-once per
+// mark write, at-least-once across that window.
 func (c *handoffkeepRelayClient) postTaskComment(ctx context.Context, taskID int64, body string) (int, error) {
 	if taskID < 1 {
 		return 0, errors.New("handoffkeep task id is invalid")

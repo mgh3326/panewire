@@ -2,12 +2,14 @@ package panewire
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,9 +17,9 @@ import (
 	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
-// taskFailHub is a hub whose handoffkeep points at the fake, with the
-// spawn-failure comment backoff disabled so each sweep makes exactly one hk
-// attempt and tests observe retry across sweeps deterministically.
+// taskFailHub is a hub whose handoffkeep points at the fake, with the hk
+// post backoff disabled so each sweep makes exactly one hk attempt. Tests
+// that need the per-row retry delay set spawnTaskFailBackoffBase explicitly.
 func taskFailHub(t *testing.T, storePath string, client *handoffkeepRelayClient, logs *bytes.Buffer) *HubServer {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
@@ -58,10 +60,15 @@ func taskFailPending(t *testing.T, h *HubServer) []string {
 
 func taskFailClaim(t *testing.T, h *HubServer, seq int) hubSpawnTask {
 	t.Helper()
+	return taskFailClaimTask(t, h, seq, "42")
+}
+
+func taskFailClaimTask(t *testing.T, h *HubServer, seq int, taskID string) hubSpawnTask {
+	t.Helper()
 	request := durableSpawnRequest()
 	request.RequestID = t14RequestID(51370 + seq)
 	job := fmt.Sprintf("task-fail-%d", seq)
-	request.Args = replaceSpawnArg(request.Args, "--job", job)
+	request.Args = replaceSpawnArg(replaceSpawnArg(request.Args, "--job", job), "--task", taskID)
 	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +201,9 @@ func TestSpawnTaskFail5137RetryThenSinglePost(t *testing.T) {
 	t.Cleanup(stop)
 	var logs bytes.Buffer
 	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &logs)
+	// Every sweep re-attempts: the growing per-row delay is disabled here so
+	// the test observes sweep-level retry deterministically.
+	h.spawnTaskFailBackoffBase = time.Nanosecond
 	task := taskFailClaim(t, h, 1)
 	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
 		t.Fatal(err)
@@ -319,4 +329,177 @@ func TestSpawnTaskFail5137NoPostWithoutTerminalFailure(t *testing.T) {
 			t.Fatalf("comments after replay to success = %d, want 0", len(got))
 		}
 	})
+}
+
+func taskFailCommentCalls(t *testing.T, fake *fakeHandoffkeep) int {
+	t.Helper()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	n := 0
+	for _, c := range fake.calls {
+		if c.Method == http.MethodPost && strings.HasSuffix(c.Path, "/comments") {
+			n++
+		}
+	}
+	return n
+}
+
+// Terminal rows that predate the posted-at mark never owed a comment: the
+// one-shot backfill stamps them judged, and only later failures post.
+func TestSpawnTaskFail5137BackfillStampsHistory(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+	h.spawnTaskFailBackoffBase = time.Nanosecond
+	old := taskFailClaim(t, h, 1)
+	if _, err := h.inbox.store.completeSpawn(t.Context(), old, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Pretend old predates the mark column: drop the one-shot guard and run
+	// ensure again, as a store from before hk 5137 would on first open.
+	if _, err := h.inbox.store.db.Exec(`DELETE FROM spawn_task_fail_backfill`); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.inbox.store.ensureSpawnTasks(); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if got := taskFailComments(t, fake); len(got) != 0 {
+		t.Fatalf("comments for pre-existing failures = %d, want 0", len(got))
+	}
+	if pending := taskFailPending(t, h); len(pending) != 0 {
+		t.Fatalf("pending notices after backfill = %v, want none", pending)
+	}
+	fresh := taskFailClaimTask(t, h, 2, "4202")
+	if _, err := h.inbox.store.completeSpawn(t.Context(), fresh, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if got := taskFailComments(t, fake); len(got) != 1 {
+		t.Fatalf("comments for a new failure after backfill = %d, want 1", len(got))
+	}
+}
+
+// Two overlapping sweeps post once: the per-request single-flight plus the
+// mark CAS own the row, not the sweep count.
+func TestSpawnTaskFail5137ConcurrentSweepsPostOnce(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+	h.spawnTaskFailBackoffBase = time.Nanosecond
+	task := taskFailClaim(t, h, 1)
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.flushSpawnTaskFailNotices(context.Background())
+		}()
+	}
+	wg.Wait()
+	if got := taskFailComments(t, fake); len(got) != 1 {
+		t.Fatalf("comments after concurrent sweeps = %d, want 1: %+v", len(got), got)
+	}
+}
+
+// A mark write lost after hk stored the comment reposts once: exactly-once
+// per mark write, at-least-once across that window, as documented.
+func TestSpawnTaskFail5137LostMarkRepostsOnce(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+	h.spawnTaskFailBackoffBase = time.Nanosecond
+	task := taskFailClaim(t, h, 1)
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if got := taskFailComments(t, fake); len(got) != 1 {
+		t.Fatalf("comments after first sweep = %d, want 1", len(got))
+	}
+	// Simulate the lost mark write: the row is unjudged again with hk
+	// already holding the comment.
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET task_fail_notice_ms=0 WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	got := taskFailComments(t, fake)
+	if len(got) != 2 || got[0].Body != got[1].Body {
+		t.Fatalf("comments after lost mark = %d, want the same line twice: %+v", len(got), got)
+	}
+}
+
+// A --task-shaped value inside another flag's slot must not name the hk
+// task: only the real --task pair counts.
+func TestSpawnTaskFail5137FlagValueSlotIsNotTask(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+	h.spawnTaskFailBackoffBase = time.Nanosecond
+	request := durableSpawnRequest()
+	request.RequestID = t14RequestID(51381)
+	args := replaceSpawnArg(request.Args, "--job", "task-fail-forge")
+	// A --task-shaped value in another flag's slot: the loose reader would
+	// take 43 for the task, the strict pair walk skips it for the real 7.
+	var forged []string
+	for _, arg := range args {
+		if arg == "--task" {
+			forged = append(forged, "--purpose", "--task=43")
+		}
+		forged = append(forged, arg)
+	}
+	forged = replaceSpawnArg(forged, "--task", "7")
+	request.Args = forged
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "task-fail-forge", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	got := taskFailComments(t, fake)
+	if len(got) != 1 {
+		t.Fatalf("comments = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].TaskPath != "/v1/tasks/7/comments" {
+		t.Fatalf("comment path = %q, want the real --task 7", got[0].TaskPath)
+	}
+}
+
+// A row hk keeps refusing is re-attempted only after its growing delay, so an
+// outage costs one bounded sweep and cheap skips instead of stalling the loop.
+func TestSpawnTaskFail5137BackoffSkipsUntilDue(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+	h.spawnTaskFailBackoffBase = time.Hour
+	task := taskFailClaim(t, h, 1)
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.commentStatus = http.StatusServiceUnavailable
+	fake.mu.Unlock()
+	h.flushSpawnTaskFailNotices(t.Context())
+	h.flushSpawnTaskFailNotices(t.Context())
+	if n := taskFailCommentCalls(t, fake); n != 1 {
+		t.Fatalf("hk comment attempts = %d, want 1 (second sweep skips)", n)
+	}
+	if pending := taskFailPending(t, h); len(pending) != 1 {
+		t.Fatalf("pending notices = %v, want the one failure", pending)
+	}
+	// Simulate the delay passing: clearing the retry state makes the row due
+	// again, and the next sweep re-attempts the post.
+	h.spawnTaskFailMu.Lock()
+	h.spawnTaskFailNext = map[string]time.Time{}
+	h.spawnTaskFailFails = map[string]int{}
+	h.spawnTaskFailMu.Unlock()
+	h.flushSpawnTaskFailNotices(t.Context())
+	if n := taskFailCommentCalls(t, fake); n != 2 {
+		t.Fatalf("hk comment attempts after the delay = %d, want 2", n)
+	}
 }
