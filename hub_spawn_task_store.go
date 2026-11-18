@@ -426,18 +426,48 @@ func (s *laneInboxStore) beginSpawnSend(parent context.Context, task hubSpawnTas
 	return n == 1, err
 }
 
-// recordPlacedAccount saves the placed account key and pool on the operation
-// before dispatch, so in-flight operations are counted by liveAccountJobs (hk 5113).
+// recordPlacedAccount merges the placed account key and pool into the operation's
+// outcome before dispatch, so in-flight operations are counted by liveAccountJobs
+// while preserving any existing outcome fields such as legacy host claims (hk 5113).
 func (s *laneInboxStore) recordPlacedAccount(parent context.Context, requestID string, attempt int, pool, accountKey string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	outcome := hubSpawnOutcome{Pool: pool, AccountKey: accountKey}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var currentResult, claimedHost, claimResult string
+	err = tx.QueryRowContext(ctx, s.q(`SELECT result,claimed_host,claim_result FROM spawn_operations WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant')`), requestID, attempt).Scan(&currentResult, &claimedHost, &claimResult)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	var outcome hubSpawnOutcome
+	if currentResult != "" && currentResult != "{}" {
+		_ = json.Unmarshal([]byte(currentResult), &outcome)
+	}
+	legacyHost, legacyProof := spawnLegacyClaim(hubSpawnTask{ClaimedHost: claimedHost, Outcome: outcome})
+	if claimResult != "" {
+		legacyProof = ""
+	}
+	outcome.Pool = pool
+	outcome.AccountKey = accountKey
 	raw, err := json.Marshal(outcome)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant')`), string(raw), requestID, attempt)
-	return err
+	proof := legacyProof
+	if proof == "" {
+		proof = spawnClaimProof(outcome, string(raw))
+	}
+	_, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET result=?,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,claimed_host=CASE WHEN claimed_host='' THEN ? ELSE claimed_host END WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant')`), string(raw), proof, legacyHost, requestID, attempt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Unknown observations retain the reservation. Only a definitive result may
@@ -863,9 +893,17 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 		return task, errSpawnClaimed
 	}
 	// A deliberate repeat asks for the request again, so its time limit
-	// starts over with the new attempt.
+	// starts over with the new attempt. Clear stale account placement from
+	// the prior attempt's outcome (hk 5113).
+	clearedOutcome := task.Outcome
+	clearedOutcome.AccountKey = ""
+	clearedOutcome.Pool = ""
+	rawOutcome, err := json.Marshal(clearedOutcome)
+	if err != nil {
+		return task, err
+	}
 	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, task.Request.ExpiresSeconds))
-	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0 WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
+	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',result=?,deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0 WHERE request_id=? AND status='retryable' AND attempt=?`), string(rawOutcome), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}

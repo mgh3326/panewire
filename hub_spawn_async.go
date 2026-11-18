@@ -684,8 +684,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 				var saved fleet.PlacementTrace
 				transport.snapshotReady = readErr == nil && !recorded && json.Unmarshal(payload, &saved) == nil && saved.Chosen == tr.Chosen && saved.Profile == tr.Profile
 			}
-			if tr.AccountKey != "" && h.inbox != nil {
-				_ = h.inbox.store.recordPlacedAccount(parent, task.Request.RequestID, task.Attempt, tr.Pool, tr.AccountKey)
+			if h.inbox != nil {
+				if recordErr := h.inbox.store.recordPlacedAccount(parent, task.Request.RequestID, task.Attempt, tr.Pool, tr.AccountKey); recordErr != nil {
+					h.logger.Warn("hub spawn placed account could not be recorded", "request_id", task.Request.RequestID, "attempt", task.Attempt, "pool", tr.Pool, "account_key", tr.AccountKey, "error", recordErr)
+				}
 			}
 		}
 	}

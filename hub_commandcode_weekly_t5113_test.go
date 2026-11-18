@@ -138,3 +138,93 @@ func TestHubLiveAccountJobs_DispatchingInFlight_t5113(t *testing.T) {
 		t.Fatalf("liveAccountJobs for second request[%s] = %q, want %q", acctA, secondJobs[acctA], "job-dispatching-1")
 	}
 }
+
+// TestRepeatSpawnClearsStaleAccountKey_t5113 proves that repeatSpawnTask and
+// retrySpawnTask clear stale AccountKey on the retryable-to-accepted update,
+// and that recordPlacedAccount clears it when placed on a different pool (e.g. codex).
+func TestRepeatSpawnClearsStaleAccountKey_t5113(t *testing.T) {
+	h := asyncSpawnHub(t)
+	now := time.Now()
+	const acctA = "commandcode:5c7a09bd00000001"
+
+	task := liveOp(t, h, 1, "job-repeat-1", "auto", now)
+	if err := h.inbox.store.recordPlacedAccount(t.Context(), task.Request.RequestID, task.Attempt, "commandcode", acctA); err != nil {
+		t.Fatal(err)
+	}
+	// Complete attempt 1 with retryable outcome containing acctA
+	failed := hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:busy", Host: "desktop", Profile: "cmd-dsflash41", Retryable: true, AccountKey: acctA, Pool: "commandcode"}
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, failed, now); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Repeat the task -> status becomes 'accepted', attempt becomes 2
+	repeated, err := h.inbox.store.resumeCleanedSpawn(t.Context(), saved, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.Outcome.AccountKey != "" {
+		t.Fatalf("repeated task.Outcome.AccountKey = %q, want empty after repeat", repeated.Outcome.AccountKey)
+	}
+
+	// liveAccountJobs should not report acctA for this repeated accepted task
+	jobs, err := h.liveAccountJobs(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job, ok := jobs[acctA]; ok {
+		t.Fatalf("liveAccountJobs reported stale %s=%s for repeated task", acctA, job)
+	}
+
+	// When placement places attempt 2 on codex, recordPlacedAccount clears pool/accountKey
+	if err := h.inbox.store.recordPlacedAccount(t.Context(), repeated.Request.RequestID, repeated.Attempt, "codex", ""); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := h.inbox.store.spawnTask(t.Context(), repeated.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Outcome.AccountKey != "" {
+		t.Fatalf("updated task.Outcome.AccountKey = %q, want empty", updated.Outcome.AccountKey)
+	}
+}
+
+// TestRecordPlacedAccountPreservesLegacyHostClaim_t5113 proves that recordPlacedAccount
+// merges the placed account into the existing outcome without erasing legacy host pins.
+func TestRecordPlacedAccountPreservesLegacyHostClaim_t5113(t *testing.T) {
+	h := asyncSpawnHub(t)
+	now := time.Now()
+	const acctA = "commandcode:5c7a09bd00000001"
+	const legacyHost = "mac-pinned-host"
+
+	task := liveOp(t, h, 1, "job-legacy-pin-1", "auto", now)
+	// Seed a legacy claim in result (Retryable + Host, no claimed_host or claim_result)
+	legacyOutcome := hubSpawnOutcome{Host: legacyHost, Retryable: true, Stage: "launch"}
+	rawLegacy, _ := json.Marshal(legacyOutcome)
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET result=? WHERE request_id=?`, string(rawLegacy), task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now record placed account
+	if err := h.inbox.store.recordPlacedAccount(t.Context(), task.Request.RequestID, task.Attempt, "commandcode", acctA); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The host pin must be preserved both in Outcome.Host and claimed_host
+	if reloaded.Outcome.Host != legacyHost {
+		t.Fatalf("reloaded.Outcome.Host = %q, want %q", reloaded.Outcome.Host, legacyHost)
+	}
+	if reloaded.ClaimedHost != legacyHost {
+		t.Fatalf("reloaded.ClaimedHost = %q, want %q", reloaded.ClaimedHost, legacyHost)
+	}
+	if reloaded.Outcome.AccountKey != acctA {
+		t.Fatalf("reloaded.Outcome.AccountKey = %q, want %q", reloaded.Outcome.AccountKey, acctA)
+	}
+}
