@@ -26,6 +26,12 @@ func briefSentPayload(t *testing.T, a *App, brief string) map[string]any {
 	return map[string]any{"pane_id": "w:p1", "label": "agent-a", "profile": "cmd-dsflash41", "family": "deepseek", "role": "reviewer", "owner_lane": "owner", "parent_lane": "parent", "brief_path": path, "brief_sha256": hex.EncodeToString(sum[:])}
 }
 
+// spawnFailed is what Spawn's failure path writes last: the spawn is over.
+func spawnFailed(t *testing.T, a *App) {
+	t.Helper()
+	putEvent(t, a, "j", "job.spawn_retryable", map[string]any{"retry": "repeat the same spawn command on the same host"})
+}
+
 // The pane ran after the node reported rc 76. Its done is accepted on the
 // node's own receipt that the brief reached the pane.
 func TestDoneAcceptsBriefSentReceiptWhenSubmitWasUnconfirmed(t *testing.T) {
@@ -73,12 +79,14 @@ func TestDoneRefusesBriefReceiptThatIsNotThisAttemptsOwn(t *testing.T) {
 	}{
 		{"brief file changed", func(t *testing.T, a *App) {
 			putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
+			spawnFailed(t, a)
 			if e := os.WriteFile(filepath.Join(a.Jobs, "j", "brief-delivered.md"), []byte("another brief\n"), 0600); e != nil {
 				t.Fatal(e)
 			}
 		}},
 		{"brief file gone", func(t *testing.T, a *App) {
 			putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
+			spawnFailed(t, a)
 			if e := os.Remove(filepath.Join(a.Jobs, "j", "brief-delivered.md")); e != nil {
 				t.Fatal(e)
 			}
@@ -87,18 +95,22 @@ func TestDoneRefusesBriefReceiptThatIsNotThisAttemptsOwn(t *testing.T) {
 			p := briefSentPayload(t, a, "the brief\n")
 			p["brief_path"] = filepath.Join(a.Jobs, "other", "brief-delivered.md")
 			putEvent(t, a, "j", eventBriefSent, p)
+			spawnFailed(t, a)
 		}},
 		{"no pane", func(t *testing.T, a *App) {
 			p := briefSentPayload(t, a, "the brief\n")
 			delete(p, "pane_id")
 			putEvent(t, a, "j", eventBriefSent, p)
+			spawnFailed(t, a)
 		}},
 		{"reclaimed after", func(t *testing.T, a *App) {
 			putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
+			spawnFailed(t, a)
 			putEvent(t, a, "j", "job.reclaim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "role": "reviewer"})
 		}},
 		{"lost after", func(t *testing.T, a *App) {
 			putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
+			spawnFailed(t, a)
 			putEvent(t, a, "j", "job.lost", map[string]any{})
 		}},
 	} {
@@ -125,6 +137,7 @@ func TestDoneAdoptsBriefReceiptAsSpawnReceipt(t *testing.T) {
 	payload := briefSentPayload(t, a, "the brief\n")
 	payload["cwd"], payload["herdr_session"], payload["expires_at"] = "/work/tree", "sess", "2026-11-18T08:00:00Z"
 	putEvent(t, a, "j", eventBriefSent, payload)
+	spawnFailed(t, a)
 	if err := strictDone(t, a, report, result); err != nil {
 		t.Fatal(err)
 	}
@@ -161,4 +174,88 @@ func TestDoneAdoptsNothingWithoutBriefReceipt(t *testing.T) {
 			t.Fatal("job.spawned written without a delivered-brief receipt")
 		}
 	}
+}
+
+// The receipt exists from the send on, while Spawn may still confirm the brief
+// and write its own job.spawned. A done in that interval adopts nothing: the
+// spawn's later job.spawned would revive the completed job.
+func TestDoneDoesNotAdoptWhileSpawnIsStillConfirming(t *testing.T) {
+	a, h, report, result := strictClaimedWithoutReceiptFixture(t)
+	putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
+	err := strictDone(t, a, report, result)
+	assertStrictFailure(t, a, err, exitStateConflict, "no_spawn_evidence")
+	for _, ev := range mustEvents(t, a, "j") {
+		if ev.Kind == "job.spawned" {
+			t.Fatal("job.spawned adopted while the spawn is in flight")
+		}
+	}
+	for _, body := range h.putBodies {
+		if body["state"] == "spawned" {
+			t.Fatalf("unexpected spawned repair PUT: %v", body)
+		}
+	}
+}
+
+// A spawn whose pane cleanup was refused ends with job.cleanup_pending; that
+// pane is the one still running, and its done is accepted.
+func TestDoneAcceptsBriefReceiptAfterRefusedCleanup(t *testing.T) {
+	a, _, report, result := strictClaimedWithoutReceiptFixture(t)
+	putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
+	putEvent(t, a, "j", "job.cleanup_pending", map[string]any{"reason": "pane_or_resources_unverified"})
+	if err := strictDone(t, a, report, result); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The adopted receipt is not a new claim: a hub revocation stands whether it
+// was written before the adoption or after it.
+func TestAdoptedSpawnReceiptDoesNotClearHubRevocation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		order func(t *testing.T, a *App)
+	}{
+		{"revoked after adoption", func(t *testing.T, a *App) {
+			a2 := adoptFixture(t, a)
+			_ = a2
+			writeHubRevocationRecord(t, a, "j")
+		}},
+		{"revoked before adoption", func(t *testing.T, a *App) {
+			writeHubRevocationRecord(t, a, "j")
+			adoptFixture(t, a)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, _, _ := strictClaimedWithoutReceiptFixture(t)
+			tc.order(t, a)
+			j, err := a.job("j")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !j.Reassigned || !a.hubReassigned(j) {
+				t.Fatal("adoption cleared the hub's revocation")
+			}
+		})
+	}
+}
+
+// adoptFixture records the brief receipt and the spawn's end, then adopts it as
+// `done` would, writing the job.spawned directly.
+func adoptFixture(t *testing.T, a *App) Job {
+	t.Helper()
+	putEvent(t, a, "j", eventBriefSent, briefSentPayload(t, a, "the brief\n"))
+	spawnFailed(t, a)
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := a.briefSentReceipt(j.Events, "j")
+	if receipt == nil {
+		t.Fatal("no receipt to adopt")
+	}
+	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "adopted_from": eventBriefSent})
+	adopted, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return adopted
 }

@@ -47,6 +47,12 @@ func (a *App) adoptBriefSent(ctx context.Context, j Job) (Job, error) {
 		}
 	}
 	receipt["adopted_from"] = eventBriefSent
+	// A revocation is written without this job's locks: read the ledger again
+	// before the write. The adopted receipt cannot clear one (reassignedInLedger),
+	// so a revocation landing after this check still stops every later write.
+	if e := a.refuseReassigned(j); e != nil {
+		return j, e
+	}
 	if e := a.event(ctx, j.ID, "job.spawned", receipt); e != nil {
 		return j, e
 	}
@@ -56,6 +62,9 @@ func (a *App) adoptBriefSent(ctx context.Context, j Job) (Job, error) {
 // briefSentReceipt is the spawn receipt `done` may adopt when the job has no
 // job.spawned event: the newest job.brief_sent of the
 // job's current attempt, accepted only when
+//   - the spawn that sent it has ended in failure (job.spawn_retryable or
+//     job.cleanup_pending after it), so no Spawn is still confirming the brief
+//     and about to write its own job.spawned over a completion,
 //   - no claim, reclaim, loss, revocation or reap came after it, so it belongs
 //     to this attempt's pane and not to an earlier one that was closed, and
 //   - the brief file it names still exists in this job's directory with the
@@ -67,15 +76,21 @@ func (a *App) adoptBriefSent(ctx context.Context, j Job) (Job, error) {
 // event of this kind.
 func (a *App) briefSentReceipt(events []Event, id string) map[string]any {
 	var receipt map[string]any
+	ended := false
 	for _, event := range events {
 		switch event.Kind {
 		case eventBriefSent:
-			receipt = event.Payload
+			receipt, ended = event.Payload, false
+		case "job.spawn_retryable", "job.cleanup_pending":
+			// The spawn's failure path ran to its end (the markers it writes
+			// last). Until then Spawn may still confirm the brief and write its
+			// own job.spawned, and a completion adopted now would be revived by it.
+			ended = receipt != nil
 		case "job.claim", "job.claimed", "job.reclaim", "job.lost", "job.revoked", "job.reaped":
-			receipt = nil
+			receipt, ended = nil, false
 		}
 	}
-	if receipt == nil || str(receipt, "pane_id") == "" {
+	if receipt == nil || !ended || str(receipt, "pane_id") == "" {
 		return nil
 	}
 	path := filepath.Join(a.Jobs, id, "brief-delivered.md")
