@@ -727,6 +727,7 @@ func (client *HubClient) storeWatcherFence(job string, release func()) {
 	if client.closeFences == nil {
 		client.closeFences = map[string]func(){}
 	}
+	delete(client.closeRearmed, job)
 	if old := client.closeFences[job]; old != nil {
 		old()
 	}
@@ -748,6 +749,27 @@ func (client *HubClient) releaseWatcherFence(job string) {
 	}
 }
 
+func (client *HubClient) markWatcherRearmed(job string) {
+	client.closeFenceMu.Lock()
+	defer client.closeFenceMu.Unlock()
+	if client.closeRearmed == nil {
+		client.closeRearmed = map[string]bool{}
+	}
+	client.closeRearmed[job] = true
+}
+
+func (client *HubClient) isWatcherRearmed(job string) bool {
+	client.closeFenceMu.Lock()
+	defer client.closeFenceMu.Unlock()
+	return client.closeRearmed != nil && client.closeRearmed[job]
+}
+
+func (client *HubClient) clearWatcherRearmed(job string) {
+	client.closeFenceMu.Lock()
+	defer client.closeFenceMu.Unlock()
+	delete(client.closeRearmed, job)
+}
+
 // settleHubClose drives one job's hub close one step and reports the step's
 // state. The daemon pass counts a done edge in the ledger's hub_close_settle
 // flow only for a terminal state: a pending state with a nil error (an
@@ -766,9 +788,7 @@ func (client *HubClient) settleHubClose(ctx context.Context, job string) fleet.H
 		slog.Warn("hub close settlement pending", "job", job, "error", err)
 		state = fleet.HubClosePending
 	}
-	if client.holdsWatcherFence(job) {
-		client.reconcileWatcherFence(ctx, job)
-	}
+	client.reconcileWatcherFence(ctx, job)
 	return state
 }
 
@@ -811,12 +831,15 @@ func (client *HubClient) reconcileWatcherFence(ctx context.Context, job string) 
 	if err != nil {
 		return client.holdsWatcherFence(job)
 	}
+	if open {
+		client.clearWatcherRearmed(job)
+	}
 	held := client.holdsWatcherFence(job)
 	if !open {
 		if held {
 			client.releaseWatcherFence(job)
 			rearm = live
-		} else if watcher, err := ledger.Watcher(dir); err == nil && watcher == fleet.HubCloseWatcherNone {
+		} else if watcher, err := ledger.Watcher(dir); err == nil && watcher == fleet.HubCloseWatcherNone && !client.isWatcherRearmed(job) {
 			rearm = live
 		}
 		return true
@@ -838,6 +861,7 @@ func (client *HubClient) reconcileWatcherFence(ctx context.Context, job string) 
 // rearmAfterFence starts the watchers of live jobs that have none, after a
 // fence that may have turned one away was released.
 func (client *HubClient) rearmAfterFence(job string) {
+	client.markWatcherRearmed(job)
 	if client.fenceRearm != nil {
 		client.fenceRearm(job)
 		return
