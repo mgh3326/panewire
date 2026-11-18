@@ -81,7 +81,7 @@ func knownNodeCommandOp(op string) bool {
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
 		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
-		nodeCommandCheckoutSweep:
+		nodeCommandCheckoutSweep, nodeCommandHandoverCheck:
 		return true
 	}
 	return false
@@ -251,6 +251,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneCloseOp:      {"request_id", "job", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed", "end_reason"},
 	nodeCommandPaneCloseStatus:  {"request_id", "job"},
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
+	nodeCommandHandoverCheck:    {"job", "cwd", "origin", "branch"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -369,7 +370,8 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
 	optionalAck := op == nodeCommandPaneCloseStatus && nodeCommandHasFields(raw, append(append([]string(nil), names...), "ack"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck) {
+	optionalHandover := op == nodeCommandPaneCloseOp && nodeCommandHasFields(raw, append(append([]string(nil), names...), "handover"))
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover) {
 		return nil, false
 	}
 	switch op {
@@ -483,6 +485,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandCheckoutSweep:
 		var args nodeCheckoutSweepArgs
 		return args, decodeNodeCommandStrict(raw, &args)
+	case nodeCommandHandoverCheck:
+		var args nodeHandoverCheckArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeHandoverCheckArgs(args)
 	}
 	return nil, false
 }
@@ -609,6 +614,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result nodeCheckoutSweepResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeCheckoutSweepResult(result)
 		target = result
+	case nodeCommandHandoverCheck:
+		var result nodeHandoverCheckResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeHandoverCheckResult(result)
+		target = result
 	}
 	if !valid {
 		return nil, false
@@ -620,11 +629,19 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 // nodeGitCommand builds the invocation every node git call shares: the C locale
 // (so parsed porcelain and error text do not depend on the host) and a wait
 // delay that ends a pipe a git helper still holds.
+// nodeGitLocationEnv are the variables that point git at a repository, index
+// or object store other than the one -C names.
+var nodeGitLocationEnv = map[string]bool{"GIT_DIR": true, "GIT_WORK_TREE": true, "GIT_INDEX_FILE": true, "GIT_OBJECT_DIRECTORY": true,
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true, "GIT_COMMON_DIR": true, "GIT_NAMESPACE": true, "GIT_PREFIX": true}
+
 func nodeGitCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, value := range os.Environ() {
-		if !strings.HasPrefix(value, "LC_ALL=") {
+		name, _, _ := strings.Cut(value, "=")
+		// -C names the repository: an inherited repository-location
+		// variable must not redirect a node command to another one.
+		if name != "LC_ALL" && !nodeGitLocationEnv[name] {
 			env = append(env, value)
 		}
 	}
@@ -976,6 +993,8 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return result, ""
 	case nodeWorktreeListArgs:
 		return nodeWorktreeList(ctx, client.nodeGitRunner(), args)
+	case nodeHandoverCheckArgs:
+		return client.nodeHandoverCheck(ctx, args)
 	case nodeWorktreePrepareArgs:
 		return client.nodeWorktreePrepare(ctx, args)
 	case nodeWorktreeRemoveArgs:
@@ -1118,7 +1137,7 @@ func (client *HubClient) nodePaneMatchInSession(ctx context.Context, session, pa
 // so an idle→working→idle bounce also refuses — leaves only that read-to-
 // close gap, which is no wider than the ssh reap's re-read then close.
 func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseArgs) (any, string) {
-	result, code := client.nodePaneCloseWith(ctx, args, nil)
+	result, code := client.nodePaneCloseWith(ctx, args, nil, nil)
 	if code != "" {
 		return nil, code
 	}
@@ -1129,7 +1148,7 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 // guarded look and the settle, before the final look and `herdr pane close`;
 // an error from it leaves the pane open and answers close_failed. A close operation records its
 // closing state there (node_pane_close_op.go).
-func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneCloseArgs, beforeClose func() error) (nodePaneCloseResult, string) {
+func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneCloseArgs, beforeClose, lastCheck func() error) (nodePaneCloseResult, string) {
 	// A blocked pane may be a worker waiting on an ESC answer, so the node
 	// closes one only when the job's own ledger names the reviewer role; the
 	// operator-credential command path cannot widen that (hk 3315).
@@ -1176,19 +1195,25 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		timer.Stop()
 		return nodePaneCloseResult{}, "herdr_failed"
 	}
-	// The hook runs before the final look, so whatever it costs (a durable
-	// journal write) never widens the gap between that look and the close.
-	if beforeClose != nil {
-		if err := beforeClose(); err != nil {
-			var stop nodeCloseHookStop
-			if errors.As(err, &stop) {
-				if stop.code != "" {
-					return nodePaneCloseResult{}, stop.code
+	// Record the closing state before the final pane look. The separate
+	// hand-over check runs after that look, just before the close.
+	runHook := func(hook func() error) (nodePaneCloseResult, string, bool) {
+		if hook != nil {
+			if err := hook(); err != nil {
+				var stop nodeCloseHookStop
+				if errors.As(err, &stop) {
+					if stop.code != "" {
+						return nodePaneCloseResult{}, stop.code, true
+					}
+					return nodePaneCloseResult{Outcome: stop.outcome}, "", true
 				}
-				return nodePaneCloseResult{Outcome: stop.outcome}, ""
+				return nodePaneCloseResult{}, "journal_failed", true
 			}
-			return nodePaneCloseResult{}, "journal_failed"
 		}
+		return nodePaneCloseResult{}, "", false
+	}
+	if result, code, stop := runHook(beforeClose); stop {
+		return result, code
 	}
 	outcome, second, err := client.nodePaneMatchInSession(ctx, session, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
 	if err != nil {
@@ -1204,9 +1229,8 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	// A pane that asked a question and is idle is waiting for an answer, not
-	// finished. The node decides from its own records here, after the last
-	// read and immediately before the irreversible close, so a question the
-	// watcher has not copied yet still holds the pane.
+	// finished. The node decides from its own records after the last pane
+	// read, so a question the watcher has not copied yet still holds the pane.
 	if args.QuestionJob != "" {
 		if client.jobsInboxRoot == "" {
 			return nodePaneCloseResult{}, "jobs_root_unset"
@@ -1220,6 +1244,11 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		case open:
 			return nodePaneCloseResult{Outcome: nodePaneQuestionOpen}, ""
 		}
+	}
+	// The hand-over's worktree check is the last step before the close: a
+	// write during the final pane and question checks must still be seen.
+	if result, code, stop := runHook(lastCheck); stop {
+		return result, code
 	}
 	if _, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "close", args.PaneID); err != nil {
 		return nodePaneCloseResult{}, "close_failed"

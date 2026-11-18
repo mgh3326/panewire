@@ -170,7 +170,11 @@ func liveExclusions(exclusions []hubSpawnExclusion, now time.Time) []hubSpawnExc
 
 func (s *laneInboxStore) ensureSpawnTasks() error {
 	if s.dialect == laneInboxPostgres {
-		return nil
+		// The schema is migrated; the outboxes still reconcile with the history
+		// at every start (hk 5298).
+		ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
+		defer done()
+		return s.reconcileSpawnOutboxes(ctx)
 	}
 	ctx, done := s.op(s.life)
 	defer done()
@@ -266,7 +270,10 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	if err := s.backfillSpawnTaskFailNotices(ctx, time.Now().UTC()); err != nil {
 		return err
 	}
-	return nil
+	// The placement-record and notice outboxes (hk 5298; postgres: 0028). They
+	// take the startup deadline from the store's life, not what is left of this
+	// call's ordinary one: the reconcile reads the history's owed rows.
+	return s.ensureSpawnOutboxes(s.life)
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
@@ -666,6 +673,9 @@ func queueSpawnNoticeRows(ctx context.Context, s *laneInboxStore, tx *sql.Tx, ta
 	}
 	for _, n := range lanes {
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), n.id, task.Request.RequestID, task.Job, n.lane, raw, now.UnixMilli()); err != nil {
+			return err
+		}
+		if err := s.enqueueSpawnNotice(ctx, tx, n.id); err != nil {
 			return err
 		}
 	}
