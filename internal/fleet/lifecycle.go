@@ -121,6 +121,14 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			return e
 		}
 	}
+	if kind == "done" {
+		// A pane whose submit the node could not confirm (rc 76) wrote no
+		// job.spawned but may have run: its delivered-brief receipt becomes the
+		// spawn receipt before anything is recorded (hk 5174).
+		if j, e = a.adoptBriefSent(ctx, j); e != nil {
+			return e
+		}
+	}
 	recovered := false
 	if readErr != nil {
 		// The file is gone. The newest completion announcing this path names

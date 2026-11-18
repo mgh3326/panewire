@@ -64,7 +64,7 @@ func nodeJobBookkeepingEvent(name string) bool {
 	}
 	switch kind {
 	case "job.claim", "job.reclaim", "job.placement", "job.task_link", "job.duplicate_override",
-		"job.spawn_retryable", "job.spawn_aborted", "job.record_failed", "job.cleanup_pending", "job.cleanup_refused":
+		"job.spawn_retryable", "job.spawn_aborted", "job.record_failed", "job.cleanup_pending", "job.cleanup_refused", "job.brief_sent":
 		return true
 	}
 	return strings.HasPrefix(kind, "lease.") || strings.HasPrefix(kind, "quota_pool.")
