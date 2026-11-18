@@ -18,6 +18,8 @@
 package panewire
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"sync"
@@ -132,15 +134,19 @@ type nodeLoopDayBucket struct {
 // nodeLoopsMu, never by nodeCommandMu, so a ledger call inside a sweep that
 // holds the command lock cannot deadlock it.
 type nodeLoopLedgerState struct {
-	mu   sync.Mutex
-	days map[string]map[nodeLoopMechanism]*nodeLoopDayBucket
+	mu    sync.Mutex
+	epoch string
+	days  map[string]map[nodeLoopMechanism]*nodeLoopDayBucket
 	// silentStreak records the date each silent path last counted on.
 	silentStreak map[string]string
 	lastTick     map[nodeLoopMechanism]time.Time
 }
 
 func newNodeLoopLedgerState() *nodeLoopLedgerState {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
 	return &nodeLoopLedgerState{
+		epoch:        hex.EncodeToString(b),
 		days:         make(map[string]map[nodeLoopMechanism]*nodeLoopDayBucket),
 		silentStreak: make(map[string]string),
 		lastTick:     make(map[nodeLoopMechanism]time.Time),
@@ -288,6 +294,15 @@ func (client *HubClient) nodeLoopSnapshot() map[nodeLoopMechanism]nodeLoopStat {
 	return out
 }
 
+// hubNodeLoopsPayload is the heartbeat's optional loops field: the node's
+// current-day bucket. Absent means the node predates the ledger; the hub
+// shows such a machine as unknown and raises no notice for it.
+type hubNodeLoopsPayload struct {
+	Date  string           `json:"date"`
+	Epoch string           `json:"epoch,omitempty"`
+	Rows  []hubNodeLoopRow `json:"rows"`
+}
+
 // hubNodeLoopRow is one mechanism's current-day counts on the heartbeat. It
 // mirrors loopsRowEntry without the machine: the hub fills that in from the
 // authenticated sender.
@@ -300,15 +315,8 @@ type hubNodeLoopRow struct {
 	Errors         int64  `json:"errors"`
 	SilentErrors   int64  `json:"silent_errors"`
 	LastTick       string `json:"last_tick"`
+	AgeS           int64  `json:"age_s"`
 	OldestPendingS int64  `json:"oldest_pending_s"`
-}
-
-// hubNodeLoopsPayload is the heartbeat's optional loops field: the node's
-// current-day bucket. Absent means the node predates the ledger; the hub
-// shows such a machine as unknown and raises no notice for it.
-type hubNodeLoopsPayload struct {
-	Date string           `json:"date"`
-	Rows []hubNodeLoopRow `json:"rows"`
 }
 
 // nodeLoopsForHeartbeat copies the current UTC date's bucket in mechanism
@@ -335,8 +343,15 @@ func (client *HubClient) nodeLoopsForHeartbeat() *hubNodeLoopsPayload {
 			lastTick = st.lastTick[m]
 		}
 		last := ""
+		ageS := int64(-1)
 		if !lastTick.IsZero() {
 			last = lastTick.UTC().Format(time.RFC3339)
+			diff := now.Sub(lastTick)
+			if diff >= 0 {
+				ageS = int64(diff / time.Second)
+			} else {
+				ageS = 0
+			}
 		}
 		rows = append(rows, hubNodeLoopRow{
 			Mechanism:      string(m),
@@ -347,10 +362,11 @@ func (client *HubClient) nodeLoopsForHeartbeat() *hubNodeLoopsPayload {
 			Errors:         s.Errors,
 			SilentErrors:   s.SilentErrors,
 			LastTick:       last,
+			AgeS:           ageS,
 			OldestPendingS: int64(s.OldestPending / time.Second),
 		})
 	}
-	return &hubNodeLoopsPayload{Date: date, Rows: rows}
+	return &hubNodeLoopsPayload{Date: date, Epoch: st.epoch, Rows: rows}
 }
 
 // nodeLoopMechanismKnown reports whether name is one of the closed node
@@ -373,8 +389,13 @@ func decodeHubNodeLoops(raw json.RawMessage) (*hubNodeLoopsPayload, bool) {
 		return nil, false
 	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || len(fields) != 2 {
+	if json.Unmarshal(raw, &fields) != nil || (len(fields) != 2 && len(fields) != 3) {
 		return nil, false
+	}
+	for name := range fields {
+		if name != "date" && name != "rows" && name != "epoch" {
+			return nil, false
+		}
 	}
 	rawDate, ok := fields["date"]
 	if !ok {
@@ -391,6 +412,12 @@ func decodeHubNodeLoops(raw json.RawMessage) (*hubNodeLoopsPayload, bool) {
 	if parsed, err := time.Parse("2006-01-02", date); err != nil || parsed.Format("2006-01-02") != date {
 		return nil, false
 	}
+	var epoch string
+	if rawEpoch, ok := fields["epoch"]; ok {
+		if json.Unmarshal(rawEpoch, &epoch) != nil {
+			return nil, false
+		}
+	}
 	var rows []map[string]json.RawMessage
 	if json.Unmarshal(rawRows, &rows) != nil || len(rows) == 0 || len(rows) > len(nodeLoopMechanisms) {
 		return nil, false
@@ -398,17 +425,18 @@ func decodeHubNodeLoops(raw json.RawMessage) (*hubNodeLoopsPayload, bool) {
 	seen := make(map[string]bool, len(rows))
 	out := make([]hubNodeLoopRow, 0, len(rows))
 	for _, item := range rows {
-		if len(item) != 9 {
+		if len(item) != 9 && len(item) != 10 {
 			return nil, false
 		}
 		var row hubNodeLoopRow
+		row.AgeS = -1
 		encoded, _ := json.Marshal(item)
 		if json.Unmarshal(encoded, &row) != nil {
 			return nil, false
 		}
 		for name := range item {
 			switch name {
-			case "mechanism", "interval_s", "ticks", "made", "done", "errors", "silent_errors", "last_tick", "oldest_pending_s":
+			case "mechanism", "interval_s", "ticks", "made", "done", "errors", "silent_errors", "last_tick", "oldest_pending_s", "age_s":
 			default:
 				return nil, false
 			}
@@ -417,7 +445,7 @@ func decodeHubNodeLoops(raw json.RawMessage) (*hubNodeLoopsPayload, bool) {
 			return nil, false
 		}
 		seen[row.Mechanism] = true
-		if row.IntervalS < 0 || row.Ticks < 0 || row.Made < 0 || row.Done < 0 || row.Errors < 0 || row.SilentErrors < 0 || row.OldestPendingS < 0 {
+		if row.IntervalS < 0 || row.Ticks < 0 || row.Made < 0 || row.Done < 0 || row.Errors < 0 || row.SilentErrors < 0 || row.OldestPendingS < 0 || row.AgeS < -1 {
 			return nil, false
 		}
 		if row.Ticks > 1<<40 || row.Made > 1<<40 || row.Done > 1<<40 || row.Errors > 1<<40 || row.SilentErrors > 1<<40 {
@@ -430,7 +458,7 @@ func decodeHubNodeLoops(raw json.RawMessage) (*hubNodeLoopsPayload, bool) {
 		}
 		out = append(out, row)
 	}
-	return &hubNodeLoopsPayload{Date: date, Rows: out}, true
+	return &hubNodeLoopsPayload{Date: date, Epoch: epoch, Rows: out}, true
 }
 
 // nodeLoopsForPeer returns the heartbeat's loops field, or nil while the hub

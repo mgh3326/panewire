@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -620,20 +621,166 @@ func (pendingCloseLedger) Settle(context.Context, string) (fleet.HubCloseState, 
 }
 
 // TestSettleHubClosePendingNilErrorCountsNoDone is the fix for review finding
-// 6 (medium): a (HubClosePending, nil) step is still open and must not count
-// a done edge that would balance made and done for a stuck close.
+// 6 (low): ensure terminal-state predicate is used and pending states are not
+// counted as done.
 func TestSettleHubClosePendingNilErrorCountsNoDone(t *testing.T) {
 	client := &HubClient{jobsInboxRoot: t.TempDir(), nodeHubClose: pendingCloseLedger{}}
 	state := client.settleHubClose(context.Background(), "job-1")
-	if state != fleet.HubClosePending {
-		t.Fatalf("settle state=%v, want HubClosePending", state)
+	if hubCloseStateIsTerminal(state) {
+		t.Fatalf("state %v is terminal, want non-terminal", state)
 	}
-	switch state {
-	case fleet.HubCloseNone, fleet.HubCloseSettled, fleet.HubCloseCancelled:
-		client.nodeLoopNoteDone(nodeHubCloseSettle, "job-1")
+	if !hubCloseStateIsTerminal(fleet.HubCloseSettled) || !hubCloseStateIsTerminal(fleet.HubCloseCancelled) || !hubCloseStateIsTerminal(fleet.HubCloseNone) {
+		t.Fatal("terminal states reported non-terminal")
+	}
+	if hubCloseStateIsTerminal(fleet.HubClosePending) {
+		t.Fatal("HubClosePending reported terminal")
 	}
 	if snap := client.nodeLoopSnapshot()[nodeHubCloseSettle]; snap.Done != 0 {
 		t.Fatalf("done=%d, want 0", snap.Done)
+	}
+}
+
+type errorCloseLedger struct {
+	nodeFleetHubClose
+	reconciled atomic.Int32
+}
+
+func (e *errorCloseLedger) LockEnd(context.Context, string) (func(), error) {
+	return func() {}, nil
+}
+func (e *errorCloseLedger) FenceState(string) (bool, bool, error) {
+	e.reconciled.Add(1)
+	return false, false, nil
+}
+func (e *errorCloseLedger) Settle(context.Context, string) (fleet.HubCloseState, error) {
+	return fleet.HubClosePending, errors.New("settle simulated error")
+}
+
+// TestSettleHubCloseErrorReconcilesWatcherFence is the fix for review finding
+// 2 (medium): reconcileWatcherFence must still run when Settle returns an error.
+func TestSettleHubCloseErrorReconcilesWatcherFence(t *testing.T) {
+	ledger := &errorCloseLedger{}
+	client := &HubClient{jobsInboxRoot: t.TempDir(), nodeHubClose: ledger}
+	state := client.settleHubClose(context.Background(), "job-1")
+	if state != fleet.HubClosePending {
+		t.Fatalf("state=%v, want HubClosePending", state)
+	}
+	if count := ledger.reconciled.Load(); count != 2 {
+		t.Fatalf("FenceState called %d times, want 2 (fence reconcile skipped on Settle error)", count)
+	}
+}
+
+// TestNodeLoopsRestartAccumulatesDayCounts is the fix for review finding 1
+// (medium): a node restart accumulates earlier counts within the day across
+// epochs instead of dropping them.
+func TestNodeLoopsRestartAccumulatesDayCounts(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	for _, m := range loopMechanisms {
+		hub.loopTick(m)
+	}
+	epoch1 := &hubNodeLoopsPayload{Date: "2026-11-18", Epoch: "epoch-1", Rows: []hubNodeLoopRow{
+		{Mechanism: string(nodeSpawnSettle), Ticks: 5, SilentErrors: 1},
+	}}
+	hub.observeNodeLoops("machine-a", epoch1, now)
+
+	now = time.Date(2026, 11, 18, 14, 0, 0, 0, time.UTC)
+	epoch2 := &hubNodeLoopsPayload{Date: "2026-11-18", Epoch: "epoch-2", Rows: []hubNodeLoopRow{
+		{Mechanism: string(nodeSpawnSettle), Ticks: 3, SilentErrors: 0},
+	}}
+	hub.observeNodeLoops("machine-a", epoch2, now)
+
+	var body string
+	hub.loopsDocPublish = func(_ context.Context, _, b string) error { body = b; return nil }
+	hub.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return false, nil }
+	now = time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
+	hub.maybeWriteLoopsRow(ctx)
+
+	var doc loopsRowDoc
+	if err := json.Unmarshal([]byte(body), &doc); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range doc.Rows {
+		if row.Machine == "machine-a" && row.Mechanism == string(nodeSpawnSettle) {
+			found = true
+			if row.Ticks != 8 || row.SilentErrors != 1 {
+				t.Fatalf("row ticks=%d silent_errors=%d, want 8 and 1", row.Ticks, row.SilentErrors)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("spawn_settle row missing")
+	}
+}
+
+// TestNodeLoopsNoReportRetiresAfterSevenDays is the fix for review finding 4
+// (low): machines silent for 7 or more consecutive days stop generating
+// daily no_report notices.
+func TestNodeLoopsNoReportRetiresAfterSevenDays(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	hub.observeNodeLoops("retiring-node", nil, now)
+	for _, m := range loopMechanisms {
+		hub.loopTick(m)
+	}
+
+	hub.loopsDocPublish = func(context.Context, string, string) error { return nil }
+	hub.loopsDocExists = func(context.Context, string) (bool, error) { return false, nil }
+
+	for day := 2; day <= 10; day++ {
+		now = time.Date(2026, 11, day, 0, 1, 0, 0, time.UTC)
+		for _, m := range loopMechanisms {
+			hub.loopTick(m)
+		}
+		hub.maybeWriteLoopsRow(ctx)
+		if day == 2 {
+			continue // day 1 had a heartbeat, so no no_report notice
+		}
+		dateStr := fmt.Sprintf("2026-11-%02d", day-1)
+		sent := hub.loopNoticeAlreadySent("retiring-node", "no_report", dateStr)
+		if day <= 9 {
+			if !sent {
+				t.Fatalf("no_report notice not sent for day %s", dateStr)
+			}
+		} else {
+			if sent {
+				t.Fatalf("no_report notice sent after 7 consecutive days for day %s", dateStr)
+			}
+		}
+	}
+}
+
+// TestNodeLoopsClockSkewDoesNotTripStaleNotice is the fix for review finding
+// 5 (low): node clock skew does not trip false stale notices because age is
+// computed on receipt time plus node AgeS.
+func TestNodeLoopsClockSkewDoesNotTripStaleNotice(t *testing.T) {
+	hubNow := time.Date(2026, 11, 18, 12, 30, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &hubNow, nil)
+
+	// Node clock is 20 minutes behind hub (12:10), but just ticked 10 seconds ago (AgeS = 10).
+	nodePayload := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-1",
+		Rows: []hubNodeLoopRow{
+			{
+				Mechanism: string(nodeTaskPaneSweep),
+				IntervalS: 300,
+				LastTick:  "2026-11-18T12:09:50Z",
+				AgeS:      10,
+				Ticks:     1,
+			},
+		},
+	}
+	hub.observeNodeLoops("skewed-node", nodePayload, hubNow)
+
+	hits := hub.nodeLoopNoticeHits(hubNow.Add(15 * time.Second))
+	for _, hit := range hits {
+		if hit.Machine == "skewed-node" && strings.Contains(hit.Reason, "last_tick older") {
+			t.Fatalf("false stale notice tripped by clock skew: %+v", hit)
+		}
 	}
 }
 

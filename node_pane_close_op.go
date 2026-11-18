@@ -753,10 +753,22 @@ func (client *HubClient) settleHubClose(ctx context.Context, job string) fleet.H
 	state, err := client.hubCloseLedger().Settle(ctx, job)
 	if err != nil {
 		slog.Warn("hub close settlement pending", "job", job, "error", err)
-		return fleet.HubClosePending
+		state = fleet.HubClosePending
 	}
 	client.reconcileWatcherFence(ctx, job)
 	return state
+}
+
+// hubCloseStateIsTerminal reports whether a HubCloseState is terminal: only
+// terminal states count as a done edge in the hub_close_settle flow. A
+// pending state (even with a nil error) means settlement is still open.
+func hubCloseStateIsTerminal(state fleet.HubCloseState) bool {
+	switch state {
+	case fleet.HubCloseNone, fleet.HubCloseSettled, fleet.HubCloseCancelled:
+		return true
+	default:
+		return false
+	}
 }
 
 // reconcileWatcherFence makes the node's fence on the job's watch lock match
@@ -879,9 +891,10 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 		}
 		client.nodeLoopClearSilent("node_pane_close_op.go:pendingHubCloseJobs")
 		open = jobs
-		// Flow edges: one item per job with an open hub-close intent. A job
-		// enters when the pass lists it; a settled close exits.
-		for _, job := range jobs {
+		visited := unionJobs(jobs, client.fencedJobs())
+		// Flow edges: one item per job with an open hub-close intent or fence.
+		// A job enters when the pass visits it; a settled or released close exits.
+		for _, job := range visited {
 			client.nodeLoopNoteMade(nodeHubCloseSettle, job)
 		}
 		// Each step is bounded and runs outside the node's acting lock: the
@@ -890,7 +903,7 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 		var running sync.WaitGroup
 		defer running.Wait()
 		slots := make(chan struct{}, hubCloseSettleConcurrency)
-		for _, job := range unionJobs(jobs, client.fencedJobs()) {
+		for _, job := range visited {
 			select {
 			case slots <- struct{}{}:
 			case <-ctx.Done():
@@ -905,8 +918,7 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 				// A done edge needs a terminal state: HubClosePending with a
 				// nil error is still open, and counting it would balance made
 				// and done for a stuck close.
-				switch client.settleHubClose(step, job) {
-				case fleet.HubCloseNone, fleet.HubCloseSettled, fleet.HubCloseCancelled:
+				if hubCloseStateIsTerminal(client.settleHubClose(step, job)) {
 					client.nodeLoopNoteDone(nodeHubCloseSettle, job)
 				}
 			}(job)
