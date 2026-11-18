@@ -1194,7 +1194,7 @@ A completed hk job also settles a request past its deadline (hk 5267): when the
 job record reads `completed` with a pane, the request's node host, and the
 request's task identity (its `--task`, or for a `--parent-job` request a
 `parent_job` naming that parent; a task id at or past 2^53 is refused, since
-the record's number may be rounded), and its `completed_at` is at or after the
+the record's number may be rounded), and its `ended_at` is at or after the
 request's creation (job ids are reusable; a missing stamp refuses), the hub settles the request `succeeded` at the next probe
 (`settleCompletedSpawn`), without a node connection. A landing receipt that
 never reached the hub is therefore not required. Then a correcting `SPAWNED`

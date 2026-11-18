@@ -338,7 +338,7 @@ func (c *completedJobStore) Get(ctx context.Context, id string) (map[string]any,
 // completedJobRecord is hk's record of the stranded job once it finished on
 // machine-a, pane w9:p4, under the request's task 42.
 func completedJobRecord(host string) map[string]any {
-	return map[string]any{"state": "completed", "completed_at": time.Now().UTC().Format(time.RFC3339Nano), "host": host, "pane_id": "w9:p4", "label": "test-job", "profile": "codex-sol", "model": "codex-sol-model", "task_id": 42}
+	return map[string]any{"state": "completed", "ended_at": time.Now().UTC().Format(time.RFC3339Nano), "host": host, "pane_id": "w9:p4", "label": "test-job", "profile": "codex-sol", "model": "codex-sol-model", "task_id": 42}
 }
 
 // useJobStore points the stranded hub's spawn app at store.
@@ -609,10 +609,10 @@ func TestStrandedCompletedJobUnsafeTaskIDRefuses_5267(t *testing.T) {
 func TestStrandedCompletedJobCompletionTimeGuards_5267(t *testing.T) {
 	cases := map[string]func(map[string]any, time.Time){
 		"completed before the request": func(r map[string]any, created time.Time) {
-			r["completed_at"] = created.Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+			r["ended_at"] = created.Add(-time.Hour).UTC().Format(time.RFC3339Nano)
 		},
-		"no completion time":          func(r map[string]any, _ time.Time) { delete(r, "completed_at") },
-		"unparseable completion time": func(r map[string]any, _ time.Time) { r["completed_at"] = "yesterday" },
+		"no completion time":          func(r map[string]any, _ time.Time) { delete(r, "ended_at") },
+		"unparseable completion time": func(r map[string]any, _ time.Time) { r["ended_at"] = "yesterday" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

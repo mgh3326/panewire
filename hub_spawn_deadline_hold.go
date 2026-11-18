@@ -130,10 +130,12 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	return true
 }
 
-// spawnRecordCompletedSince reports whether the record's completion stamp is
-// at or after created. A missing or unparseable stamp reports false.
+// spawnRecordCompletedSince reports whether the record's ended_at, the stamp
+// hk keeps for the completed transition (docs/config.md, "Job records in
+// handoffkeep"), is at or after created. A missing or unparseable stamp reports
+// false.
 func spawnRecordCompletedSince(record map[string]any, created time.Time) bool {
-	at, err := time.Parse(time.RFC3339Nano, spawnRecordString(record, "completed_at"))
+	at, err := time.Parse(time.RFC3339Nano, spawnRecordString(record, "ended_at"))
 	return err == nil && !at.Before(created)
 }
 
