@@ -303,3 +303,29 @@ func TestPlacementTraceKeepsFreshSkipOfExpiredRefusalHost_t5214(t *testing.T) {
 	}
 	t.Fatal("fresh skip of the host was dropped from the trace")
 }
+
+// A carried-over row the engine wrote itself (hub_spawn_disabled here) is not
+// the row an expired refusal wrote, so it stays when the host drops out of the
+// current pass (mergewake finding, hk 5214).
+func TestPlacementTracePrunesOnlyRowsAnExpiredRefusalWrote_t5214(t *testing.T) {
+	now := time.UnixMilli(1_700_000_000_000)
+	previous := fleet.PlacementTrace{Source: "auto", Candidates: []fleet.PlacementCandidateRecord{
+		{Host: "laptop", Outcome: "skipped", Reason: "hub_spawn_disabled"},
+		{Host: "desk", Outcome: "skipped", Reason: "hub_checkout_refused:dirty_retry_in_60s"},
+	}}
+	exclusions := []hubSpawnExclusion{
+		{Machine: "laptop", Reason: "checkout_refused:dirty", ExpiresMS: now.Add(-time.Second).UnixMilli()},
+		{Machine: "desk", Reason: "checkout_refused:dirty", ExpiresMS: now.Add(-time.Second).UnixMilli()},
+	}
+	trace := continueSpawnPlacementTrace(previous, fleet.PlacementTrace{}, exclusions, now)
+	rows := map[string]fleet.PlacementCandidateRecord{}
+	for _, candidate := range trace.Candidates {
+		rows[candidate.Host] = candidate
+	}
+	if got, ok := rows["laptop"]; !ok || got.Reason != "hub_spawn_disabled" {
+		t.Fatalf("engine's own skip was pruned with the expired refusal: %+v", got)
+	}
+	if _, listed := rows["desk"]; listed {
+		t.Fatalf("expired refusal's own row is still listed: %+v", rows["desk"])
+	}
+}

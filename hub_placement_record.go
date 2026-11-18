@@ -69,6 +69,28 @@ func (s *laneInboxStore) spawnPlacementSnapshot(parent context.Context, requestI
 	return []byte(raw), delivery, marked == 1, err
 }
 
+// refusalSkipCode is the candidate reason the hub writes for a refusal of
+// reason: the hub_ prefix, the engine's spawn_failed prefix dropped, and the
+// code form.
+func refusalSkipCode(reason string) string {
+	return fleetevent.Code(fleetevent.Redact("hub_" + strings.TrimPrefix(reason, "spawn_failed:")))
+}
+
+// wroteExpiredRefusal reports whether candidate's skip reason is one an expired
+// exclusion of its host wrote, with or without the remaining-time suffix.
+func wroteExpiredRefusal(candidate fleet.PlacementCandidateRecord, exclusions []hubSpawnExclusion, now time.Time) bool {
+	for _, excluded := range exclusions {
+		if excluded.Machine != candidate.Host || excluded.liveAt(now) {
+			continue
+		}
+		code := refusalSkipCode(excluded.Reason)
+		if candidate.Reason == code || strings.HasPrefix(candidate.Reason, code+"_retry_in_") {
+			return true
+		}
+	}
+	return false
+}
+
 // continueSpawnPlacementTrace carries the original decision and its candidates
 // into a later placement pass. A claimed-host retry is forced internally, but
 // the request's original auto decision must not become a forced placement in hk.
@@ -81,21 +103,18 @@ func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusi
 	if current.Repo == "" {
 		current.Repo = previous.Repo
 	}
-	// An earlier pass's hub skip of a host whose refusals have all expired is no
-	// longer a skip: the host is placed again, so its carried-over row goes (hk
-	// 5214). A row no exclusion of this request explains is kept as it was. The
-	// prune runs on the carry-over only, so a row this pass evaluated itself stays.
+	// A carried-over row an expired refusal wrote is no longer a skip: the host
+	// is placed again, so the row goes (hk 5214). Only that refusal's own row
+	// goes; an engine skip of the same host, or any row no expired exclusion
+	// wrote, is kept as it was. The prune runs on the carry-over only, so a row
+	// this pass evaluated itself stays.
 	live := liveExclusions(exclusions, now)
 	liveHosts := make(map[string]bool, len(live))
 	for _, excluded := range live {
 		liveHosts[excluded.Machine] = true
 	}
-	refused := make(map[string]bool, len(exclusions))
-	for _, excluded := range exclusions {
-		refused[excluded.Machine] = true
-	}
 	candidates := slices.DeleteFunc(append([]fleet.PlacementCandidateRecord(nil), previous.Candidates...), func(candidate fleet.PlacementCandidateRecord) bool {
-		return candidate.Outcome == "skipped" && strings.HasPrefix(candidate.Reason, "hub_") && refused[candidate.Host] && !liveHosts[candidate.Host]
+		return candidate.Outcome == "skipped" && !liveHosts[candidate.Host] && wroteExpiredRefusal(candidate, exclusions, now)
 	})
 	positions := make(map[string]int, len(candidates))
 	for i, candidate := range candidates {
@@ -119,14 +138,14 @@ func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusi
 			positions[excluded.Machine] = i
 			candidates = append(candidates, fleet.PlacementCandidateRecord{Host: excluded.Machine})
 		}
-		reason := "hub_" + strings.TrimPrefix(excluded.Reason, "spawn_failed:")
+		reason := refusalSkipCode(excluded.Reason)
 		if excluded.ExpiresMS != 0 {
 			// A bounded refusal shows how long it still holds (hk 5214).
 			seconds := max(0, (excluded.ExpiresMS-now.UnixMilli()+999)/1000)
 			reason += "_retry_in_" + strconv.FormatInt(seconds, 10) + "s"
 		}
 		candidates[i].Outcome = "skipped"
-		candidates[i].Reason = fleetevent.Code(fleetevent.Redact(reason))
+		candidates[i].Reason = reason
 	}
 	current.Candidates = candidates
 	if current.Record != nil {
