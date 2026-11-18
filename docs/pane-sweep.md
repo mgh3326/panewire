@@ -78,12 +78,14 @@ live again. A lost implementer ends only when its `job.lost` announces a quota
 hand-over — the replacement works a new pane; any other loss keeps the pane.
 
 A task-derived end, and a completed author (implementer READY), waits while its
-worktree is on an open PR. The sweep reads the worktree HEAD and its branch tip
-on origin, then the task's handoffkeep changes. A matching open PR is logged as
-`reason=open_pr`; an unreadable worktree, origin or change list is
-`reason=pr_state_unknown`. A completed fix author's task is its parent's; if a
-named parent cannot resolve to a task, its pane stays with the owner. A task's
-change list is read at most once per pass.
+worktree is on an open PR. The sweep reads the task's handoffkeep changes: if
+the task has no open PR (an empty change list or all PRs merged), nothing waits
+and the close goes ahead without inspecting git (hk 4962). When an open PR exists,
+the sweep reads the worktree HEAD and its branch tip on origin; a matching open PR is
+logged as `reason=open_pr`. An unreadable change list, or an unreadable
+worktree or origin while an open PR exists, is `reason=pr_state_unknown`. A completed
+fix author's task is its parent's; if a named parent cannot resolve to a task,
+its pane stays with the owner. A task's change list is read at most once per pass.
 
 A `--keep` pane closes a day after its end (operator decision 268): an
 implementer's task-derived end counts, and an open PR or a live task does not
