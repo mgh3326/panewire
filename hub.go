@@ -604,9 +604,14 @@ type HubServer struct {
 	poolCooling                    map[string]time.Time
 	poolSweep                      poolSweepState
 	// accountCreditMarks holds the provider credit rejections read on one
-	// account (hk 5138); accountCreditOnce loads them from the hub store.
+	// account (hk 5138). accountCreditLoadMu guards the one-time (retrying)
+	// load from the hub store, accountCreditLoaded marks a successful read,
+	// and accountCreditRead is a test seam for that read.
 	accountCreditMarks               map[string]accountCreditMark
-	accountCreditOnce                sync.Once
+	accountCreditLoadMu              sync.Mutex
+	accountCreditLoaded              bool
+	accountCreditLoadFailed          bool
+	accountCreditRead                func(context.Context) (map[string]accountCreditMark, error)
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int

@@ -1,6 +1,8 @@
 package panewire
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -208,5 +210,31 @@ func TestCommandcodeAccountHandoverRetriesAfterFailure(t *testing.T) {
 		if result := f.hub.sweepPoolJob(t.Context(), e, task); result.action != poolJobSkipped || result.why != "handover_failed" {
 			t.Fatalf("pass %d = %+v, want skipped/handover_failed so the job is released and retried", pass, result)
 		}
+	}
+}
+
+// hk 5138 review: a failed first read of the durable marks is retried, so a
+// busy store at hub start cannot leave every mark unserved for the process.
+func TestAccountCreditMarkLoadRetriesAfterFailure(t *testing.T) {
+	f := newSweepFixture(t)
+	at := f.hub.now()
+	mark := accountCreditMark{Account: ccMarkAccountA, Pool: "commandcode", Marked: at}
+	if err := f.hub.inbox.store.putAccountCreditMark(t.Context(), mark.Account, mark); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	f.hub.accountCreditRead = func(ctx context.Context) (map[string]accountCreditMark, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("store busy")
+		}
+		return f.hub.inbox.store.accountCreditMarks(ctx)
+	}
+	if marks := f.hub.snapshotAccountCreditMarks(at); len(marks) != 0 {
+		t.Fatalf("a failed load served marks: %+v", marks)
+	}
+	marks := f.hub.snapshotAccountCreditMarks(at)
+	if _, ok := marks[ccMarkAccountA]; !ok || calls != 2 {
+		t.Fatalf("retry marks=%+v calls=%d, want %s after a second read", marks, calls, ccMarkAccountA)
 	}
 }

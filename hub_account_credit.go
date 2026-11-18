@@ -21,23 +21,47 @@ import (
 //     whichever comes first.
 const accountCreditMarkPool = "commandcode"
 
-// loadAccountCreditMarks reads the durable marks once per hub process.
-func (h *HubServer) loadAccountCreditMarks() {
+// ensureAccountCreditMarks loads the durable marks on first use and retries
+// after a failed read (a busy store at hub start must not leave every mark
+// unserved for the process lifetime). A successful load merges into memory,
+// keeping any newer mark this process already wrote.
+func (h *HubServer) ensureAccountCreditMarks() {
 	if h.inbox == nil {
+		return
+	}
+	h.accountCreditLoadMu.Lock()
+	defer h.accountCreditLoadMu.Unlock()
+	if h.accountCreditLoaded {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	marks, err := h.inbox.store.accountCreditMarks(ctx)
+	read := h.accountCreditRead
+	if read == nil {
+		read = h.inbox.store.accountCreditMarks
+	}
+	marks, err := read(ctx)
 	if err != nil {
-		h.logger.Warn("account credit marks could not be read", "error", err)
+		if !h.accountCreditLoadFailed {
+			h.logger.Warn("account credit marks could not be read; retrying", "error", err)
+			h.accountCreditLoadFailed = true
+		} else {
+			h.logger.Debug("account credit marks still unreadable", "error", err)
+		}
 		return
 	}
+	h.accountCreditLoadFailed = false
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.accountCreditMarks == nil {
-		h.accountCreditMarks = marks
+		h.accountCreditMarks = map[string]accountCreditMark{}
 	}
+	for account, mark := range marks {
+		if current, held := h.accountCreditMarks[account]; !held || mark.Marked.After(current.Marked) {
+			h.accountCreditMarks[account] = mark
+		}
+	}
+	h.accountCreditLoaded = true
 }
 
 // accountCreditMarkActive reports whether account's mark still holds at now:
@@ -70,7 +94,7 @@ func (h *HubServer) accountCreditMarkActive(account string, mark accountCreditMa
 // already holds is left as it is, so repeated passes do not extend its TTL; a
 // mark that lifted starts a new episode with the new time.
 func (h *HubServer) markAccountCreditExhausted(pool, account string, at time.Time) error {
-	h.accountCreditOnce.Do(h.loadAccountCreditMarks)
+	h.ensureAccountCreditMarks()
 	at = at.UTC()
 	h.mu.Lock()
 	prior, found := h.accountCreditMarks[account]
@@ -102,7 +126,7 @@ func (h *HubServer) accountCreditMarkHeld(account string, now time.Time) bool {
 	if account == "" {
 		return false
 	}
-	h.accountCreditOnce.Do(h.loadAccountCreditMarks)
+	h.ensureAccountCreditMarks()
 	h.mu.Lock()
 	mark, found := h.accountCreditMarks[account]
 	h.mu.Unlock()
@@ -140,7 +164,7 @@ func (h *HubServer) handOffAccountCreditStopped(ctx context.Context, task hubSpa
 // fleet snapshot, dropping (and durably forgetting) the lifted ones so a hub
 // restart cannot read them as holding again.
 func (h *HubServer) snapshotAccountCreditMarks(now time.Time) map[string]time.Time {
-	h.accountCreditOnce.Do(h.loadAccountCreditMarks)
+	h.ensureAccountCreditMarks()
 	h.mu.Lock()
 	var active map[string]time.Time
 	var lifted []accountCreditMark
