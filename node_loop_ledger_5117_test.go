@@ -818,3 +818,223 @@ func TestNodeCheckoutRevisitSkipsLiveCheckouts(t *testing.T) {
 		t.Fatalf("live checkouts made=%d, want 0", snap.Made)
 	}
 }
+
+// TestNodeLoopsMultiEpochDeterministicNewestProcessState verifies that two
+// epochs with different oldest_pending_s / interval_s produce the newest
+// epoch's values deterministically.
+func TestNodeLoopsMultiEpochDeterministicNewestProcessState(t *testing.T) {
+	hubNow := time.Date(2026, 11, 18, 14, 0, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &hubNow, nil)
+
+	p1 := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-1",
+		Rows: []hubNodeLoopRow{
+			{
+				Mechanism:      string(nodeTaskPaneSweep),
+				IntervalS:      300,
+				OldestPendingS: 120,
+				Ticks:          5,
+			},
+		},
+	}
+	p2 := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-2",
+		Rows: []hubNodeLoopRow{
+			{
+				Mechanism:      string(nodeTaskPaneSweep),
+				IntervalS:      600,
+				OldestPendingS: 30,
+				Ticks:          2,
+			},
+		},
+	}
+	// Deliver epoch-1 at 12:00, epoch-2 at 13:00.
+	hub.observeNodeLoops("node-a", p1, time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC))
+	hub.observeNodeLoops("node-a", p2, time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC))
+
+	st := hub.loopLedger()
+	st.mu.Lock()
+	rows := hub.nodeLoopsRowsLocked(st, "2026-11-18")
+	st.mu.Unlock()
+
+	if len(rows) != 1 {
+		t.Fatalf("rows count = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.IntervalS != 600 || row.OldestPendingS != 30 {
+		t.Fatalf("row interval=%d oldest_pending=%d, want 600 and 30 (from newest epoch)", row.IntervalS, row.OldestPendingS)
+	}
+	if row.Ticks != 7 {
+		t.Fatalf("row ticks=%d, want 7 (summed across epochs)", row.Ticks)
+	}
+}
+
+// TestNodeLoopsMultiEpochWedgedNewestFiresStaleNotice verifies that a wedged
+// newest epoch (age 3600, interval 300) fires the stale rule even though an
+// older epoch reported fresh age 0.
+func TestNodeLoopsMultiEpochWedgedNewestFiresStaleNotice(t *testing.T) {
+	hubNow := time.Date(2026, 11, 18, 14, 0, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &hubNow, nil)
+
+	p1 := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-1",
+		Rows: []hubNodeLoopRow{
+			{
+				Mechanism: string(nodeTaskPaneSweep),
+				IntervalS: 300,
+				AgeS:      0,
+				Ticks:     10,
+			},
+		},
+	}
+	// Epoch 2 wedged: last ticked 3600s ago.
+	p2 := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-2",
+		Rows: []hubNodeLoopRow{
+			{
+				Mechanism: string(nodeTaskPaneSweep),
+				IntervalS: 300,
+				AgeS:      3600,
+				Ticks:     1,
+			},
+		},
+	}
+	hub.observeNodeLoops("node-a", p1, time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC))
+	hub.observeNodeLoops("node-a", p2, time.Date(2026, 11, 18, 14, 0, 0, 0, time.UTC))
+
+	hits := hub.nodeLoopNoticeHits(hubNow)
+	staleFound := false
+	for _, hit := range hits {
+		if hit.Machine == "node-a" && hit.Mechanism == loopMechanism(nodeTaskPaneSweep) && strings.Contains(hit.Reason, "last_tick older") {
+			staleFound = true
+		}
+	}
+	if !staleFound {
+		t.Fatalf("wedged newest epoch did not fire stale notice: hits=%+v", hits)
+	}
+}
+
+// TestNodeLoopsMultiEpochMadeDoneFromNewestNotSummed verifies that two epochs
+// each with made=20, done=1 produce made=20, not 40, preventing false progress notices.
+func TestNodeLoopsMultiEpochMadeDoneFromNewestNotSummed(t *testing.T) {
+	hubNow := time.Date(2026, 11, 18, 14, 0, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &hubNow, nil)
+
+	p1 := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-1",
+		Rows: []hubNodeLoopRow{
+			{
+				Mechanism: string(nodeWorktreeFlow),
+				IntervalS: 86400,
+				Made:      20,
+				Done:      1,
+				Ticks:     1,
+			},
+		},
+	}
+	p2 := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-2",
+		Rows: []hubNodeLoopRow{
+			{
+				Mechanism: string(nodeWorktreeFlow),
+				IntervalS: 86400,
+				Made:      20,
+				Done:      1,
+				Ticks:     1,
+			},
+		},
+	}
+	hub.observeNodeLoops("node-a", p1, time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC))
+	hub.observeNodeLoops("node-a", p2, time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC))
+
+	st := hub.loopLedger()
+	st.mu.Lock()
+	rows := hub.nodeLoopsRowsLocked(st, "2026-11-18")
+	st.mu.Unlock()
+
+	if len(rows) != 1 {
+		t.Fatalf("rows count = %d, want 1", len(rows))
+	}
+	if rows[0].Made != 20 || rows[0].Done != 1 {
+		t.Fatalf("made=%d done=%d, want 20 and 1 (from newest epoch, not summed)", rows[0].Made, rows[0].Done)
+	}
+}
+
+// TestNodeLoopsReportAfterDateWrittenDropped verifies that a report arriving
+// for date D after date D has been written is dropped and not left behind in nodeReports.
+func TestNodeLoopsReportAfterDateWrittenDropped(t *testing.T) {
+	now := time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &now, nil)
+	hub.loopsDocPublish = func(context.Context, string, string) error { return nil }
+	hub.loopsDocExists = func(context.Context, string) (bool, error) { return false, nil }
+	ctx := context.Background()
+
+	// Initial report for D (2026-11-18) arrives before write.
+	p1 := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-1",
+		Rows: []hubNodeLoopRow{
+			{Mechanism: string(nodeTaskPaneSweep), IntervalS: 300, Ticks: 1},
+		},
+	}
+	hub.observeNodeLoops("node-a", p1, time.Date(2026, 11, 18, 23, 50, 0, 0, time.UTC))
+
+	// Write date D at midnight.
+	for _, m := range loopMechanisms {
+		hub.loopTick(m)
+	}
+	hub.maybeWriteLoopsRow(ctx)
+
+	// Late report for D arrives after D was written.
+	p2 := &hubNodeLoopsPayload{
+		Date:  "2026-11-18",
+		Epoch: "epoch-2",
+		Rows: []hubNodeLoopRow{
+			{Mechanism: string(nodeTaskPaneSweep), IntervalS: 300, Ticks: 2},
+		},
+	}
+	hub.observeNodeLoops("node-a", p2, time.Date(2026, 11, 19, 0, 5, 0, 0, time.UTC))
+
+	st := hub.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if _, exists := st.nodeReports["node-a"]["2026-11-18"]; exists {
+		t.Fatalf("report for already-written date 2026-11-18 was stored in nodeReports")
+	}
+}
+
+// TestNodeLoopsPrunesPastDaysOnRollover verifies that when date rolls over,
+// bucketFor deletes earlier dates from s.days so only today's bucket remains.
+func TestNodeLoopsPrunesPastDaysOnRollover(t *testing.T) {
+	d1 := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	client := &HubClient{now: func() time.Time { return d1 }}
+	client.nodeLoopTick(nodeTaskPaneSweep)
+
+	st := client.nodeLoopLedger()
+	st.mu.Lock()
+	if len(st.days) != 1 || st.days["2026-11-18"] == nil {
+		st.mu.Unlock()
+		t.Fatalf("expected day 2026-11-18 in days: %+v", st.days)
+	}
+	st.mu.Unlock()
+
+	// Roll over to next day.
+	d2 := time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
+	client.now = func() time.Time { return d2 }
+	client.nodeLoopTick(nodeTaskPaneSweep)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.days) != 1 || st.days["2026-11-19"] == nil {
+		t.Fatalf("expected only day 2026-11-19 in days after rollover: %+v", st.days)
+	}
+	if _, exists := st.days["2026-11-18"]; exists {
+		t.Fatalf("earlier day 2026-11-18 was not pruned on rollover")
+	}
+}

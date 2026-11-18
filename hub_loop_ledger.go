@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -187,6 +188,9 @@ type loopLedgerState struct {
 	// machine|mechanism|date. The hub's own notices keep the shorter
 	// mechanism|date key in noticeSent.
 	nodeNoticeSent map[string]string
+	// nodeRowsWrittenThrough records the latest date whose daily row and prune
+	// have completed. Reports for that date or earlier are dropped.
+	nodeRowsWrittenThrough string
 }
 
 // nodeLoopReport is one node's latest heartbeat ledger bucket. Rows reuse
@@ -530,7 +534,7 @@ func (h *HubServer) nodeLoopsRowsLocked(st *loopLedgerState, date string) []loop
 	for _, machine := range machines {
 		byEpoch := st.nodeReports[machine][date]
 		if len(byEpoch) > 0 {
-			rows, _, _ := mergeNodeEpochRows(machine, byEpoch)
+			rows, _ := mergeNodeEpochRows(machine, byEpoch)
 			out = append(out, rows...)
 			continue
 		}
@@ -541,42 +545,50 @@ func (h *HubServer) nodeLoopsRowsLocked(st *loopLedgerState, date string) []loop
 
 // mergeNodeEpochRows combines reports from multiple process epochs of the same
 // node on the same date, so node restarts accumulate counts instead of dropping
-// earlier activity.
-func mergeNodeEpochRows(machine string, byEpoch map[string]nodeLoopReport) ([]loopsRowEntry, map[string]int64, time.Time) {
-	if len(byEpoch) == 1 {
-		for _, rep := range byEpoch {
-			return rep.Rows, rep.Ages, rep.Received
+// earlier activity. The newest epoch supplies the process state (made, done,
+// interval_s, oldest_pending_s, last_tick, age_s) while event counts (ticks,
+// errors, silent_errors) are summed across all epochs.
+func mergeNodeEpochRows(machine string, byEpoch map[string]nodeLoopReport) ([]loopsRowEntry, map[string]time.Time) {
+	type epochEntry struct {
+		id  string
+		rep nodeLoopReport
+	}
+	epochs := make([]epochEntry, 0, len(byEpoch))
+	for id, rep := range byEpoch {
+		epochs = append(epochs, epochEntry{id: id, rep: rep})
+	}
+	sort.Slice(epochs, func(i, j int) bool {
+		if !epochs[i].rep.Received.Equal(epochs[j].rep.Received) {
+			return epochs[i].rep.Received.Before(epochs[j].rep.Received)
+		}
+		return epochs[i].id < epochs[j].id
+	})
+
+	newest := epochs[len(epochs)-1].rep
+	apparentTicks := make(map[string]time.Time, len(newest.Rows))
+	if newest.Ages != nil {
+		for _, r := range newest.Rows {
+			if ageS, ok := newest.Ages[r.Mechanism]; ok && ageS >= 0 {
+				apparentTicks[r.Mechanism] = newest.Received.Add(-time.Duration(ageS) * time.Second)
+			}
 		}
 	}
-	merged := make(map[string]*loopsRowEntry)
-	ages := make(map[string]int64)
-	var latestReceived time.Time
-	for _, rep := range byEpoch {
-		if rep.Received.After(latestReceived) {
-			latestReceived = rep.Received
-		}
-		for _, r := range rep.Rows {
-			e := merged[r.Mechanism]
-			if e == nil {
-				cp := r
-				merged[r.Mechanism] = &cp
-				if rep.Ages != nil {
-					ages[r.Mechanism] = rep.Ages[r.Mechanism]
-				}
-				continue
-			}
-			e.Ticks += r.Ticks
-			e.Made += r.Made
-			e.Done += r.Done
-			e.Errors += r.Errors
-			e.SilentErrors += r.SilentErrors
-			if r.LastTick > e.LastTick {
-				e.LastTick = r.LastTick
-			}
-			if rep.Ages != nil && rep.Ages[r.Mechanism] >= 0 {
-				if cur, ok := ages[r.Mechanism]; !ok || cur < 0 || rep.Ages[r.Mechanism] < cur {
-					ages[r.Mechanism] = rep.Ages[r.Mechanism]
-				}
+
+	if len(epochs) == 1 {
+		return newest.Rows, apparentTicks
+	}
+
+	merged := make(map[string]*loopsRowEntry, len(newest.Rows))
+	for _, r := range newest.Rows {
+		cp := r
+		merged[r.Mechanism] = &cp
+	}
+	for _, e := range epochs[:len(epochs)-1] {
+		for _, r := range e.rep.Rows {
+			if target := merged[r.Mechanism]; target != nil {
+				target.Ticks += r.Ticks
+				target.Errors += r.Errors
+				target.SilentErrors += r.SilentErrors
 			}
 		}
 	}
@@ -585,7 +597,7 @@ func mergeNodeEpochRows(machine string, byEpoch map[string]nodeLoopReport) ([]lo
 		out = append(out, *e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Mechanism < out[j].Mechanism })
-	return out, ages, latestReceived
+	return out, apparentTicks
 }
 
 // loopsRowKey names the hk document for a UTC date.
@@ -684,6 +696,9 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 		st.mu.Lock()
 		delete(st.days, date)
 		h.pruneNodeLoopDayLocked(st, date)
+		if st.nodeRowsWrittenThrough < date {
+			st.nodeRowsWrittenThrough = date
+		}
 		st.mu.Unlock()
 	}
 }
@@ -870,15 +885,23 @@ func (h *HubServer) observeNodeLoops(machineID string, loops *hubNodeLoopsPayloa
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	reportDate := loopDateOf(received)
+	if loops != nil {
+		reportDate = loops.Date
+	}
+	if st.nodeRowsWrittenThrough != "" && reportDate <= st.nodeRowsWrittenThrough {
+		slog.Debug("dropping node loop report for already written date", "machine", machineID, "date", reportDate, "written_through", st.nodeRowsWrittenThrough)
+		return
+	}
 	if st.nodeHbDays[machineID] == nil {
 		st.nodeHbDays[machineID] = make(map[string]bool)
 	}
-	st.nodeHbDays[machineID][loopDateOf(received)] = true
+	st.nodeHbDays[machineID][reportDate] = true
 	st.nodeConsecutiveNoReport[machineID] = 0
 	// A heartbeat alone opens the date: a day with node reports but no hub
 	// tick yet still writes one document at midnight.
-	if st.days[loopDateOf(received)] == nil {
-		st.days[loopDateOf(received)] = make(map[loopMechanism]*loopDayBucket)
+	if st.days[reportDate] == nil {
+		st.days[reportDate] = make(map[loopMechanism]*loopDayBucket)
 	}
 	if _, ok := st.nodeFirstSeen[machineID]; !ok {
 		st.nodeFirstSeen[machineID] = received
@@ -922,13 +945,12 @@ func (h *HubServer) nodeLoopNoticeHits(now time.Time) []loopNoticeHit {
 		if !ok || len(byEpoch) == 0 {
 			continue
 		}
-		rows, ages, received := mergeNodeEpochRows(machine, byEpoch)
+		rows, apparentTicks := mergeNodeEpochRows(machine, byEpoch)
 		for _, row := range rows {
 			interval := time.Duration(row.IntervalS) * time.Second
 			if interval > 0 {
-				ageS, hasAge := ages[row.Mechanism]
-				if hasAge && ageS >= 0 {
-					apparentAge := time.Duration(ageS)*time.Second + now.Sub(received)
+				if apparentTick, ok := apparentTicks[row.Mechanism]; ok {
+					apparentAge := now.Sub(apparentTick)
 					if apparentAge > loopStaleIntervals*interval {
 						hits = append(hits, loopNoticeHit{Machine: machine, Mechanism: loopMechanism(row.Mechanism), Reason: fmt.Sprintf("last_tick older than %d intervals", loopStaleIntervals)})
 					}

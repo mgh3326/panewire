@@ -146,6 +146,9 @@ one row set per machine in machine-id order. A node that was disconnected
 for the whole day writes no row. One document per date still holds when node
 rows arrive late in the day: reports buffer in memory and merge at the
 midnight write, and an already written document is never rewritten.
+A node restart keeps the day's ticks, errors and silent errors across process
+epochs; made, done and oldest_pending restart with the process, as the hub's
+own ledger does on a hub restart.
 
 An older node sends heartbeats with no `loops` field. Its row reads
 `mechanism: "unknown"`, with no ticks and no counts — never zeros, which

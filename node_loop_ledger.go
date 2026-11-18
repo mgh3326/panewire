@@ -163,6 +163,11 @@ func (client *HubClient) nodeLoopLedger() *nodeLoopLedgerState {
 }
 
 func (s *nodeLoopLedgerState) bucketFor(date string, m nodeLoopMechanism) *nodeLoopDayBucket {
+	for d := range s.days {
+		if d < date {
+			delete(s.days, d)
+		}
+	}
 	byDate, ok := s.days[date]
 	if !ok {
 		byDate = make(map[nodeLoopMechanism]*nodeLoopDayBucket)
@@ -330,6 +335,11 @@ func (client *HubClient) nodeLoopsForHeartbeat() *hubNodeLoopsPayload {
 	st := client.nodeLoopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	for d := range st.days {
+		if d < date {
+			delete(st.days, d)
+		}
+	}
 	rows := make([]hubNodeLoopRow, 0, len(nodeLoopMechanisms))
 	for _, m := range nodeLoopMechanisms {
 		var s nodeLoopStat
