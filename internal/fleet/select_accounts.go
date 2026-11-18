@@ -414,6 +414,34 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 		}
 	} else {
 		if c.row.Pool == "commandcode" {
+			// A configured mark source that did not answer refuses the account
+			// (fail closed): placing it could seat a job on a spent account.
+			if p.accountMarksUnknown {
+				c.reason, c.code, c.outcome = "credit_mark_unknown", outcomeQuotaUnknown, "dropped:credit_mark_unknown"
+				c.tier = -1
+				return
+			}
+			// A credit stop keeps this account off placement while the pool's
+			// other accounts stay candidates (hk 5138). A reading below one
+			// credit refuses the account whatever the mark says (decision 403).
+			// A mark holds until a reading *observed after it* reports credits:
+			// the store caches readings, so the balance at hand can predate the
+			// rejection and must not lift the mark. A reading with no balance
+			// says nothing, so the mark holds.
+			if v.Balance != nil && *v.Balance < 1 {
+				c.reason = fmt.Sprintf("credit_exhausted balance=%g", *v.Balance)
+				c.code, c.outcome = outcomeQuotaExhausted, "dropped:"+c.reason
+				c.tier = -1
+				return
+			}
+			if at, held := p.creditExhaustedAccount(c.accountKey); held {
+				if v.Balance == nil || !c.measuredAt.After(at) {
+					c.reason = fmt.Sprintf("credit_exhausted account=%s", c.accountKey)
+					c.code, c.outcome = outcomeQuotaExhausted, "dropped:credit_exhausted account="+c.accountKey
+					c.tier, c.creditSince = -1, at
+					return
+				}
+			}
 			cutoff := p.poolCutoff(c.row.Pool)
 			if v.Blocking != nil && *v.Blocking >= cutoff {
 				c.reason = fmt.Sprintf("window_exhausted cutoff=%g", cutoff)
@@ -464,6 +492,17 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	if c.reason != "" {
 		c.outcome = "dropped:" + c.reason
 	}
+}
+
+// creditExhaustedAccount reports the hub's provider credit mark on key while
+// it holds: the hub lifts it at the first reading taken after the mark, and
+// this side lifts it after AccountCreditMarkTTL at the latest.
+func (p *selPlan) creditExhaustedAccount(key string) (time.Time, bool) {
+	at, held := p.accountCredit[key]
+	if !held || key == "" || !p.at.Before(at.Add(AccountCreditMarkTTL)) {
+		return time.Time{}, false
+	}
+	return at.UTC(), true
 }
 
 // freeLimitHeld reports a free-tier reading at its limit: the shared bucket is

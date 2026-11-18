@@ -156,7 +156,12 @@ type App struct {
 	// once. New sets QuotaStopHandOffGrace.
 	QuotaHandOffGrace time.Duration
 	State             FleetStateReader
-	fleetLog          *fleetStateLog
+	// AccountCreditMarks reads the hub's durable provider credit marks
+	// (commandcode, hk 5138), in addition to the fleet snapshot. Nil reads the
+	// hub endpoint with the [hub] operator credential; an error fails closed
+	// for commandcode accounts (credit_mark_unknown).
+	AccountCreditMarks func(context.Context) (map[string]time.Time, error)
+	fleetLog           *fleetStateLog
 	// Version is the build line `panewire --version` prints, compared with the
 	// remote hosts' by the preflight.
 	Version string

@@ -42,8 +42,14 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 	if !validNodeEndReason(endReason) || !validNodePaneName(label) || !nodeCommandPaneIDPattern.MatchString(task.Outcome.Pane) || !validLaneReference(owner) {
 		return errors.New("invalid close target")
 	}
+	text := fmt.Sprintf("Pool %s is exhausted; job %s ended. Respawn it on another pool.", exhaustion.Pool, task.Job)
+	if exhaustion.accountCredit() {
+		// Only a provider credit rejection speaks about the account's credits;
+		// a free-limit or window exhaustion also names an account.
+		text = fmt.Sprintf("Account %s has no provider credit left; job %s ended. Respawn it on another account.", exhaustion.Account, task.Job)
+	}
 	action := poolAction{ID: id, Job: task.Job, Phase: poolActionPending, Data: poolActionData{
-		Owner: owner, Text: fmt.Sprintf("Pool %s is exhausted; job %s ended. Respawn it on another pool.", exhaustion.Pool, task.Job),
+		Owner: owner, Text: text,
 		SpawnRequest: task.Request.RequestID, Pane: task.Outcome.Pane, Label: label, EndReason: endReason,
 	}}
 	// The per-job lock also guards reassignment; mu is needed only to take the

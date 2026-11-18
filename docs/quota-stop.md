@@ -81,8 +81,9 @@ ten minutes over the pools live jobs are placed on:
   refused, so a notice never rests on a day-old row set. A pool the catalog does
   not list at all fires nothing.
 - **Credit exhausted.** The pane of a live job on the pool shows the provider's
-  own credit rejection: Anthropic's "Your credit balance is too low" or
-  OpenAI's `insufficient_quota` / "You exceeded your current quota". The hub
+  own credit rejection: Anthropic's "Your credit balance is too low", OpenAI's
+  `insufficient_quota` / "You exceeded your current quota", or Command Code's
+  "You have insufficient credits to make this request". The hub
   reads the pane's visible tail through its node (`pane.read`, the reader the
   quota-stop manager uses) and applies the quota-stop activity rule
   (`internal/quotastop`), so the same words quoted by a later answer are not a
@@ -91,11 +92,30 @@ ten minutes over the pools live jobs are placed on:
   (hk 4982, the 2026-11-17 anthropic-api stop the trigger read every ten
   minutes and did not fire on). The rejection must name the job's own pool.
 
-Neither cause names an account or a reset: it fires per pool, and every live
-job on the pool gets the one notice below, whose text names what ran out. A
-cause is held until the pool comes back — a catalog row un-retired — after
-which both of the pool's triggers re-arm and a repeat is logged as new. While a
-cause is held, later passes still notify jobs that were placed after it fired.
+The retired cause and the anthropic-api / openai-api credit causes name no
+account and no reset: they fire per pool, and every live job on the pool gets
+the one notice below, whose text names what ran out. A pool cause is held until
+the pool comes back — a catalog row un-retired — after which both of the pool's
+triggers re-arm and a repeat is logged as new. While a cause is held, later
+passes still notify jobs that were placed after it fired.
+
+**Command Code is scoped to the account (hk 5138).** That pool holds several
+accounts per host and fleet-wide, so its rejection marks only the job's
+recorded `account_key`, never the pool. The mark is stored in the hub database
+(both the SQLite and Postgres schemas), served to selection in the fleet
+snapshot, and skipped there with reason `credit_exhausted account=<key>` — the
+path a 7d-exhausted account takes, leaving the pool's other accounts placeable.
+It lifts at the first quota reading of that account observed after the mark
+that reports at least one remaining credit (a fresh omp report), because a
+reading below one credit is still exhausted; a reading with no balance says
+nothing, so the mark then holds until 24 h, whichever comes first. Selection
+also drops any mark past 24 h, and refuses an account whose reading reports
+fewer than one credit even without a mark (`credit_exhausted balance=<n>`,
+decision 403). A job whose placement record has no account marks nothing rather
+than the pool. An implementer on the marked account is handed over
+through the quota-stop flow's successor (`hub_quota_replace.go`), and that
+successor excludes no pool: the mark keeps it off the spent account while the
+other accounts stay usable.
 
 For an implementer, or a reviewer or consult on a node that does not advertise
 close operations, the hub records a `lane.event` asking the owner to hand the

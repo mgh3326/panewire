@@ -111,6 +111,10 @@ type PoolView struct {
 	// a pool without one. Selection drops a free rung as free_limit while it
 	// reads exhausted with a reset still ahead.
 	Free *shared.FreeBucket
+	// Balance is a credit pool's remaining provider credits as the reading
+	// reports them (commandcode's amount.remaining, decision 403). Nil is
+	// unknown; selection refuses an account below one credit.
+	Balance *float64
 	// Groups is the view of each metering group of a reading that has only
 	// group-scoped windows (agy), by group name. Each group view ranks on that
 	// group's longest window of a day or more. The

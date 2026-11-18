@@ -67,6 +67,10 @@ type Observation struct {
 	// It is accepted since handoffkeep c8cf75f4 ("Accept additive free_bucket on
 	// shared quota observations", hk 2334, #96).
 	FreeBucket *FreeBucket `json:"free_bucket,omitempty"`
+	// Balance is a credit pool's remaining provider credits when the reading
+	// carries one (commandcode's `commandcode:balance`, decision 403, hk 5138).
+	// Nil is unknown, never zero.
+	Balance *float64 `json:"balance,omitempty"`
 }
 
 // Latest is the store's answer for one account; Observation is nil when none

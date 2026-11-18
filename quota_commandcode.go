@@ -122,7 +122,7 @@ func (s *nativeQuotaSource) refreshCommandcode(ctx context.Context) ([]shared.Re
 	}
 	if !direct {
 		s.flowOnce.Do(func() {
-			s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(shared.OtherFreshTTL), HostID: s.HostID, Wait: s.Wait}
+			s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(shared.OtherFreshTTL), HostID: s.HostID, Wait: s.Wait, Warn: quotaFlowWarn(s.Warn)}
 		})
 	}
 	stale := quota.Fail(quota.ErrKindProbe, "omp usage report is stale")

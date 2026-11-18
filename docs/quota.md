@@ -147,9 +147,15 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
   API 읽기에서 "rolling이라 pace 불가"로 표시하던 규칙(hk 4330)은 이 source에는 적용하지
   않습니다. 7d는 다른 구독 pool의 7일 window와 똑같이 pace합니다. 5h reset은 0 사용일 때
   omp가 생략할 수 있고, 그러면 reset 없는 bucket입니다.
-- **No month, no balance.** 30일 window와 credit balance는 읽지도, 투영하지도, gate하지도
-  않습니다. `commandcode:balance`는 무시합니다. 크레딧이 떨어진 계정은 pane에서 실패하며 그것을
-  받아들입니다 (decision 289). `commandcode_required_window_missing:30d` 규칙
+- **No month; balance gates below 1 credit (decision 403).** 30일 window는 읽지도,
+  투영하지도, gate하지도 않습니다. `commandcode:balance`의 `amount.remaining`(credits)은
+  reading에 `balance`로 담고, 1 credit 미만이면 그 계정을 gate와 selection에서
+  `credit_exhausted balance=<n>`으로 거부합니다. 값이 없거나 깨진 balance는 0이 아니라
+  unknown이라 아무것도 gate하지 않습니다. pane에는 그대로 실패할 수 있고(decision 289),
+  그 pane rejection은 account 단위 mark로 placement에서 빠집니다 (hk 5138; 아래 Selection).
+  `balance`는 shared observation의 additive field입니다: publishing하는 node보다 store가
+  먼저 이 field를 받아들여야 합니다(`free_bucket`과 같은 조건, "Store requirement" 참고).
+  `commandcode_required_window_missing:30d` 규칙
   (decision/2026-11-06/commandcode-30d-required-in-panewire-gate)은 이 pool에서 폐기되었습니다.
   gate가 요구하는 window는 `5h`와 `7d`뿐이고, 둘 중 하나가 없는 reading은
   `commandcode_required_window_missing:<window>`로 unmeasurable입니다.
@@ -197,7 +203,10 @@ harness가 omp이고, omp는 자기 login(여러 계정일 수 있음)으로 쓰
     fresh로 유지해도 30분 안에 placement에서 빠지고, 30분 넘게 잠든 host는 깨어나 announce하면 다시
     묶입니다); 다른 pool은 지금처럼 가장 최근 key
     하나입니다. 계정마다 binding과 candidate가 따로이고 자기 window로 판정합니다. 한 계정이
-    소진(또는 cutoff 90)이거나 75% 이상 주간 한도 바쁨(`account_busy_near_weekly_limit`)이면 그 계정만 drop되고, **한 계정이라도 room이 있으면 pool은 usable**,
+    소진(또는 cutoff 90)이거나, reading의 `balance`가 1 credit 미만
+    (`credit_exhausted balance=<n>`, decision 403)이거나, pane에서 credit rejection을 읽어
+    남은 account mark가 있거나(`credit_exhausted account=<key>`, hk 5138), 75% 이상 주간 한도
+    바쁨(`account_busy_near_weekly_limit`)이면 그 계정만 drop되고, **한 계정이라도 room이 있으면 pool은 usable**,
     모두 소진이면 pool은 drop됩니다. 정렬은 다른 구독 pool의 7일 window와 같은 규칙입니다: 주가
     사용 안 된 채 끝날 위험(waste risk)이 큰 계정이 먼저, 그렇지 않으면 room이 많은 계정.
   - **Which account omp uses.** omp는 세션을 시작할 때 계정을 자기 usage ranking으로 고르고
@@ -217,7 +226,7 @@ OAuth 계정만 resolve하므로 API-key 계정인 Command Code에는 "no OAuth 
   uses its own login, and its stderr (which can name an account) is discarded.
 - **Plan and status.** `panewire quota status`는 이 호스트가 아는 계정마다 pool/window 행을
   보여 주며 FRESHNESS 열에 omp report의 나이(`fresh 2m`)가 붙습니다. `panewire plan`은 계정마다
-  `account commandcode:<fp> host=<h> 5h=<x>% 7d=<y>% age=<n>` 줄을 출력하며 거부된 계정은 거부 사유(`window_exhausted cutoff=90` 또는 `account_busy_near_weekly_limit account=… job=…`)를 덧붙이고, candidate outcome에도 이유가 기록됩니다. `panewire quota refresh commandcode`는 계정마다 JSON 한 줄을
+  `account commandcode:<fp> host=<h> 5h=<x>% 7d=<y>% age=<n>` 줄을 출력하며 거부된 계정은 거부 사유(`window_exhausted cutoff=90`, `credit_exhausted balance=<n>`, `credit_exhausted account=<key>` 또는 `account_busy_near_weekly_limit account=… job=…`)를 덧붙이고, candidate outcome에도 이유가 기록됩니다. `panewire quota refresh commandcode`는 계정마다 JSON 한 줄을
   출력합니다.
 
 ## Native measurement: devin

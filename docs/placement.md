@@ -129,6 +129,14 @@ Selection and `plan` show `credit_exhausted` and its `since` time. The shared
 store keeps the close across a hub restart and when `/v1/state` is unavailable.
 If the shared store cannot be read, admission fails closed.
 
+A commandcode account is scoped the same way but kept by the hub, not the
+shared manual store (hk 5138): a pane credit rejection marks only that
+account, and the fleet snapshot carries the mark to every host's selection.
+The account drops `credit_exhausted account=<key>` (with `since`) until the
+mark lifts, or `credit_exhausted balance=<n>` while its own reading reports
+fewer than one remaining credit (decision 403). The pool's other accounts stay
+candidates. See [quota-stop.md](quota-stop.md), "An exhausted pool".
+
 ### Pool concurrency cap
 
 `[quota].pool_max_concurrent = { "openai-api" = 2 }` limits live spawns on a pool,
