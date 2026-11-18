@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -263,7 +264,11 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 	}
 	if !valid {
 		logReap("invalid_request")
-		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		refusal := map[string]string{"error": "invalid_request"}
+		if reason := nodeCommandRefusal(body.Op, body.Args); reason != "" {
+			refusal["reason"] = reason
+		}
+		writeJSON(writer, http.StatusBadRequest, refusal)
 		return
 	}
 	if access := h.authorizeNodeCommand(request, body.Op, machine); access != hubAccessGranted {
@@ -445,4 +450,52 @@ func (h *HubServer) releaseClosedPaneLanes(machine string, args any, result hubN
 		return
 	}
 	h.releasePaneLanes(machine, closeArgs.PaneID, commandStart)
+}
+
+func nodeCommandRefusal(op string, raw json.RawMessage) string {
+	if op == nodeCommandWorktreeRemove {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) == nil && fields != nil {
+			if dispRaw, ok := fields["disposable"]; ok {
+				var entries []any
+				if json.Unmarshal(dispRaw, &entries) == nil {
+					for idx, item := range entries {
+						str, ok := item.(string)
+						if !ok {
+							return fmt.Sprintf("disposable entry %d (index %d) is not a string", idx+1, idx)
+						}
+						if ref := nodeDisposableEntryRefusal(idx, str); ref != "" {
+							return ref
+						}
+					}
+					if len(entries) > 16 {
+						return fmt.Sprintf("disposable carries %d entries (entry 17, index 16 exceeds limit of 16); the limit is 16", len(entries))
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func nodeDisposableEntryRefusal(index int, entry string) string {
+	if entry == "" {
+		return fmt.Sprintf("disposable entry %d (index %d) is empty", index+1, index)
+	}
+	if len(entry) > 255 {
+		return fmt.Sprintf("disposable entry %d (index %d) is longer than 255 bytes", index+1, index)
+	}
+	if strings.Contains(entry, "/") {
+		return fmt.Sprintf("disposable entry %d (index %d) contains '/'", index+1, index)
+	}
+	if strings.ContainsAny(entry, "*?[") {
+		return fmt.Sprintf("disposable entry %d (index %d) contains glob characters", index+1, index)
+	}
+	if entry == "." || entry == ".." {
+		return fmt.Sprintf("disposable entry %d (index %d) is %q", index+1, index, entry)
+	}
+	if hasControlByte(entry) {
+		return fmt.Sprintf("disposable entry %d (index %d) contains control characters", index+1, index)
+	}
+	return ""
 }

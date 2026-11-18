@@ -240,6 +240,10 @@ func fleetQuotaFromReading(pool string, reading shared.Reading, now time.Time) (
 		}
 		quotaValue.Buckets = append(quotaValue.Buckets, out)
 	}
+	if reading.Balance != nil {
+		balance := *reading.Balance
+		quotaValue.Balance = &balance
+	}
 	if reading.Free != nil {
 		free := &FleetStateFree{State: reading.Free.State}
 		if reading.Free.ResetsAt != nil {

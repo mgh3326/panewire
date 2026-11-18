@@ -906,3 +906,46 @@ func TestLaneInboxStorePostgresUpgradeAfterOlder0011AddsStartBy_t4612(t *testing
 		t.Fatalf("upgraded database lacks spawn_attempt_start_by: %v", err)
 	}
 }
+
+// hk 5138: the commandcode account credit mark is durable in both dialects, a
+// later mark replaces an earlier one, and a lifted mark is gone after reopen.
+func TestLaneInboxStoreContractAccountCreditMarks_t5138(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		at := time.UnixMilli(1_700_000_000_000).UTC()
+		first := accountCreditMark{Account: "commandcode:7d279b7dcc317cda", Pool: "commandcode", Marked: at}
+		if err := s.putAccountCreditMark(t.Context(), first.Account, first); err != nil {
+			t.Fatal(err)
+		}
+		reopened := open()
+		marks, err := reopened.accountCreditMarks(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := marks[first.Account]; !ok || !got.Marked.Equal(at) || got.Pool != "commandcode" {
+			t.Fatalf("marks after reopen = %+v, want %s at %v", marks, first.Account, at)
+		}
+
+		later := accountCreditMark{Account: first.Account, Pool: "commandcode", Marked: at.Add(time.Hour)}
+		if err := reopened.putAccountCreditMark(t.Context(), later.Account, later); err != nil {
+			t.Fatal(err)
+		}
+		if marks, err = reopened.accountCreditMarks(t.Context()); err != nil || !marks[first.Account].Marked.Equal(later.Marked) {
+			t.Fatalf("replaced mark = %+v, %v; want %v", marks, err, later.Marked)
+		}
+
+		// The delete names the marked time: a newer episode keeps its row.
+		if err := reopened.deleteAccountCreditMark(t.Context(), later.Account, at); err != nil {
+			t.Fatal(err)
+		}
+		if marks, err = reopened.accountCreditMarks(t.Context()); err != nil || !marks[later.Account].Marked.Equal(later.Marked) {
+			t.Fatalf("a stale delete dropped the new mark: %+v, %v", marks, err)
+		}
+		if err := reopened.deleteAccountCreditMark(t.Context(), later.Account, later.Marked); err != nil {
+			t.Fatal(err)
+		}
+		if marks, err = open().accountCreditMarks(t.Context()); err != nil || len(marks) != 0 {
+			t.Fatalf("marks after delete = %+v, %v; want none", marks, err)
+		}
+	})
+}

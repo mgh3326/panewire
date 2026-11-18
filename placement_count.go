@@ -251,6 +251,7 @@ func (h *HubServer) completeSpawn(ctx context.Context, task hubSpawnTask, outcom
 		if spawnAttemptTerminal(status) {
 			if status == "succeeded" {
 				h.noteMissingPlacementSnapshot(ctx, task)
+				go h.maybeSupersedeParent(task)
 			}
 			if !h.wakePlacementRecords() {
 				h.deliverPlacementRecord(h.closeCtx, task.Request.RequestID, task.Attempt)

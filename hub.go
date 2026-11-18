@@ -555,6 +555,17 @@ type HubServer struct {
 	waitingMu         sync.Mutex
 	waitingCheckedAt  time.Time
 	waitingReadFailed bool
+	// spawnTaskFailMu guards the spawn-failure task comment's once-per-streak
+	// post failure log and its per-row retry counts (hub_spawn_task_fail.go).
+	// The next attempt itself lives on the operation (task_fail_retry_ms), so
+	// the sweep's due filter and restarts both respect it.
+	// spawnTaskFailBackoffBase is the first retry delay for a row hk did not
+	// take; zero is the default. It doubles per consecutive failure to a
+	// 10-minute cap.
+	spawnTaskFailMu          sync.Mutex
+	spawnTaskFailWarned      bool
+	spawnTaskFailBackoffBase time.Duration
+	spawnTaskFailFails       map[string]int
 	// parkNoticeMu guards the parked-request owner notice's poll time and its
 	// candidate cursor (hub_spawn_park_notice.go).
 	parkNoticeMu        sync.Mutex
@@ -581,35 +592,51 @@ type HubServer struct {
 	// constructor succeeds and Close releases it.
 	logFile *os.File
 
-	mu                               sync.Mutex
-	nodes                            map[string]*hubNodeRecord
-	lastNotes                        map[string]*HubLastNote
-	subscribers                      map[*hubEventSubscriber]struct{}
-	alerts                           map[string]*hubAlertState
-	unknownMessages                  uint64
-	unfencedCompletions              uint64
-	startedAt                        time.Time
-	uiAllowCFOnly                    bool
-	cfAccess                         *hubCFAccessVerifier
-	uiEvents                         []hubUIEvent
-	jobs                             map[string]*hubJobRecord
-	pendingRevocations               map[string]map[string]hubJobRevokedEvent
-	placementPolicyPath              string
-	placementPolicy                  PlacementPolicy
-	placementPolicyModTime           time.Time
-	placementPolicyObservedModTime   time.Time
-	placementPolicyLoaded            bool
-	placementPolicyStatus            string
-	placementPolicyLastFailure       string
-	routeHits                        hubRouteHits
-	prometheusURL                    string
-	prometheusClient                 *http.Client
-	prometheusBearer                 string
-	prometheusBasicUser              string
-	prometheusBasicPass              string
-	placementCache                   placementCache
-	poolCooling                      map[string]time.Time
-	poolSweep                        poolSweepState
+	mu                             sync.Mutex
+	nodes                          map[string]*hubNodeRecord
+	lastNotes                      map[string]*HubLastNote
+	subscribers                    map[*hubEventSubscriber]struct{}
+	alerts                         map[string]*hubAlertState
+	unknownMessages                uint64
+	unfencedCompletions            uint64
+	startedAt                      time.Time
+	uiAllowCFOnly                  bool
+	cfAccess                       *hubCFAccessVerifier
+	uiEvents                       []hubUIEvent
+	jobs                           map[string]*hubJobRecord
+	pendingRevocations             map[string]map[string]hubJobRevokedEvent
+	placementPolicyPath            string
+	placementPolicy                PlacementPolicy
+	placementPolicyModTime         time.Time
+	placementPolicyObservedModTime time.Time
+	placementPolicyLoaded          bool
+	placementPolicyStatus          string
+	placementPolicyLastFailure     string
+	routeHits                      hubRouteHits
+	prometheusURL                  string
+	prometheusClient               *http.Client
+	prometheusBearer               string
+	prometheusBasicUser            string
+	prometheusBasicPass            string
+	placementCache                 placementCache
+	poolCooling                    map[string]time.Time
+	poolSweep                      poolSweepState
+	// accountCreditMarks holds the provider credit rejections read on one
+	// account (hk 5138). accountCreditLoadMu guards the one-time (retrying)
+	// load from the hub store, accountCreditLoaded marks a successful read,
+	// and accountCreditRead is a test seam for that read.
+	accountCreditMarks      map[string]accountCreditMark
+	accountCreditLoadMu     sync.Mutex
+	accountCreditLoaded     bool
+	accountCreditLoadFailed bool
+	accountCreditLoadErr    error
+	accountCreditRetryAt    time.Time
+	accountCreditLoadRetry  time.Duration
+	accountCreditRead       func(context.Context) (map[string]accountCreditMark, error)
+	accountCreditDelete     func(context.Context, string, time.Time) error
+	// accountCreditPending holds lifted marks whose durable delete failed; it
+	// is retried without making the mark active again (hk 5138 review).
+	accountCreditPending             []accountCreditMark
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -672,6 +699,20 @@ type HubServer struct {
 	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
 	// reads each hk record once while the job stays in its window.
 	reviewerEndSettled map[string]bool
+	// supersededParents records a parent job a landed successor replaced but
+	// whose pane was still working: parent job id to its deferred close. The
+	// hub closes each entry at the first sweep where its pane is no longer
+	// working, through the jobs-close reap path. Guarded by mu.
+	supersededParents map[string]supersededEntry
+	// supersededChecked names the hub jobs whose hk record the deferred
+	// rebuild already read once. A job is checked on the first sweep that
+	// sees it live, so parents that appear after a restart (their nodes
+	// report later) are still re-armed. Guarded by mu.
+	supersededChecked map[string]bool
+	// supersededSweepMu keeps at most one deferred-parent pass in flight;
+	// the Sweep ticker never waits out a hung node (see
+	// startSupersededSweep).
+	supersededSweepMu  sync.Mutex
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool
@@ -957,6 +998,18 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		_ = hub.inbox.store.close()
 		return nil, err
 	}
+	if hub.handoffkeep == nil && hub.inbox != nil {
+		// No hk client to post through: rows already terminal never post, so
+		// enabling hk later posts only failures that turn final afterwards.
+		// This runs while the hub is still single-threaded, so the judged
+		// set is exactly the pre-start backlog — never a row that turns
+		// final later.
+		if judged, err := hub.inbox.store.judgeSpawnTaskFailBacklog(context.Background(), hub.now().UTC()); err != nil {
+			hub.logger.Warn("hub spawn task comment backlog not judged", "error", err)
+		} else if judged > 0 {
+			hub.logger.Info("hub spawn task comment backlog judged without posting: no hk client", "rows", judged)
+		}
+	}
 	return hub, nil
 }
 
@@ -1034,6 +1087,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
+	mux.HandleFunc("GET /v1/state/account-credit", h.handleAccountCreditMarks)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/mine", h.handleMyJobs)
 	mux.HandleFunc("POST /v1/jobs/reap", h.handleJobReap)
@@ -2664,6 +2718,7 @@ func (h *HubServer) Sweep() {
 	h.startFleetLoadPublish(now)
 	h.logRouteHits(now)
 	h.sweepOrphanedJobs(now)
+	h.startSupersededSweep()
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)

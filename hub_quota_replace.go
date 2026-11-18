@@ -137,7 +137,19 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude
 			pools = append(pools, p)
 		}
 	}
-	setArg("--exclude-pool", strings.Join(append(pools, exclude), ","))
+	if exclude != "" {
+		pools = append(pools, exclude)
+	}
+	if len(pools) > 0 {
+		setArg("--exclude-pool", strings.Join(pools, ","))
+	} else if hubSpawnArg(next.Args, "--exclude-pool") != "" {
+		for i := 0; i+1 < len(next.Args); i++ {
+			if next.Args[i] == "--exclude-pool" {
+				next.Args = slices.Delete(next.Args, i, i+2)
+				break
+			}
+		}
+	}
 	if next.Repository.Checkout != nil {
 		checkout := *next.Repository.Checkout
 		next.Repository.Checkout = &checkout
@@ -233,6 +245,12 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	exclude := pool
 	if stopPool, _ := quotaStopReasonFields(event.Reason); stopPool != "" && spawnargs.ValuePattern.MatchString(stopPool) {
 		exclude = fleet.BandKey(stopPool)
+	}
+	if quotaStopReasonAccount(event.Reason) != "" {
+		// An account-scoped stop says one account ran out, not the pool: the
+		// successor must be able to take the pool's other accounts, and the
+		// durable account mark keeps it off the spent one (hk 5138).
+		exclude = ""
 	}
 	// The pointer to the successor is written once, with state=lost, so its
 	// whole value must fit hk's limit before anything is closed or placed.

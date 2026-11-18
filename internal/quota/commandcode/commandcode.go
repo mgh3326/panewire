@@ -3,7 +3,8 @@
 // Command Code account omp holds on the host, each with a 5-hour and a weekly
 // limit and the time omp fetched them (docs/quota.md §Native measurement:
 // commandcode). panewire handles no Command Code key and calls no Command Code
-// API; the month and the credit balance are not read.
+// API; the month is not read, and the credit balance is read only to refuse an
+// account below one credit (decision 403).
 //
 // The reading depends on omp's output shape, so an output this package does not
 // know is an error, never a guess: the pool is then not admitted.
@@ -149,6 +150,10 @@ type ompLimit struct {
 		Used         *float64 `json:"used"`
 		Limit        *float64 `json:"limit"`
 		UsedFraction *float64 `json:"usedFraction"`
+		// Remaining is `commandcode:balance`'s amount.remaining, in credits
+		// (decision 403, hk 5138). It is raw so a malformed value is unknown,
+		// never zero and never a parse failure of the reading's windows.
+		Remaining json.RawMessage `json:"remaining"`
 	} `json:"amount"`
 	Status string `json:"status"`
 }
@@ -273,10 +278,12 @@ func parse(out []byte) ([]Account, error) {
 	return accounts, nil
 }
 
-// parseReport reads one account's limits: the 5-hour and weekly windows. The
-// credit balance and any other limit are not read. A pay-as-you-go account has
-// only a balance, no window at all: it comes back with no bucket and the caller
-// leaves it out. A window that is present but unreadable is errShape.
+// parseReport reads one account's limits: the 5-hour and weekly windows, and
+// the credit balance's remaining credits. Any other limit is not read. A
+// pay-as-you-go account has only a balance, no window at all: it comes back
+// with no bucket and the caller leaves it out. A window that is present but
+// unreadable is errShape; a balance that is malformed is unknown (nil), never
+// zero (decision 403).
 func parseReport(limits []ompLimit) (Account, error) {
 	var account Account
 	id := ""
@@ -295,7 +302,25 @@ func parseReport(limits []ompLimit) (Account, error) {
 	account.FP = Fingerprint(id)
 	account.Observation = quota.Observation{Source: quota.SourceOmpUsage}
 	seen := map[string]bool{}
+	balanceSeen := false
 	for _, limit := range limits {
+		if limit.ID == provider+":balance" {
+			// Remaining credits, not a window. A second balance row, or one
+			// whose amount cannot be read, is unknown: never zero.
+			if balanceSeen {
+				account.Observation.Balance = nil
+				continue
+			}
+			balanceSeen = true
+			if limit.Amount != nil && len(limit.Amount.Remaining) > 0 {
+				var remaining *float64
+				if json.Unmarshal(limit.Amount.Remaining, &remaining) == nil && remaining != nil && finite(*remaining) && *remaining >= 0 {
+					value := *remaining
+					account.Observation.Balance = &value
+				}
+			}
+			continue
+		}
 		window, duration := "", int64(0)
 		switch limit.ID {
 		case provider + ":5h":

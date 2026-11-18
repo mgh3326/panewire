@@ -10,6 +10,8 @@ A devin pane whose record is a free-model stop is a `devin-free` stop with the r
 
 A provider credit rejection is a stop too (hk 4982): the classifier names the pool from the rejection's own wording — Anthropic's "Your credit balance is too low" is `anthropic-api`, OpenAI's `insufficient_quota` or "You exceeded your current quota" is `openai-api` — and sets `CreditExhaustedAt` at the observation. It is recognised, never acted on here: the job watcher publishes the rejection and the hub's credit trigger sweeps the pool, so this manager records no decision and never resumes or hands over on a credit stop.
 
+A Command Code window limit is a stop too (hk 5183): omp renders the provider's 429 as its error row — `Error: 429 You've reached your 5-hour usage limit for your plan. Your limit resets at 2026-11-18T08:31:56.856Z. Please wait for the window to reset or upgrade your plan to continue. (type=rate_limit_error param=RATE_LIMITED)` — followed by `Retry failed after 1 attempts: Provider requested 5075005ms wait, exceeds retry.maxDelayMs`. The classifier names the pool `commandcode` and reads the reset from the row's own `resets at` RFC 3339 timestamp (a timestamp that does not parse leaves the reset unknown, handed over as `reset_unknown`). Like the credit row it anchors on the rendered error row only (the `429` status, optionally behind `Error:`, `API Error:` or `⏺`), never on the sentence anywhere in ordinary output, so a final answer quoting it is no stop. The row wraps: continuation rows made only of the sentence's words, a number, a timestamp and the `(type=…)` suffix join it until that suffix closes it, and the retry notice and omp's `raw-http-request=` path under it are chrome, not later output; any other row after the limit row cancels the stop. It is not a choice dialog (its "upgrade your plan" text is not a menu) and not a credit rejection (`CreditExhaustedAt` stays zero), so it goes through the ordinary decision below: an implementer waits when the reset is within start plus `--expected` and is otherwise handed over (urgent priority hands over); a reviewer or consult gets the behaviour of its role in "A quota stop, by role". Only the 5-hour wording is captured from a real screen. The sentence is the provider's own message that omp renders, so omp's installed source does not carry the weekly wording either; any one-word window in `You've reached your <window> usage limit` (`weekly`, `7-day`) is read the same way, a guess until a weekly screen is captured. The stop is pool-scoped: the hand-over does not carry the job's `account_key`, so the successor excludes the `commandcode` pool until the reset (the credit rejection above, unlike it, marks only the job's account).
+
 Otherwise the observation asks `herdr agent explain <pane> --json` for the matched rule and the agent kind; the top-level `agent` and `matched_rule` keys are read as herdr 0.9.5 returns them, and a `result`-wrapped reply is accepted too. A `quota_limit` rule means herdr recognised the stop: the screen text supplies the reset, and when the text has no parseable limit the pool comes from the agent kind with the reset unknown, handed over as `reset_unknown`. Otherwise the screen classifier decides. herdr 0.9.5 ships no `quota_limit` rule, so every detection today is the structured record's or the classifier's; the herdr path is covered by fixture only, not by a live quota stop. The basis (`structured`, `herdr:quota_limit` or `classifier`) is logged on each `quota-stop observation` and `quota-stop action` line; it is not stored in the database.
 
 A wait also shows on the pane. A `wait` decision the manager will wait out (a worker or tester, or any role with `--quota-stop-act`) reports herdr's display-only token `panewire_quota` from source `panewire.quota`: the value is `<pool> wait until <reset RFC 3339 UTC>` and the TTL is the reset plus five minutes, capped at herdr's 24 h maximum. A capped token is re-reported five minutes before it lapses, and a resume or hand-over clears it. A herdr that refuses the report, or the clear, is retried half a minute later and logged once per outage, never once per retry; the refusal never changes the decision, and a refused clear is retried until the token's TTL has passed. The token never feeds a decision — the `quota_stop_decisions` row stays the authority — and herdr keeps tokens in memory only, so a token published before a daemon restart is left to its TTL. A sidebar row shows it only where the desk configures `$panewire_quota`.
@@ -81,8 +83,9 @@ ten minutes over the pools live jobs are placed on:
   refused, so a notice never rests on a day-old row set. A pool the catalog does
   not list at all fires nothing.
 - **Credit exhausted.** The pane of a live job on the pool shows the provider's
-  own credit rejection: Anthropic's "Your credit balance is too low" or
-  OpenAI's `insufficient_quota` / "You exceeded your current quota". The hub
+  own credit rejection: Anthropic's "Your credit balance is too low", OpenAI's
+  `insufficient_quota` / "You exceeded your current quota", or Command Code's
+  "You have insufficient credits to make this request". The hub
   reads the pane's visible tail through its node (`pane.read`, the reader the
   quota-stop manager uses) and applies the quota-stop activity rule
   (`internal/quotastop`), so the same words quoted by a later answer are not a
@@ -91,11 +94,30 @@ ten minutes over the pools live jobs are placed on:
   (hk 4982, the 2026-11-17 anthropic-api stop the trigger read every ten
   minutes and did not fire on). The rejection must name the job's own pool.
 
-Neither cause names an account or a reset: it fires per pool, and every live
-job on the pool gets the one notice below, whose text names what ran out. A
-cause is held until the pool comes back — a catalog row un-retired — after
-which both of the pool's triggers re-arm and a repeat is logged as new. While a
-cause is held, later passes still notify jobs that were placed after it fired.
+The retired cause and the anthropic-api / openai-api credit causes name no
+account and no reset: they fire per pool, and every live job on the pool gets
+the one notice below, whose text names what ran out. A pool cause is held until
+the pool comes back — a catalog row un-retired — after which both of the pool's
+triggers re-arm and a repeat is logged as new. While a cause is held, later
+passes still notify jobs that were placed after it fired.
+
+**Command Code is scoped to the account (hk 5138).** That pool holds several
+accounts per host and fleet-wide, so its rejection marks only the job's
+recorded `account_key`, never the pool. The mark is stored in the hub database
+(both the SQLite and Postgres schemas), served to selection in the fleet
+snapshot, and skipped there with reason `credit_exhausted account=<key>` — the
+path a 7d-exhausted account takes, leaving the pool's other accounts placeable.
+It lifts at the first quota reading of that account observed after the mark
+that reports at least one remaining credit (a fresh omp report), because a
+reading below one credit is still exhausted; a reading with no balance says
+nothing, so the mark then holds until 24 h, whichever comes first. Selection
+also drops any mark past 24 h, and refuses an account whose reading reports
+fewer than one credit even without a mark (`credit_exhausted balance=<n>`,
+decision 403). A job whose placement record has no account marks nothing rather
+than the pool. An implementer on the marked account is handed over
+through the quota-stop flow's successor (`hub_quota_replace.go`), and that
+successor excludes no pool: the mark keeps it off the spent account while the
+other accounts stay usable.
 
 For an implementer, or a reviewer or consult on a node that does not advertise
 close operations, the hub records a `lane.event` asking the owner to hand the

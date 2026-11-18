@@ -251,6 +251,7 @@ func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount,
 			ConfirmedAt *time.Time         `json:"confirmed_at"`
 			Buckets     []accountBucket    `json:"buckets"`
 			FreeBucket  *shared.FreeBucket `json:"free_bucket"`
+			Balance     *float64           `json:"balance"`
 		} `json:"observation"`
 	}
 	if i := strings.IndexByte(key, ':'); i <= 0 || !validID(key[:i]) || !accountFP.MatchString(key[i+1:]) {
@@ -277,6 +278,10 @@ func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount,
 			acc.Fresh = true
 		}
 		acc.Quota = withFree(accountPoolView(readableBuckets(accountPool(key), o.Buckets), c.now()), o.FreeBucket, c.now())
+		if acc.Quota != nil && o.Balance != nil {
+			balance := *o.Balance
+			acc.Quota.Balance = &balance
+		}
 	}
 	return acc, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -15,7 +16,9 @@ import (
 // "An exhausted pool"):
 //
 //   - every catalog row of the pool is retired while live jobs still run on it;
-//   - a job's pane on the pool shows the provider's credit-exhausted rejection.
+//   - a job's pane on the pool shows the provider's credit-exhausted rejection
+//     (anthropic-api and openai-api per pool; commandcode's pool holds several
+//     accounts, so its rejection marks the job's own account, hk 5138).
 //
 // Each pass reads the catalog and the live jobs' panes, so a pool that comes
 // back (a row un-retired) re-arms both triggers.
@@ -69,8 +72,32 @@ func (h *HubServer) checkPoolTriggers(ctx context.Context) {
 		return
 	}
 	h.checkRetiredPools(ctx, pools)
-	for _, pool := range h.creditExhaustedPools(ctx, tasks) {
+	h.checkCreditRejections(ctx, tasks)
+}
+
+// creditRejections is what one pass read from the live jobs' panes: the pools
+// whose provider credit rejection covers every account, and the accounts a
+// multi-account pool's rejection is scoped to.
+type creditRejections struct {
+	Pools    []string
+	Accounts []accountCreditMark
+}
+
+// checkCreditRejections starts the sweep for every credit rejection a live
+// job's pane shows: a pool-level cause for anthropic-api and openai-api, and
+// an account-level mark for commandcode, whose pool holds several accounts
+// (hk 5138). The mark is written before the sweep reads it.
+func (h *HubServer) checkCreditRejections(ctx context.Context, tasks []hubSpawnTask) {
+	rejections := h.creditRejections(ctx, tasks)
+	for _, pool := range rejections.Pools {
 		h.startPoolSweep(poolExhaustion{Pool: pool, Cause: poolCauseCreditExhausted})
+	}
+	for _, mark := range rejections.Accounts {
+		if err := h.markAccountCreditExhausted(mark.Pool, mark.Account, h.now()); err != nil {
+			h.logger.Warn("account credit mark could not be stored", "pool", mark.Pool, "account", mark.Account, "error", err)
+			continue
+		}
+		h.startPoolSweep(poolExhaustion{Pool: mark.Pool, Account: mark.Account, Cause: poolCauseCreditExhausted})
 	}
 }
 
@@ -144,11 +171,13 @@ func (h *HubServer) poolCatalogRows(ctx context.Context) ([]fleet.CatalogRow, er
 	return app.CatalogRows(ctx)
 }
 
-// creditExhaustedPools reads the pane of every live job and collects the pools
-// whose provider credit-exhausted rejection it shows. A pane is read only when
-// the job recorded a host and pane, and the rejection must name the job's own
-// pool, so one pool's closure never reaches another pool's jobs.
-func (h *HubServer) creditExhaustedPools(ctx context.Context, tasks []hubSpawnTask) []string {
+// creditRejections reads the pane of every live job and collects the
+// credit-exhausted rejections it shows. A pane is read only when the job
+// recorded a host and pane, and the rejection must name the job's own pool, so
+// one pool's closure never reaches another pool's jobs. The commandcode pool
+// holds several accounts: its rejection marks the job's own account, and a job
+// with no recorded account marks nothing rather than the whole pool (hk 5138).
+func (h *HubServer) creditRejections(ctx context.Context, tasks []hubSpawnTask) creditRejections {
 	byMachine := map[string][]hubSpawnTask{}
 	for _, task := range tasks {
 		if task.Status != "succeeded" || task.Outcome.Pool == "" || task.Outcome.Pane == "" {
@@ -164,6 +193,8 @@ func (h *HubServer) creditExhaustedPools(ctx context.Context, tasks []hubSpawnTa
 	}
 	slices.Sort(machines)
 	exhausted := map[string]bool{}
+	var accounts []accountCreditMark
+	seenAccount := map[string]bool{}
 	for _, machine := range machines {
 		panes := h.nodePaneRows(ctx, machine)
 		if panes == nil {
@@ -179,9 +210,22 @@ func (h *HubServer) creditExhaustedPools(ctx context.Context, tasks []hubSpawnTa
 			if !h.nodeCall(ctx, machine, nodeCommandPaneRead, args, poolTriggerNodeWait, &read) || read.Outcome != nodePaneReadOK {
 				continue
 			}
-			if pool, ok := quotastop.CreditExhausted(read.ScreenTail); ok && pool == task.Outcome.Pool {
-				exhausted[pool] = true
+			pool, ok := quotastop.CreditExhausted(read.ScreenTail)
+			if !ok || pool != task.Outcome.Pool {
+				continue
 			}
+			if pool == accountCreditMarkPool {
+				account := task.Outcome.AccountKey
+				if account == "" || seenAccount[account] {
+					// Without a recorded account the mark cannot be scoped,
+					// and the pool's other accounts must stay placeable.
+					continue
+				}
+				seenAccount[account] = true
+				accounts = append(accounts, accountCreditMark{Pool: pool, Account: account})
+				continue
+			}
+			exhausted[pool] = true
 		}
 	}
 	pools := make([]string, 0, len(exhausted))
@@ -189,7 +233,8 @@ func (h *HubServer) creditExhaustedPools(ctx context.Context, tasks []hubSpawnTa
 		pools = append(pools, pool)
 	}
 	slices.Sort(pools)
-	return pools
+	slices.SortFunc(accounts, func(a, b accountCreditMark) int { return strings.Compare(a.Account, b.Account) })
+	return creditRejections{Pools: pools, Accounts: accounts}
 }
 
 // nodePaneRows lists machine's panes by pane id. An agent row wins over a pane

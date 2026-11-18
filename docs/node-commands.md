@@ -780,11 +780,14 @@ reservation (hk 4737). A failed ledger read or handoffkeep write answers
 
 ### `job.reap`
 
-`args: {job, lane, force}` — all three required, and `force:false` must be
-stated. This is the node half of `panewire jobs close`
-([jobs-own.md](jobs-own.md)): the hub has already checked that the caller's
-lane owns the job, and the node re-proves it from the job's own ledger and
-herdr before it closes a pane it did not spawn in this process.
+`args: {job, lane, force, expect?}` — `job`, `lane` and `force` are required,
+and `force:false` must be stated. `expect`, when present, must be a closable
+status (`idle`, `done` or `blocked`); a node that predates it refuses the
+frame as `invalid_args` without acting. This is the node half of
+`panewire jobs close` ([jobs-own.md](jobs-own.md)): the hub has already
+checked that the caller's lane owns the job, and the node re-proves it from
+the job's own ledger and herdr before it closes a pane it did not spawn in
+this process.
 
 The node reads `<inbox>/jobs/<job>/events` and takes the owner lane from the
 newest claim, and the pane, label and keep flag from the `job.spawned` receipt.
@@ -792,14 +795,20 @@ It then re-reads `herdr agent list` and requires the row for that pane id to
 carry the receipt's label; a pane id is host-local and reused, so a different
 label is another pane. `pane.close`'s settle applies to a non-forced close:
 two matching reads one interval apart, an unchanged `state_change_seq` where
-herdr reports one, and an empty composer both times.
+herdr reports one, and an empty composer both times. A forced close carrying
+`expect` re-reads the verified pane just before closing and refuses when the
+pane is no longer as proven: `working` reads as `job-working`, and any other
+unexpected non-finished status as `pane-changed`. A finished pane (`idle` or
+`done`) stays closable whatever was expected. The recheck narrows the race to
+the close call itself: herdr's `pane close` takes only the pane id, so a pane
+answered between the recheck and the close is still closed.
 
 | `outcome` | `pane` | Meaning |
 | --- | --- | --- |
 | `closed` | the closed pane | Matched and `herdr pane close` succeeded. |
 | `pane-gone` | the receipt's pane, when it names one | No such agent pane; nothing to close. With no pane, the ledger names none and the node verified nothing. |
-| `pane-changed` | the receipt's pane | The pane carries another label, is in no closable status, or its composer is not proven empty; not closed. |
-| `job-working` | the receipt's pane | The pane is `working`; `force` closes it. Not closed. |
+| `pane-changed` | the receipt's pane | The pane carries another label, is in no closable status, its composer is not proven empty, or a forced `expect` recheck found it no longer as proven and not finished; not closed. |
+| `job-working` | the receipt's pane | The pane is `working`; plain `force` closes it, but a forced close carrying `expect` refuses. Not closed. |
 | `pane-blocked` | the receipt's pane | The pane waits at a prompt; `force` closes it. Not closed. |
 | `protected` | the receipt's pane | The job was spawned with `--keep`; never closed, whatever `force` says. |
 | `owner-mismatch` | the receipt's pane | The ledger's owner lane is not `lane`; not closed. |
@@ -1094,7 +1103,7 @@ cancelled never takes the lock. A node with no configured work root answers
 
 ### `worktree.remove`
 
-`args: {cwd, expect_head, base, regenerable, detached?}` — `cwd` inside the linked
+`args: {cwd, expect_head, base, regenerable, detached?, disposable?}` — `cwd` inside the linked
 worktree, `expect_head` the 40-hex commit it must still be on, `base` the
 merged-into branch (a `regenerable` pattern must contain a literal
 character: wildcard-only patterns such as `*` are invalid_args; a glob with a
@@ -1110,6 +1119,15 @@ merged into `origin/<base>` or fully pushed to `origin/<branch>` (both judged af
 `base` equal to the branch never counts), and — re-read immediately before
 removal — no pane is live in it (the ignored-file scan and the pane check are the last reads; a non-pane process writing an ignored file between them and the removal is a residual window this op cannot fence). It then runs `git worktree remove` and
 `git branch -d`; never `--force` or `-D`.
+
+`disposable` is an optional list of exact basenames at the worktree root (at
+most 16 entries; each entry must be a non-empty exact basename with no `/`, no
+glob characters `*?[`, not `.` or `..`, at most 255 bytes). Any invalid entry
+rejects the command with 400 `invalid_request` naming the entry index.
+Untracked files (porcelain `?? `) whose path is exactly one of those basenames
+at the worktree root do not count as dirty, and are deleted before `git worktree
+remove` runs. Tracked changes, other untracked files, disposable names in
+subdirectories, and untracked directories still cause `dirty`.
 
 `detached` is an optional boolean, defaulting to false. When true, the
 worktree must be detached and its resolved directory must be a direct child
@@ -1128,7 +1146,7 @@ running a git op on the clone, then delete the lock file.
 
 | `outcome` | Meaning |
 | --- | --- |
-| `removed` | Worktree removed and, in branch mode, `git branch -d` attempted; `worktree` describes what was removed. |
+| `removed` | Worktree removed and, in branch mode, `git branch -d` attempted; `worktree` describes what was removed, and `disposable` names any deleted disposable files. |
 | `worktree-gone` | `cwd` is not a linked worktree. |
 | `worktree-changed` | HEAD or common repository differs from the first inspection or `expect_head`. |
 | `outside-work-root` | The resolved path or common git dir is outside the work root, or a detached-mode directory fails the reviewer name or location guard. |
@@ -1302,7 +1320,8 @@ is true when the local event ledger contains a `job.completed` event.
 `activity_events` counts the ledger's `events/` files that are not spawn
 bookkeeping: `job.claim`, `job.reclaim`, `job.placement`, `job.task_link`,
 `job.duplicate_override`, `job.spawn_retryable`, `job.spawn_aborted`,
-`job.record_failed`, `job.cleanup_pending`, `job.cleanup_refused`, `lease.*` and
+`job.record_failed`, `job.cleanup_pending`, `job.cleanup_refused`,
+`job.brief_sent`, `lease.*` and
 `quota_pool.*`. Any other kind, and any name that does not parse as
 `NNNNN-<kind>.json` (exactly five digits), counts, so a job that shows 0 has had nothing after its
 claim. A node that predates the field omits it; a caller reads that as unknown,

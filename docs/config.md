@@ -88,6 +88,7 @@ local_delete_at = "drive_confirmed"
 | `clinepass` | `false` | Operator-configured capability required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). Unlike a harness flag, the node cannot measure the proxy, so this boolean is the whole answer (see [Capability flags](#capability-flags)). |
 | `omp_commandcode` | `false` | Explicit override for the `omp` harness capability required by `omp-dsflash41`, `omp-musespark13`, `omp-musespark13c`, `omp-inkling2s`, `omp-museember`, `omp-argon4`, `omp-mimo26pro`, `omp-cc-opus55`, `omp-cc-sonnet55`, and `omp-cc-sol61`: the host's omp has the Command Code provider configured (`omp models` lists the selected model). With no boolean here, the executing node's readiness decides (see [Capability flags](#capability-flags)). Unrated rows admit only with `PANEWIRE_E6_ARM`; Command Code rules are in [quota](quota.md#command-code-seats). |
 | `report_user_idle` | `false` | Literal boolean, read on each heartbeat. `true` makes a macOS node report whole seconds since the last keyboard or pointer input, as `host_activity.user_idle_s`, to a hub that accepts `host_activity`. Linux never sends it. The node reads no app names, window titles, input content or process lists. See [placement telemetry](placement.md#telemetry). |
+| `go_trimpath` | `true` | Literal boolean. Every spawned pane gets `-trimpath` in `GOFLAGS` (appended to the spawner's own value, never replacing it), so builds in different worktrees of one commit hit each other's Go build-cache entries. Set `false` on a host whose tests need absolute source paths. See [Go build cache across worktrees](#go-build-cache-across-worktrees). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
 | `roles`, `grades` | unset | Light-host limits, as for [`[hosts.NAME]`](#hostsname): the spawn roles and task grades this machine accepts. |
 | `presence_id` | `machine_id` | Identity this host uses in pacelever host-presence records. |
@@ -95,6 +96,26 @@ local_delete_at = "drive_confirmed"
 | `brief_preamble` | selected policy block | Explicit named preamble block for this host. |
 | `pool_policy` | embedded pool-order policy | Path to the versioned pool-order JSON used by automatic model selection. |
 | `fleet_usage_alert_gb` | legacy/read-only | Retained config key; standalone disk alerts are not emitted in v0.1. |
+
+### Go build cache across worktrees
+
+Each fleet session works in its own worktree directory, and the go command puts a
+package's directory into its action id unless `-trimpath` is set. Two worktrees
+of one commit therefore shared no cache entry for the repository's own packages:
+measured on one commit checked out at two paths, the second worktree reused 274
+of 296 actions (everything outside the module) and recompiled all of its Go
+packages; with `-trimpath` it reused 295 of 296, the remaining miss being the
+test-binary link. The differing hash input is `modroot <dir>` / `package go
+index v2 <dir>/<pkg>` for the main module.
+
+Spawn passes `GOFLAGS=<the spawner's flags> -trimpath` to the pane when
+`[local].go_trimpath` is on (the default), so the flag reaches every `go build`,
+`go test` and `go vet` run inside it. It changes no build result, only the
+recorded source paths (and, for test failures and panics, they name the package
+rather than the worktree). On a host whose tests resolve `runtime.Caller` paths
+against absolute source paths, set `go_trimpath = false`. The go command trims
+cache entries unused for five days itself (`GOCACHE/trim.txt`); this key sets
+no bound of its own.
 
 ### Capability flags
 
@@ -198,7 +219,7 @@ and its error is preserved in the registration warning.
 | `workspace` | target `[local] workspace` | Workspace on this remote host, named by label (`workers`), not by id. Herdr deletes a workspace when its last pane closes; spawn recreates a missing label, but an id cannot be recreated. The caller's `-w` / `--workspace` applies only to local placement. Missing target workspace configuration refuses with `WORKSPACE_UNCONFIGURED` (70). Automatic SSH placement tries the next candidate on this early refusal; forced placement still stops. |
 | `cwd_map` | explicit override | Inline table of local prefix → remote prefix; longest prefix wins. Only needed as an exception: the default remote cwd is `$HOME/work/<repo>` on the target, cloned when missing. For a job run from a linked git worktree the default is `<work root>/<worktree dir>`, where the work root is derived from entries that map a checkout directly under the local work root (else `$HOME/work`). |
 | `cwd_keys` | legacy | Kept for legacy hub configurations; not used. A hub host's cwd key is the canonical repo name. |
-| `hub_wait` | `240` | `via = "hub"` only: seconds (1..300) the hub waits for the node to answer a spawn. It bounds the whole node run, so it must exceed the node's `brief_submit_timeout_ms` plus launch time; a shorter budget cuts the submit window. A first spawn that clones a large repo may need more. |
+| `hub_wait` | `240` | `via = "hub"` only: seconds (1..300) the hub waits for the node to answer a spawn. It bounds the whole node run, so it must exceed the node's `brief_submit_timeout_ms` plus launch time; a shorter budget cuts the submit window. The node keeps at least a submit window of one `brief_submit_retry_ms` period plus one 5 s wait slice (20 s by default), or `brief_submit_timeout_ms` when that is lower, and a 20 s reserve for the failure capture and pane cleanup: the launch ends where they begin. A budget the fetch, checkout and launch have already spent below that refuses with `SUBMIT_WINDOW_UNAVAILABLE` (70) before the brief is sent, or before any pane is launched; raise `hub_wait` for this host. A first spawn that clones a large repo may need more. |
 | `brief_doc_prefix` | `briefs/` | `via = "hub"` only: handoffkeep key prefix the brief is uploaded under; it must match the node's own `brief_doc_prefix` (ends in `/`). |
 | `tags` | unset | Capability tags offered by this host (`caps` is an alias; both lists merge). A job's required `--tags` must be a subset for the host to be a placement candidate. A capability the host does not declare is unknown and fails closed for this host only: the host is excluded for jobs that need it and stays eligible for every other job. See [Host capabilities and light hosts](#host-capabilities-and-light-hosts). |
 | `roles` | unset (all) | Nonempty list of spawn roles (`implementer`, `reviewer`, `consult`) this host accepts. Other roles record `role_not_accepted:<role>`. A list that still names the retired `builder` role is a config error (exit 70) that names the key to edit: delete `"builder"` from `<host>.roles`. |
@@ -1038,7 +1059,7 @@ exit 75. A `--result` on a record that is completed without one is
 watcher warns and continues. Safe reasons are `secret_like_content`
 or `secret_like_content:<pattern>` (pattern matches `[a-z0-9_]{1,40}`),
 `terminal_without_result`, `result_conflict`, `job_escalated`, `job_lost`,
-`no_spawn_evidence`, a validated hk code matching `[a-z0-9_]{1,64}`,
+`no_spawn_evidence` (the hk record is still `claimed` and the job's ledger has neither a `job.spawned` receipt nor a `job.brief_sent` receipt of the current attempt whose brief file still has the recorded digest), a validated hk code matching `[a-z0-9_]{1,64}`,
 `http_<status>`, `hk_unreachable` or `hk_unconfigured`.
 
 An interactive `done` that completed but left the report out of hk, or its pin
@@ -1093,9 +1114,22 @@ and `refs.job_id` from the parent to the new job through `handoffkeep tasks
 rebind`, regardless of the parent's state. When the task is still bound to an
 earlier job in the parent's `--parent-job` chain, the successor follows the
 chain and rebinds from that ancestor holder; unrelated holders are refused.
-The parent pane is left running.
-Only implementer spawns take over; reviewer and consult children do not. Spawns with `--task`, or neither flag and
+Only implementer spawns take over; reviewer and consult children do not.
+Spawns with `--task`, or neither flag and
 no `ARBITER_JOB`, claim as before.
+
+Once that implementer successor lands, the hub also ends the parent's pane
+itself through the jobs-close reap path (`hub_spawn_supersede.go`): a parent
+whose pane is `idle`, `done` or `blocked` closes at landing (a blocked pane
+is proven blocked first, then closed carrying that proof, which the node
+re-reads just before closing; the recheck narrows the race to the close call
+itself, since herdr's pane close takes only the pane id); a parent that is
+still `working` is recorded as
+superseded by the successor (`job.superseded` on the parent) and closed at
+the first sweep where it is no longer working. A parent spawned with
+`--keep` is never closed, the worktree is never removed (the successor may
+be using it), and the parent's hk task is untouched: the successor carries
+it. The owner lane hears one `info` lane.event when the pane closes.
 
 The earlier `job.task_link` event records `status: inherited` and
 `takeover: pending`. After landing, `job.task_rebind` records the outcome:
@@ -2256,7 +2290,7 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 70 | Configuration or trust refusal, including `POLICY_UNAVAILABLE`. |
 | 74 | Active job duplicate, including an hk `job_id_taken` claim refusal. |
 | 75 | Unreadable duplicate state (the ledger's record of a duplicate job has no state or an unreadable `job.spawned` receipt; a released job has no receipt and is reclaimed), changed artifact, or a `--parent-job` that resolves neither locally nor in hk within the bound. Also a hub request in `deadline_exceeded`: its ownership is unresolved. |
-| 76 | `BRIEF_SUBMISSION_UNCONFIRMED`: no working transition or submitted brief turn on the launch session and pane. Codex retries a submit key once only for composer residue; other harnesses retain one submit-key retry when submission remains unconfirmed. |
+| 76 | `BRIEF_SUBMISSION_UNCONFIRMED`: no working transition or submitted brief turn on the launch session and pane. Codex retries a submit key once only for composer residue; other harnesses retain one submit-key retry when submission remains unconfirmed. The pane may still run: before it waits, the node records `job.brief_sent` (the pane and the digest of `jobs/<job>/brief-delivered.md`), and once the failed spawn has finished its cleanup (a spawn holds the job's operation lock, the one `done` takes, from before its claim until it is published or its failure cleanup has recorded the attempt's end, so a fast `done` waits for the spawn's own `job.spawned`; (`job.spawn_retryable` or `job.cleanup_pending` is in the ledger, read in ledger order), a `panewire done` from that pane adopts it as the job's spawn receipt (a local `job.spawned`, so the completion, usage read and pane sweep see the pane) and repairs the claimed hk record, instead of refusing with `no_spawn_evidence`. |
 | 77 | `NO_ROLE_CANDIDATE` or seat, grade, family, or E6 refusal; quota gate exit 5 is remapped here. `role_restricted:` preserves the gate reason and names the rule that refused. 역할 제한 이유가 표시되면 그 사유가 가리키는 역할 또는 프로필을 선택하세요. |
 | 78 | `preflight`: at least one checked remote host failed a check; the reasons are on stdout and in the error. |
 | 79 | Mock isolation refusal. |

@@ -103,6 +103,9 @@ type admissionReading struct {
 	FP      string
 	Buckets []admissionBucket
 	Free    *admissionFree
+	// Balance is a credit pool's remaining provider credits, nil when the
+	// reading carries none (commandcode, decision 403).
+	Balance *float64
 }
 
 // admissionManual is one operator-entered window (manual observation).
@@ -669,6 +672,12 @@ func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) adm
 		d.Basis = freeBasisPrefix + rung
 		d.Reason = freeAvailable + ": SWE-2 free bucket; account credits do not constrain this rung"
 		return d
+	}
+	if row.Pool == commandcodePool && observed && reading.Balance != nil && *reading.Balance < 1 {
+		// The account's reported remaining credits are below one: the next
+		// request fails at the provider (decision 403). A missing balance is
+		// unknown and gates nothing.
+		return d.refuse(gateBlocked, fmt.Sprintf("credit_exhausted balance=%g", *reading.Balance))
 	}
 	cutoff := policy.Cutoff
 	if in.Policy.Pools[row.Pool].Cutoff == 0 && policy.Class == "preserve" {

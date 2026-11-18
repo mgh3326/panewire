@@ -37,7 +37,7 @@ Each `(host, kind, key)` triple names one latest value.
 
 | kind | key | publisher | body |
 |---|---|---|---|
-| `quota` | account key (`<pool>:<16-hex>`) | the node that runs the measurement | `quota`: `account_key`, `pool`, `source` (측정 소스), `buckets[]` (`window`, `used_pct`, `resets_at`, `scope`, `model`), `free_bucket` (`state`, `resets_at`) for a pool with a free tier (devin's SWE-2 bucket; a free-only reading may carry no bucket) |
+| `quota` | account key (`<pool>:<16-hex>`) | the node that runs the measurement | `quota`: `account_key`, `pool`, `source` (측정 소스), `buckets[]` (`window`, `used_pct`, `resets_at`, `scope`, `model`), `free_bucket` (`state`, `resets_at`) for a pool with a free tier (devin's SWE-2 bucket; a free-only reading may carry no bucket), `balance` (commandcode의 남은 provider credits, 없으면 unknown) |
 | `load` | empty | the hub, computed from the node's own heartbeats with `/etc/panewire/placement.json` | `load`: `load_ratio`, `score`, `accepting`, `usable`, `connected`, `slot_full`, `active_jobs`, `reason` |
 | `publisher` | empty | the hub, from the node's connection | `publisher`: `connected`, `last_seen` |
 | `readiness` | empty | the hub, from the node's heartbeat and its own launch counts | `readiness`: `readiness_unknown`, `readiness` (the node's report), `backoff_until` (harness kind to time). See [placement.md](placement.md#readiness) |
@@ -165,7 +165,7 @@ and the `login_missing` placement drop are unchanged.
   other hosts share.
 - **Login screen on rc=76.** A hub spawn that ends rc=76
   (`BRIEF_SUBMISSION_UNCONFIRMED`) leaves the executing node a screen capture,
-  `jobs/<job>/spawn-failure-*.txt` (`captureFailure`). When the newest capture
+  `jobs/<job>/spawn-failure-*.txt` (`captureFailure`). A pane that ran anyway can still complete: the node wrote `job.brief_sent` when it sent the brief, and `done` accepts it as spawn evidence (see rc 76 in [config.md](config.md)). When the newest capture
   is the harness's login screen and pane cleanup was verified, the node marks
   that (host, harness) `login_missing` at once and sends rc=88 with the
   `AUTH_UNAVAILABLE` refusal and sign-in hint. An unchanged hub classifies it

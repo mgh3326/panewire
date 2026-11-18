@@ -1219,6 +1219,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = claimJobDirIdentity(a.Jobs, s.Job); e != nil {
 		return e
 	}
+	// The job's operation lock is the one hand-off between this spawn and a
+	// `done` from its pane: held from before the claim that starts the attempt
+	// until the spawn is published and its watcher started, or its failure
+	// cleanup has recorded the attempt's end. A fast pane's `done` waits here and
+	// then sees the spawn's own job.spawned, never a half-finished attempt
+	// (hk 5174). It is released before any --wait.
+	unlockOperation, e := a.holdJobOperation(ctx, s.Job)
+	if e != nil {
+		return e
+	}
+	defer unlockOperation()
 	startedClaim := time.Now()
 	if e = a.claimJobRecord(ctx, s); e != nil {
 		a.stage("claim", startedClaim)
@@ -1352,12 +1363,25 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	// The pane's hub lane is its label (registered below). Naming it here lets
 	// the pane's `panewire inbox` commands default to their own lane.
 	env = append(env, "PANEWIRE_LANE="+s.Label)
+	// Each session works in its own worktree directory, and without -trimpath
+	// that directory is part of every package's action id: two worktrees of one
+	// commit then share nothing (hk 5160). The spawner's own GOFLAGS is kept.
+	if boolean(a.Config.Local, "go_trimpath", true) {
+		env = append(env, "GOFLAGS="+goFlagsForPane(effectiveGOFLAGS()))
+	}
 	if seat.Kind == "claude" && s.Purpose != "director" {
 		env = append(env, "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")
 	}
 	if e = a.workspaceTrust(ctx, s, seat, env); e != nil {
 		return fail(exitConfig, "workspace trust: %v", e)
 	}
+	// The launch may not spend the brief's submit window (hk 5174): it ends
+	// where the window begins, or the spawn refuses before any pane exists.
+	launchCtx, endLaunch, e := a.reserveSubmitWindow(ctx)
+	if e != nil {
+		return e
+	}
+	defer endLaunch()
 	startedLaunch := time.Now()
 	launchRecorded := false
 	defer func() {
@@ -1370,11 +1394,27 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		for _, v := range env {
 			args = append(args, "--env", v)
 		}
+		// Under the node's context, not the launch's: a create the launch
+		// deadline killed may have committed, and its pane_id would never be
+		// parsed. A create that returns late is cleaned up with its pane, and
+		// start refuses on the expired launch context.
 		return a.call(ctx, "herdr", args...)
+	}
+	// A create the node cannot account for (it timed out, or answered with
+	// something unusable) may have made a tab: keep the claim and record cleanup
+	// pending instead of calling the spawn safe to retry.
+	createOutcomeUnknown := func(r Result) {
+		if ctx.Err() != nil || r.Code == 0 {
+			retrySafe = false
+		}
+	}
+	if e = a.launchCutoff(launchCtx, ctx, "before tab create"); e != nil {
+		return e
 	}
 	s.placement.started = true
 	r := createTab(s.Workspace)
 	if e = check(r, "herdr tab create"); e != nil {
+		createOutcomeUnknown(Result{Code: 1})
 		// Another spawn's failed cleanup may close a workspace this spawn
 		// adopted before the tab exists. A label can be recreated; an id cannot.
 		if !workspaceGone(r) || herdrWorkspaceID.MatchString(configuredWorkspace) {
@@ -1388,13 +1428,18 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			createdWorkspaces = append(createdWorkspaces, retryCreated)
 		}
 		s.Workspace = retryWorkspace
+		if e = a.launchCutoff(launchCtx, ctx, "before the second tab create"); e != nil {
+			return e
+		}
 		r = createTab(s.Workspace)
 		if e = check(r, "herdr tab create"); e != nil {
+			createOutcomeUnknown(Result{Code: 1})
 			return e
 		}
 	}
 	var created map[string]any
 	if e = json.Unmarshal([]byte(r.Out), &created); e != nil {
+		retrySafe = false
 		return e
 	}
 	created = unwrap(created)
@@ -1404,10 +1449,25 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	s.placement.execution.Kind = seat.Kind
 	tab := str(created, "tab_id")
 	if pane == "" {
+		retrySafe = false
 		return fail(exitConfig, "tab create omitted pane_id")
 	}
-	if e = a.start(ctx, s, seat, launch, pane, argv); e != nil {
+	// The create came back after the launch cutoff: no harness is started, so
+	// the failed-agent cleanup (which needs an agent identity) cannot close this
+	// shell. Close the exact tab this attempt created, and forget the pane once
+	// it is gone; a close that fails leaves the pane for cleanup_pending.
+	if e = a.launchCutoff(launchCtx, ctx, "after tab create"); e != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer closeCancel()
+		if closeErr := a.closeCreatedWorkspace(closeCtx, &createdWorkspace{workspace: s.Workspace, tab: tab, rootPane: pane}); closeErr == nil {
+			pane = ""
+		} else {
+			a.warn("tab %s left open after the launch cutoff: %v", tab, closeErr)
+		}
 		return e
+	}
+	if e = a.start(launchCtx, s, seat, launch, pane, argv); e != nil {
+		return a.launchBudgetSpent(launchCtx, ctx, e)
 	}
 	a.stage("launch", startedLaunch)
 	launchRecorded = true
@@ -1422,7 +1482,16 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e != nil {
 		return e
 	}
-	if e = a.deliver(ctx, seat.Kind, pane, pointer); e != nil {
+	initialScreen, e := a.sendBrief(ctx, seat.Kind, pane, pointer)
+	if e != nil {
+		return e
+	}
+	// The brief is in the pane. Record that before waiting on the submit
+	// window, so a pane that runs after a 76 can still complete (hk 5174).
+	if e = a.recordBriefSent(ctx, s, seat, launch, pane, tab, pool, owner, payload); e != nil {
+		return e
+	}
+	if e = a.confirmBrief(ctx, seat.Kind, pane, pointer, initialScreen); e != nil {
 		return e
 	}
 	if seat.Kind == "omp" || seat.Kind == "cmd" {
@@ -1462,23 +1531,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
 		}
 	}
-	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
-	// The request's time limit, so the node's pane sweep can end a reviewer or
-	// consult by its real limit (hk 4747).
-	receipt["expires_at"] = a.spawnExpiresAt(s).UTC().Format(time.RFC3339)
-	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
-	// What the node put on disk for a checkout spec: "sparse" carries the
-	// paths the request left out, so the reviewer prompt may say they are
-	// absent on purpose (hk 5098). Absent for a spawn with no spec.
-	if s.checkoutMode != "" {
-		receipt["checkout_mode"] = s.checkoutMode
-	}
-	if s.AccountKey != "" {
-		receipt["account_key"] = s.AccountKey
-	}
-	if s.E6Arm != "" {
-		receipt["e6_arm"] = s.E6Arm
-	}
+	receipt := a.spawnReceipt(ctx, s, seat, launch, pane, tab, pool, owner, machine)
 	if laneOK {
 		receipt["hub_lane"] = lane
 		receipt["hub_lane_machine"] = machine
@@ -1523,6 +1576,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.laneUnregistered && a.envOr("PANEWIRE_LANE_STRICT", "WRK_LANE_STRICT") == "1" {
 		return fail(exitLaneUnregistered, "%s pane exists but lane is UNREGISTERED", s.Role)
 	}
+	unlockOperation()
 	return a.afterSpawn(ctx, s, false)
 }
 
@@ -1756,6 +1810,30 @@ func noSymlinks(path string) error {
 // returns the one-line pointer that is typed into the pane instead. Typing the
 // whole brief lost everything past about 1 KB on a remote host, and the pane
 // still reported a landed brief; a file has no such limit.
+// spawnReceipt is the job.spawned receipt of a pane the node launched, without
+// the lane fields registration adds. job.brief_sent carries the same fields, so
+// a `done` that adopts it (adoptBriefSent) leaves the job as a spawn would.
+func (a *App) spawnReceipt(ctx context.Context, s Spawn, seat Seat, launch Launch, pane, tab, pool, owner, machine string) map[string]any {
+	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
+	// The request's time limit, so the node's pane sweep can end a reviewer or
+	// consult by its real limit (hk 4747).
+	receipt["expires_at"] = a.spawnExpiresAt(s).UTC().Format(time.RFC3339)
+	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
+	// What the node put on disk for a checkout spec: "sparse" carries the
+	// paths the request left out, so the reviewer prompt may say they are
+	// absent on purpose (hk 5098). Absent for a spawn with no spec.
+	if s.checkoutMode != "" {
+		receipt["checkout_mode"] = s.checkoutMode
+	}
+	if s.AccountKey != "" {
+		receipt["account_key"] = s.AccountKey
+	}
+	if s.E6Arm != "" {
+		receipt["e6_arm"] = s.E6Arm
+	}
+	return receipt
+}
+
 func (a *App) writeDeliveredBrief(job, payload string) (string, error) {
 	dir := filepath.Join(a.Jobs, job)
 	if e := os.MkdirAll(dir, 0700); e != nil {

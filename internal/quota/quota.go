@@ -76,6 +76,11 @@ type Observation struct {
 	// serves a cached report (omp usage). Zero means the figures are as old as
 	// the measurement call itself.
 	MeasuredAt time.Time
+	// Balance is a credit pool's remaining provider credits when the source
+	// reports one (commandcode's `commandcode:balance` amount.remaining, hk
+	// 5138). Nil means the report carried none, or an unreadable one: unknown,
+	// never zero.
+	Balance *float64
 }
 
 // Error is a measurement failure. It carries a kind and a fixed, safe

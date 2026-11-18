@@ -27,6 +27,11 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 		app.LiveSpawnProfiles = h.liveSpawnProfiles
 		app.LivePlacedByAccount = h.liveProfilesByAccount
 		app.LiveAccountJobs = h.liveAccountJobs
+		// The hub owns the durable account credit marks: its in-process
+		// selection reads them directly, in addition to the snapshot (hk 5138).
+		app.AccountCreditMarks = func(context.Context) (map[string]time.Time, error) {
+			return h.snapshotAccountCreditMarks(h.now().UTC())
+		}
 	}
 	return app, err
 }
@@ -489,6 +494,9 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			h.spawnCoordinatorScan(ctx, schedule)
 		}
 		h.flushSpawnNotifications(ctx)
+		// Terminal spawn failures with --task owe their hk task one comment (hk
+		// 5137); the sweep posts each once and retries failures with backoff.
+		h.flushSpawnTaskFailNotices(ctx)
 		select {
 		case <-ctx.Done():
 			return
