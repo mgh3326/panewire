@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,4 +93,45 @@ func TestJobDirTTLKeepsAHandoverMark(t *testing.T) {
 	if !r.exists("j1") {
 		t.Fatal("the TTL deleted the hand-over's keep mark")
 	}
+}
+
+// A hand-over publishes its keep mark under the clone's git-op lock. Both
+// removal paths take that lock and recheck the mark while holding it, so a
+// mark written while they waited keeps the worktree.
+func TestSweepRechecksTheKeepMarkUnderTheCloneLock(t *testing.T) {
+	publishWhileWaiting := func(t *testing.T, mark, top string) func(context.Context, string) (func(), error) {
+		return func(context.Context, string) (func(), error) {
+			if err := os.MkdirAll(filepath.Dir(mark), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(mark, []byte(top+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return func() {}, nil
+		}
+	}
+	t.Run("pane sweep tail", func(t *testing.T) {
+		f, g, _, cwd := checkoutFixture(t)
+		f.sweeper.LockClone = publishWhileWaiting(t, filepath.Join(f.a.Jobs, "handing-over", HandoverKeepFile), cwd)
+		f.endedSweep(61, time.Hour)
+		if len(g.removed) != 0 || !f.infoHas("task worktree kept", "reason="+sweepWorktreeHandoverKept) {
+			t.Fatalf("removed=%v info=%q", g.removed, f.info)
+		}
+	})
+	t.Run("checkout sweep", func(t *testing.T) {
+		f, g, sweep := checkoutSweepFixture(t)
+		id := "impl-9-race01"
+		dir := g.worktree(t, id+"-checkout")
+		pane := f.job(id, "implementer", "", map[string]any{"cwd": dir})
+		putEvent(t, f.a, id, "job.completed", map[string]any{})
+		delete(f.status, pane)
+		sweep.LockClone = publishWhileWaiting(t, filepath.Join(f.a.Jobs, "handing-over", HandoverKeepFile), dir)
+		rows, err := sweep.Pass(t.Context(), f.a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 || rows[0].Reason != sweepWorktreeHandoverKept || len(g.removed) != 0 {
+			t.Fatalf("rows=%+v removed=%v", rows, g.removed)
+		}
+	})
 }

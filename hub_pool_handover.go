@@ -433,7 +433,9 @@ func handoverNote(oldJob, host string, exhaustion poolExhaustion, keep nodeHando
 		b.WriteString(" The hub keeps the old worktree when it closes the old pane and names it here.")
 		return b.String()
 	case !keep.Dirty:
-		b.WriteString(" The old worktree held no other work.")
+		// Never "no other work": git can hide edits (index flags, a
+		// submodule's own flags), so the kept worktree stays the check.
+		b.WriteString(" The node listed no other work in the old worktree; it is kept, so check it (submodules too) before you rely on origin alone.")
 	default:
 		b.WriteString(" The old worktree holds work origin does not have; nothing of it was pushed.")
 		if keep.Head != "" && keep.Head != start {

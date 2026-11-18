@@ -251,16 +251,22 @@ func TestNodeHandoverKeepListsAnAssumeUnchangedEdit(t *testing.T) {
 	if err := os.Remove(filepath.Join(work, "new.txt")); err != nil {
 		t.Fatal(err)
 	}
-	handoverGit(t, work, "update-index", "--assume-unchanged", "a.txt")
-	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hidden edit\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if status := handoverGit(t, work, "status", "--porcelain"); status != "" {
-		t.Fatalf("fixture: git status shows %q", status)
-	}
-	result, _ := handoverKeepRun(t, work, true)
-	if result["dirty"] != true || fmt.Sprint(result["uncommitted"]) != "[a.txt]" {
-		t.Fatalf("result=%v", result)
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			handoverGit(t, work, "update-index", "--no-assume-unchanged", "--no-skip-worktree", "a.txt")
+			handoverGit(t, work, "checkout", "--", "a.txt")
+			handoverGit(t, work, "update-index", flag, "a.txt")
+			if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hidden edit\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if status := handoverGit(t, work, "status", "--porcelain"); status != "" {
+				t.Fatalf("fixture: git status shows %q", status)
+			}
+			result, _ := handoverKeepRun(t, work, true)
+			if result["dirty"] != true || fmt.Sprint(result["uncommitted"]) != "[a.txt]" {
+				t.Fatalf("result=%v", result)
+			}
+		})
 	}
 }
 
@@ -328,5 +334,20 @@ func TestNodeWorktreeRemoveRechecksTheKeepMarkUnderTheLock(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("the kept worktree is gone: %v", err)
+	}
+}
+
+// Another holder's git worktree lock is never adopted as the hand-over's: its
+// owner may unlock it. The keep fails (the hub retries) instead of "kept".
+func TestNodeHandoverKeepRefusesAForeignWorktreeLock(t *testing.T) {
+	work, _ := handoverRepo(t, true)
+	handoverGit(t, work, "stash", "push", "-u", "-m", "fixture")
+	handoverGit(t, work, "checkout", "main")
+	linked := filepath.Join(filepath.Dir(work), "linked")
+	handoverGit(t, work, "worktree", "add", linked, "wk/task")
+	handoverGit(t, work, "worktree", "lock", "--reason", "operator maintenance", linked)
+	result, _ := handoverKeepRun(t, linked, true)
+	if result["outcome"] != nodeHandoverKeepGitError || result["kept"] == true {
+		t.Fatalf("result=%v", result)
 	}
 }

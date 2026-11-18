@@ -170,7 +170,8 @@ decides with the §Implementer rule (the job's start, the task's priority and
      - then has the old node run `worktree.handover_keep` with `keep`: from
        the top level (never the pane's subdirectory) it reads HEAD and the
        paths `git status` names (untracked included) plus every path marked
-       assume-unchanged, which `git status` hides (at most 50 names and
+       assume-unchanged, and every present path marked skip-worktree, which
+       `git status` hides (at most 50 names and
        8 KiB, the rest counted). Holding the clone's git-op lock, it writes
        `jobs/<old>/handover-keep` and locks a linked worktree with
        `git worktree lock` (reason `panewire handover-keep`).
@@ -184,8 +185,13 @@ decides with the §Implementer rule (the job's start, the task's priority and
        it, or one containing it) keeps it from the pane sweep and
        `checkout.sweep` (`handover_kept`), from `worktree.remove`
        (`handover-kept`), and the job directory holding the mark from the
-       job-directory TTL. `worktree.remove` checks the mark again under
-       the git-op lock. The git lock also holds after a rollback to a node
+       job-directory TTL. `worktree.remove`, the pane sweep tail and
+       `checkout.sweep` check the mark again under the git-op lock
+       (`clone_busy_kept` when it is not free). An existing git lock counts
+       only when its reason is the hand-over's; another holder's lock fails
+       the keep and the hub retries. A note never says the old worktree held
+       no other work: git can hide edits (a submodule's own index flags), so
+       the successor checks the kept worktree. The git lock also holds after a rollback to a node
        binary that predates the mark: its removals pass one `--force`, which
        git refuses for a locked worktree. Clearing the mark and the lock is
        hk 5246.

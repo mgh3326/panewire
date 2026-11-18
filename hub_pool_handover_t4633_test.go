@@ -302,7 +302,7 @@ func TestPoolHandoverNoteNamesTheKeptWorktree(t *testing.T) {
 		wants []string
 	}{
 		{"dirty", handoverReadReply("dirty-job"), handoverKeepReply("dirty-job", true), []string{`"a.txt", "runtime.env"`, "nothing of it was pushed", "kept at machine-a:/work/dirty-job-checkout"}},
-		{"clean", handoverReadReply("dirty-job"), handoverKeepReply("dirty-job", false), []string{"held no other work", "kept at machine-a:/work/dirty-job-checkout"}},
+		{"clean", handoverReadReply("dirty-job"), handoverKeepReply("dirty-job", false), []string{"check it (submodules too)", "kept at machine-a:/work/dirty-job-checkout"}},
 		{"never pushed", never, neverKept, []string{"was never pushed", "HEAD " + handoverHead, "kept at machine-a:"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

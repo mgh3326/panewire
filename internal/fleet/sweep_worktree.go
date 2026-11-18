@@ -48,6 +48,8 @@ const (
 	// worktree's snapshot (or a submodule held work it does not carry), so
 	// the successor's note names this worktree (hk 4633).
 	sweepWorktreeHandoverKept = "handover_kept"
+	// sweepWorktreeCloneBusy: the clone's git-op lock was not free.
+	sweepWorktreeCloneBusy = "clone_busy_kept"
 )
 
 // handoverKept reports whether a hand-over keeps cwd (HandoverKeeps over
@@ -177,6 +179,18 @@ func (s *TaskPaneSweeper) worktreePlan(ctx context.Context, a *App, j Job, cwd s
 // through discardWorktree, which saves the work first; any other cleared end
 // is the merged path.
 func (s *TaskPaneSweeper) removeWorktree(ctx context.Context, a *App, j Job, end paneSweepEnd, clone, branch, cwd, base string, owned bool) string {
+	if s.LockClone != nil {
+		// A hand-over publishes its keep mark under the clone's git-op lock
+		// (hk 4633): hold it through the recheck and the removal.
+		release, err := s.LockClone(ctx, clone)
+		if err != nil {
+			return sweepWorktreeCloneBusy
+		}
+		defer release()
+		if handoverKept(a, j.ID, cwd) {
+			return sweepWorktreeHandoverKept
+		}
+	}
 	if owned || (end.discard && !end.merged) {
 		return s.discardWorktree(ctx, a, j, end, clone, branch, cwd, base)
 	}

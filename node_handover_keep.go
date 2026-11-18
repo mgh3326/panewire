@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -221,7 +222,7 @@ func (client *HubClient) nodeHandoverKeep(ctx context.Context, args nodeHandover
 	listed := 0
 	// git status hides an edit to a path marked assume-unchanged: list
 	// every such path, since the kept worktree may hold its only copy.
-	for _, path := range append(handoverStatusPaths(status), handoverAssumedPaths(files)...) {
+	for _, path := range append(handoverStatusPaths(status), handoverAssumedPaths(top, files)...) {
 		if len(result.Uncommitted) < nodeHandoverKeepMaxListed && validHandoverListedPath(path) && listed+len(path) <= nodeHandoverKeepListBytes {
 			result.Uncommitted = append(result.Uncommitted, path)
 			listed += len(path)
@@ -274,19 +275,31 @@ func handoverStatusPaths(status string) []string {
 const nodeHandoverKeepLockReason = "panewire handover-keep"
 
 // handoverAssumedPaths reads git ls-files -v -z and returns the paths marked
-// assume-unchanged (a lowercase tag), whose edits git status does not show.
-func handoverAssumedPaths(files string) []string {
+// assume-unchanged (a lowercase tag) or skip-worktree (S) and present in
+// top, whose edits git status does not show. An absent skip-worktree path is
+// a sparse checkout's, not work.
+func handoverAssumedPaths(top, files string) []string {
 	var paths []string
 	for _, record := range strings.Split(files, "\x00") {
-		if len(record) > 2 && record[0] >= 'a' && record[0] <= 'z' && record[1] == ' ' {
-			paths = append(paths, record[2:])
+		if len(record) < 3 || record[1] != ' ' {
+			continue
+		}
+		tag, path := record[0], record[2:]
+		hidden := tag >= 'a' && tag <= 'z'
+		if tag == 'S' || tag == 's' {
+			_, err := os.Lstat(filepath.Join(top, filepath.FromSlash(path)))
+			hidden = err == nil
+		}
+		if hidden {
+			paths = append(paths, path)
 		}
 	}
 	return paths
 }
 
 // handoverWorktreeLocked reports whether git worktree list --porcelain shows
-// path as locked (a lock left by an earlier keep of the same worktree).
+// path locked with the hand-over's own reason (an earlier keep of the same
+// worktree). Another holder's lock is never adopted: its owner may unlock it.
 func handoverWorktreeLocked(list, path string) bool {
 	for _, block := range strings.Split(list, "\n\n") {
 		lines := strings.Split(block, "\n")
@@ -294,7 +307,7 @@ func handoverWorktreeLocked(list, path string) bool {
 			continue
 		}
 		for _, line := range lines[1:] {
-			if line == "locked" || strings.HasPrefix(line, "locked ") {
+			if line == "locked "+nodeHandoverKeepLockReason {
 				return true
 			}
 		}
