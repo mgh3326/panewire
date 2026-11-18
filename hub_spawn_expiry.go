@@ -116,6 +116,9 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 		if n, _ := result.RowsAffected(); n != 1 {
 			return false, nil
 		}
+		if err = s.syncSpawnQueueNextCheck(ctx, tx, task.Request.RequestID); err != nil {
+			return false, err
+		}
 		return true, tx.Commit()
 	}
 	given := spawnGivenUpOutcome(task, outcome.Host)
@@ -138,8 +141,13 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 
 // releaseEndedSpawn frees the reservation of a request that ended without
 // starting, so the job id and the task's role are free to submit again (the
-// same release a retryable request gets), and queues the owner's notice.
+// same release a retryable request gets), takes it out of the spawn queue
+// (and, refused or failed, owes its hk task comment), and queues the owner's
+// notice. status is the terminal status the caller just wrote.
 func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task hubSpawnTask, status, raw string, now time.Time) error {
+	if err := s.endSpawnQueue(ctx, tx, task.Request.RequestID, status); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
 		return err
 	}

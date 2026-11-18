@@ -570,8 +570,8 @@ type HubServer struct {
 	waitingReadFailed bool
 	// spawnTaskFailMu guards the spawn-failure task comment's once-per-streak
 	// post failure log and its per-row retry counts (hub_spawn_task_fail.go).
-	// The next attempt itself lives on the operation (task_fail_retry_ms), so
-	// the sweep's due filter and restarts both respect it.
+	// The next attempt itself lives on the row's task_fail_notice_outbox
+	// entry (retry_ms), so the sweep's due filter and restarts both respect it.
 	// spawnTaskFailBackoffBase is the first retry delay for a row hk did not
 	// take; zero is the default. It doubles per consecutive failure to a
 	// 10-minute cap.
