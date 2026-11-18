@@ -241,7 +241,7 @@ func (h *HubServer) waitPoolStop(ctx context.Context, exhaustion poolExhaustion,
 		Owner: task.Owner, Kind: poolActionKindWait,
 		Handover: &poolHandover{Pool: exhaustion.Pool, Cause: exhaustion.Cause, Reset: exhaustion.Reset.Unix()},
 	}}
-	if err := h.inbox.store.insertPoolAction(ctx, row); err != nil {
+	if err := h.inbox.store.insertPoolAction(ctx, row, h.now().UTC()); err != nil {
 		return poolJobSkip(role, "store_unavailable")
 	}
 	return h.notifyPoolWait(ctx, exhaustion, task, why)
@@ -444,7 +444,7 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 				}
 			}
 			handover.Submitted = true
-			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 				return err
 			}
 			select {
@@ -468,7 +468,7 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 		} else {
 			handover.Outcome, handover.Reason = handoverFailed, fmt.Sprintf("successor %s rc=%d %s", task.Status, task.Outcome.RC, task.Outcome.Reason)
 		}
-		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 			return err
 		}
 	}
@@ -503,7 +503,7 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 	}
 	h.logger.Info("pool hand-over finished", "job", action.Job, "successor", handover.Job, "outcome", handover.Outcome, "action", action.ID)
 	action.Phase = poolActionDone
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	h.poolActionObserved.Delete(action.ID)
@@ -534,7 +534,7 @@ func (h *HubServer) handoverBeforeClose(ctx context.Context, action *poolAction)
 	withdraw := func(reason string) (bool, error) {
 		handover.Reason = reason
 		h.logger.Info("pool hand-over withdrawn before the close", "job", action.Job, "action", action.ID, "reason", reason)
-		return false, h.inbox.store.savePoolAction(ctx, *action)
+		return false, h.inbox.store.savePoolAction(ctx, *action, h.now().UTC())
 	}
 	exhaustion := handover.exhaustion()
 	if h.poolEventGone(exhaustion, h.now()) || exhaustion.poolWide() && !h.poolSweep.held(exhaustion.key()) {

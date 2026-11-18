@@ -89,7 +89,7 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 			return errors.New("successor already exists or unreadable")
 		}
 	}
-	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.insertPoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	h.poolActionObserved.Store(action.ID, struct{}{})
@@ -336,7 +336,7 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 				// a new attempt while it works is released above, never
 				// closed by this intent.
 				action.Data.TargetAttempt = status.Attempt
-				if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+				if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 					return err
 				}
 			}
@@ -372,7 +372,7 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 				return h.releasePoolAction(ctx, action)
 			}
 			action.Data.Args = args
-			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 				return err
 			}
 		}
@@ -483,7 +483,7 @@ func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolA
 			// The node answered the ack: no later pass repeats it.
 			acked = true
 			action.Data.Acked = true
-			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 				h.logger.Warn("pool action ack not saved", "job", action.Job, "action", action.ID, "error", h.inbox.store.loggable("pool action", err))
 			}
 		}
@@ -537,7 +537,7 @@ func (h *HubServer) refusePoolAction(ctx context.Context, action poolAction) err
 		handover.Outcome = handoverFailed
 		// Save the reason before publishing: a lost acknowledgement or a
 		// restart must replay the same notice without closing the old pane.
-		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 			return err
 		}
 		eventID := handoverNoticeID(action)
@@ -574,7 +574,7 @@ func (h *HubServer) logObservedPoolAction(action poolAction) {
 }
 
 func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, outcome string) error {
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	// The durable terminal transition is the action's exit: settled,
@@ -608,7 +608,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		if handover != nil && handover.Outcome == "" && !handover.Submitted {
 			if _, err := h.inbox.store.spawnTask(ctx, handover.Successor.RequestID); err == nil {
 				handover.Submitted = true
-				if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+				if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 					return err
 				}
 			} else if !errors.Is(err, sql.ErrNoRows) {
@@ -623,7 +623,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		// Settlement permits reassignment. Once another owner has the job,
 		// this old action must not release its role or announce its end.
 		action.Phase = poolActionDone
-		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 			return err
 		}
 		h.poolActionObserved.Delete(action.ID)
@@ -667,7 +667,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		}
 	}
 	action.Phase = poolActionDone
-	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+	if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 		return err
 	}
 	h.poolActionObserved.Delete(action.ID)

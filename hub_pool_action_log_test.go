@@ -13,7 +13,7 @@ func TestPoolActionInventoryCompletesBeforeSlowNode(t *testing.T) {
 	f, first := poolActionFixture(t)
 	second := first
 	second.ID, second.Job, second.Node = "action-2", "later-job", "machine-b"
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), second); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), second, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	started := time.Date(2026, time.November, 18, 1, 2, 3, 0, time.UTC)
@@ -71,7 +71,7 @@ func TestPoolActionInventoryDoesNotCompleteWhenStoreUnavailable(t *testing.T) {
 func TestPoolActionInventoryReportsEmptySnapshot(t *testing.T) {
 	f, action := poolActionFixture(t)
 	action.Phase = poolActionRefused
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	logs := captureHubLog(f.hub)
@@ -177,7 +177,7 @@ func TestPoolActionPendingObservedOnceAfterHubRestart(t *testing.T) {
 func TestPoolActionGuardedFinalizationObservedAfterHubRestart(t *testing.T) {
 	f, action := poolActionFixture(t)
 	action.Phase = poolActionGuarded
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f)
