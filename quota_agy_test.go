@@ -93,7 +93,8 @@ func agyTestSource(spawnConfig string, files map[string]string, api agy.Doer, fp
 				}
 				return nil, os.ErrNotExist
 			},
-			SecretService: func(context.Context) (string, error) { return "", errors.New("no secret service") },
+			// An empty keyring item: the keyring answered and holds no login.
+			SecretService: func(context.Context) (string, error) { return "", nil },
 			LookPath:      func(string) (string, error) { return "", errors.New("not found") },
 			Processes:     func(context.Context) []agy.Proc { return nil },
 			ListenPorts:   func(context.Context, int) []int { return nil },

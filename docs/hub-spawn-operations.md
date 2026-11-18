@@ -879,7 +879,8 @@ checkout or engine call. A spawn carrying a checkout on a node with a work
 root is not answered that way: the node clones into the work root, following
 [the placement rule](placement.md#the-filter). A first-run refusal
 (`hooks_review`, `trust_prompt`, `omp_setup_wizard`, `auth_unavailable`) tells
-`operator-desk` which one-time action the host needs
+the operator, through a Sentry warning and not a lane, which one-time action the
+host needs
 ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)). When the
 node verifies cleanup and the refusal precedes the hk job claim (result stage
 empty, `placement` or `checkout`), auto placement can try another host. Before

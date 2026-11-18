@@ -346,24 +346,32 @@ keeps its refusal.
 Nothing answers the dialog: trust stays a one-time human action on the host.
 
 The first time a host reports a need for a harness kind, the hub sends one
-`lane.event` to `operator-desk` and one Sentry warning (when hub Sentry is
-configured). The Sentry event is titled `ACTION NEEDED: <host> <kind> — <action>`
-(quotes dropped from the action) with fingerprint
-`[action-needed, host, kind, action]`, so the existing Sentry→Discord rule posts
-one message per host and action. The hub resolves nothing: a recurrence after the
-operator resolves the issue alerts again as a regression. The desk line:
+Sentry warning (when hub Sentry is configured) and no lane event: no session's
+inbox gets it, and the existing Sentry→Discord rule posts it. The Sentry event is
+titled `ACTION NEEDED: <host> <kind> — <action>` (quotes dropped from the action)
+with fingerprint `[action-needed, host, kind, action]`, so one message is posted
+per host and action. The hub resolves nothing: a recurrence after the operator
+resolves the issue alerts again as a regression. The title reads:
 
 ```
-[oci] codex needs a one-time action: run codex once and choose "Trust all and continue"
+ACTION NEEDED: oci codex — run codex once and choose Trust all and continue
 ```
 
 A need is a readiness `dialog` value or `login: missing`; a refusal above counts
 as a report of the same need. The text carries the host, the kind and the
 action only, never screen content. The hub tells each (host, kind, need) once
-and forgets it when a later readiness report no longer shows it, so the need
-coming back is told again. A report computed before the notice cannot forget
-it. The told set is in hub memory: a hub restart tells the needs that are still
-reported once more.
+while it stands, and records it as told only after the Sentry transport accepts
+and flushes the event (bounded at 2 s). With no Sentry DSN nothing is told, and
+the next report tries again. The told state is kept in the hub store (table
+`one_time_action_notices`, Postgres migration 0026) and read back at start, so a
+hub restart does not tell a standing need again. A need clears only when a
+readiness report shows it gone and it stays gone for one full readiness cycle
+(5 minutes): a report that shows it again inside that cycle cancels the clear
+and tells nothing. A report computed before the notice cannot clear it, and a
+need that clears and comes back is told again. A need of a kind the readiness
+report does not cover (kiro, opencode) is never cleared by a report, so it
+stays told until its row is cleared by hand. This is a known gap: no path clears
+it yet, not even a successful launch of that kind.
 
 ### Spawner configuration
 

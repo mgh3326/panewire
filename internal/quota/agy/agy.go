@@ -168,7 +168,13 @@ func (c Config) cloud(ctx context.Context) (quota.Observation, error) {
 	token := c.fileToken()
 	usedSecret := false
 	if token == "" {
-		if token = c.secretToken(ctx); token != "" {
+		secret, err := c.secretToken(ctx)
+		if err != nil {
+			// The keyring is unreadable from this process, so no login is
+			// judged absent or present: the failure is not a login error.
+			return quota.Observation{}, quota.Fail(quota.ErrKindProbeFailed, "agy login store is unreadable from this process")
+		}
+		if token = secret; token != "" {
 			usedSecret = true
 		}
 	}
@@ -202,7 +208,7 @@ func (c Config) cloud(ctx context.Context) (quota.Observation, error) {
 	// to the keyring copy. A refused fallback keeps the refresh hint rather
 	// than masking it behind the same failure.
 	if !secretRefused {
-		if secret := c.secretToken(ctx); secret != "" && secret != token {
+		if secret, _ := c.secretToken(ctx); secret != "" && secret != token {
 			if alt, altErr := c.fetch(ctx, secret); altErr == nil {
 				return alt, nil
 			}
