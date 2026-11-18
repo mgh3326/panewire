@@ -310,9 +310,32 @@ func paneSweepAwaitsPR(j Job) bool {
 	return !strings.HasPrefix(j.Label, "mwr-")
 }
 
+// paneSweepReplacedBy is the successor a job.replaced event names for a job
+// whose work a successor took over (spawn.go recordReplaced), "" when the job
+// dir holds no such event. The name is the successor's job id.
+func paneSweepReplacedBy(j Job) string {
+	for _, ev := range j.Events {
+		if ev.Kind == "job.replaced" {
+			if by := str(ev.Payload, "replaced_by"); by != "" {
+				return by
+			}
+		}
+	}
+	return ""
+}
+
+// paneSweepReplaced reports that a non-keep job counts as ended because a
+// successor replaced it (docs/pane-sweep.md, "Replaced jobs"): the successor
+// owns the task and the PR, so the job's own pane, its PR and its state never
+// keep it. --keep jobs keep their own rule (hk 5295).
+func paneSweepReplaced(j Job) bool { return !j.Keep && paneSweepReplacedBy(j) != "" }
+
 // paneSweepWaitsOnPR reports that an open PR from the job's worktree keeps its
-// pane: a task-derived end, or a completed author.
-func paneSweepWaitsOnPR(j Job) bool { return !paneSweepClosed(j) || paneSweepAwaitsPR(j) }
+// pane: a task-derived end, or a completed author. A replaced job never waits:
+// the PR is its successor's.
+func paneSweepWaitsOnPR(j Job) bool {
+	return !paneSweepReplaced(j) && (!paneSweepClosed(j) || paneSweepAwaitsPR(j))
+}
 
 // paneSweepJobEnd is the end a closed job gives when its task has not ended.
 func paneSweepJobEnd(j Job, taskState string) paneSweepEnd {
@@ -328,6 +351,9 @@ func paneSweepJobEnd(j Job, taskState string) paneSweepEnd {
 		end.reason = "job_handed_off"
 	default:
 		end.reason = "job_revoked"
+	}
+	if paneSweepReplaced(j) {
+		end.reason = "job_replaced"
 	}
 	if j.Ended == "job.completed" || j.Outcome == "completed" {
 		end.state = "completed"
@@ -414,12 +440,12 @@ func (s *TaskPaneSweeper) info(message string, attrs ...any) {
 func paneSweepKey(j Job) string { return j.ID + "\x00" + j.Pane }
 
 // paneSweepCandidate admits a job whose pane the sweep may close: a spawn role
-// from spawnRoles, and either an implementer (judged by its task) or a
-// job that ended locally. A builder, captain or lead pane is its lane's, not
-// the sweep's.
+// from spawnRoles, and either an implementer (judged by its task), a
+// job that ended locally, or a job a successor replaced. A builder, captain or
+// lead pane is its lane's, not the sweep's.
 func paneSweepCandidate(j Job) bool {
 	return !j.Reaped && !j.Keep && j.Pane != "" && j.Label != "" && slices.Contains(spawnRoles, paneSweepRole(j)) &&
-		(paneSweepTaskRole(j) || paneSweepClosed(j))
+		(paneSweepTaskRole(j) || paneSweepClosed(j) || paneSweepReplaced(j))
 }
 
 // paneSweepKeepCandidate admits a --keep job: an implementer always, so its
@@ -577,7 +603,8 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 	// (hk 4904).
 	excludedPanes := map[string]bool{}
 	for _, j := range candidates {
-		closed := paneSweepClosed(j)
+		replaced := paneSweepReplaced(j)
+		closed := paneSweepClosed(j) || replaced
 		var task string
 		var taskErr error
 		if paneSweepTaskRole(j) {
@@ -623,6 +650,11 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		// A task that ended decides the end state; a closed job whose task is
 		// still live, or unreadable, ends by its own record.
 		end, eligible := paneSweepTaskEnd(status)
+		if replaced {
+			// The successor owns the task: a replaced job's end is its own
+			// record's, so a task that ended never sets its state (hk record).
+			eligible = false
+		}
 		if !eligible {
 			// A task that is live again has no end to date: forget the first
 			// sighting of an earlier end, so a task that ends again starts a
@@ -646,20 +678,28 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		if j.Keep && !due {
 			continue
 		}
-		if !due {
-			switch {
-			case !idle:
-				s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", s.notIdleReason(j, agents))
-				continue
-			case now.Sub(since) < s.Grace:
-				s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", "grace", "idle_seconds", int(now.Sub(since).Seconds()))
+		switch {
+		case replaced:
+			// A replaced job closes on the first sweep that finds its pane not
+			// working: no grace, no owner-age wait, and no open-PR keep (the
+			// rule below comes first). A working pane is never forced.
+			if !paneSweepReadyToClose(j, agents) {
+				s.info("task pane kept", "job", j.ID, "task", task, "pane", j.Pane, "reason", s.notIdleReason(j, agents))
 				continue
 			}
+		case due:
+		case !idle:
+			s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", s.notIdleReason(j, agents))
+			continue
+		case now.Sub(since) < s.Grace:
+			s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", "grace", "idle_seconds", int(now.Sub(since).Seconds()))
+			continue
 		}
 		// A task-derived end, and a completed author (paneSweepAwaitsPR),
 		// wait on an open PR — also past the deadline, since the pane is the
 		// PR author's. A job its owner closed is swept whatever its PRs say
-		// (hk 3383), and a --keep pane never waits.
+		// (hk 3383), and a --keep pane never waits. A replaced job never
+		// waits: the successor owns the PR (paneSweepWaitsOnPR).
 		if !j.Keep && paneSweepTaskRole(j) && paneSweepWaitsOnPR(j) {
 			if reason, number := s.paneSweepPRKeep(ctx, a, j, task, taskErr, prs); reason != "" {
 				attrs := []any{"job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", reason}
@@ -959,6 +999,20 @@ func (s *TaskPaneSweeper) idle(j Job, agents []Agent) bool {
 	return false
 }
 
+// paneSweepReadyToClose reports that a replaced job's pane may close now: its
+// row matches the job (paneSweepMatches, so a pane another job's label has
+// taken stays) and is not working, or no row lists the pane at all, which the
+// close's ownership proof then settles (pane_unlisted). A working pane is never
+// forced.
+func paneSweepReadyToClose(j Job, agents []Agent) bool {
+	for _, ag := range agents {
+		if ag.Pane == j.Pane {
+			return paneSweepMatches(j, ag) && ag.Status != "working"
+		}
+	}
+	return true
+}
+
 func (s *TaskPaneSweeper) notIdleReason(j Job, agents []Agent) string {
 	for _, ag := range agents {
 		if ag.Pane == j.Pane {
@@ -1155,7 +1209,7 @@ func (s *TaskPaneSweeper) closeStillEnded(ctx context.Context, j, latest Job, ta
 	} else if !paneSweepCandidate(latest) {
 		return false
 	}
-	if paneSweepClosed(latest) {
+	if paneSweepClosed(latest) || paneSweepReplaced(latest) {
 		return true
 	}
 	if end.byJob || task == "" {
@@ -1240,8 +1294,35 @@ func (s *TaskPaneSweeper) reapSweptPaneHeld(ctx context.Context, a *App, latest,
 	if err := a.event(ctx, j.ID, "job.reaped", map[string]any{"pane_id": j.Pane, "reason": end.reason}); err != nil {
 		a.warn("job.reaped not recorded: %v", err)
 	}
+	if successor := paneSweepReplacedBy(latest); successor != "" {
+		// The successor owns the worktree, the PR and the task: none of them
+		// is removed or written to here, and the owner hears once.
+		s.info("task worktree kept", "job", latest.ID, "reason", "replaced")
+		a.announceReplacedClose(ctx, latest, successor)
+		return
+	}
 	s.sweepWorktree(ctx, a, latest, end)
 	s.closedFailure(ctx, a, j, task)
+}
+
+// announceReplacedClose tells the job's owner lane, with one info line keyed
+// by the job (so a repeat is one event), that the sweep closed a replaced
+// job's pane. A job with no owner lane gets a warning only.
+func (a *App) announceReplacedClose(ctx context.Context, j Job, successor string) {
+	if j.Owner == "" {
+		a.warn("replaced job %s closed without an owner lane to tell", j.ID)
+		return
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	text := fmt.Sprintf("[panewire] closed %s (replaced by %s) on %s", j.ID, successor, host)
+	r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", j.Owner, "--type", "info",
+		"--event-id", "replaced-close-"+j.ID, "--inbox-root", filepath.Dir(a.Jobs), "--text", text)
+	if err := check(r, "replaced close notice"); err != nil {
+		a.warn("replaced close notice not sent for job %s: %v", j.ID, err)
+	}
 }
 
 // savePaneScreen keeps the pane's last screen before the close. A screen hk
@@ -1259,6 +1340,11 @@ func (a *App) savePaneScreen(ctx context.Context, j Job, task string) error {
 		return err
 	}
 	screen := []byte(r.Out)
+	if paneSweepReplaced(j) {
+		// The task is the successor's, and a replaced close leaves hk's task
+		// alone: the screen stays in the job's directory.
+		return a.writeLocalPaneScreen(j.ID, screen)
+	}
 	_, err := UploadPaneScreen(ctx, j.ID, task, screen)
 	switch {
 	case err == nil && len(screen) <= PaneScreenDocMaxBytes:
@@ -1269,15 +1355,18 @@ func (a *App) savePaneScreen(ctx context.Context, j Job, task string) error {
 	case err != nil:
 		a.warn("pane screen refused by hk for job %s; the local copy is the screen: %v", j.ID, err)
 	}
-	root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
+	return a.writeLocalPaneScreen(j.ID, screen)
+}
+
+// writeLocalPaneScreen writes the screen to <job dir>/pane-screen.txt, mode
+// 0600, through an os.Root on the job directory.
+func (a *App) writeLocalPaneScreen(job string, screen []byte) error {
+	root, err := os.OpenRoot(filepath.Join(a.Jobs, job))
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	if err := durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, screen, 0600); err != nil {
-		return err
-	}
-	return nil
+	return durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, screen, 0600)
 }
 
 // markSweptJob writes the end state to the hk record of a job that never
