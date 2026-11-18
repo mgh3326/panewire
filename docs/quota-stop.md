@@ -168,14 +168,23 @@ decides with the §Implementer rule (the job's start, the task's priority and
      - releases it when the pane moved or changed directory, and holds it
        until the pane is idle;
      - then has the old node snapshot the worktree: from the top level
-       (never the pane's subdirectory), a temporary index
-       (`GIT_INDEX_FILE`, `read-tree HEAD`, `add -A`, `write-tree`) and
-       `commit-tree -p HEAD`, pushed to `refs/panewire/handover/<old>` on
-       origin. Untracked files are included and ignored ones are not; the
-       user's index, stash and branch are untouched; every byte is carried,
-       with no diff, filter or size limit. A pushed tip no longer in the
-       worktree's history (`diverged`) or a start point that moved releases
-       the row unclosed.
+       (never the pane's subdirectory), a temporary index that starts as a
+       copy of the user's index (`GIT_INDEX_FILE`), `add -u`, `write-tree`
+       and `commit-tree -p HEAD`, pushed to `refs/panewire/handover/<old>`
+       on origin. The user's index, stash and branch are untouched. A pushed
+       tip no longer in the worktree's history (`diverged`) or a start point
+       that moved releases the row unclosed.
+     - **What the ref holds:** the old job's unpushed commits (the snapshot's
+       parent is the old HEAD) and one commit on top with every tracked
+       path's worktree state — modified, deleted, and new files the user had
+       staged — as `git add` stores it.
+     - **What stays only on the old host:** every untracked file (never
+       added or pushed, whatever its name: it may hold a credential, and the
+       ref is readable by anyone who can read origin; operator decision on
+       r4613533212), ignored files, Git LFS objects, clean-filtered contents,
+       nested repositories and dirty submodules, and anything written after
+       the snapshot. The note lists the untracked paths (quoted, up to 2 KiB,
+       then a count) and names the kept worktree.
      - The push sends only that ref (`--no-follow-tags`, no submodule
        recursion, no hooks) and the ref must read back on origin as the
        commit.

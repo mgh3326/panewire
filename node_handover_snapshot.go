@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -14,8 +17,9 @@ import (
 // level it reports the branch, its last pushed commit (git ls-remote on the
 // node, which holds the origin's credentials) or the base it was cut from.
 // With Snapshot set — at the close, after the hub saw the pane idle — it also
-// commits the whole worktree, untracked files included, through a temporary
-// index (the user's index, stash and branch stay untouched) on top of HEAD and
+// commits the worktree's tracked changes (the user's staged files included;
+// untracked files never) through a temporary index seeded from the user's
+// (which, with the stash and branch, stays untouched) on top of HEAD and
 // pushes that commit to refs/panewire/handover/<job> on origin (no tags, no
 // submodules, read back after the push). A snapshot always writes
 // fleet.HandoverKeepFile into the job's directory as well: every sweep then
@@ -73,9 +77,31 @@ type nodeHandoverSnapshotResult struct {
 	Ref    string `json:"ref,omitempty"`
 	// Submodule: a submodule holds changes the commit does not carry.
 	Submodule bool `json:"submodule"`
+	// Untracked lists the worktree's untracked, non-ignored files (at most
+	// nodeHandoverSnapshotMaxListed; UntrackedMore counts the rest). They are
+	// never committed or pushed: they stay in the kept worktree (hk 4633,
+	// operator decision on r4613533212).
+	Untracked     []string `json:"untracked,omitempty"`
+	UntrackedMore int      `json:"untracked_more,omitempty"`
 	// Kept: the job's worktree is kept by HandoverKeepFile; the successor
 	// copies what the ref lacks from Top on this node.
 	Kept bool `json:"kept"`
+}
+
+// nodeHandoverSnapshotMaxListed bounds the untracked paths a result names.
+const nodeHandoverSnapshotMaxListed = 50
+
+// validHandoverUntrackedPath is one printable relative path for the note.
+func validHandoverUntrackedPath(path string) bool {
+	if path == "" || len(path) > 1024 || !utf8.ValidString(path) || strings.HasPrefix(path, "/") {
+		return false
+	}
+	for _, r := range path {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func validNodeHandoverSnapshotArgs(args nodeHandoverSnapshotArgs) bool {
@@ -91,9 +117,17 @@ func validNodeHandoverSnapshotResult(result nodeHandoverSnapshotResult) bool {
 		if (result.Commit == "") != (result.Ref == "") || result.Commit != "" && (!nodeShaPattern.MatchString(result.Commit) || !strings.HasPrefix(result.Ref, handoverSnapshotRefPrefix) || !validNodeJobName(strings.TrimPrefix(result.Ref, handoverSnapshotRefPrefix))) {
 			return false
 		}
+		if len(result.Untracked) > nodeHandoverSnapshotMaxListed || result.UntrackedMore < 0 {
+			return false
+		}
+		for _, path := range result.Untracked {
+			if !validHandoverUntrackedPath(path) {
+				return false
+			}
+		}
 		return validNodeRefName(result.Branch) && validNodeCommandPath(result.Top) && (result.Pushed == "" || nodeShaPattern.MatchString(result.Pushed))
 	case nodeHandoverSnapshotNotAJob, nodeHandoverSnapshotBranch, nodeHandoverSnapshotGitError, nodeHandoverSnapshotDiverged:
-		return result == nodeHandoverSnapshotResult{Outcome: result.Outcome}
+		return reflect.DeepEqual(result, nodeHandoverSnapshotResult{Outcome: result.Outcome})
 	}
 	return false
 }
@@ -191,9 +225,21 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 	staged, ok2 := read("ls-files", "-s")
 	head, ok3 := read("rev-parse", "HEAD")
 	headTree, ok4 := read("rev-parse", "HEAD^{tree}")
-	if !ok1 || !ok2 || !ok3 || !ok4 {
+	untracked, ok5 := read("ls-files", "-z", "--others", "--exclude-standard")
+	index, ok6 := read("rev-parse", "--path-format=absolute", "--git-path", "index")
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
 		return refuse(nodeHandoverSnapshotGitError)
 	}
+	for _, path := range strings.Split(untracked, "\x00") {
+		switch {
+		case path == "":
+		case len(result.Untracked) < nodeHandoverSnapshotMaxListed && validHandoverUntrackedPath(path):
+			result.Untracked = append(result.Untracked, path)
+		default:
+			result.UntrackedMore++
+		}
+	}
+
 	head, headTree = strings.TrimSpace(head), strings.TrimSpace(headTree)
 	for _, line := range strings.Split(staged, "\n") {
 		if mode, rest, _ := strings.Cut(line, " "); mode == "160000" {
@@ -202,7 +248,7 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 			}
 		}
 	}
-	tree, commit, err := handoverSnapshotCommit(ctx, top, dir, args.Job)
+	tree, commit, err := handoverSnapshotCommit(ctx, top, dir, strings.TrimSpace(index), args.Job)
 	if err != nil {
 		return refuse(nodeHandoverSnapshotGitError)
 	}
@@ -217,10 +263,10 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 			result.Commit, result.Ref = commit, ref
 		}
 	}
-	// Losing nothing matters more than starting clean: the commit is
-	// what git add stores (LFS pointers, clean-filtered files, nested
-	// repositories as gitlinks), and the pane's processes may write
-	// after it. The worktree stays until an operator clears the mark
+	// Losing nothing matters more than starting clean: the commit holds
+	// tracked changes only, as git add stores them (LFS pointers,
+	// clean-filtered files), untracked files stay here, and the pane's
+	// processes may write after it. The worktree stays until an operator clears the mark
 	// (hk 5246).
 	if err := replaceFileAtomicallyInRoot(job, fleet.HandoverKeepFile, []byte(top+"\n"), 0600); err != nil {
 		return nil, "capture_failed"
@@ -229,10 +275,13 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 	return result, ""
 }
 
-// handoverSnapshotCommit writes the whole worktree at top, untracked files
-// included and ignored files left out, as a commit on top of HEAD through a
-// temporary index in the job's directory.
-func handoverSnapshotCommit(ctx context.Context, top, jobDir, job string) (tree, commit string, err error) {
+// handoverSnapshotCommit writes the worktree's tracked changes at top as a
+// commit on top of HEAD: a temporary index in the job's directory starts as a
+// copy of the user's index (so staged new files count as tracked), then
+// git add -u takes every tracked path's worktree state. Untracked files are
+// never added: they may hold credentials, and the ref is readable by
+// everyone who can read origin.
+func handoverSnapshotCommit(ctx context.Context, top, jobDir, userIndex, job string) (tree, commit string, err error) {
 	index, err := os.CreateTemp(jobDir, ".handover-index-*")
 	if err != nil {
 		return "", "", err
@@ -240,15 +289,23 @@ func handoverSnapshotCommit(ctx context.Context, top, jobDir, job string) (tree,
 	path := index.Name()
 	index.Close()
 	defer os.Remove(path)
-	// git refuses an empty file as an index; it creates one where none is.
-	if err := os.Remove(path); err != nil {
-		return "", "", err
-	}
 	env := append([]string{"GIT_INDEX_FILE=" + path}, handoverSnapshotIdentity...)
-	if _, err := gitWithEnv(ctx, env, "-C", top, "read-tree", "HEAD"); err != nil {
+	if body, err := os.ReadFile(userIndex); err == nil {
+		if err := os.WriteFile(path, body, 0600); err != nil {
+			return "", "", err
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		// No index yet: start from HEAD. git refuses an empty index file.
+		if err := os.Remove(path); err != nil {
+			return "", "", err
+		}
+		if _, err := gitWithEnv(ctx, env, "-C", top, "read-tree", "HEAD"); err != nil {
+			return "", "", err
+		}
+	} else {
 		return "", "", err
 	}
-	if _, err := gitWithEnv(ctx, env, "-C", top, "add", "-A", "--", "."); err != nil {
+	if _, err := gitWithEnv(ctx, env, "-C", top, "add", "-u", "--", "."); err != nil {
 		return "", "", err
 	}
 	if tree, err = gitWithEnv(ctx, env, "-C", top, "write-tree"); err != nil {

@@ -2,6 +2,8 @@ package panewire
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -139,14 +141,17 @@ func TestNodeHandoverSnapshotRestoresTheWorktreeByteForByte(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(work, "staged.txt"), []byte("staged\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			handoverGit(t, work, "add", "staged.txt")
+			// Staged new files are tracked in the user's index: they go in.
+			handoverGit(t, work, "add", "staged.txt", "live", "latin1.txt")
 			indexBefore := handoverGit(t, work, "diff", "--cached", "--name-status")
 			statusBefore := handoverGit(t, work, "status", "--porcelain")
 			want := worktreeFiles(t, work)
+			// new.txt is untracked: it stays on the host and is only named.
+			delete(want, "new.txt")
 
 			result, _ := handoverSnapshotRun(t, filepath.Join(work, "live"), true)
 			ref := handoverSnapshotRefPrefix + "job-a"
-			if result["outcome"] != nodeHandoverSnapshotSaved || result["dirty"] != true || result["ref"] != ref || result["kept"] != true || result["top"] != work {
+			if result["outcome"] != nodeHandoverSnapshotSaved || result["dirty"] != true || result["ref"] != ref || result["kept"] != true || result["top"] != work || fmt.Sprint(result["untracked"]) != "[new.txt]" {
 				t.Fatalf("result=%v", result)
 			}
 			if got := handoverGit(t, work, "diff", "--cached", "--name-status"); got != indexBefore {
@@ -303,5 +308,44 @@ func TestNodeHandoverSnapshotPushesOnlyItsRefAndKeepsTheWorktree(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(jobDir, fleet.HandoverKeepFile)); err != nil {
 		t.Fatalf("a pushed snapshot left the worktree unkept: %v", err)
+	}
+}
+
+// Operator decision on r4613533212: the ref carries tracked changes and
+// unpushed commits only. A non-ignored untracked file (a 0600 runtime.env
+// holding a token) is never committed or pushed; the successor's note names
+// it, and it stays in the kept old worktree.
+func TestNodeHandoverSnapshotNeverPushesUntrackedFiles(t *testing.T) {
+	work, _ := handoverRepo(t, true)
+	if err := os.WriteFile(filepath.Join(work, "runtime.env"), []byte("TOKEN=secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, jobDir := handoverSnapshotRun(t, work, true)
+	commit, _ := result["commit"].(string)
+	if commit == "" {
+		t.Fatalf("result=%v, want a snapshot of the tracked edit", result)
+	}
+	tree := handoverGit(t, work, "ls-tree", "-r", "--name-only", commit)
+	for _, name := range []string{"runtime.env", "new.txt"} {
+		if strings.Contains("\n"+tree+"\n", "\n"+name+"\n") {
+			t.Fatalf("untracked %s is in the snapshot commit: %q", name, tree)
+		}
+	}
+	if !strings.Contains("\n"+tree+"\n", "\na.txt\n") {
+		t.Fatalf("the tracked edit is missing: %q", tree)
+	}
+	if blob := handoverGit(t, work, "show", commit+":a.txt"); blob != "three" {
+		t.Fatalf("a.txt in the snapshot=%q", blob)
+	}
+	var snap nodeHandoverSnapshotResult
+	if err := json.Unmarshal(mustJSON(result), &snap); err != nil {
+		t.Fatal(err)
+	}
+	note := handoverNote("job-a", "machine-a", poolExhaustion{Pool: "claude", Cause: "window:5h"}, snap)
+	if !strings.Contains(note, `"runtime.env"`) || !strings.Contains(note, "never pushed") || !strings.Contains(note, "kept at machine-a:"+work) {
+		t.Fatalf("note=%q", note)
+	}
+	if _, err := os.Stat(filepath.Join(jobDir, fleet.HandoverKeepFile)); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -427,9 +427,14 @@ func handoverNote(oldJob, host string, exhaustion poolExhaustion, snap nodeHando
 	case host == "":
 		b.WriteString(" The hub snapshots the old worktree when it closes the old pane and names the snapshot here.")
 	case snap.Ref != "":
-		fmt.Fprintf(&b, " The old worktree's unpushed commits and uncommitted work, untracked files included, are commit %s at %s on origin. Restore them first: git fetch origin %s && git checkout -B %s FETCH_HEAD && git reset --mixed HEAD~1 (the branch keeps the old commits, the work comes back uncommitted, and history stays linear).", snap.Commit, snap.Ref, shellWord(snap.Ref), shellWord(branch))
+		fmt.Fprintf(&b, " The old worktree's unpushed commits and uncommitted changes to tracked files are commit %s at %s on origin. Restore them first: git fetch origin %s && git checkout -B %s FETCH_HEAD && git reset --mixed HEAD~1 (the branch keeps the old commits, the work comes back uncommitted, and history stays linear).", snap.Commit, snap.Ref, shellWord(snap.Ref), shellWord(branch))
 	case !snap.Dirty:
 		b.WriteString(" The old worktree held no other work.")
+	}
+	if len(snap.Untracked) > 0 || snap.UntrackedMore > 0 {
+		b.WriteString(" Untracked files are never pushed; these stay only in the old worktree: ")
+		b.WriteString(handoverUntrackedList(snap.Untracked, snap.UntrackedMore))
+		b.WriteString(".")
 	}
 	if snap.Kept {
 		if snap.Ref == "" && snap.Dirty {
@@ -638,4 +643,29 @@ func handoverStartsAt(snap nodeHandoverSnapshotResult) string {
 // metacharacters the successor must not run.
 func shellWord(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// handoverNoteListBytes bounds the untracked list in the note, so the brief
+// keeps its room under the submission cap.
+const handoverNoteListBytes = 2048
+
+// handoverUntrackedList joins paths, quoted, up to handoverNoteListBytes and
+// counts the rest.
+func handoverUntrackedList(paths []string, more int) string {
+	var b strings.Builder
+	for i, path := range paths {
+		item := strconv.Quote(path)
+		if b.Len()+len(item)+2 > handoverNoteListBytes {
+			more += len(paths) - i
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(item)
+	}
+	if more > 0 {
+		fmt.Fprintf(&b, " and %d more", more)
+	}
+	return b.String()
 }
