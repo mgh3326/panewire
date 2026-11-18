@@ -1093,9 +1093,22 @@ and `refs.job_id` from the parent to the new job through `handoffkeep tasks
 rebind`, regardless of the parent's state. When the task is still bound to an
 earlier job in the parent's `--parent-job` chain, the successor follows the
 chain and rebinds from that ancestor holder; unrelated holders are refused.
-The parent pane is left running.
-Only implementer spawns take over; reviewer and consult children do not. Spawns with `--task`, or neither flag and
+Only implementer spawns take over; reviewer and consult children do not.
+Spawns with `--task`, or neither flag and
 no `ARBITER_JOB`, claim as before.
+
+Once that implementer successor lands, the hub also ends the parent's pane
+itself through the jobs-close reap path (`hub_spawn_supersede.go`): a parent
+whose pane is `idle`, `done` or `blocked` closes at landing (a blocked pane
+is proven blocked first, then closed carrying that proof, which the node
+re-reads just before closing; the recheck narrows the race to the close call
+itself, since herdr's pane close takes only the pane id); a parent that is
+still `working` is recorded as
+superseded by the successor (`job.superseded` on the parent) and closed at
+the first sweep where it is no longer working. A parent spawned with
+`--keep` is never closed, the worktree is never removed (the successor may
+be using it), and the parent's hk task is untouched: the successor carries
+it. The owner lane hears one `info` lane.event when the pane closes.
 
 The earlier `job.task_link` event records `status: inherited` and
 `takeover: pending`. After landing, `job.task_rebind` records the outcome:
