@@ -112,7 +112,7 @@ features (`ended_panes` is the precedent).
 | Mechanism | Kind | Item (one per) | Entry edge (made) | Exit edge (done) |
 |---|---|---|---|---|
 | `task_pane_sweep` | scan | — | — | — |
-| `worktree_flow` | flow | worktree of an ended job (job id) | worktreePlan clears it for removal; the daily revisit judges it | guarded removal takes it |
+| `worktree_flow` | flow | worktree of an ended job (job id) | worktreePlan clears it for removal; the daily revisit attempts its removal | guarded removal takes it |
 | `quota_measure` | scan | — | — | — |
 | `job_dir_ttl` | scan | — | — | — |
 | `quota_pool_reconcile` | flow | stale quota record or orphan job (job) | first listing that day | orphan released |
@@ -165,5 +165,8 @@ row is written, and no row.
 
 Once a day the node runs the `node sweep-checkouts` logic itself (hk 5091)
 over the worktrees the sweep tail kept, through the same guarded removal —
-including the in-use guard — and never touches a worktree in use. Its counts
-go to the `worktree_flow` mechanism. The manual command stays.
+including the in-use guard — and never touches a worktree in use. The revisit
+holds `nodeCommandMu`, so its git mutations never interleave with a pane
+close. A checkout kept for a live user leaves on its own and never enters the
+flow; every other judged checkout does, out when the guarded removal takes
+it. The manual command stays.

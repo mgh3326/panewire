@@ -740,21 +740,23 @@ func (client *HubClient) releaseWatcherFence(job string) {
 // left to the next step, never to the hub. The fence is reconciled under the
 // job's end lock before the step (a step runs only while no watcher that
 // ignores the close can run) and after it (released once no intent is open).
-// settleHubClose drives one job's hub close one step. It reports whether the
-// close settled: the daemon pass counts exits in the ledger's hub_close_settle
-// flow.
-func (client *HubClient) settleHubClose(ctx context.Context, job string) bool {
+// settleHubClose drives one job's hub close one step and reports the step's
+// state. The daemon pass counts a done edge in the ledger's hub_close_settle
+// flow only for a terminal state: a pending state with a nil error (an
+// unreadable close operation waits) is still open, and counting it done
+// would hide a stuck close behind balanced made and done.
+func (client *HubClient) settleHubClose(ctx context.Context, job string) fleet.HubCloseState {
 	if !client.reconcileWatcherFence(ctx, job) {
 		slog.Warn("hub close settlement waits: the job's watch lock is held by a watcher that does not defer, or unreadable", "job", job)
-		return false
+		return fleet.HubClosePending
 	}
-	settled := true
-	if _, err := client.hubCloseLedger().Settle(ctx, job); err != nil {
+	state, err := client.hubCloseLedger().Settle(ctx, job)
+	if err != nil {
 		slog.Warn("hub close settlement pending", "job", job, "error", err)
-		settled = false
+		return fleet.HubClosePending
 	}
 	client.reconcileWatcherFence(ctx, job)
-	return settled
+	return state
 }
 
 // reconcileWatcherFence makes the node's fence on the job's watch lock match
@@ -900,7 +902,11 @@ func (client *HubClient) runHubCloseSettle(ctx context.Context) {
 				defer func() { <-slots }()
 				step, cancel := context.WithTimeout(ctx, hubCloseSettleBudget)
 				defer cancel()
-				if client.settleHubClose(step, job) {
+				// A done edge needs a terminal state: HubClosePending with a
+				// nil error is still open, and counting it would balance made
+				// and done for a stuck close.
+				switch client.settleHubClose(step, job) {
+				case fleet.HubCloseNone, fleet.HubCloseSettled, fleet.HubCloseCancelled:
 					client.nodeLoopNoteDone(nodeHubCloseSettle, job)
 				}
 			}(job)

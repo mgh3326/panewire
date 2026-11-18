@@ -110,7 +110,11 @@ func (client *HubClient) nodeCheckoutSweep(ctx context.Context, args nodeCheckou
 const nodeCheckoutRevisitInterval = 24 * time.Hour
 
 // runCheckoutRevisit runs the kept-worktree revisit once a day, starting with
-// one pass at node start like the quota-pool reconcile does.
+// one pass at node start like the quota-pool reconcile does. Every pass holds
+// nodeCommandMu: the removals are git mutations that must not interleave with
+// another acting node command (a pane close works through the same lock), and
+// a manual sweep is rare enough that the queue is fine. The lock wraps the
+// pass seam too, so a test pass observes the same serialization.
 func (client *HubClient) runCheckoutRevisit(ctx context.Context) {
 	if client.jobsInboxRoot == "" {
 		return
@@ -119,7 +123,12 @@ func (client *HubClient) runCheckoutRevisit(ctx context.Context) {
 	if pass == nil {
 		pass = client.revisitKeptWorktrees
 	}
-	pass(ctx)
+	guarded := func(ctx context.Context) {
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		pass(ctx)
+	}
+	guarded(ctx)
 	ticks := client.checkoutRevisitTicks
 	if ticks == nil {
 		ticker := time.NewTicker(nodeCheckoutRevisitInterval)
@@ -131,7 +140,7 @@ func (client *HubClient) runCheckoutRevisit(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticks:
-			pass(ctx)
+			guarded(ctx)
 		}
 	}
 }
@@ -139,6 +148,8 @@ func (client *HubClient) runCheckoutRevisit(ctx context.Context) {
 // revisitKeptWorktrees runs one non-dry-run checkout sweep and counts it in
 // the worktree flow mechanism: one item per judged *-checkout worktree, out
 // when the guarded removal takes it. A failure counts in the day's errors.
+// runCheckoutRevisit serializes it against other acting node commands; a
+// direct caller holds nodeCommandMu itself.
 func (client *HubClient) revisitKeptWorktrees(ctx context.Context) {
 	// The ledger ticks at the top of every pass: the tick is the liveness
 	// signal between the daily removals.
@@ -154,6 +165,12 @@ func (client *HubClient) revisitKeptWorktrees(ctx context.Context) {
 		return
 	}
 	for _, row := range rows.Checkouts {
+		// A checkout kept for a live user leaves on its own when that work
+		// ends, so it never enters the flow: counting it would trip the
+		// progress rule on a healthy node with many active checkouts.
+		if row.Outcome == "kept" && fleet.CheckoutSweepLiveKeep(row.Reason) {
+			continue
+		}
 		id := row.Job
 		if id == "" {
 			id = row.Path

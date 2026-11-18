@@ -8,8 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // errFixtureLoops fails the heartbeat's optional collectors in the gate test,
@@ -448,5 +451,223 @@ func TestNodeCheckoutRevisitRealGit(t *testing.T) {
 	result, ok := rows.(nodeCheckoutSweepResult)
 	if !ok || len(result.Checkouts) != 1 || result.Checkouts[0].Outcome != "kept" {
 		t.Fatalf("dry run after revisit = %+v, want the one kept held checkout", rows)
+	}
+}
+
+// TestNodeLoopsNextDayHeartbeatKeepsPreviousDay is the fix for review finding
+// 1 (high): a next-day heartbeat must not replace the previous day's bucket
+// before its row is written. The old code kept one report per machine and the
+// 2026-11-18 row read unknown with the silent error lost.
+func TestNodeLoopsNextDayHeartbeatKeepsPreviousDay(t *testing.T) {
+	now := time.Date(2026, 11, 18, 23, 59, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	for _, m := range loopMechanisms {
+		hub.loopTick(m)
+	}
+	dayOne := &hubNodeLoopsPayload{Date: "2026-11-18", Rows: []hubNodeLoopRow{
+		{Mechanism: string(nodeSpawnSettle), IntervalS: 0, Ticks: 1, SilentErrors: 1},
+	}}
+	hub.observeNodeLoops("machine-a", dayOne, now)
+	now = time.Date(2026, 11, 19, 0, 0, 20, 0, time.UTC)
+	hub.observeNodeLoops("machine-a", &hubNodeLoopsPayload{Date: "2026-11-19"}, now)
+
+	var bodies []string
+	hub.loopsDocPublish = func(_ context.Context, _, b string) error { bodies = append(bodies, b); return nil }
+	hub.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return false, nil }
+	now = time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
+	hub.maybeWriteLoopsRow(ctx)
+	if len(bodies) != 1 {
+		t.Fatalf("publishes=%d, want 1", len(bodies))
+	}
+	var doc loopsRowDoc
+	if err := json.Unmarshal([]byte(bodies[0]), &doc); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range doc.Rows {
+		if row.Machine == "machine-a" {
+			if row.Mechanism == "unknown" {
+				t.Fatalf("previous-day row read unknown after a next-day heartbeat")
+			}
+			if row.Mechanism == string(nodeSpawnSettle) && row.SilentErrors == 1 {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("previous-day spawn_settle row lost: %+v", doc.Rows)
+	}
+}
+
+// TestRunCheckoutRevisitHoldsCommandMu is the fix for review finding 2
+// (high): every revisit pass holds nodeCommandMu, so a git removal never
+// interleaves with a pane close. The pass seam observes the same lock the
+// real sweep takes.
+func TestRunCheckoutRevisitHoldsCommandMu(t *testing.T) {
+	client := &HubClient{jobsInboxRoot: t.TempDir()}
+	ticks := make(chan time.Time, 1)
+	client.checkoutRevisitTicks = ticks
+	var held atomic.Bool
+	done := make(chan struct{})
+	client.checkoutRevisitPass = func(context.Context) {
+		held.Store(!client.nodeCommandMu.TryLock())
+		close(done)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.runCheckoutRevisit(ctx)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("revisit pass did not run")
+	}
+	if !held.Load() {
+		t.Fatal("revisit pass ran without nodeCommandMu held")
+	}
+}
+
+// TestNodeLoopsNoReportRetriesAfterPersistFailure is the fix for review
+// finding 3 (medium): a failed no-report persist keeps the date pending
+// instead of pruning it, so the next sweep retries instead of losing the
+// notice.
+func TestNodeLoopsNoReportRetriesAfterPersistFailure(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	hub.observeNodeLoops("gone-node", nil, now)
+	for _, m := range loopMechanisms {
+		hub.loopTick(m)
+	}
+	hub.inbox.store.abort()
+	// Day two passes with no heartbeat from gone-node but the hub still
+	// ticking, so its row is due at the first tick of day three.
+	now = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	for _, m := range loopMechanisms {
+		hub.loopTick(m)
+	}
+	now = time.Date(2026, 11, 20, 0, 1, 0, 0, time.UTC)
+	hub.loopsDocPublish = func(context.Context, string, string) error { return nil }
+	hub.loopsDocExists = func(context.Context, string) (bool, error) { return false, nil }
+	hub.maybeWriteLoopsRow(ctx)
+	if hub.loopNoticeAlreadySent("gone-node", "no_report", "2026-11-19") {
+		t.Fatal("failed no-report persist was marked sent")
+	}
+	st := hub.loopLedger()
+	st.mu.Lock()
+	_, pending := st.days["2026-11-19"]
+	st.mu.Unlock()
+	if !pending {
+		t.Fatal("failed no-report send pruned the date instead of keeping it pending")
+	}
+}
+
+// TestSweepTaskPanesTicksWorktreeFlow is the fix for review finding 3
+// (medium): the sweep pass ticks the worktree tail's flow, so the 5m
+// interval on the heartbeat row matches the tail's real cadence.
+func TestSweepTaskPanesTicksWorktreeFlow(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	client := &HubClient{now: func() time.Time { return now }, taskPaneSweepInterval: 5 * time.Minute}
+	client.sweepTaskPanes(context.Background(), &fleet.TaskPaneSweeper{})
+	snap := client.nodeLoopSnapshot()
+	if snap[nodeTaskPaneSweep].Ticks != 1 || snap[nodeWorktreeFlow].Ticks != 1 {
+		t.Fatalf("sweep ticks=%d worktree ticks=%d, want 1 and 1",
+			snap[nodeTaskPaneSweep].Ticks, snap[nodeWorktreeFlow].Ticks)
+	}
+	var found *hubNodeLoopRow
+	for _, row := range client.nodeLoopsForHeartbeat().Rows {
+		if row.Mechanism == string(nodeWorktreeFlow) {
+			found = &row
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("worktree_flow row missing from heartbeat")
+	}
+	if found.IntervalS != int64(5*time.Minute/time.Second) {
+		t.Fatalf("worktree_flow interval_s=%d, want %d", found.IntervalS, int64(5*time.Minute/time.Second))
+	}
+}
+
+// TestNodeLoopsHeartbeatCarriesLastTickAcrossMidnight is the fix for review
+// finding 5 (medium): a row whose new-day bucket is still empty carries the
+// mechanism's most recent tick, instead of reading stale from midnight until
+// its first pass.
+func TestNodeLoopsHeartbeatCarriesLastTickAcrossMidnight(t *testing.T) {
+	now := time.Date(2026, 11, 18, 23, 0, 0, 0, time.UTC)
+	client := &HubClient{now: func() time.Time { return now }}
+	client.nodeLoopTick(nodeLaneReconcile)
+	now = time.Date(2026, 11, 19, 0, 30, 0, 0, time.UTC)
+	rows := client.nodeLoopsForHeartbeat().Rows
+	for _, row := range rows {
+		if row.Mechanism == string(nodeLaneReconcile) && row.LastTick != "2026-11-18T23:00:00Z" {
+			t.Fatalf("lane_reconcile last_tick=%q, want the previous day's tick", row.LastTick)
+		}
+	}
+}
+
+// pendingCloseLedger is a nodeHubCloseLedger whose Settle never finishes: it
+// returns HubClosePending with a nil error, like an unreadable close
+// operation does.
+type pendingCloseLedger struct{ nodeFleetHubClose }
+
+func (pendingCloseLedger) LockEnd(context.Context, string) (func(), error) {
+	return func() {}, nil
+}
+func (pendingCloseLedger) FenceState(string) (bool, bool, error) { return false, false, nil }
+func (pendingCloseLedger) Settle(context.Context, string) (fleet.HubCloseState, error) {
+	return fleet.HubClosePending, nil
+}
+
+// TestSettleHubClosePendingNilErrorCountsNoDone is the fix for review finding
+// 6 (medium): a (HubClosePending, nil) step is still open and must not count
+// a done edge that would balance made and done for a stuck close.
+func TestSettleHubClosePendingNilErrorCountsNoDone(t *testing.T) {
+	client := &HubClient{jobsInboxRoot: t.TempDir(), nodeHubClose: pendingCloseLedger{}}
+	state := client.settleHubClose(context.Background(), "job-1")
+	if state != fleet.HubClosePending {
+		t.Fatalf("settle state=%v, want HubClosePending", state)
+	}
+	switch state {
+	case fleet.HubCloseNone, fleet.HubCloseSettled, fleet.HubCloseCancelled:
+		client.nodeLoopNoteDone(nodeHubCloseSettle, "job-1")
+	}
+	if snap := client.nodeLoopSnapshot()[nodeHubCloseSettle]; snap.Done != 0 {
+		t.Fatalf("done=%d, want 0", snap.Done)
+	}
+}
+
+// TestNodeCheckoutRevisitSkipsLiveCheckouts is the fix for review finding 7
+// (low): twenty live checkouts enter no flow item, so the progress rule
+// cannot fire on a healthy node. The old code counted every judged row.
+func TestNodeCheckoutRevisitSkipsLiveCheckouts(t *testing.T) {
+	root := t.TempDir()
+	nodeLoopTestGit(t, root, "init", "-b", "main", "clone")
+	if err := os.WriteFile(filepath.Join(root, "clone", "notes.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nodeLoopTestGit(t, filepath.Join(root, "clone"), "add", "notes.txt")
+	nodeLoopTestGit(t, filepath.Join(root, "clone"), "commit", "-m", "seed")
+	jobsDir := filepath.Join(root, "jobs")
+	for i := range 20 {
+		id := "job-live"
+		if i > 0 {
+			id = "job-live" + string(rune('a'+i-1))
+		}
+		dir := filepath.Join(root, id+"-checkout")
+		nodeLoopTestGit(t, filepath.Join(root, "clone"), "worktree", "add", "--detach", dir)
+		nodeLoopTestJobEvent(t, jobsDir, id, "01.json", "job.spawned", "2026-11-18T10:00:00Z", map[string]any{"cwd": dir, "role": "implementer"})
+	}
+	spawnCfg := filepath.Join(root, "spawn.json")
+	if err := os.WriteFile(spawnCfg, []byte(`{"work_root": "`+root+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	client := &HubClient{now: func() time.Time { return now }, jobsInboxRoot: root, spawnConfigPath: spawnCfg}
+	client.nodeCommandMu.Lock()
+	client.revisitKeptWorktrees(context.Background())
+	client.nodeCommandMu.Unlock()
+	if snap := client.nodeLoopSnapshot()[nodeWorktreeFlow]; snap.Made != 0 {
+		t.Fatalf("live checkouts made=%d, want 0", snap.Made)
 	}
 }

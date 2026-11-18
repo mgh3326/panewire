@@ -133,6 +133,10 @@ func (client *HubClient) endedPanesForHeartbeat() *int {
 // taskPaneSweepMu, which the hub's pane.sweep command also takes.
 func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.TaskPaneSweeper) {
 	client.nodeLoopTick(nodeTaskPaneSweep)
+	// The worktree tail runs inside this pass, so the pass ticks its flow
+	// too: the sweep interval is the tail's liveness cadence, and the daily
+	// revisit ticks it between removals as well.
+	client.nodeLoopTick(nodeWorktreeFlow)
 	client.taskPaneSweepMu.Lock()
 	app, reason := client.taskPaneSweepApp(sweeper)
 	var err error

@@ -312,7 +312,10 @@ type hubNodeLoopsPayload struct {
 }
 
 // nodeLoopsForHeartbeat copies the current UTC date's bucket in mechanism
-// order for the heartbeat.
+// order for the heartbeat. The tick column is the liveness signal, so a row
+// whose bucket is still empty after midnight carries the mechanism's most
+// recent tick across process lifetime: without the fallback every interval
+// mechanism would read stale from midnight until its first pass.
 func (client *HubClient) nodeLoopsForHeartbeat() *hubNodeLoopsPayload {
 	now := client.nowUTC()
 	date := loopDateOf(now)
@@ -327,9 +330,13 @@ func (client *HubClient) nodeLoopsForHeartbeat() *hubNodeLoopsPayload {
 				s = b.nodeLoopStat
 			}
 		}
+		lastTick := s.LastTick
+		if lastTick.IsZero() {
+			lastTick = st.lastTick[m]
+		}
 		last := ""
-		if !s.LastTick.IsZero() {
-			last = s.LastTick.UTC().Format(time.RFC3339)
+		if !lastTick.IsZero() {
+			last = lastTick.UTC().Format(time.RFC3339)
 		}
 		rows = append(rows, hubNodeLoopRow{
 			Mechanism:      string(m),

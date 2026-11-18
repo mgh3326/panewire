@@ -164,11 +164,12 @@ type loopLedgerState struct {
 	// reset it, or the first sweep of the day would report every slow
 	// loop as stalled and burn its daily notice.
 	lastTick map[loopMechanism]time.Time
-	// nodeReports holds each reporting node's latest current-day bucket, by
-	// machine. A node sends only its own current day, so one entry per
-	// machine is the whole day; the daily write merges it into the day's
-	// single document. Guarded by the same mu as the hub buckets.
-	nodeReports map[string]nodeLoopReport
+	// nodeReports holds each reporting node's buckets by machine and date. A
+	// node's first heartbeat of a new UTC day must not replace the previous
+	// day's bucket before its row is written, so both stay until the prune
+	// after each day's write drops them. Guarded by the same mu as the hub
+	// buckets.
+	nodeReports map[string]map[string]nodeLoopReport
 	// nodeHbDays records, per machine, the UTC dates with at least one
 	// decoded heartbeat. A machine with a heartbeat but no loops field on a
 	// date is an older node: its row reads unknown. A known machine with no
@@ -199,7 +200,7 @@ func newLoopLedgerState() *loopLedgerState {
 		silentStreak:   make(map[string]string),
 		noticeSent:     make(map[string]string),
 		lastTick:       make(map[loopMechanism]time.Time),
-		nodeReports:    make(map[string]nodeLoopReport),
+		nodeReports:    make(map[string]map[string]nodeLoopReport),
 		nodeHbDays:     make(map[string]map[string]bool),
 		nodeFirstSeen:  make(map[string]time.Time),
 		nodeNoticeSent: make(map[string]string),
@@ -521,7 +522,7 @@ func (h *HubServer) nodeLoopsRowsLocked(st *loopLedgerState, date string) []loop
 	sort.Strings(machines)
 	var out []loopsRowEntry
 	for _, machine := range machines {
-		if rep, ok := st.nodeReports[machine]; ok && rep.Date == date {
+		if rep, ok := st.nodeReports[machine][date]; ok {
 			out = append(out, rep.Rows...)
 			continue
 		}
@@ -614,8 +615,14 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 				return
 			}
 		}
-		if !exists {
-			h.sendNodeNoReportNotices(ctx, date)
+		// The no-report notice retries until it is sent: a failed persist
+		// backs off and keeps the date pending, so the notice is never lost
+		// with the prune below. A restarted hub that finds the row present
+		// still runs it against its own roster, which only names machines it
+		// has itself seen.
+		if !h.sendNodeNoReportNotices(ctx, date) {
+			h.loopBackoffRowRetry(now)
+			return
 		}
 		st.mu.Lock()
 		delete(st.days, date)
@@ -626,10 +633,10 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 
 // sendNodeNoReportNotices names once each known machine with no heartbeat at
 // all on the closed date. A disconnected node writes no row; the notice is
-// how the day still accounts for it. It runs only when this process writes
-// the date's row, so a restarted hub that finds the row present does not
-// repeat another process's notices.
-func (h *HubServer) sendNodeNoReportNotices(ctx context.Context, date string) {
+// how the day still accounts for it. It reports whether every needed notice
+// is marked sent, so the caller keeps a failed date pending for the next
+// sweep instead of pruning it.
+func (h *HubServer) sendNodeNoReportNotices(ctx context.Context, date string) bool {
 	st := h.loopLedger()
 	st.mu.Lock()
 	var machines []string
@@ -644,12 +651,17 @@ func (h *HubServer) sendNodeNoReportNotices(ctx context.Context, date string) {
 	}
 	st.mu.Unlock()
 	sort.Strings(machines)
+	sent := true
 	for _, machine := range machines {
 		if h.loopNoticeAlreadySent(machine, "no_report", date) {
 			continue
 		}
 		h.persistLoopNotice(ctx, machine, "no_report", []string{"no heartbeat or loops report for the whole day"}, date)
+		if !h.loopNoticeAlreadySent(machine, "no_report", date) {
+			sent = false
+		}
 	}
+	return sent
 }
 
 // pruneNodeLoopDayLocked drops a written date from the per-machine heartbeat
@@ -659,8 +671,13 @@ func (h *HubServer) pruneNodeLoopDayLocked(st *loopLedgerState, date string) {
 	for machine := range st.nodeHbDays {
 		delete(st.nodeHbDays[machine], date)
 	}
-	for machine, rep := range st.nodeReports {
-		if rep.Date <= date {
+	for machine, byDate := range st.nodeReports {
+		for reportDate := range byDate {
+			if reportDate <= date {
+				delete(byDate, reportDate)
+			}
+		}
+		if len(byDate) == 0 {
 			delete(st.nodeReports, machine)
 		}
 	}
@@ -812,7 +829,10 @@ func (h *HubServer) observeNodeLoops(machineID string, loops *hubNodeLoopsPayloa
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Mechanism < rows[j].Mechanism })
-	st.nodeReports[machineID] = nodeLoopReport{Date: loops.Date, Rows: rows, Received: received}
+	if st.nodeReports[machineID] == nil {
+		st.nodeReports[machineID] = make(map[string]nodeLoopReport)
+	}
+	st.nodeReports[machineID][loops.Date] = nodeLoopReport{Date: loops.Date, Rows: rows, Received: received}
 }
 
 // nodeLoopNoticeHits applies the hub's three notice conditions to every
@@ -825,8 +845,9 @@ func (h *HubServer) nodeLoopNoticeHits(now time.Time) []loopNoticeHit {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	var hits []loopNoticeHit
-	for machine, rep := range st.nodeReports {
-		if rep.Date != date {
+	for machine, byDate := range st.nodeReports {
+		rep, ok := byDate[date]
+		if !ok {
 			continue
 		}
 		for _, row := range rep.Rows {
