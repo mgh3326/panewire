@@ -1005,6 +1005,30 @@ func TestSupersedeRetryStaysBoundToTheRefusedAttempt(t *testing.T) {
 	}
 }
 
+// TestSupersedeDeferredCloseIsBoundToTheAttemptFirstSeen: a close deferred
+// because the parent was working binds the parent's attempt at the first
+// look, so a parent re-prompted into a new attempt before it goes idle is
+// never closed by the old intent.
+func TestSupersedeDeferredCloseIsBoundToTheAttemptFirstSeen(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.land(t, f.successorTask("implementer", "parent", true))
+	if err := f.step(t, supersedeNoneStatus, supersedeProbe("working")); err != nil {
+		t.Fatal(err)
+	}
+	if row := f.onlyRow(t); row.Phase != poolActionPending || row.Data.Args != nil || row.Data.TargetAttempt != "00002-job.spawned.json" {
+		t.Fatalf("a deferred row must name the attempt it saw: %+v", row)
+	}
+	reprompted := poolActionReply{op: nodeCommandPaneCloseStatus, result: map[string]any{"state": nodeCloseOpNone, "released": false, "settled": false, "attempt": "00005-job.reprompted.json"}}
+	release := poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": "00005-job.reprompted.json"}}
+	if err := f.step(t, reprompted, release); err != nil {
+		t.Fatal(err)
+	}
+	f.noMoreCommands(t)
+	if row := f.onlyRow(t); row.Phase != poolActionRefused || row.Data.Args != nil {
+		t.Fatalf("a re-prompted parent must never be closed by the old intent: %+v", row)
+	}
+}
+
 // restartHubWith restarts the fixture's hub with the switch set as given, as an
 // operator restarting it with or without --supersede-close.
 func (f *supersedeFixture) restartHubWith(t *testing.T, on bool) {

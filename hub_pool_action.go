@@ -246,6 +246,16 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			if action.Data.TargetAttempt != "" && status.Attempt != action.Data.TargetAttempt {
 				return h.releasePoolAction(ctx, action)
 			}
+			if action.Data.Kind == poolActionKindSupersedeClose && action.Data.TargetAttempt == "" {
+				// Bind the parent's attempt at the first look, before a
+				// working pane defers the close: a parent re-prompted into
+				// a new attempt while it works is released above, never
+				// closed by this intent.
+				action.Data.TargetAttempt = status.Attempt
+				if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+					return err
+				}
+			}
 			probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
 			if probe.state == heldPaneAbsent || probe.state == heldPanePresent && probe.row.PaneID != action.Data.Pane {
 				// No command was sent before Args was saved. A tombstone
