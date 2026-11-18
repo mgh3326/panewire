@@ -70,6 +70,21 @@ var (
 	// row — the status, omp's "API Error:" prefix and the "⏺" mark — never on
 	// the sentence anywhere in ordinary output, and never on a bare "400".
 	creditCommandcode = regexp.MustCompile(`(?i)^(?:⏺\s*)?(?:api error:\s*)?400\s+you have insufficient credits to make this request`)
+	// limitCommandcode is the Command Code provider's window limit as omp
+	// renders it as the error row ("Error: 429 You've reached your 5-hour usage
+	// limit for your plan. Your limit resets at 2026-11-18T08:31:56.856Z. Please
+	// wait for the window to reset or upgrade your plan to continue.
+	// (type=rate_limit_error param=RATE_LIMITED)", hk 5183). Only the 5-hour
+	// wording is captured; the weekly row is matched by the same sentence with
+	// the window named in one word ("weekly", "7-day"), which is a guess until a
+	// weekly screen is captured. Like creditCommandcode it anchors on the
+	// rendered error row (the status, omp's "Error:" / "API Error:" prefix and
+	// the "⏺" mark), never on the sentence anywhere in ordinary output.
+	limitCommandcode = regexp.MustCompile(`(?i)^(?:⏺\s*)?(?:(?:api )?error:\s*)?429\s+you[’']ve reached your [a-z0-9-]+ usage limit`)
+	// limitCommandcodeReset is the row's own reset: an RFC 3339 timestamp.
+	limitCommandcodeReset = regexp.MustCompile(`(?i)\blimit resets at\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))`)
+	// limitCommandcodeDone ends the row: omp's "(type=… param=…)" suffix.
+	limitCommandcodeDone = regexp.MustCompile(`(?i)\(type=[^)]*\)`)
 )
 
 // Classify reports the quota stop shown as the last activity of screen when the
@@ -131,6 +146,17 @@ func classifyStatus(screen string, now time.Time, local *time.Location) (Stop, b
 	case creditCommandcode.MatchString(screen):
 		out.Pool = "commandcode"
 		out.CreditExhaustedAt = now.UTC()
+	case limitCommandcode.MatchString(screen):
+		// A window limit, not a dialog: its "upgrade your plan" text is not a
+		// choice, and its reset is the row's own timestamp (zero when it does
+		// not parse, which the manager hands over as reset_unknown).
+		out.Pool = "commandcode"
+		if m := limitCommandcodeReset.FindStringSubmatch(screen); m != nil {
+			if reset, err := time.Parse(time.RFC3339Nano, m[1]); err == nil {
+				out.Reset = reset.UTC()
+			}
+		}
+		return out, true
 	default:
 		return out, false
 	}
@@ -328,6 +354,15 @@ func statusBlockOf(screen string, isStatus func(string) bool) (string, string, b
 			if isStatus(line) {
 				status, tail, found, later, open = line, nil, true, false, false
 				limitOpen, limitIndent = (devin.MatchString(line) || devinRequest.MatchString(line)) && !requestLimitComplete(line), indent
+			} else if found && limitCommandcode.MatchString(status) && !limitCommandcodeDone.MatchString(status) && limitContinuationRow(line) && len(status)+len(line) < 600 {
+				// omp's window-limit row wraps; its next rows join it until
+				// the "(type=…)" suffix closes it (hk 5183).
+				status += " " + line
+				tail = nil
+			} else if found && limitCommandcode.MatchString(status) && (limitRetryRow(line) || creditDiagnosticRow(line)) {
+				// omp's retry notice and diagnostic path under the limit row
+				// are the harness's chrome; the limit stays the last activity.
+				tail = append(tail, line)
 			} else if found && creditRow(status) && (creditDiagnosticRow(line) || creditContinuationRow(line)) {
 				// omp writes its own diagnostic path under the rejection
 				// ("raw-http-request=<file>", hk 4982) and the rejection itself
@@ -358,7 +393,7 @@ func requestLimitComplete(text string) bool {
 // credit-exhausted rejection: both are a stop on the pool they name.
 func limitRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
-	return devin.MatchString(line) || devinPaid.MatchString(line) || devinRequest.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) || creditRow(line)
+	return devin.MatchString(line) || devinPaid.MatchString(line) || devinRequest.MatchString(line) || claude.MatchString(line) || codexSignal.MatchString(line) || creditRow(line) || limitCommandcode.MatchString(line)
 }
 
 // CreditExhausted reports the pool named by a provider credit-exhausted line
@@ -404,6 +439,45 @@ func creditContinuationRow(line string) bool {
 	line = strings.TrimLeft(line, statusPrefixes)
 	lower := strings.ToLower(line)
 	return strings.HasPrefix(lower, "(type=") || strings.HasPrefix(lower, "please purchase more credits") || strings.HasPrefix(lower, "purchase more credits")
+}
+
+// limitRetryRow reports omp's retry notice under a window-limit row ("Retry
+// failed after 1 attempts: Provider requested 5075005ms wait, exceeds
+// retry.maxDelayMs", hk 5183). It is read only after a limit status row.
+func limitRetryRow(line string) bool {
+	return strings.HasPrefix(strings.ToLower(line), "retry failed after ")
+}
+
+// limitContinuationWords are the words of the window-limit sentence. A wrapped
+// continuation row is made of these, a number or a timestamp, and the
+// "(type=…)" suffix, so ordinary agent output under an unfinished row still
+// cancels the stop.
+var limitContinuationWords = map[string]bool{
+	"you've": true, "you’ve": true, "reached": true, "your": true, "usage": true, "limit": true, "for": true, "plan": true,
+	"resets": true, "at": true, "please": true, "wait": true, "the": true, "window": true, "to": true, "reset": true,
+	"or": true, "upgrade": true, "continue": true, "weekly": true, "week": true, "hour": true, "day": true, "429": true,
+}
+
+var limitWindowWord = regexp.MustCompile(`^\d+-(?:hour|day|week)$`)
+
+var limitTimestampWord = regexp.MustCompile(`(?i)^\d{4}-\d{2}-\d{2}T[0-9:.]+(?:z|[+-]\d{2}:\d{2})?$`)
+
+// limitContinuationRow reports a wrapped continuation of a window-limit row.
+func limitContinuationRow(line string) bool {
+	words := strings.Fields(strings.ToLower(line))
+	if len(words) == 0 {
+		return false
+	}
+	for _, word := range words {
+		word = strings.Trim(word, ".,;:()")
+		switch {
+		case limitContinuationWords[word], limitTimestampWord.MatchString(word), limitWindowWord.MatchString(word):
+		case strings.HasPrefix(word, "type=") || strings.HasPrefix(word, "param="):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // userTurn reports whether line starts a user turn: the prompt mark of devin,
