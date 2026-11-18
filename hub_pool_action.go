@@ -99,6 +99,11 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 
 const poolActionInterval = 10 * time.Second
 
+var (
+	errCloseAttemptUnavailable = errors.New("close attempt unavailable")
+	errPoolReleaseNotProved    = errors.New("release not proved")
+)
+
 func (h *HubServer) startPoolActions(ctx context.Context) {
 	h.closeMu.Lock()
 	defer h.closeMu.Unlock()
@@ -172,6 +177,40 @@ func (h *HubServer) reconcilePoolActions(ctx context.Context) {
 }
 
 func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) error {
+	err := h.reconcilePoolActionStep(ctx, action)
+	stuck := errors.Is(err, errCloseAttemptUnavailable) || errors.Is(err, errPoolReleaseNotProved)
+	if !stuck && action.Data.StuckSince == 0 {
+		return err
+	}
+	now := h.now().UTC()
+	current, observeErr := h.inbox.store.observePoolActionStuck(ctx, action.ID, stuck, now)
+	if observeErr != nil {
+		return errors.Join(err, observeErr)
+	}
+	if !stuck || current.Phase != poolActionPending || current.Data.StuckSince == 0 || now.Sub(time.UnixMilli(current.Data.StuckSince)) < 30*time.Minute {
+		return err
+	}
+	if noticeErr := h.notifyStuckPoolAction(ctx, current, err.Error()); noticeErr != nil {
+		return errors.Join(err, noticeErr)
+	}
+	return err
+}
+
+func (h *HubServer) notifyStuckPoolAction(ctx context.Context, action poolAction, reason string) error {
+	eventID := "pool-action-stuck:" + action.ID
+	owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
+	if err != nil || owned {
+		return err
+	}
+	text := fmt.Sprintf("[panewire] The hub holds job %s on host %s: %s (row %s). Check the host; you can hand the job over by hand after checking it.", action.Job, action.Node, reason, action.ID)
+	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	if result.ID == 0 || result.PersistFailed {
+		return errors.New("stuck pool action notice unavailable")
+	}
+	return nil
+}
+
+func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolAction) error {
 	if action.Phase == poolActionSettled {
 		return h.finishPoolAction(ctx, action)
 	}
@@ -264,7 +303,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		if action.Data.Kind == poolActionKindHandover && action.Data.Args != nil && status.Attempt == "" {
 			// A transiently unreadable attempt is not proof that the saved
 			// close may bypass the pre-close checks after a hub restart.
-			return errors.New("close attempt unavailable")
+			return errCloseAttemptUnavailable
 		}
 		if action.Data.Kind == poolActionKindHandover && status.Attempt != "" {
 			// The node has registered no close yet, even when Args were saved
@@ -484,7 +523,7 @@ func (h *HubServer) releasePoolAction(ctx context.Context, action poolAction) er
 	var status nodeCloseOpStatusResult
 	ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}
 	if !h.nodeCall(ctx, action.Node, nodeCommandPaneCloseRelease, ref, hubNodeCommandWait, &status) || status.State != fleet.CloseOpCancelled || !status.Released {
-		return errors.New("release not proved")
+		return errPoolReleaseNotProved
 	}
 	return h.refusePoolAction(ctx, action)
 }

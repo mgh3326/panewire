@@ -43,6 +43,9 @@ type poolActionData struct {
 	RetryID                   string
 	RetryAfter                int64
 	RetryCount                uint8
+	// StuckSince is the first observation of an unresolved close/release
+	// failure, in Unix milliseconds. It survives a hub restart.
+	StuckSince int64 `json:",omitempty"`
 	// Kind is "" for the quota-stop close (reviewer, consult),
 	// poolActionKindSupersedeClose for a successor closing its parent
 	// (hub_spawn_supersede.go), poolActionKindHandover for an implementer
@@ -93,6 +96,8 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	// Carry the same budget to an unknown successor: a chain of uncertain
 	// closes must not mint a fresh request on every reconciliation pass.
 	retry.Data.RetryAfter, retry.Data.RetryCount = current.RetryAfter, current.RetryCount
+	// A new row has its own notice and its own failure interval.
+	retry.Data.StuckSince = 0
 	retryData, err := json.Marshal(retry.Data)
 	if err != nil {
 		return false, err
@@ -159,6 +164,45 @@ func (s *laneInboxStore) savePoolAction(parent context.Context, action poolActio
 	}
 	_, err = s.db.ExecContext(ctx, s.q(`UPDATE pool_actions SET phase=?,data=? WHERE id=?`), action.Phase, string(data), action.ID)
 	return err
+}
+
+// observePoolActionStuck changes only the persisted failure timer, without
+// overwriting a close argument or phase concurrently saved by another pass.
+func (s *laneInboxStore) observePoolActionStuck(parent context.Context, id string, stuck bool, now time.Time) (poolAction, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	var action poolAction
+	var data string
+	action.ID = id
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT job,node,epoch,phase,data FROM pool_actions WHERE id=?`), id).Scan(&action.Job, &action.Node, &action.Epoch, &action.Phase, &data)
+	if err != nil {
+		return action, err
+	}
+	if err := json.Unmarshal([]byte(data), &action.Data); err != nil {
+		return action, err
+	}
+	if action.Phase != poolActionPending {
+		return action, nil
+	}
+	if stuck && action.Data.StuckSince == 0 {
+		action.Data.StuckSince = now.UnixMilli()
+	} else if !stuck && action.Data.StuckSince != 0 {
+		action.Data.StuckSince = 0
+	} else {
+		return action, nil
+	}
+	updated, err := json.Marshal(action.Data)
+	if err != nil {
+		return action, err
+	}
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE pool_actions SET data=? WHERE id=? AND phase=? AND data=?`), string(updated), id, poolActionPending, data)
+	if err != nil {
+		return action, err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return action, errors.New("pool action changed while recording stuck time")
+	}
+	return action, nil
 }
 
 func (s *laneInboxStore) pendingPoolAction(parent context.Context, job string) (string, error) {
@@ -360,6 +404,8 @@ func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, nex
 	if err != nil {
 		return err
 	}
+	// A new row has its own notice and its own failure interval.
+	next.Data.StuckSince = 0
 	nextData, err := json.Marshal(next.Data)
 	if err != nil {
 		return err

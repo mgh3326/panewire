@@ -174,6 +174,11 @@ decides with the §Implementer rule (the job's start, the task's priority and
      `end_reason="quota_stop pool=<pool> replaced_by=<new job>"`, the pinned
      format (`TestQuotaStopEndReasonFormatIsPinned`), before the submit,
      because the spawn refuses a task still bound to a job that is not lost.
+     If the attempt remains unreadable or release cannot be proved for 30
+     minutes, the hub sends the owner one notice naming the job, host, reason
+     and row. The row stays pending and keeps the job fenced; the owner can
+     check the host and hand the job over by hand. Missing-job finality is
+     tracked in hk 5296.
   4. **Submit.** Once the close is settled and the record reads `lost` with
      that reason, the stored successor is claimed with the same request id on
      every retry. A crash between the claim and saving that fact replays the
