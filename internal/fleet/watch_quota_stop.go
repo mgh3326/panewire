@@ -470,8 +470,13 @@ func (a *App) attemptEndedBeforeAnnouncement(id, wantPane string) (bool, error) 
 		case "job.claim", "job.claimed", "job.reclaim":
 			ended, sticky = false, false
 		case "job.spawned":
-			ended, sticky = false, false
 			pane = str(ev.Payload, "pane_id")
+			if str(ev.Payload, "adopted_from") != "" {
+				// Late bookkeeping for the attempt already running, as
+				// reassignedInLedger reads it: no new ownership.
+				continue
+			}
+			ended, sticky = false, false
 		case "job.reprompted":
 			// A re-prompt revives a live attempt, not a reaped or revoked one:
 			// it restores no ownership (foldJob keeps Reaped, and
@@ -597,6 +602,11 @@ func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, e
 	if emit {
 		// The caller (the watcher's end) holds the end lock already.
 		if e := a.quotaStopAnnounceEndLocked(ctx, j, stop); e != nil && !errors.Is(e, errQuotaStopSuperseded) {
+			// The hk record is already lost: an announcement that could not
+			// read the ledger must not also keep the lease held.
+			if re := a.releaseQuota(ctx, j); re != nil {
+				return errors.Join(e, re)
+			}
 			return e
 		}
 	}

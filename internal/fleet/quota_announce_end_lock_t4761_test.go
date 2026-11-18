@@ -216,3 +216,37 @@ func TestQuotaStopAnnounceListedEventUnreadable_t4761(t *testing.T) {
 		t.Fatal("unreadable listed event: want an error")
 	}
 }
+
+// An adopted spawn receipt is late bookkeeping for the revoked attempt and
+// does not clear the revocation (#690 review r5).
+func TestQuotaStopAnnounceRevokeIsStickyAcrossAdoptedSpawn_t4761(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	if err := a.event(context.Background(), "j", "job.revoked", map[string]any{"pane_id": "w:p1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.event(context.Background(), "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "role": "reviewer", "adopted_from": "brief_sent"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.quotaStopAnnounce(context.Background(), Job{ID: "j", Pane: "w:p1"}, quotastop.Stop{Pool: "claude"}); !errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("announce after revoke and adopted spawn: %v, want errQuotaStopSuperseded", err)
+	}
+}
+
+// After the hk record is written lost, an announcement that cannot read the
+// ledger still releases the quota lease (#690 review r5).
+func TestQuotaStopFinishReleasesLeaseOnUnreadableLedger_t4761(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	if pools, err := a.ledger().QuotaPools(context.Background(), "j"); err != nil || len(pools) == 0 {
+		t.Fatalf("fixture lease: pools=%v err=%v", pools, err)
+	}
+	writeLedgerFile(t, a, "00090-job.note.json", `{not json`)
+	if err := a.quotaStopFinish(context.Background(), Job{ID: "j", Pane: "w:p1"}, quotastop.Stop{Pool: "claude"}, true); err == nil {
+		t.Fatal("finish on an unreadable ledger: want the read error")
+	}
+	if err := os.Remove(filepath.Join(a.Jobs, "j", "events", "00090-job.note.json")); err != nil {
+		t.Fatal(err)
+	}
+	if pools, err := a.ledger().QuotaPools(context.Background(), "j"); err != nil || len(pools) != 0 {
+		t.Fatalf("lease after finish: pools=%v err=%v, want released", pools, err)
+	}
+}
