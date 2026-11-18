@@ -1298,9 +1298,8 @@ stays `<request_id>:<attempt>:<status>`; the submitting lane's is the same id
 with `:<lane>` appended.
 `SPAWNED` stays type `report`.
 
-A spawn that names an hk task (`--task`) and reaches a terminal failure
-(`failed`, `refused` or `deadline_exceeded`) also posts one comment to that
-hk task (hk 5137):
+A spawn that names an hk task (`--task`) and reaches a final failure
+(`failed` or `refused`) also posts one comment to that hk task (hk 5137):
 
 `spawn failed request=<request_id> rc=<rc> stage=<stage> reason=<reason>`
 
@@ -1308,16 +1307,18 @@ That is the line the wake skill asks sessions to write by hand; the hub
 writing it keeps the stuck-work wait accurate without a session in the loop.
 The comment posts once per request id in every path the hub can observe: the
 operation carries a posted-at mark (`task_fail_notice_ms`, migration
-`0022_spawn_task_fail_notice.sql`) that survives a hub restart, and terminal
-rows that predate the mark are stamped judged once at migration time and
-never post. A post hk refuses for good is dropped loudly, while any other
+`0022_spawn_task_fail_notice.sql`) that survives a hub restart, and failed
+and refused rows that predate the mark are stamped judged at migration time
+and never post. A post hk refuses for good is dropped loudly, while any other
 failure stays pending and retries with the hub's backoff (bounded per sweep,
 then a growing per-row delay so an outage cannot stall scheduling; one warn
 per failure streak). If the hub stops between the hk post and the mark — or
 an hk answer is lost after hk stored the write — the next sweep reposts once:
 at-least-once across that window, exactly-once everywhere else. Succeeded
 spawns, spawns without `--task`, and retryable outcomes (which a later
-attempt may still land) post nothing.
+attempt may still land) post nothing. `deadline_exceeded` is not final — a
+late node result can still land it as succeeded — so it posts nothing; if the
+row is later finished as failed, the failed post fires then, once.
 
 **Reviewer jobs a daemon started** (`--role reviewer`, job id starting `mwr-`;
 [how the hub recognises them](quiet-delivery.md#records-kept-in-hk-only)) are

@@ -202,12 +202,12 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		return err
 	}
 	// The spawn-failure task comment mark is hk 5137's (postgres: 0022): when
-	// the sweep judged the row's terminal failure. Terminal rows that predate
-	// the column are stamped judged once, so the first sweep after deploy
-	// does not repost history; rows that turn terminal later keep mark 0 and
-	// post normally. The mark suppresses a repost once its write lands; a hub
-	// that stops between the hk post and the mark reposts on the next sweep,
-	// so the guarantee is at-least-once across that window.
+	// the sweep judged the row's final failure. Failed and refused rows that
+	// predate the column are stamped judged once, so the first sweep after
+	// deploy does not repost history; rows that turn final later keep mark 0
+	// and post normally. The mark suppresses a repost once its write lands; a
+	// hub that stops between the hk post and the mark reposts on the next
+	// sweep, so the guarantee is at-least-once across that window.
 	if err := s.backfillSpawnTaskFailNotices(ctx, time.Now().UTC()); err != nil {
 		return err
 	}

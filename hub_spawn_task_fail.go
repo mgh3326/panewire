@@ -1,19 +1,21 @@
 // Spawn-failure hk task comments (hk 5137).
 //
-// When a spawn whose request names an hk task (--task) reaches a terminal
-// failure — failed, refused or deadline_exceeded — the hub posts one comment
-// to that hk task:
+// When a spawn whose request names an hk task (--task) reaches a final
+// failure — failed or refused — the hub posts one comment to that hk task:
 //
 //	spawn failed request=<request_id> rc=<rc> stage=<stage> reason=<reason>
 //
 // That is the line the wake skill asks sessions to write by hand; hk parses
 // the prefix, so the hub writing it keeps the stuck-work wait (hk 5128)
 // accurate without a session in the loop. A retryable failure is never
-// terminal, so it never posts: only a final outcome does, and a spawn later
+// final, so it never posts: only a final outcome does, and a spawn later
 // replayed to success under the same request id posts nothing.
+// deadline_exceeded is not final — a late node result can still land it as
+// succeeded — so it posts nothing; if the row is later finished as failed
+// (finishUnownedSpawn or otherwise), the failed post fires then, once.
 //
 // The single hook is the sweep below, run by the spawn coordinator next to
-// the notification flush. It finds terminal-failure rows whose mark is unset,
+// the notification flush. It finds final-failure rows whose mark is unset,
 // posts each through the hub's handoffkeep client, and records the posted-at
 // mark (task_fail_notice_ms) on the operation. The mark is what makes the
 // post idempotent across restarts: a row the hub stopped after posting keeps
@@ -21,15 +23,14 @@
 // exactly-once per mark write and at-least-once across a crash (or an hk
 // answer lost after hk stored the write — the comments route takes no
 // idempotency key, and nothing can read back posted comments to reconcile).
-// A row judged not owed (no --task, or an outcome that is no longer a
-// terminal failure) is marked too, so the sweep never reconsiders it. Rows
-// that turn terminal under this hub always post: terminal rows that predate
-// the mark column are stamped judged once at migration time and never post.
-// A failed post keeps its mark unset and retries on a later sweep with the
-// hub's backoff (hubretry, bounded per row, then a per-row growing delay so
-// an hk outage cannot hold the coordinator loop); one warn is logged per
+// A row judged not owed (no --task, or an outcome that is no longer a final
+// failure) is marked too, so the sweep never reconsiders it. Rows that turn
+// final under this hub always post: rows that were already terminal when the
+// mark column landed are stamped judged once at migration time and never
+// post. A failed post keeps its mark unset and retries on a later sweep with
+// the hub's backoff (hubretry, bounded per row, then a per-row growing delay
+// so an hk outage cannot hold the coordinator loop); one warn is logged per
 // failure streak, so an outage does not fill the log and is never silent.
-
 package panewire
 
 import (
@@ -68,13 +69,14 @@ func spawnTaskFailText(requestID string, outcome hubSpawnOutcome) string {
 	return "spawn failed request=" + requestID + " rc=" + strconv.Itoa(outcome.RC) + " stage=" + outcome.Stage + " reason=" + outcome.Reason
 }
 
-// pendingSpawnTaskFailNoticeIDs lists the oldest operations whose terminal
-// failure still owes its hk task comment: a failed, refused or
-// deadline_exceeded row the sweep has not judged yet.
+// pendingSpawnTaskFailNoticeIDs lists the oldest operations whose final
+// failure still owes its hk task comment: a failed or refused row the sweep
+// has not judged yet. deadline_exceeded is not final and never appears here;
+// if such a row is later finished as failed, that failed row is listed then.
 func (s *laneInboxStore) pendingSpawnTaskFailNoticeIDs(parent context.Context, limit int) ([]string, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id FROM spawn_operations WHERE status IN ('failed','refused','deadline_exceeded') AND task_fail_notice_ms=0 ORDER BY created_ms LIMIT ?`), limit)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0 ORDER BY created_ms LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -105,13 +107,13 @@ func (s *laneInboxStore) markSpawnTaskFailNotice(parent context.Context, request
 	return n == 1, err
 }
 
-// backfillSpawnTaskFailNotices stamps terminal rows that predate the posted-at
-// mark as judged, once per store. Without it the first sweep after deploy
-// would post a spawn-failed comment for every historical failure. The guard
-// row and the UPDATE commit together, so a hub that stops half way redoes the
-// backfill and a finished one never rescans. Rows that turn terminal later
-// keep mark 0 and post normally, so a restart between a terminal commit and
-// its post never loses the comment.
+// backfillSpawnTaskFailNotices stamps failed and refused rows that predate
+// the posted-at mark as judged, once per store. Without it the first sweep
+// after deploy would post a spawn-failed comment for every historical
+// failure. The guard row and the UPDATE commit together, so a hub that stops
+// half way redoes the backfill and a finished one never rescans. Rows that
+// turn final later keep mark 0 and post normally, so a restart between a
+// final commit and its post never loses the comment.
 func (s *laneInboxStore) backfillSpawnTaskFailNotices(parent context.Context, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
@@ -128,7 +130,7 @@ func (s *laneInboxStore) backfillSpawnTaskFailNotices(parent context.Context, no
 		return err
 	}
 	if n, _ := marked.RowsAffected(); n == 1 {
-		if _, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused','deadline_exceeded')`), now.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused')`), now.UnixMilli()); err != nil {
 			return err
 		}
 	}
@@ -228,11 +230,11 @@ func (h *HubServer) pruneSpawnTaskFailBackoff(ids []string) {
 	}
 }
 
-// postSpawnTaskFailNotice posts one terminal failure's hk task comment and
+// postSpawnTaskFailNotice posts one final failure's hk task comment and
 // marks the operation judged. Only a durable mark suppresses a repost: the
-// sweep re-reads the row, so a failure superseded since (a deadline_exceeded
-// row a late node result landed, or any row that left its terminal failure)
-// is judged without posting.
+// sweep re-reads the row, so anything that is no longer failed or refused —
+// including a deadline_exceeded row a late node result landed, which posts
+// nothing — is judged without posting.
 func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID string) {
 	// One sweep owns a request id at a time; the durable mark owns it across
 	// sweeps and restarts.
@@ -244,7 +246,7 @@ func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID strin
 	if err != nil {
 		return
 	}
-	if task.Status != "failed" && task.Status != "refused" && task.Status != "deadline_exceeded" {
+	if task.Status != "failed" && task.Status != "refused" {
 		_, _ = h.inbox.store.markSpawnTaskFailNotice(ctx, requestID, h.now().UTC())
 		h.spawnTaskFailReset(requestID)
 		return

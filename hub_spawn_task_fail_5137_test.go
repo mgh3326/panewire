@@ -76,13 +76,12 @@ func taskFailClaimTask(t *testing.T, h *HubServer, seq int, taskID string) hubSp
 	return task
 }
 
-// Each terminal failure with --task posts exactly one comment with the exact
+// Each final failure with --task posts exactly one comment with the exact
 // wake-skill text, and a second sweep posts nothing more.
-func TestSpawnTaskFail5137PostsOncePerTerminalStatus(t *testing.T) {
+func TestSpawnTaskFail5137PostsOncePerFinalStatus(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		seq     int
-		sent    bool
 		outcome hubSpawnOutcome
 		want    string
 		refused bool
@@ -99,13 +98,6 @@ func TestSpawnTaskFail5137PostsOncePerTerminalStatus(t *testing.T) {
 			outcome: hubSpawnOutcome{RC: 78, Stage: "queue", Reason: "task:42=missing"},
 			want:    "spawn failed request=%s rc=78 stage=queue reason=task:42=missing",
 			refused: true,
-		},
-		{
-			name:    "deadline exceeded",
-			seq:     13,
-			sent:    true,
-			outcome: hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"},
-			want:    "spawn failed request=%s rc=124 stage=landing reason=timeout",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -129,17 +121,6 @@ func TestSpawnTaskFail5137PostsOncePerTerminalStatus(t *testing.T) {
 				h.endWaitingSpawn(t.Context(), task, "refused", "task:42=missing", 78)
 			} else {
 				task = taskFailClaim(t, h, test.seq)
-				if test.sent {
-					// A deadline-exceeded row keeps its node binding (the node
-					// may still answer), so only a sent attempt can time out
-					// into it; an unsent one renews instead (hk 4660).
-					node := hubSpawnRequest{RequestID: t14RequestID(51990 + test.seq), Machine: "machine-a", Args: task.Request.Args, WaitSeconds: 600}
-					bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, node, time.Now().UTC())
-					if err != nil {
-						t.Fatal(err)
-					}
-					task = sentSpawnFixture(t, h.inbox.store, bound)
-				}
 				if _, err := h.inbox.store.completeSpawn(t.Context(), task, test.outcome, time.Now()); err != nil {
 					t.Fatal(err)
 				}
@@ -163,6 +144,70 @@ func TestSpawnTaskFail5137PostsOncePerTerminalStatus(t *testing.T) {
 				t.Fatalf("pending notices = %v, want none", pending)
 			}
 		})
+	}
+}
+
+// deadline_exceeded is not final, so it posts nothing; a late node result
+// still lands it. If the row is later finished as failed, the failed post
+// fires once; if it lands as succeeded, nothing ever posts.
+func TestSpawnTaskFail5137DeadlineExceededPostsOnlyWhenFailed(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+	h.spawnTaskFailBackoffBase = time.Nanosecond
+	claimSent := func(t *testing.T, seq int) hubSpawnTask {
+		t.Helper()
+		task := taskFailClaimTask(t, h, seq, fmt.Sprintf("44%02d", seq))
+		node := hubSpawnRequest{RequestID: t14RequestID(51990 + seq), Machine: "machine-a", Args: task.Request.Args, WaitSeconds: 600}
+		bound, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, node, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sentSpawnFixture(t, h.inbox.store, bound)
+	}
+	task := claimSent(t, 21)
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID); err != nil || saved.Status != "deadline_exceeded" {
+		t.Fatalf("row = %+v %v, want deadline_exceeded", saved, err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if got := taskFailComments(t, fake); len(got) != 0 {
+		t.Fatalf("comments while deadline_exceeded = %d, want 0", len(got))
+	}
+	// The stuck path finishes the row as failed: one comment with the failed
+	// outcome, not the earlier timeout.
+	current, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.completeSpawn(t.Context(), current, hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "orphaned_after_restart", Host: "machine-a", NodeResult: true}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	got := taskFailComments(t, fake)
+	if len(got) != 1 {
+		t.Fatalf("comments after the row failed = %d, want 1: %+v", len(got), got)
+	}
+	if want := "spawn failed request=" + task.Request.RequestID + " rc=75 stage=landing reason=orphaned_after_restart"; got[0].Body != want {
+		t.Fatalf("comment = %q, want %q", got[0].Body, want)
+	}
+	// A deadline_exceeded row a late node result lands posts nothing, ever.
+	landed := claimSent(t, 22)
+	if _, err := h.inbox.store.completeSpawn(t.Context(), landed, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	late, err := h.inbox.store.spawnTask(t.Context(), landed.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.completeSpawn(t.Context(), late, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "pane-1", NodeResult: true}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if got := taskFailComments(t, fake); len(got) != 1 {
+		t.Fatalf("comments after a late success = %d, want still 1", len(got))
 	}
 }
 
