@@ -89,7 +89,11 @@ func (a *App) briefSentReceipt(events []Event, id string) map[string]any {
 			// last). Until then Spawn may still confirm the brief and write its
 			// own job.spawned, and a completion adopted now would be revived by it.
 			ended = receipt != nil
-		case "job.claim", "job.claimed", "job.reclaim", "job.lost", "job.revoked", "job.reaped":
+		case "job.claim", "job.claimed", "job.reclaim", "job.lost", "job.revoked", "job.reaped",
+			// A --job-dup-ok respawn of the same id begins an attempt with no
+			// claim record: job.duplicate_override, then job.placement. Either
+			// ends the earlier attempt's receipt.
+			"job.duplicate_override", "job.placement":
 			receipt, ended = nil, false
 		}
 	}
