@@ -1,11 +1,14 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,7 +36,7 @@ func TestQuotaPoolReconcileReleasesGoneJobAndKeepsLiveJob(t *testing.T) {
 	writeQuotaPoolReconcileSpawnedEvent(t, jobs, "gone-job", "default")
 	writeQuotaPoolReconcileSpawnedEvent(t, jobs, "live-job", "custom")
 	now = base.Add(20 * time.Minute)
-	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true})
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true, QuotaPoolReconcile: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +84,7 @@ func writeQuotaPoolReconcileSpawnedEvent(t *testing.T, jobs, job, session string
 }
 
 func TestQuotaPoolReconcileRunsAtStartupAndOnEachTick(t *testing.T) {
-	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: t.TempDir(), AllowInsecureForTests: true})
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: t.TempDir(), AllowInsecureForTests: true, QuotaPoolReconcile: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,20 +124,25 @@ func TestQuotaPoolReconcileLeavesRecordsWhenRecordedSessionIsUnreadable(t *testi
 	}
 	writeQuotaPoolReconcileSpawnedEvent(t, jobs, "held-job", "custom")
 	now = base.Add(20 * time.Minute)
-	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true})
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true, QuotaPoolReconcile: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	client.quotaReconcile.app = func() (*fleet.App, error) {
 		return &fleet.App{Arbiter: store}, nil
 	}
+	var readCalls atomic.Int32
 	client.quotaReconcile.agents = func(_ context.Context, session string) ([]nodeHerdrRow, error) {
+		readCalls.Add(1)
 		if session != "custom" {
 			t.Fatalf("read Herdr session %q, want custom", session)
 		}
 		return nil, errors.New("herdr unavailable")
 	}
 	client.reconcileNodeQuotaPools(ctx)
+	if readCalls.Load() != 1 {
+		t.Fatalf("agents reader called %d times, want 1", readCalls.Load())
+	}
 
 	if pools, err := store.QuotaPools(ctx, "held-job"); err != nil || len(pools) != 1 || pools[0] != "example" {
 		t.Fatalf("held job pools=%v err=%v, want retained after failed session read", pools, err)
@@ -159,7 +167,7 @@ func TestQuotaPoolReconcileFailsClosedWhenJobDirectoryIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	now = base.Add(20 * time.Minute)
-	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true})
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true, QuotaPoolReconcile: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,5 +182,142 @@ func TestQuotaPoolReconcileFailsClosedWhenJobDirectoryIsMissing(t *testing.T) {
 
 	if pools, err := store.QuotaPools(ctx, "missing-dir-job"); err != nil || len(pools) != 1 || pools[0] != "example" {
 		t.Fatalf("missing-dir job pools=%v err=%v, want retained", pools, err)
+	}
+}
+
+func TestQuotaPoolReconcileRefusesEmptySnapshotWhenJobsHeld(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	jobs := filepath.Join(root, "jobs")
+	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	now := base
+	store := &arbiter.Store{DB: arbiter.StatePath(filepath.Join(root, "data")), Inbox: jobs, Now: func() time.Time { return now }}
+	job := "held-job"
+	label := "label-" + job
+	if _, err := store.Claim(ctx, arbiter.Claim{Job: job, Lane: "owner", T: "T2", AgentLabel: label}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordQuotaPool(ctx, arbiter.QuotaRun{Job: job, Profile: "fixture", Gate: arbiter.Gate{Pool: "example"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeQuotaPoolReconcileSpawnedEvent(t, jobs, job, "default")
+	now = base.Add(20 * time.Minute)
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true, QuotaPoolReconcile: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.quotaReconcile.app = func() (*fleet.App, error) {
+		return &fleet.App{Arbiter: store}, nil
+	}
+	client.quotaReconcile.agents = func(_ context.Context, session string) ([]nodeHerdrRow, error) {
+		return []nodeHerdrRow{}, nil
+	}
+	client.reconcileNodeQuotaPools(ctx)
+
+	if pools, err := store.QuotaPools(ctx, job); err != nil || len(pools) != 1 || pools[0] != "example" {
+		t.Fatalf("held job pools=%v err=%v, want retained after empty agent snapshot", pools, err)
+	}
+	if jv, err := store.JobGet(ctx, job); err != nil || jv.State != "leased" {
+		t.Fatalf("held job state=%q err=%v, want leased", jv.State, err)
+	}
+}
+
+func TestQuotaPoolReconcileDisabledByDefault(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	jobs := filepath.Join(root, "jobs")
+	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	now := base
+	store := &arbiter.Store{DB: arbiter.StatePath(filepath.Join(root, "data")), Inbox: jobs, Now: func() time.Time { return now }}
+	job := "gone-job"
+	label := "label-" + job
+	if _, err := store.Claim(ctx, arbiter.Claim{Job: job, Lane: "owner", T: "T2", AgentLabel: label}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordQuotaPool(ctx, arbiter.QuotaRun{Job: job, Profile: "fixture", Gate: arbiter.Gate{Pool: "example"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeQuotaPoolReconcileSpawnedEvent(t, jobs, job, "default")
+	now = base.Add(20 * time.Minute)
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.quotaReconcile.app = func() (*fleet.App, error) {
+		return &fleet.App{Arbiter: store}, nil
+	}
+	client.quotaReconcile.agents = func(_ context.Context, session string) ([]nodeHerdrRow, error) {
+		return []nodeHerdrRow{{nodeAgentRow: nodeAgentRow{Name: "other", AgentStatus: "idle"}}}, nil
+	}
+	var passes atomic.Int32
+	client.quotaReconcile.pass = func(context.Context) { passes.Add(1) }
+	client.runQuotaPoolReconcile(ctx)
+	if passes.Load() != 0 {
+		t.Fatalf("runQuotaPoolReconcile ran %d passes, want 0 when disabled by default", passes.Load())
+	}
+	client.reconcileNodeQuotaPools(ctx)
+	if pools, err := store.QuotaPools(ctx, job); err != nil || len(pools) != 1 || pools[0] != "example" {
+		t.Fatalf("job pools=%v err=%v, want retained when reconcile is disabled", pools, err)
+	}
+}
+
+func TestQuotaPoolReconcileDaemonFlag(t *testing.T) {
+	root := t.TempDir()
+	envPath := filepath.Join(root, "node.env")
+	if err := os.WriteFile(envPath, []byte("HUB_MACHINE_ID=node-a\nHUB_TOKEN="+r6NodeAToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--socket", filepath.Join(root, "daemon.sock"), "--hub-url", "ws://fixture.invalid", "--hub-token-env", envPath}
+	daemon, code, err := newDaemonForCLI(base, daemonCLIDeps{AllowInsecureForTests: true})
+	if err != nil || code != ExitOK || daemon.cfg.Hub.Client.quotaPoolReconcile {
+		t.Fatalf("default flag: daemon=%v code=%d err=%v, want quotaPoolReconcile=false", daemon, code, err)
+	}
+	daemon, code, err = newDaemonForCLI(append(append([]string(nil), base...), "--quota-pool-reconcile"), daemonCLIDeps{AllowInsecureForTests: true})
+	if err != nil || code != ExitOK || !daemon.cfg.Hub.Client.quotaPoolReconcile {
+		t.Fatalf("opt-in flag: daemon=%v code=%d err=%v, want quotaPoolReconcile=true", daemon, code, err)
+	}
+}
+
+func TestQuotaPoolReconcileKeepsAndLogsUnnamedRows(t *testing.T) {
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	ctx := context.Background()
+	root := t.TempDir()
+	jobs := filepath.Join(root, "jobs")
+	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	now := base
+	store := &arbiter.Store{DB: arbiter.StatePath(filepath.Join(root, "data")), Inbox: jobs, Now: func() time.Time { return now }}
+	job := "gone-job"
+	label := "label-" + job
+	if _, err := store.Claim(ctx, arbiter.Claim{Job: job, Lane: "owner", T: "T2", AgentLabel: label}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordQuotaPool(ctx, arbiter.QuotaRun{Job: job, Profile: "fixture", Gate: arbiter.Gate{Pool: "example"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeQuotaPoolReconcileSpawnedEvent(t, jobs, job, "default")
+	now = base.Add(20 * time.Minute)
+	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true, QuotaPoolReconcile: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.quotaReconcile.app = func() (*fleet.App, error) {
+		return &fleet.App{Arbiter: store}, nil
+	}
+	client.quotaReconcile.agents = func(_ context.Context, session string) ([]nodeHerdrRow, error) {
+		return []nodeHerdrRow{
+			{nodeAgentRow: nodeAgentRow{Name: "", AgentStatus: "idle"}},
+		}, nil
+	}
+	client.reconcileNodeQuotaPools(ctx)
+
+	if pools, err := store.QuotaPools(ctx, job); err != nil || len(pools) != 0 {
+		t.Fatalf("gone job pools=%v err=%v, want released despite unnamed row", pools, err)
+	}
+	if !strings.Contains(buf.String(), "herdr agent snapshot row without a name kept") {
+		t.Fatalf("logs %q do not mention keeping unnamed row", buf.String())
 	}
 }

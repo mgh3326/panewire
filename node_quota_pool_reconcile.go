@@ -21,7 +21,7 @@ const (
 // this node's Herdr agents. The ledger's identity and startup guards decide
 // which absent jobs are safe to release.
 func (client *HubClient) runQuotaPoolReconcile(ctx context.Context) {
-	if client.jobsInboxRoot == "" {
+	if client.jobsInboxRoot == "" || !client.quotaPoolReconcile {
 		return
 	}
 	pass := client.quotaReconcile.pass
@@ -46,6 +46,9 @@ func (client *HubClient) runQuotaPoolReconcile(ctx context.Context) {
 }
 
 func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
+	if !client.quotaPoolReconcile {
+		return
+	}
 	newApp := client.quotaReconcile.app
 	if newApp == nil {
 		newApp = func() (*fleet.App, error) { return fleet.New(slogWarnWriter{}, slogWarnWriter{}) }
@@ -89,11 +92,17 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 				return nil, err
 			}
 			for _, row := range rows {
-				if row.Name == "" || row.AgentStatus == "" {
+				if row.AgentStatus == "" {
 					return nil, errors.New("herdr agent snapshot has incomplete identity")
+				}
+				if row.Name == "" {
+					slog.Info("herdr agent snapshot row without a name kept", "session", session, "status", row.AgentStatus)
 				}
 				agents = append(agents, arbiter.Agent{Status: row.AgentStatus, Name: row.Name})
 			}
+		}
+		if len(jobs) > 0 && len(agents) == 0 {
+			return nil, errors.New("herdr agent snapshot is empty while jobs are held")
 		}
 		return agents, nil
 	})
