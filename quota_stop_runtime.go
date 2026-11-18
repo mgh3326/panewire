@@ -516,8 +516,12 @@ func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandid
 	defer q.store.mu.Unlock()
 	// The attempt the stop was observed in (ledger view): the hand-over is
 	// announced for that attempt only, so a retry after a re-prompt is refused
-	// (hk 5224). An unreadable ledger leaves it unbound, as before.
-	attempt, _ := fleet.CurrentAttempt(filepath.Join(q.root, "jobs"), job.JobID)
+	// (hk 5224). A ledger that cannot be read reserves nothing: an unbound
+	// decision would pass for any later attempt.
+	attempt, err := fleet.CurrentAttempt(filepath.Join(q.root, "jobs"), job.JobID)
+	if err != nil {
+		return false, false, err
+	}
 	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner,attempt) VALUES(?,?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane, attempt)
 	if err != nil {
 		return false, false, err

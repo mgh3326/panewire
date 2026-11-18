@@ -254,7 +254,7 @@ func TestCurrentAttemptNamesTheNewestAttemptEvent_t5224(t *testing.T) {
 	if err != nil || second == first {
 		t.Fatalf("attempt after a re-prompt %q (was %q) err %v, want a new identity", second, first, err)
 	}
-	if none, err := CurrentAttempt(a.Jobs, "no-such-job"); err != nil || none != "" {
+	if none, err := CurrentAttempt(a.Jobs, "no-such-job"); err != nil || none != NoAttempt {
 		t.Fatalf("job without a ledger: %q, %v", none, err)
 	}
 	// The announcement of the identity the manager recorded still goes ahead.
@@ -263,5 +263,49 @@ func TestCurrentAttemptNamesTheNewestAttemptEvent_t5224(t *testing.T) {
 	}
 	if err := a.quotaStopAnnounceAttempt(context.Background(), Job{ID: "j", Pane: "w:p1"}, quotastop.Stop{Pool: "claude"}, first); !errors.Is(err, errQuotaStopSuperseded) {
 		t.Fatalf("announce of the earlier identity: %v, want errQuotaStopSuperseded", err)
+	}
+}
+
+func mustAttempt(t *testing.T, a *App) string {
+	t.Helper()
+	attempt, err := CurrentAttempt(a.Jobs, "j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return attempt
+}
+
+// A decision the manager recorded without a verifiable attempt (a row from
+// before attempts were bound) is dropped rather than announced for whatever
+// attempt runs now; so is one bound to an attempt a re-prompt has replaced
+// (#699 review).
+func TestAnnounceQuotaStopRefusesAnUnboundOrStaleDecision_t5224(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
+	started := 0
+	old := announceStartWatch
+	announceStartWatch = func(*App, string) error { started++; return nil }
+	t.Cleanup(func() { announceStartWatch = old })
+	observed := mustAttempt(t, a)
+	if err := a.event(context.Background(), "j", "job.reprompted", map[string]any{"pane_id": "w:p1"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := a.job("j")
+	for name, attempt := range map[string]string{"unbound": "", "stale": observed} {
+		if err := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", attempt, quotastop.Stop{Pool: "claude"}); err != nil {
+			t.Fatalf("%s: %v, want the decision dropped without an error", name, err)
+		}
+	}
+	after, _ := a.job("j")
+	if len(after.Events) != len(before.Events) || started != 0 {
+		t.Fatalf("events %d -> %d, watchers %d: want nothing written for an unbound or stale decision", len(before.Events), len(after.Events), started)
+	}
+}
+
+// A ledger that has no attempt yet has its own identity: an announcement
+// bound to it is refused once an attempt exists.
+func TestNoAttemptIdentityIsNotAWildcard_t5224(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "implementer", "idle", "I stopped here.\n")
+	if err := a.quotaStopAnnounceAttempt(context.Background(), Job{ID: "j", Pane: "w:p1"}, quotastop.Stop{Pool: "claude"}, NoAttempt); !errors.Is(err, errQuotaStopSuperseded) {
+		t.Fatalf("announce bound to NoAttempt on a job with attempts: %v, want errQuotaStopSuperseded", err)
 	}
 }

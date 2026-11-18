@@ -167,7 +167,14 @@ func (v ledgerView) Superseded(pane, attempt string) bool {
 	if pane != "" && v.Pane != "" && v.Pane != pane {
 		return true
 	}
-	return attempt != "" && v.Attempt != attempt
+	if attempt == "" {
+		return false
+	}
+	current := v.Attempt
+	if current == "" {
+		current = NoAttempt
+	}
+	return current != attempt
 }
 
 // decision is what a watcher decision depends on: it is stale once any of it

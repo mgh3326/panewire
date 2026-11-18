@@ -302,8 +302,13 @@ func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
 //
 // attempt is the identity (CurrentAttempt) of the attempt the manager observed
 // the stop in; the announcement is dropped, as superseded, if the ledger's
-// current attempt is another one. Empty leaves the attempt unchecked.
+// current attempt is another one. An empty attempt is a decision recorded
+// before attempts were bound (or without one): it cannot be verified, so it is
+// dropped as superseded rather than announced for whatever attempt runs now.
 func AnnounceQuotaStop(ctx context.Context, jobs, job, pane, attempt string, stop quotastop.Stop) error {
+	if attempt == "" {
+		return nil
+	}
 	home, _ := os.UserHomeDir()
 	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
 	if e := a.quotaStopAnnounceAttempt(ctx, Job{ID: job, Pane: pane}, stop, attempt); e != nil {
@@ -399,17 +404,24 @@ func (a *App) quotaStopAnnounceAttempt(ctx context.Context, j Job, stop quotasto
 	return a.quotaStopAnnounceEndLocked(ctx, j, stop, attempt)
 }
 
+// NoAttempt is the identity CurrentAttempt reports for a job whose ledger has
+// no attempt event yet; the empty identity is an unbound decision.
+const NoAttempt = "-"
+
 // CurrentAttempt is the identity of the job's current attempt on the node's
 // jobs root (ledgerView.Attempt): the quota-stop manager records it with its
-// decision and AnnounceQuotaStop refuses the decision once it changed. Empty
-// when the job has no ledger.
+// decision and AnnounceQuotaStop refuses the decision once it changed. A job
+// without a ledger is NoAttempt; a ledger that cannot be read is an error.
 func CurrentAttempt(jobs, job string) (string, error) {
 	a := &App{Jobs: jobs, Now: time.Now}
 	evs, err := a.ledgerEvents(job)
 	if err != nil {
 		return "", err
 	}
-	return viewLedger(evs).Attempt, nil
+	if attempt := viewLedger(evs).Attempt; attempt != "" {
+		return attempt, nil
+	}
+	return NoAttempt, nil
 }
 
 // quotaStopAnnounceEndLocked is quotaStopAnnounce for a caller that already
