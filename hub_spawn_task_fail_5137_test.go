@@ -253,8 +253,8 @@ func TestSpawnTaskFail5137RetryThenSinglePost(t *testing.T) {
 	t.Cleanup(stop)
 	var logs bytes.Buffer
 	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, &logs)
-	// Every sweep re-attempts: the growing per-row delay is disabled here so
-	// the test observes sweep-level retry deterministically.
+	// Shrink the per-row delay to nanoseconds: every sweep re-attempts while
+	// hk is down, so the test observes sweep-level retry deterministically.
 	h.spawnTaskFailBackoffBase = time.Nanosecond
 	task := taskFailClaim(t, h, 1)
 	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
@@ -613,14 +613,41 @@ func TestSpawnTaskFail5137BookkeepingSurvivesCancel(t *testing.T) {
 	}
 }
 
-// Without an hk client the sweep judges only failures older than the hub's
-// start: enabling hk later posts nothing for a backlog whose tasks moved on,
-// while this lifetime's failures stay owed.
+// Without an hk client the hub judges its pre-start backlog once at startup:
+// enabling hk later posts nothing for rows already terminal then, while
+// failures that turn final afterwards stay owed.
 func TestSpawnTaskFail5137NoHKJudgesOnlyBacklog(t *testing.T) {
 	t.Setenv(crashReportDSNEnv, "")
+	storePath := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	// Seed a terminal row before the hub exists, as an unconfigured window
+	// would leave behind.
+	seed := openSpawnStore(t, storePath)
+	request := durableSpawnRequest()
+	request.RequestID = t14RequestID(51390)
+	request.Args = replaceSpawnArg(replaceSpawnArg(request.Args, "--job", "task-fail-backlog"), "--task", "4690")
+	backlog, _, err := seed.claimSpawn(t.Context(), request, "task-fail-backlog", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.completeSpawn(t.Context(), backlog, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// A row submitted before the hub started but turning final after it is
+	// not backlog: it stays owed. A created_ms cutoff would judge it without
+	// posting and suppress it forever.
+	staleRequest := durableSpawnRequest()
+	staleRequest.RequestID = t14RequestID(51391)
+	staleRequest.Args = replaceSpawnArg(replaceSpawnArg(staleRequest.Args, "--job", "task-fail-stale"), "--task", "4691")
+	stale, _, err := seed.claimSpawn(t.Context(), staleRequest, "task-fail-stale", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.db.Exec(`UPDATE spawn_operations SET created_ms=1 WHERE request_id=?`, stale.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
 	config := HubServerConfig{
 		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"},
-		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
+		InboxStorePath:  storePath,
 		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -629,11 +656,7 @@ func TestSpawnTaskFail5137NoHKJudgesOnlyBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { h.Close() })
-	backlog := taskFailClaim(t, h, 1)
-	if _, err := h.inbox.store.completeSpawn(t.Context(), backlog, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET created_ms=1 WHERE request_id=?`, backlog.Request.RequestID); err != nil {
+	if _, err := h.inbox.store.completeSpawn(t.Context(), stale, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	fresh := taskFailClaimTask(t, h, 2, "4602")
@@ -641,10 +664,10 @@ func TestSpawnTaskFail5137NoHKJudgesOnlyBacklog(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.flushSpawnTaskFailNotices(t.Context())
-	if n := taskFailUnjudged(t, h); n != 1 {
-		t.Fatalf("unjudged failures = %d, want only this lifetime's row", n)
+	if n := taskFailUnjudged(t, h); n != 2 {
+		t.Fatalf("unjudged failures = %d, want this lifetime's two rows", n)
 	}
-	if pending := taskFailPending(t, h); len(pending) != 1 {
-		t.Fatalf("pending notices = %v, want only this lifetime's row", pending)
+	if pending := taskFailPending(t, h); len(pending) != 2 {
+		t.Fatalf("pending notices = %v, want this lifetime's two rows", pending)
 	}
 }

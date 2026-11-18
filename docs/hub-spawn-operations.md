@@ -1319,9 +1319,11 @@ the retry delay are written detached from the sweep budget, so a spent
 budget cannot lose bookkeeping for a post that already succeeded. If the hub
 stops between the hk post and the mark — or an hk answer is lost after hk
 stored the write — the next sweep reposts once: at-least-once across that
-window, exactly-once everywhere else. Without an hk client the sweep judges
-only failures older than the hub's start, so enabling hk later never floods
-old tasks. Succeeded spawns, spawns without `--task`, and retryable outcomes
+window, exactly-once everywhere else. A hub that starts without an hk client
+judges its pre-start backlog once at startup, so enabling hk later never
+floods old tasks; failures that turn final afterwards stay owed and post
+once a client exists. Succeeded spawns, spawns without `--task`, and
+retryable outcomes
 (which a later attempt may still land) post nothing. `deadline_exceeded` is
 not final — a late node result can still land it as succeeded — so it posts
 nothing; if the row is later finished as failed, the failed post fires then,

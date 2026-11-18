@@ -35,8 +35,9 @@
 // detached from the sweep budget, so a spent budget or a shutting-down
 // coordinator cannot lose bookkeeping for a post that already succeeded. One
 // warn is logged per failure streak, so an outage does not fill the log and
-// is never silent. Without an hk client the sweep judges only failures older
-// than the hub's start, so enabling hk later never floods old tasks.
+// is never silent. A hub that starts without an hk client judges its pre-start
+// backlog once at startup, so enabling hk later never floods old tasks;
+// failures that turn final afterwards stay owed.
 package panewire
 
 import (
@@ -128,15 +129,15 @@ func (s *laneInboxStore) deferSpawnTaskFailNotice(parent context.Context, reques
 	return n == 1, err
 }
 
-// judgeSpawnTaskFailNoticesBefore marks unjudged final failures created
-// before cutover as judged without posting, and answers how many it judged.
-// The no-hk sweep calls it with the hub's start time, so enabling hk later
-// posts only failures from the configured lifetime, never a backlog whose
-// tasks have moved on.
-func (s *laneInboxStore) judgeSpawnTaskFailNoticesBefore(parent context.Context, cutover time.Time) (int64, error) {
+// judgeSpawnTaskFailBacklog marks unjudged final failures as judged without
+// posting, and answers how many it judged. The hub calls it once at startup
+// when it has no hk client — while still single-threaded, so the judged set
+// is exactly the pre-start backlog and never a row that turns final later.
+// Enabling hk later then posts only failures that turn final afterwards.
+func (s *laneInboxStore) judgeSpawnTaskFailBacklog(parent context.Context, now time.Time) (int64, error) {
 	ctx, done := s.op(context.WithoutCancel(parent))
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused') AND created_ms<?`), cutover.UnixMilli(), cutover.UnixMilli())
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused')`), now.UnixMilli())
 	if err != nil {
 		return 0, err
 	}
@@ -192,19 +193,7 @@ func spawnTaskFailNoticePermanent(status int) bool {
 // the page and starve newer failures, and an hk outage cannot hold the
 // coordinator loop past one bounded sweep.
 func (h *HubServer) flushSpawnTaskFailNotices(ctx context.Context) {
-	if h.inbox == nil {
-		return
-	}
-	if h.handoffkeep == nil {
-		// No hk client to post through: failures from before this hub
-		// started are judged without posting, so enabling hk later does not
-		// flood old tasks. Failures from this hub's own lifetime stay owed
-		// and post once a client exists.
-		if judged, err := h.inbox.store.judgeSpawnTaskFailNoticesBefore(ctx, h.startedAt); err != nil {
-			h.logger.Warn("hub spawn task comment backlog not judged", "error", err)
-		} else if judged > 0 {
-			h.logger.Info("hub spawn task comment backlog judged without posting: no hk client", "rows", judged)
-		}
+	if h.inbox == nil || h.handoffkeep == nil {
 		return
 	}
 	ids, err := h.inbox.store.pendingSpawnTaskFailNoticeIDs(ctx, h.now().UTC(), spawnTaskFailNoticeLimit)
@@ -286,9 +275,9 @@ func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID strin
 	}
 	body := spawnTaskFailText(requestID, task.Outcome)
 	// One hk attempt per sweep: the sweep's own cadence plus the persisted
-	// per-row delay is the retry backoff, so a due row costs one attempt, not
-	// a 10s hubretry budget of the coordinator loop. The comments route takes
-	// no idempotency key: an hk answer lost after hk stored the write can
+	// per-row delay is the retry backoff, so a due row costs one attempt and
+	// the coordinator loop is never held by a retry budget. The comments route
+	// takes no idempotency key: an hk answer lost after hk stored the write can
 	// still duplicate on the next sweep, and a hub that stops between the
 	// post and the mark reposts as well. Both windows are at-least-once by
 	// necessity; the mark suppresses every repost the hub can observe.

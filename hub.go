@@ -968,6 +968,18 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		_ = hub.inbox.store.close()
 		return nil, err
 	}
+	if hub.handoffkeep == nil && hub.inbox != nil {
+		// No hk client to post through: rows already terminal never post, so
+		// enabling hk later posts only failures that turn final afterwards.
+		// This runs while the hub is still single-threaded, so the judged
+		// set is exactly the pre-start backlog — never a row that turns
+		// final later.
+		if judged, err := hub.inbox.store.judgeSpawnTaskFailBacklog(context.Background(), hub.now().UTC()); err != nil {
+			hub.logger.Warn("hub spawn task comment backlog not judged", "error", err)
+		} else if judged > 0 {
+			hub.logger.Info("hub spawn task comment backlog judged without posting: no hk client", "rows", judged)
+		}
+	}
 	return hub, nil
 }
 
