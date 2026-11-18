@@ -166,9 +166,9 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// 0008 migration). A restart restores counts from these two columns, and
 	// refresh_waits arrived with hk 4600 (postgres: 0011). The four parked
 	// notice columns are hk 4662's (postgres: 0019); the placed seat columns
-	// are hk 5124's (postgres: 0022) and task_fail_notice_ms is hk 5137's
-	// (postgres: 0023).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`} {
+	// are hk 5124's (postgres: 0022), task_fail_notice_ms is hk 5137's
+	// (postgres: 0023), and task_fail_retry_ms is hk 5137's (postgres: 0024).
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -209,12 +209,13 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		return err
 	}
 	// The spawn-failure task comment mark is hk 5137's (postgres: 0023): when
-	// the sweep judged the row's final failure. Failed and refused rows that
-	// predate the column are stamped judged once, so the first sweep after
-	// deploy does not repost history; rows that turn final later keep mark 0
-	// and post normally. The mark suppresses a repost once its write lands; a
-	// hub that stops between the hk post and the mark reposts on the next
-	// sweep, so the guarantee is at-least-once across that window.
+	// the sweep judged the row's final failure; the retry column (postgres:
+	// 0024) holds a row hk did not take's next attempt. Failed and refused
+	// rows that predate the columns are stamped judged once, so the first
+	// sweep after deploy does not repost history; rows that turn final later
+	// keep mark 0 and post normally. The mark suppresses a repost once its
+	// write lands; a hub that stops between the hk post and the mark reposts
+	// on the next sweep, so the guarantee is at-least-once across that window.
 	if err := s.backfillSpawnTaskFailNotices(ctx, time.Now().UTC()); err != nil {
 		return err
 	}

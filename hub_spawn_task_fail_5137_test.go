@@ -51,11 +51,20 @@ func taskFailComments(t *testing.T, fake *fakeHandoffkeep) []fakeHandoffkeepComm
 
 func taskFailPending(t *testing.T, h *HubServer) []string {
 	t.Helper()
-	ids, err := h.inbox.store.pendingSpawnTaskFailNoticeIDs(t.Context(), 100)
+	ids, err := h.inbox.store.pendingSpawnTaskFailNoticeIDs(t.Context(), time.Now().UTC(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return ids
+}
+
+func taskFailUnjudged(t *testing.T, h *HubServer) int {
+	t.Helper()
+	var n int
+	if err := h.inbox.store.db.QueryRow(`SELECT COUNT(*) FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func taskFailClaim(t *testing.T, h *HubServer, seq int) hubSpawnTask {
@@ -534,17 +543,46 @@ func TestSpawnTaskFail5137BackoffSkipsUntilDue(t *testing.T) {
 	if n := taskFailCommentCalls(t, fake); n != 1 {
 		t.Fatalf("hk comment attempts = %d, want 1 (second sweep skips)", n)
 	}
-	if pending := taskFailPending(t, h); len(pending) != 1 {
-		t.Fatalf("pending notices = %v, want the one failure", pending)
+	if n := taskFailUnjudged(t, h); n != 1 {
+		t.Fatalf("unjudged failures = %d, want the one failure (backed off, not due)", n)
 	}
-	// Simulate the delay passing: clearing the retry state makes the row due
-	// again, and the next sweep re-attempts the post.
-	h.spawnTaskFailMu.Lock()
-	h.spawnTaskFailNext = map[string]time.Time{}
-	h.spawnTaskFailFails = map[string]int{}
-	h.spawnTaskFailMu.Unlock()
+	// Simulate the delay passing: stamping the row's next attempt in the past
+	// makes it due again, and the next sweep re-attempts the post.
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET task_fail_retry_ms=1 WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
 	h.flushSpawnTaskFailNotices(t.Context())
 	if n := taskFailCommentCalls(t, fake); n != 2 {
 		t.Fatalf("hk comment attempts after the delay = %d, want 2", n)
+	}
+}
+
+// Backed-off rows must not starve newer failures: the due filter runs before
+// LIMIT, so a page of 32 backed-off rows still leaves room for what is due.
+func TestSpawnTaskFail5137BackedOffRowsDoNotStarveNewer(t *testing.T) {
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+	h.spawnTaskFailBackoffBase = time.Hour
+	fake.mu.Lock()
+	fake.commentStatus = http.StatusServiceUnavailable
+	fake.mu.Unlock()
+	for seq := 1; seq <= 32; seq++ {
+		task := taskFailClaimTask(t, h, seq, fmt.Sprintf("45%02d", seq))
+		if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if n := taskFailCommentCalls(t, fake); n != 32 {
+		t.Fatalf("hk comment attempts = %d, want 32", n)
+	}
+	fresh := taskFailClaimTask(t, h, 33, "4533")
+	if _, err := h.inbox.store.completeSpawn(t.Context(), fresh, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if n := taskFailCommentCalls(t, fake); n != 33 {
+		t.Fatalf("hk comment attempts = %d, want 33 (the newer failure is tried despite 32 backed-off rows)", n)
 	}
 }

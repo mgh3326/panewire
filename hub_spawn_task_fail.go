@@ -71,12 +71,15 @@ func spawnTaskFailText(requestID string, outcome hubSpawnOutcome) string {
 
 // pendingSpawnTaskFailNoticeIDs lists the oldest operations whose final
 // failure still owes its hk task comment: a failed or refused row the sweep
-// has not judged yet. deadline_exceeded is not final and never appears here;
-// if such a row is later finished as failed, that failed row is listed then.
-func (s *laneInboxStore) pendingSpawnTaskFailNoticeIDs(parent context.Context, limit int) ([]string, error) {
+// has not judged yet whose retry delay has passed. deadline_exceeded is not
+// final and never appears here; if such a row is later finished as failed,
+// that failed row is listed then. The due filter runs in the query, before
+// LIMIT, so backed-off rows never monopolize the page and starve newer
+// failures.
+func (s *laneInboxStore) pendingSpawnTaskFailNoticeIDs(parent context.Context, now time.Time, limit int) ([]string, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0 ORDER BY created_ms LIMIT ?`), limit)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0 AND (task_fail_retry_ms=0 OR task_fail_retry_ms<=?) ORDER BY created_ms LIMIT ?`), now.UnixMilli(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +103,20 @@ func (s *laneInboxStore) markSpawnTaskFailNotice(parent context.Context, request
 	ctx, done := s.op(parent)
 	defer done()
 	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE request_id=? AND task_fail_notice_ms=0`), now.UnixMilli(), requestID)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// deferSpawnTaskFailNotice records a row's next attempt after hk did not take
+// its comment. The sweep's due filter keeps the row out of later pages until
+// then, so backed-off rows never starve newer failures.
+func (s *laneInboxStore) deferSpawnTaskFailNotice(parent context.Context, requestID string, next time.Time) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_retry_ms=? WHERE request_id=? AND task_fail_notice_ms=0`), next.UnixMilli(), requestID)
 	if err != nil {
 		return false, err
 	}
@@ -149,85 +166,61 @@ func spawnTaskFailNoticePermanent(status int) bool {
 	return false
 }
 
-// flushSpawnTaskFailNotices posts the hk task comment for every terminal
-// spawn failure that still owes one. A sweep that finds nothing pending costs
-// one indexed status read; rows in their retry delay are skipped without an
-// hk call, so an hk outage cannot hold the coordinator loop past one bounded
-// sweep.
+// flushSpawnTaskFailNotices posts the hk task comment for every final spawn
+// failure that still owes one and whose retry delay has passed. A sweep that
+// finds nothing due costs one indexed status read; rows in their retry delay
+// are filtered by the query before LIMIT, so backed-off rows never monopolize
+// the page and starve newer failures, and an hk outage cannot hold the
+// coordinator loop past one bounded sweep.
 func (h *HubServer) flushSpawnTaskFailNotices(ctx context.Context) {
 	if h.inbox == nil || h.handoffkeep == nil {
 		return
 	}
-	ids, err := h.inbox.store.pendingSpawnTaskFailNoticeIDs(ctx, spawnTaskFailNoticeLimit)
+	ids, err := h.inbox.store.pendingSpawnTaskFailNoticeIDs(ctx, h.now().UTC(), spawnTaskFailNoticeLimit)
 	if err != nil || len(ids) == 0 {
 		return
 	}
-	h.pruneSpawnTaskFailBackoff(ids)
 	sweepCtx, cancel := context.WithTimeout(ctx, spawnTaskFailSweepBudget)
 	defer cancel()
 	for _, id := range ids {
 		if sweepCtx.Err() != nil {
 			return
 		}
-		if !h.spawnTaskFailDue(id) {
-			continue
-		}
 		h.postSpawnTaskFailNotice(sweepCtx, id)
 	}
 }
 
-// spawnTaskFailDue reports whether a row's retry delay has passed.
-func (h *HubServer) spawnTaskFailDue(id string) bool {
-	h.spawnTaskFailMu.Lock()
-	defer h.spawnTaskFailMu.Unlock()
-	next, ok := h.spawnTaskFailNext[id]
-	return !ok || !h.now().UTC().Before(next)
-}
-
-// spawnTaskFailDelay backs a row off after hk did not take its comment.
-func (h *HubServer) spawnTaskFailDelay(id string) {
+// spawnTaskFailDelay backs a row off after hk did not take its comment. The
+// next attempt is stored on the operation, so the due filter keeps it out of
+// later sweeps and a hub restart respects the delay instead of retrying at
+// once. The delay doubles per consecutive failure to spawnTaskFailBackoffMax.
+func (h *HubServer) spawnTaskFailDelay(ctx context.Context, id string) {
 	base := h.spawnTaskFailBackoffBase
 	if base <= 0 {
 		base = spawnTaskFailBackoffDefault
 	}
 	h.spawnTaskFailMu.Lock()
-	defer h.spawnTaskFailMu.Unlock()
-	if h.spawnTaskFailNext == nil {
-		h.spawnTaskFailNext = map[string]time.Time{}
+	if h.spawnTaskFailFails == nil {
 		h.spawnTaskFailFails = map[string]int{}
 	}
 	h.spawnTaskFailFails[id]++
-	delay := base << (h.spawnTaskFailFails[id] - 1)
+	failures := h.spawnTaskFailFails[id]
+	h.spawnTaskFailMu.Unlock()
+	delay := base << (failures - 1)
 	if delay <= 0 || delay > spawnTaskFailBackoffMax {
 		delay = spawnTaskFailBackoffMax
 	}
-	h.spawnTaskFailNext[id] = h.now().UTC().Add(delay)
+	if _, err := h.inbox.store.deferSpawnTaskFailNotice(ctx, id, h.now().UTC().Add(delay)); err != nil {
+		h.logger.Warn("hub spawn task comment retry not recorded", "request_id", id, "error", err)
+	}
 }
 
-// spawnTaskFailReset clears a row's retry delay after its comment posted (or
-// the row was judged), and drops backoff state for rows no longer pending.
+// spawnTaskFailReset clears a row's retry count after its comment posted (or
+// the row was judged).
 func (h *HubServer) spawnTaskFailReset(id string) {
 	h.spawnTaskFailMu.Lock()
 	defer h.spawnTaskFailMu.Unlock()
-	delete(h.spawnTaskFailNext, id)
 	delete(h.spawnTaskFailFails, id)
-}
-
-// pruneSpawnTaskFailBackoff drops retry state for rows the sweep no longer
-// owes, so the maps stay proportional to the pending set.
-func (h *HubServer) pruneSpawnTaskFailBackoff(ids []string) {
-	pending := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		pending[id] = true
-	}
-	h.spawnTaskFailMu.Lock()
-	defer h.spawnTaskFailMu.Unlock()
-	for id := range h.spawnTaskFailNext {
-		if !pending[id] {
-			delete(h.spawnTaskFailNext, id)
-			delete(h.spawnTaskFailFails, id)
-		}
-	}
 }
 
 // postSpawnTaskFailNotice posts one final failure's hk task comment and
@@ -279,7 +272,7 @@ func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID strin
 	case status == http.StatusOK || status == http.StatusCreated:
 		if _, err := h.inbox.store.markSpawnTaskFailNotice(ctx, requestID, h.now().UTC()); err != nil {
 			h.noteSpawnTaskFailFailure(requestID, target, err)
-			h.spawnTaskFailDelay(requestID)
+			h.spawnTaskFailDelay(ctx, requestID)
 			return
 		}
 		h.spawnTaskFailReset(requestID)
@@ -289,7 +282,7 @@ func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID strin
 		// mark records the judgement and the warn carries the reason.
 		if _, err := h.inbox.store.markSpawnTaskFailNotice(ctx, requestID, h.now().UTC()); err != nil {
 			h.noteSpawnTaskFailFailure(requestID, target, err)
-			h.spawnTaskFailDelay(requestID)
+			h.spawnTaskFailDelay(ctx, requestID)
 			return
 		}
 		h.spawnTaskFailReset(requestID)
@@ -299,7 +292,7 @@ func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID strin
 		h.logger.Warn("hub spawn task comment refused by hk; not retried", "request_id", requestID, "task", target, "status", status)
 	default:
 		h.noteSpawnTaskFailFailure(requestID, target, errSpawnTaskFailHTTP(status))
-		h.spawnTaskFailDelay(requestID)
+		h.spawnTaskFailDelay(ctx, requestID)
 	}
 }
 
