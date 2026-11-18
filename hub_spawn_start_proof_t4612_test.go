@@ -1,11 +1,9 @@
 package panewire
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -565,10 +563,11 @@ func TestSpawnGrantDrainBindsNoGrantRows_t4612(t *testing.T) {
 
 // With --spawn-grant-drain a quota_stop starts no hand-off.
 func TestSpawnGrantDrainStartsNoQuotaHandOff_t4612(t *testing.T) {
-	f := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1")
+	// The logger is set at construction: the fixture's node session reads it
+	// on another goroutine (hk 5282).
+	logs := &syncBuffer{}
+	f := newQuotaReplaceFixtureLogged(t, "reviewer", "mwr-1-p1", nil, logs)
 	f.hub.spawnGrantDrain = true
-	var logs bytes.Buffer
-	f.hub.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	event := quotaStopEvent(f.job, f.stopPool)
 	event.Reason = "quota_stop"
 	f.hub.startQuotaReplacement("machine-a", event)

@@ -1796,6 +1796,12 @@ func within(root, path string) bool {
 	rel, e := filepath.Rel(root, path)
 	return e == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
+
+// noSymlinks refuses a path that crosses a symlink. A symlink directly under
+// the root is the OS layout, not a link a job or an operator planted: macOS
+// maps /var, /tmp and /etc to /private/..., so every temp dir sits behind
+// /var (hk 5282). Only root can create one, so it is allowed; any deeper
+// symlink is refused.
 func noSymlinks(path string) error {
 	for p := filepath.Clean(path); p != filepath.Dir(p); p = filepath.Dir(p) {
 		s, e := os.Lstat(p)
@@ -1805,7 +1811,7 @@ func noSymlinks(path string) error {
 		if e != nil {
 			return e
 		}
-		if s.Mode()&os.ModeSymlink != 0 {
+		if s.Mode()&os.ModeSymlink != 0 && filepath.Dir(p) != string(filepath.Separator) {
 			return fail(exitUsage, "symlink path refused: %s", p)
 		}
 	}
