@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
@@ -69,10 +68,8 @@ func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string)
 // liveProfilesByAccount counts live hub spawns' placed profiles by account
 // key, leaving out exceptRequest. Profiles stay as placed (a seat name where
 // the launch went through a seat): selection folds them through the seat
-// canon. An operation that has no recorded account yet (accepted or
-// dispatching, before its first success) cannot be attributed and is not
-// counted: the gate covers bursts spaced by placement latency, not
-// same-instant races.
+// canon. The account comes from the placed columns while the attempt holds
+// its seat, from the terminal outcome after it succeeded (hk 5124).
 func (h *HubServer) liveProfilesByAccount(ctx context.Context, exceptRequest string) (map[string]map[string]int, error) {
 	if h.inbox == nil {
 		return map[string]map[string]int{}, nil
@@ -86,23 +83,29 @@ func (h *HubServer) liveProfilesByAccount(ctx context.Context, exceptRequest str
 		if task.Request.RequestID == exceptRequest {
 			continue
 		}
-		if profile := livePlacedProfile(task); profile != "" && task.Outcome.AccountKey != "" {
-			if counts[task.Outcome.AccountKey] == nil {
-				counts[task.Outcome.AccountKey] = map[string]int{}
+		if profile := livePlacedProfile(task); profile != "" {
+			if accountKey := placedAccountKeyOf(task); accountKey != "" {
+				if counts[accountKey] == nil {
+					counts[accountKey] = map[string]int{}
+				}
+				counts[accountKey][profile]++
 			}
-			counts[task.Outcome.AccountKey][profile]++
 		}
 	}
 	return counts, nil
 }
 
 // liveAccountJobs returns running jobs by account key, leaving out the hub
-// request named by its second argument (hk 5113).
+// request named by its second argument (hk 5113, hk 5124): the union of the
+// operations holding a seat in the placed columns and the succeeded
+// operations whose job is still live. A failed lookup refuses fail-closed:
+// the callers drop the seat with account_busy_unknown.
 func (h *HubServer) liveAccountJobs(ctx context.Context, exceptRequest string) (map[string]string, error) {
 	if h.inbox == nil {
 		return map[string]string{}, nil
 	}
 	tasks, err := h.liveSpawnTasks(ctx)
+	h.noteAccountJobsLookup(err)
 	if err != nil {
 		return nil, err
 	}
@@ -119,20 +122,11 @@ func (h *HubServer) liveAccountJobs(ctx context.Context, exceptRequest string) (
 		if task.Status == "failed" || task.Status == "given_up" || task.Status == "cancelled" {
 			continue
 		}
-		jobID := task.Job
-		if jobID == "" {
-			jobID = task.Request.RequestID
-		}
-		accountKey := task.Outcome.AccountKey
-		if accountKey == "" && h.inbox != nil {
-			if payload, _, _, err := h.inbox.store.spawnPlacementSnapshot(ctx, task.Request.RequestID, task.Attempt); err == nil && len(payload) > 0 {
-				var tr fleet.PlacementTrace
-				if json.Unmarshal(payload, &tr) == nil {
-					accountKey = tr.AccountKey
-				}
+		if accountKey := placedAccountKeyOf(task); accountKey != "" {
+			jobID := task.Job
+			if jobID == "" {
+				jobID = task.Request.RequestID
 			}
-		}
-		if accountKey != "" {
 			candidates = append(candidates, liveCandidate{
 				accountKey: accountKey,
 				jobID:      jobID,
@@ -152,6 +146,31 @@ func (h *HubServer) liveAccountJobs(ctx context.Context, exceptRequest string) (
 		jobs[c.accountKey] = c.jobID
 	}
 	return jobs, nil
+}
+
+// placedAccountKeyOf is the account an operation occupies: the placed columns
+// while the attempt holds its seat, the terminal outcome after the attempt
+// succeeded and cleared them (hk 5124).
+func placedAccountKeyOf(task hubSpawnTask) string {
+	if task.Status == "succeeded" {
+		return task.Outcome.AccountKey
+	}
+	return task.PlacedAccountKey
+}
+
+// noteAccountJobsLookup records the occupancy lookup outcome: one warn log
+// per failure streak, silent while the failure persists, reset on success.
+func (h *HubServer) noteAccountJobsLookup(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err == nil {
+		h.accountJobsLookupFails = 0
+		return
+	}
+	h.accountJobsLookupFails++
+	if h.accountJobsLookupFails == 1 {
+		h.logger.Warn("hub spawn account occupancy lookup failed; refusing seats fail-closed", "error", err)
+	}
 }
 
 // liveSpawnTasks lists the operations that are live by the rule above: every

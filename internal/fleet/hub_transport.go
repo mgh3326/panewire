@@ -53,6 +53,10 @@ type HubSpawnRequest struct {
 	Checkout    *HubCheckout `json:"checkout,omitempty"`
 	Args        []string     `json:"args"`
 	WaitSeconds int          `json:"wait_seconds"`
+	// AccountWeeklyUsed carries the selection's 7d reading for the chosen
+	// account to the hub's bind, which re-checks occupancy under the
+	// account's lock (hk 5124). Omitted when the selection held no reading.
+	AccountWeeklyUsed *float64 `json:"account_weekly_used,omitempty"`
 }
 
 // HubBrief names the brief document by its handoffkeep key.
@@ -695,7 +699,7 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 		if s.placement != nil {
 			s.placement.contactedHost = c.name
 		}
-		reply, err := hub.Spawn(ctx, HubSpawnRequest{RequestID: id, Machine: c.name, CWDKey: key, Brief: HubBrief{Doc: doc}, Checkout: checkout, Args: args, WaitSeconds: wait})
+		reply, err := hub.Spawn(ctx, HubSpawnRequest{RequestID: id, Machine: c.name, CWDKey: key, Brief: HubBrief{Doc: doc}, Checkout: checkout, Args: args, WaitSeconds: wait, AccountWeeklyUsed: s.AccountWeeklyUsed})
 		s.placement.remoteReceipt(c.name, reply.StdoutTail)
 		if err == nil && reply.RC == 0 && reply.Error == "" && reply.Status == "" && reply.Pane != "" && s.placement != nil && !s.placement.placed {
 			s.placement.started = true

@@ -681,15 +681,14 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			transport.snapshotHost = tr.Chosen
 			transport.snapshotProfile = tr.Profile
 			transport.snapshotReady = false
+			// The bind writes the chosen account in its own UPDATE: stash it
+			// here so the bind sees the seat this pass counted (hk 5124).
+			transport.snapshotPool = tr.Pool
+			transport.snapshotAccountKey = tr.AccountKey
 			if err == nil {
 				payload, _, recorded, readErr := h.inbox.store.spawnPlacementSnapshot(parent, task.Request.RequestID, task.Attempt)
 				var saved fleet.PlacementTrace
 				transport.snapshotReady = readErr == nil && !recorded && json.Unmarshal(payload, &saved) == nil && saved.Chosen == tr.Chosen && saved.Profile == tr.Profile
-			}
-			if h.inbox != nil {
-				if recordErr := h.inbox.store.recordPlacedAccount(parent, task.Request.RequestID, task.Attempt, tr.Pool, tr.AccountKey); recordErr != nil {
-					h.logger.Warn("hub spawn placed account could not be recorded", "request_id", task.Request.RequestID, "attempt", task.Attempt, "pool", tr.Pool, "account_key", tr.AccountKey, "error", recordErr)
-				}
 			}
 		}
 	}
@@ -1018,6 +1017,15 @@ type directSpawnTransport struct {
 	snapshotReady   bool
 	snapshotHost    string
 	snapshotProfile string
+	// snapshotPool and snapshotAccountKey are the seat the placement pass
+	// chose: the bind stores them in the placed columns, holding the
+	// per-account lock across the re-check and the bind (hk 5124).
+	snapshotPool       string
+	snapshotAccountKey string
+	// snapshotWeeklyUsed is the chosen account's 7d used share, carried from
+	// the selection that chose it. Nil when the selection held no reading:
+	// like the gate, an unknown reading is not a nearly spent one.
+	snapshotWeeklyUsed *float64
 	// probeWait is how long dispatch keeps asking its node after the landing
 	// wait ran out, before it settles the request as a timeout. Zero skips the
 	// probe (the coordinator's replay pass, whose own 5 s window is the probe).
@@ -1184,10 +1192,28 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	node.DeadlineMS = t.task.Deadline.UnixMilli()
 	node.GrantRequired = grantRequired
 	node.WaitSeconds = max(1, min(3600, int(time.Until(t.task.Deadline).Seconds())+1))
+	// The request carries the selection's 7d reading for the chosen account.
+	t.snapshotWeeklyUsed = req.AccountWeeklyUsed
 	// The bind can commit even when its response is lost. From this point a
 	// placement caller must not release ownership or fall through to a host.
+	// A commandcode seat binds under its account's lock: the busy re-check and
+	// the bind are one critical section, so two concurrent admissions on one
+	// nearly spent account admit exactly one (hk 5124). Every pool's bind
+	// records its account in the placed columns; only commandcode re-checks
+	// under the lock.
+	accountKey := t.snapshotAccountKey
+	if t.snapshotPool == commandcodePoolName && accountKey != "" {
+		release, lockErr := t.h.commandcodeSeatLocks.lock(ctx, accountKey)
+		if lockErr != nil {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: accountBusyUnknown}
+		}
+		defer release()
+		if busyErr := t.refuseBusyCommandcodeSeat(ctx); busyErr != nil {
+			return fleet.HubSpawnReply{}, busyErr
+		}
+	}
 	t.bound = true
-	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node, t.h.now().UTC())
+	task, err := t.h.inbox.store.bindSpawnPlaced(ctx, t.task.Request.RequestID, t.task.Attempt, node, accountKey, t.h.now().UTC())
 	if err != nil {
 		return fleet.HubSpawnReply{}, fleet.ErrHubPlacementBound
 	}
@@ -1579,12 +1605,6 @@ func spawnNodeOutcome(task hubSpawnTask, node hubSpawnRequest, result hubSpawnRe
 		outcome.AccountKey = result.Receipt.AccountKey
 		outcome.Role = result.Receipt.Role
 		outcome.LaneUnregistered = result.Receipt.LaneUnregistered
-	}
-	if outcome.AccountKey == "" {
-		outcome.AccountKey = task.Outcome.AccountKey
-	}
-	if outcome.Pool == "" {
-		outcome.Pool = task.Outcome.Pool
 	}
 	if outcome.RC != 0 {
 		outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
