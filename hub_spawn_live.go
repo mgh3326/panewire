@@ -95,6 +95,40 @@ func (h *HubServer) liveProfilesByAccount(ctx context.Context, exceptRequest str
 	return counts, nil
 }
 
+// liveAccountJobs returns running jobs by account key, leaving out the hub
+// request named by its second argument (hk 5113).
+func (h *HubServer) liveAccountJobs(ctx context.Context, exceptRequest string) (map[string]string, error) {
+	if h.inbox == nil {
+		return map[string]string{}, nil
+	}
+	tasks, err := h.liveSpawnTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	jobs := map[string]string{}
+	for _, task := range tasks {
+		if task.Request.RequestID == exceptRequest {
+			continue
+		}
+		if task.Status == "failed" || task.Status == "given_up" || task.Status == "cancelled" {
+			continue
+		}
+		jobID := task.Job
+		if jobID == "" {
+			jobID = task.Request.RequestID
+		}
+		if rec := h.jobs[task.Job]; rec != nil && rec.Completed {
+			continue
+		}
+		if task.Outcome.AccountKey != "" {
+			jobs[task.Outcome.AccountKey] = jobID
+		}
+	}
+	return jobs, nil
+}
+
 // liveSpawnTasks lists the operations that are live by the rule above: every
 // accepted or dispatching one, and each succeeded one that a node still
 // reports active or that started within spawnLiveSettle.

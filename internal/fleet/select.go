@@ -347,8 +347,22 @@ type selPlan struct {
 	// pool's observation history (select_burn.go). A plan built without
 	// admission inputs (a unit test) leaves it nil and the policy defaults
 	// apply.
-	burnRate func(pool string, window time.Duration) burnRate
+	burnRate    func(pool string, window time.Duration) burnRate
+	admPolicy   admissionPolicy
+	runningJobs map[string]string
 }
+
+func (p *selPlan) poolCutoff(pool string) float64 {
+	return p.admPolicy.pool(pool, p.at).Cutoff
+}
+
+func (p *selPlan) runningJob(accountKey string) string {
+	if p.runningJobs == nil {
+		return ""
+	}
+	return p.runningJobs[accountKey]
+}
+
 type selReq struct {
 	grade           string
 	lane            string
@@ -926,6 +940,12 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: %v", e)
 	}
 	p := &selPlan{policy: policy, order: slices.Clone(policy.Order), req: req, at: a.Now()}
+	if admPolicy, err := loadAdmissionPolicy(os.Getenv, a.Home); err == nil {
+		p.admPolicy = admPolicy
+	}
+	if a.LiveAccountJobs != nil {
+		p.runningJobs, _ = a.LiveAccountJobs(ctx, a.RequestID)
+	}
 	if req.expectedUnreadable {
 		p.degraded = append(p.degraded, "expected_unreadable")
 	}

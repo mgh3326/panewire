@@ -26,6 +26,7 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	if app != nil {
 		app.LiveSpawnProfiles = h.liveSpawnProfiles
 		app.LivePlacedByAccount = h.liveProfilesByAccount
+		app.LiveAccountJobs = h.liveAccountJobs
 	}
 	return app, err
 }

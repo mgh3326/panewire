@@ -185,7 +185,8 @@ func admissionPoolNumber(v any) (float64, error) {
 }
 
 // pool is the pool's effective policy at now: spend unless a class is set and
-// its until date has not passed, cutoff 99 and capacity weight 1 by default.
+// its until date has not passed, cutoff 90 for commandcode, 99 for others,
+// and capacity weight 1 by default.
 func (p admissionPolicy) pool(name string, now time.Time) admissionPoolPolicy {
 	pool := p.Pools[name]
 	if pool.Class == "" {
@@ -198,7 +199,11 @@ func (p admissionPolicy) pool(name string, now time.Time) admissionPoolPolicy {
 		}
 	}
 	if pool.Cutoff == 0 {
-		pool.Cutoff = 99
+		if name == "commandcode" {
+			pool.Cutoff = 90
+		} else {
+			pool.Cutoff = 99
+		}
 	}
 	if pool.CapacityWeight <= 0 {
 		pool.CapacityWeight = 1

@@ -78,7 +78,7 @@ func TestCommandcodePoolIsUsableWhileOneAccountHasRoom(t *testing.T) {
 	if sel.chosen.accountKey != ccKeyB {
 		t.Fatalf("chosen account %s, want %s (the one with room)", sel.chosen.accountKey, ccKeyB)
 	}
-	if c := cands[ccKeyA]; c.outcome != "dropped:window_exhausted" || c.code != outcomeQuotaExhausted {
+	if c := cands[ccKeyA]; c.outcome != "dropped:window_exhausted cutoff=90" || c.code != outcomeQuotaExhausted {
 		t.Fatalf("the exhausted account must drop on its own window: %s %s", c.outcome, c.code)
 	}
 }
@@ -95,8 +95,8 @@ func TestCommandcodePoolIsDroppedWhenEveryAccountIsExhausted(t *testing.T) {
 		t.Fatalf("both accounts exhausted: chosen=%v err=%v, want the pool dropped", sel.chosen, err)
 	}
 	for key, c := range ccCandidates(sel) {
-		if c.outcome != "dropped:window_exhausted" {
-			t.Fatalf("%s outcome %s, want window_exhausted", key, c.outcome)
+		if c.outcome != "dropped:window_exhausted cutoff=90" {
+			t.Fatalf("%s outcome %s, want window_exhausted cutoff=90", key, c.outcome)
 		}
 	}
 }
