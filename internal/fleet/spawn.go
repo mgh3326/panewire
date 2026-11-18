@@ -1356,7 +1356,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	// that directory is part of every package's action id: two worktrees of one
 	// commit then share nothing (hk 5160). The spawner's own GOFLAGS is kept.
 	if boolean(a.Config.Local, "go_trimpath", true) {
-		env = append(env, "GOFLAGS="+goFlagsForPane(os.Getenv("GOFLAGS")))
+		env = append(env, "GOFLAGS="+goFlagsForPane(effectiveGOFLAGS()))
 	}
 	if seat.Kind == "claude" && s.Purpose != "director" {
 		env = append(env, "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")

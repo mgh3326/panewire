@@ -14,6 +14,10 @@ func TestGoFlagsForPaneKeepsFlagsAndAppendsTrimpath(t *testing.T) {
 		{"-mod=mod", "-mod=mod -trimpath"},
 		{"-mod=mod -trimpath -count=1", "-mod=mod -trimpath -count=1"},
 		{"-trimpath=false", "-trimpath=false -trimpath"},
+		{"-trimpath=true", "-trimpath=true"},
+		{"-trimpath -trimpath=false", "-trimpath -trimpath=false -trimpath"},
+		{"-trimpath=false -trimpath", "-trimpath=false -trimpath"},
+		{`"-ldflags=-X 'main.note=a -trimpath b'"`, `"-ldflags=-X 'main.note=a -trimpath b'" -trimpath`},
 	} {
 		if got := goFlagsForPane(c.in); got != c.want {
 			t.Errorf("goFlagsForPane(%q) = %q, want %q", c.in, got, c.want)
@@ -50,6 +54,44 @@ func TestSpawnPaneEnvironmentAddsTrimpath(t *testing.T) {
 	if len(got) != 1 || got[0] != "GOFLAGS=-mod=mod -trimpath" {
 		t.Fatalf("pane env GOFLAGS = %v, want exactly GOFLAGS=-mod=mod -trimpath", got)
 	}
+}
+
+// Flags saved by `go env -w` still apply: the pane value carries them, because
+// a nonempty GOFLAGS in the pane would otherwise hide the saved file value.
+func TestSpawnPaneEnvironmentKeepsSavedGOFLAGS(t *testing.T) {
+	t.Setenv("GOFLAGS", "")
+	t.Setenv("GOENV", writeGOEnv(t, "GOFLAGS=-tags=enterprise\n"))
+	a, s, f, _ := cmdFixture(t)
+	if e := a.Spawn(context.Background(), s); e != nil {
+		t.Fatal(e)
+	}
+	got := paneEnvValues(f.Calls, "GOFLAGS")
+	if len(got) != 1 || got[0] != "GOFLAGS=-tags=enterprise -trimpath" {
+		t.Fatalf("pane env GOFLAGS = %v, want exactly GOFLAGS=-tags=enterprise -trimpath", got)
+	}
+}
+
+// An exported GOFLAGS wins over the saved file value, as in the go command.
+func TestSpawnPaneEnvironmentExportedGOFLAGSWins(t *testing.T) {
+	t.Setenv("GOFLAGS", "-mod=mod")
+	t.Setenv("GOENV", writeGOEnv(t, "GOFLAGS=-tags=enterprise\n"))
+	a, s, f, _ := cmdFixture(t)
+	if e := a.Spawn(context.Background(), s); e != nil {
+		t.Fatal(e)
+	}
+	got := paneEnvValues(f.Calls, "GOFLAGS")
+	if len(got) != 1 || got[0] != "GOFLAGS=-mod=mod -trimpath" {
+		t.Fatalf("pane env GOFLAGS = %v, want exactly GOFLAGS=-mod=mod -trimpath", got)
+	}
+}
+
+func writeGOEnv(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "go-env")
+	if e := os.WriteFile(path, []byte(content), 0600); e != nil {
+		t.Fatal(e)
+	}
+	return path
 }
 
 // The switch turns the flag off without touching the pane environment.
