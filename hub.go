@@ -542,6 +542,7 @@ type HubServer struct {
 	accountJobsLookupFails int
 	jobFenceLegacy         bool
 	ownerTransferDir       string
+	ownerWork              hubOwnerWork
 	poolActionLocks        hubKeyedLocks
 	poolActionMu           sync.Mutex
 	// poolActionObserved avoids repeating inventory logs while an action is active.
@@ -1077,6 +1078,7 @@ func (h *HubServer) Close() error {
 	if h.closeCancel != nil {
 		h.closeCancel()
 	}
+	h.closeOwnerWork()
 	// The notice worker stops accepting observations, cancels its request and
 	// is joined here, so it releases its Sentry client before the store closes.
 	h.closeOneTimeNotices()
@@ -1593,7 +1595,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			h.publishFleetPublisher(machineID, received)
 			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
-			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
+			h.observeActiveJobsContext(ctx, machineID, heartbeat.ActiveJobs, received)
 			h.observeNodeLoops(machineID, heartbeat.Loops, received)
 			h.sendHeartbeatDirectives(machineID, agent)
 		}

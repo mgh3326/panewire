@@ -274,6 +274,41 @@ func TestJobOwnerFenceUnownedLegacyDoesNotRevoke_t5067(t *testing.T) {
 	}
 }
 
+func TestJobOwnerFenceUnpersistedSameNodeGrantDoesNotRevoke_t5067(t *testing.T) {
+	for _, changedDuringPut := range []bool{false, true} {
+		t.Run(strconv.FormatBool(changedDuringPut), func(t *testing.T) {
+			jobs := filepath.Join(t.TempDir(), "jobs")
+			base := newFakeJobStore()
+			epoch := float64(3)
+			if changedDuringPut {
+				epoch = 1
+			}
+			base.records["j"] = map[string]any{"state": "spawned", "owner_node": "test-host", "owner_epoch": epoch}
+			store := &fenceJobStore{fakeJobStore: base}
+			if changedDuringPut {
+				store.beforePut = func(id string) {
+					base.mu.Lock()
+					base.records[id]["owner_epoch"] = float64(3)
+					base.mu.Unlock()
+				}
+			}
+			err := PutOwnedJob(t.Context(), store, jobs, "test-host", "j", map[string]any{"model": "old"}, nil)
+			if err == nil || IsJobReassigned(err) {
+				t.Fatalf("unpersisted same-node grant should be retryable without revocation: %v", err)
+			}
+			if base.record(t, "j")["model"] != nil {
+				t.Fatal("old grant changed the record")
+			}
+			if err := jobowner.Assign(jobs, "j", 3); err != nil {
+				t.Fatal(err)
+			}
+			if err := PutOwnedJob(t.Context(), store, jobs, "test-host", "j", map[string]any{"model": "new"}, nil); err != nil {
+				t.Fatalf("persisted new grant could not write: %v", err)
+			}
+		})
+	}
+}
+
 func TestJobOwnerFenceTransferRefusesDifferentOwner_t5067(t *testing.T) {
 	base := newFakeJobStore()
 	if err := base.claimSpawned(t.Context(), "j", "42", "test-host"); err != nil {

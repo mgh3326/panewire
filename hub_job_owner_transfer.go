@@ -109,26 +109,25 @@ func (h *HubServer) removeOwnerTransfer(t hubOwnerTransfer) error {
 	return nil
 }
 
-// recoverOwnerTransfers runs before heartbeat directives. It trusts hk, not
-// the journal, to say whether the intended CAS actually committed.
-func (h *HubServer) recoverOwnerTransfers(machine string) {
+// recoverOwnerTransfers runs off the heartbeat reader. It trusts hk, not the
+// journal, to say whether the intended CAS actually committed.
+func (h *HubServer) recoverOwnerTransfers(ctx context.Context, machine string) bool {
 	if h.ownerTransferDir == "" || !machineIDPattern.MatchString(machine) {
-		return
+		return false
 	}
 	dir := filepath.Join(h.ownerTransferDir, machine)
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return
+		return false
 	}
 	if err != nil {
 		h.logger.Warn("job transfer journal unavailable")
-		return
+		return false
 	}
-	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
-	defer cancel()
+	recovered := false
 	for _, entry := range entries {
 		if ctx.Err() != nil {
-			return
+			return recovered
 		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -143,60 +142,55 @@ func (h *HubServer) recoverOwnerTransfers(machine string) {
 		}
 		unlock, err := h.poolActionLocks.lock(ctx, intent.Job)
 		if err != nil {
-			return
+			return recovered
 		}
-		h.recoverOwnerTransfer(ctx, intent)
+		if h.recoverOwnerTransfer(ctx, intent) {
+			recovered = true
+		}
 		unlock()
 	}
+	return recovered
 }
 
-func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTransfer) {
+func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTransfer) bool {
 	next := fleet.JobOwner{Node: intent.To, Epoch: intent.Epoch + 1}
 	record, exists, err := h.readJobRecord(ctx, intent.Job)
 	if err != nil || !exists {
-		return
+		return false
 	}
 	state, _ := record["state"].(string)
 	if hkTerminalState(state) {
-		return
+		_ = h.removeOwnerTransfer(intent)
+		return false
 	}
 	owner, supported, err := fleet.JobOwnerFromRecord(record)
 	if err != nil || !supported {
-		return
+		return false
 	}
 	if owner != next {
 		// Epochs only increase; a competing owner makes this intent obsolete.
 		if owner.Epoch >= next.Epoch {
 			_ = h.removeOwnerTransfer(intent)
 		}
-		return
+		return false
 	}
-	if err := h.saveOwnerAssignment(hubOwnerAssignment{Job: intent.Job, Node: next.Node, Epoch: next.Epoch}, false); err != nil {
-		return
+	assignment, err := h.successorOwnerAssignment(intent.Job, intent.From, intent.To, intent.Epoch)
+	if err != nil {
+		return false
+	}
+	if err := h.saveOwnerAssignment(assignment, false); err != nil {
+		return false
 	}
 	h.mu.Lock()
 	current := h.jobs[intent.Job]
 	if current != nil && current.Node == next.Node && current.Epoch == next.Epoch {
-		// A heartbeat at the granted epoch proves the node persisted the grant.
-		node := h.nodes[next.Node]
-		active, present := HubActiveJob{}, false
-		if node != nil {
-			active, present = node.activeJobs[intent.Job]
-		}
-		if current.FencedNodes == nil {
-			current.FencedNodes = make(map[string]uint64)
-		}
-		current.FencedNodes[intent.From] = next.Epoch
-		h.enqueueRevocationLocked(intent.From, hubJobRevokedEvent{Type: "job.revoked", JobID: intent.Job, Epoch: next.Epoch})
+		h.restoreAssignmentFencesLocked(current, assignment)
 		h.mu.Unlock()
-		if present && active.Epoch == next.Epoch {
-			_ = h.removeOwnerTransfer(intent)
-		}
-		return
+		_ = h.removeOwnerTransfer(intent)
+		return false
 	}
 	h.mu.Unlock()
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	current = h.jobs[intent.Job]
 	if current == nil {
 		current = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: intent.Job, Epoch: next.Epoch}, Node: next.Node, LastSeen: h.now(), FencedNodes: make(map[string]uint64)}
@@ -204,11 +198,11 @@ func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTra
 	} else if current.Node == intent.From && current.Epoch == intent.Epoch && !current.Reassigning {
 		current.Node, current.Epoch, current.Orphaned, current.Completed = next.Node, next.Epoch, false, false
 	} else {
-		return
+		h.mu.Unlock()
+		return false
 	}
-	if current.FencedNodes == nil {
-		current.FencedNodes = make(map[string]uint64)
-	}
-	current.FencedNodes[intent.From] = next.Epoch
-	h.enqueueRevocationLocked(intent.From, hubJobRevokedEvent{Type: "job.revoked", JobID: intent.Job, Epoch: next.Epoch})
+	h.restoreAssignmentFencesLocked(current, assignment)
+	h.mu.Unlock()
+	_ = h.removeOwnerTransfer(intent)
+	return true
 }

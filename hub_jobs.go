@@ -245,6 +245,10 @@ func validRelayFinalText(value string) bool {
 }
 
 func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, received time.Time) {
+	h.observeActiveJobsContext(h.closeCtx, machineID, active, received)
+}
+
+func (h *HubServer) observeActiveJobsContext(parent context.Context, machineID string, active []HubActiveJob, received time.Time) {
 	// Resolve unknown grants outside mu: a restarted hub must not let an old
 	// epoch-1 heartbeat claim a job whose hk owner is already elsewhere.
 	h.mu.Lock()
@@ -255,18 +259,34 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		}
 	}
 	h.mu.Unlock()
-	type jobGrant struct {
-		id    string
-		epoch uint64
-	}
-	admitted := make(map[jobGrant]bool, len(unknown))
-	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
-	for _, job := range unknown {
-		assignment, held, err := h.ownerAssignment(job.JobID)
-		if err != nil || held && assignment.Ended && assignment.Node == machineID && assignment.Epoch == job.Epoch {
+	ctx, cancel := context.WithTimeout(parent, nodeLoopHKTimeout)
+	for i, job := range unknown {
+		deadline, _ := ctx.Deadline()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		lookup, stop := context.WithTimeout(ctx, remaining/time.Duration(len(unknown)-i))
+		unlock, lockErr := h.poolActionLocks.lock(lookup, job.JobID)
+		if lockErr != nil {
+			stop()
 			continue
 		}
-		admitted[jobGrant{job.JobID, job.Epoch}] = h.firstSeenJobOwned(ctx, job.JobID, machineID, job.Epoch)
+		assignment, held, err := h.ownerAssignment(job.JobID)
+		if err != nil || held && assignment.Ended && assignment.Node == machineID && assignment.Epoch == job.Epoch {
+			unlock()
+			stop()
+			continue
+		}
+		if h.firstSeenJobOwned(lookup, job.JobID, machineID, job.Epoch, false) && ctx.Err() == nil {
+			h.mu.Lock()
+			if h.nodes[machineID] != nil && h.jobs[job.JobID] == nil {
+				h.jobs[job.JobID] = &hubJobRecord{HubActiveJob: job, Node: machineID, LastSeen: received, FencedNodes: make(map[string]uint64)}
+			}
+			h.mu.Unlock()
+		}
+		unlock()
+		stop()
 	}
 	cancel()
 	seen := make(map[string]struct{}, len(active))
@@ -292,11 +312,6 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		}
 		current := h.jobs[job.JobID]
 		if current == nil {
-			// A stored hk grant proves a later epoch; a node cannot promote
-			// itself merely by presenting one.
-			if admitted[jobGrant{job.JobID, job.Epoch}] {
-				h.jobs[job.JobID] = &hubJobRecord{HubActiveJob: job, Node: machineID, LastSeen: received, FencedNodes: make(map[string]uint64)}
-			}
 			continue
 		}
 		if current.Completed || current.Reassigning || current.Node != machineID || current.Epoch != job.Epoch {
@@ -492,18 +507,15 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 		return false
 	}
 	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
-	owned := h.firstSeenJobOwned(ctx, completion.JobID, machineID, completion.Epoch)
-	cancel()
-	if !owned {
-		return false
-	}
-	ctx, cancel = context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
 	defer cancel()
 	unlock, err := h.poolActionLocks.lock(ctx, completion.JobID)
 	if err != nil {
 		return false
 	}
 	defer unlock()
+	if !h.firstSeenJobOwned(ctx, completion.JobID, machineID, completion.Epoch, true) {
+		return false
+	}
 	h.mu.Lock()
 	if h.jobs[completion.JobID] != nil {
 		h.mu.Unlock()

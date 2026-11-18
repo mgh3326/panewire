@@ -167,7 +167,7 @@ func PutOwnedJob(ctx context.Context, store JobStore, jobs, node, id string, fie
 	self := JobOwner{Node: node, Epoch: epoch}
 	if current != (JobOwner{}) && current != self {
 		refusal := &BackendError{Status: http.StatusConflict, Code: "job_owner_mismatch", OwnerNode: current.Node, OwnerEpoch: current.Epoch}
-		return revokeJobOwnerMismatch(jobs, id, epoch, current, fmt.Errorf("job_owner_mismatch: observed owner %s epoch %d: %w", current.Node, current.Epoch, refusal))
+		return refuseJobOwnerMismatch(jobs, node, id, epoch, current, fmt.Errorf("job_owner_mismatch: observed owner %s epoch %d: %w", current.Node, current.Epoch, refusal))
 	}
 	update := make(map[string]any, len(fields)+2)
 	for key, value := range fields {
@@ -206,7 +206,22 @@ func PutOwnedJob(ctx context.Context, store JobStore, jobs, node, id string, fie
 			}
 		}
 	}
-	return revokeJobOwnerMismatch(jobs, id, epoch, observed, err)
+	return refuseJobOwnerMismatch(jobs, node, id, epoch, observed, err)
+}
+
+func refuseJobOwnerMismatch(jobs, node, id string, epoch uint64, current JobOwner, err error) error {
+	if current.Node == node && current.Epoch > epoch {
+		local, readErr := jobowner.Epoch(jobs, id)
+		if readErr != nil {
+			return fmt.Errorf("job assignment unavailable: %w", readErr)
+		}
+		if local == epoch {
+			// The hub granted this node again, but its new assignment has not
+			// landed locally. Wait for the next directive without revoking it.
+			return fmt.Errorf("job assignment epoch %d not yet persisted", current.Epoch)
+		}
+	}
+	return revokeJobOwnerMismatch(jobs, id, epoch, current, err)
 }
 
 func revokeJobOwnerMismatch(jobs, id string, epoch uint64, current JobOwner, err error) error {

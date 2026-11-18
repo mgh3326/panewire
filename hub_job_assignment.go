@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/mgh3326/panewire/internal/durable"
@@ -16,51 +17,56 @@ import (
 // hubOwnerAssignment is an assignment actually issued by this hub, not an
 // owner inferred from an unverified heartbeat after restart.
 type hubOwnerAssignment struct {
-	Job   string `json:"job"`
-	Node  string `json:"node"`
-	Epoch uint64 `json:"epoch"`
-	Ended bool   `json:"ended,omitempty"`
+	Job    string   `json:"job"`
+	Node   string   `json:"node"`
+	Epoch  uint64   `json:"epoch"`
+	From   string   `json:"from,omitempty"`
+	Fenced []string `json:"fenced,omitempty"`
+	Ended  bool     `json:"ended,omitempty"`
+}
+
+const hubOwnerAssignmentMaxBytes = 64 * 1024
+
+func sameOwnerAssignment(a, b hubOwnerAssignment) bool {
+	return a.Job == b.Job && a.Node == b.Node && a.Epoch == b.Epoch && a.From == b.From && a.Ended == b.Ended && slices.Equal(a.Fenced, b.Fenced)
 }
 
 // seedLandedOwner follows a durable landing without making the spawn answer
 // depend on hk availability. Startup and heartbeat retry a missed seed.
 func (h *HubServer) seedLandedOwner(job, node string) {
-	go func() {
-		ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
-		defer cancel()
-		h.seedOwnerAssignment(ctx, hubOwnerAssignment{Job: job, Node: node, Epoch: 1})
-	}()
+	h.scheduleOwnerSeed(hubOwnerAssignment{Job: job, Node: node, Epoch: 1})
 }
 
 // seedOwnerAssignment only adopts a live legacy record from a binding the hub
 // persisted itself. A node heartbeat cannot establish that authority.
-func (h *HubServer) seedOwnerAssignment(ctx context.Context, assignment hubOwnerAssignment) {
+func (h *HubServer) seedOwnerAssignment(ctx context.Context, assignment hubOwnerAssignment) bool {
 	if assignment.Ended {
-		return
+		return false
 	}
 	unlock, err := h.poolActionLocks.lock(ctx, assignment.Job)
 	if err != nil {
-		return
+		return false
 	}
 	defer unlock()
 	current, found, err := h.ownerAssignment(assignment.Job)
-	if err != nil || !found || current != assignment {
-		return
+	if err != nil || !found || current.Ended || current.Node != assignment.Node || current.Epoch != assignment.Epoch {
+		return false
 	}
 	record, exists, err := h.readJobRecord(ctx, assignment.Job)
 	if err != nil || !exists {
-		return
+		return false
 	}
 	state, _ := record["state"].(string)
 	owner, supported, err := fleet.JobOwnerFromRecord(record)
 	if err != nil || !supported || hkTerminalState(state) {
-		return
+		return false
 	}
 	if owner != (fleet.JobOwner{}) {
 		if owner.Node != assignment.Node || owner.Epoch != assignment.Epoch {
 			h.logger.Warn("handoffkeep owner differs from hub assignment", "job", assignment.Job)
+			return false
 		}
-		return
+		return true
 	}
 	to := fleet.JobOwner{Node: assignment.Node, Epoch: assignment.Epoch}
 	supportedWrite, err := h.writeJobOwner(ctx, assignment.Job, fleet.JobOwner{}, to)
@@ -69,6 +75,7 @@ func (h *HubServer) seedOwnerAssignment(ctx context.Context, assignment hubOwner
 	} else {
 		h.noteJobFenceSupport(supportedWrite)
 	}
+	return err == nil && supportedWrite
 }
 
 func (h *HubServer) sweepOwnerAssignments(ctx context.Context) {
@@ -89,9 +96,7 @@ func (h *HubServer) sweepOwnerAssignments(ctx context.Context) {
 		job := strings.TrimSuffix(entry.Name(), ".json")
 		assignment, found, err := h.ownerAssignment(job)
 		if err == nil && found {
-			attempt, cancel := context.WithTimeout(ctx, nodeLoopHKTimeout)
-			h.seedOwnerAssignment(attempt, assignment)
-			cancel()
+			h.scheduleOwnerSeed(assignment)
 		}
 	}
 }
@@ -116,18 +121,64 @@ func (h *HubServer) ownerAssignment(job string) (hubOwnerAssignment, bool, error
 		return hubOwnerAssignment{}, false, err
 	}
 	defer file.Close()
-	body, err := io.ReadAll(io.LimitReader(file, 4097))
+	body, err := io.ReadAll(io.LimitReader(file, hubOwnerAssignmentMaxBytes+1))
 	var assignment hubOwnerAssignment
-	if err != nil || len(body) > 4096 || json.Unmarshal(body, &assignment) != nil || assignment.Job != job || !machineIDPattern.MatchString(assignment.Node) || assignment.Epoch == 0 {
+	if err != nil || len(body) > hubOwnerAssignmentMaxBytes || json.Unmarshal(body, &assignment) != nil || assignment.Job != job || !validOwnerAssignment(assignment) {
 		return hubOwnerAssignment{}, false, errors.New("invalid job assignment record")
 	}
 	return assignment, true, nil
 }
 
+func validOwnerAssignment(assignment hubOwnerAssignment) bool {
+	if !machineIDPattern.MatchString(assignment.Node) || assignment.Epoch == 0 || (assignment.From != "" && (!machineIDPattern.MatchString(assignment.From) || assignment.From == assignment.Node)) {
+		return false
+	}
+	for _, node := range assignment.Fenced {
+		if !machineIDPattern.MatchString(node) || node == assignment.Node {
+			return false
+		}
+	}
+	return true
+}
+
+// successorOwnerAssignment carries every predecessor forward so journal
+// cleanup cannot erase pending revocations after a later hub restart.
+func (h *HubServer) successorOwnerAssignment(job, from, to string, epoch uint64) (hubOwnerAssignment, error) {
+	old, found, err := h.ownerAssignment(job)
+	if err != nil {
+		return hubOwnerAssignment{}, err
+	}
+	nodes := make(map[string]struct{})
+	if found && (old.Node == from && old.Epoch == epoch || old.Node == to && old.Epoch == epoch+1) {
+		if old.From != "" {
+			nodes[old.From] = struct{}{}
+		}
+		for _, node := range old.Fenced {
+			nodes[node] = struct{}{}
+		}
+	}
+	h.mu.Lock()
+	current := h.jobs[job]
+	if current != nil && (current.Node == from && current.Epoch == epoch || current.Node == to && current.Epoch == epoch+1) {
+		for node := range current.FencedNodes {
+			nodes[node] = struct{}{}
+		}
+	}
+	h.mu.Unlock()
+	nodes[from] = struct{}{}
+	delete(nodes, to)
+	fenced := make([]string, 0, len(nodes))
+	for node := range nodes {
+		fenced = append(fenced, node)
+	}
+	slices.Sort(fenced)
+	return hubOwnerAssignment{Job: job, Node: to, Epoch: epoch + 1, From: from, Fenced: fenced}, nil
+}
+
 // saveOwnerAssignment is called under the per-job lock. A fresh spawn may
 // change its epoch-1 binding only through the durable spawn placement path.
 func (h *HubServer) saveOwnerAssignment(assignment hubOwnerAssignment, rebind bool) error {
-	if !machineIDPattern.MatchString(assignment.Node) || assignment.Epoch == 0 {
+	if !validOwnerAssignment(assignment) {
 		return errors.New("invalid job assignment")
 	}
 	path, err := h.ownerAssignmentPath(assignment.Job)
@@ -144,7 +195,13 @@ func (h *HubServer) saveOwnerAssignment(assignment hubOwnerAssignment, rebind bo
 	if found && old.Ended && !assignment.Ended && assignment.Epoch <= old.Epoch {
 		return errors.New("job assignment ended")
 	}
-	if found && old == assignment {
+	if found && old.Node == assignment.Node && old.Epoch == assignment.Epoch && assignment.From == "" {
+		assignment.From = old.From
+	}
+	if found && old.Node == assignment.Node && old.Epoch == assignment.Epoch && len(assignment.Fenced) == 0 {
+		assignment.Fenced = slices.Clone(old.Fenced)
+	}
+	if found && sameOwnerAssignment(old, assignment) {
 		return nil
 	}
 	dir := filepath.Dir(path)
@@ -156,6 +213,9 @@ func (h *HubServer) saveOwnerAssignment(assignment hubOwnerAssignment, rebind bo
 	body, err := json.Marshal(assignment)
 	if err != nil {
 		return err
+	}
+	if len(body) > hubOwnerAssignmentMaxBytes {
+		return errors.New("job assignment record too large")
 	}
 	return durable.ReplaceFileAtomically(path, ".assignment-*", body, 0600)
 }

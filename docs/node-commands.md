@@ -645,11 +645,13 @@ transfers the hk owner with the old owner as `expected_owner`; a stale transfer
 is refused and names the current owner.
 A node that receives `409 job_owner_mismatch` reads the owner again. If the
 hub seeded this same node at its current grant epoch, it retries once with that
-owner as the condition. Otherwise it records the same local revocation as a hub
-notice: it makes no further job-record writes for that attempt and the existing
-pane sweep closes the local pane. A delayed refusal or hub revocation cannot
-revoke a newer local grant. The hub checks the durable hk owner before finishing
-an old pool action, including after restart.
+owner as the condition. If hk names a newer grant to the same node that is not
+yet persisted locally, the write waits for a later assignment directive without
+revoking the job. Other mismatches record the same local revocation as a hub
+notice: the attempt makes no further job-record writes and the existing pane
+sweep closes the local pane. A delayed refusal or hub revocation cannot revoke a
+newer local grant. The hub checks the durable hk owner before finishing an old
+pool action, including after restart.
 
 An older hk omits both owner fields from a job read. Panewire sends no fence
 fields to that server and logs once per streak while retaining legacy behavior.
@@ -660,21 +662,27 @@ persisted assignments after restart and on heartbeat. Between the node's HK
 claim and that seed, upgraded nodes condition their writes on an empty owner;
 they never claim it. Before reassigning an empty-owner job, the hub first seeds
 its current owner and then transfers the fence. Without a durable assignment,
-the hub leaves the job unfenced and cannot reassign it. A later assignment back
-to the same node requires a fresh claim or spawn before that node's prior
-revocation is cleared.
+the hub leaves the job unfenced and cannot reassign it; jobs dispatched by an
+older hub without a held assignment must finish before this limitation clears.
+A later assignment back to the same node requires a fresh claim or spawn
+before that node's prior revocation is cleared.
 Older node binaries can still issue an unconditional write while being upgraded.
 Upgrade every node before advertising `close_ops_v1`: the current rollout is
 v0.0.540 followed by the release containing this fence.
+An old attempt still running when the same node receives a later grant can emit
+an event under that later epoch; launch-bound attempt identity is tracked in
+hk 5310.
 If the hub cannot read the job record, it refuses reassignment until it can
 establish whether fencing is supported. If hk rejects a terminal ownership
 transfer with `job_state_conflict`, the hub refuses the reassignment and names
-the reason; it does not bypass the fence.
+the reason; it does not bypass the fence. Conditional terminal owner-only
+transfers await deployment of hk 5303.
 The hub stores assignments and transfer intents alongside its SQLite inbox,
 or under its panewire state directory when it uses PostgreSQL or no inbox.
-Keep that directory across hub restarts: the successor's heartbeat redelivers
-an assignment only after hk confirms its node, epoch, and non-terminal state.
-Once the node reports the granted epoch, the intent is removed.
+Keep that directory across hub restarts: recovery checks hk's node, epoch, and
+non-terminal state before redelivering a successor's durable assignment. It
+removes the transfer intent after persisting that assignment, which also retains
+the predecessors needed to restore revocation delivery after another restart.
 
 Rollout order: deploy the hub with this guard, upgrade the node binaries,
 run `panewire node close-ops enable` on each node, then run

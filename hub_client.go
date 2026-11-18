@@ -2530,10 +2530,12 @@ func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubC
 		}
 	case "job.assigned":
 		if client.jobsInboxRoot == "" {
-			return errors.New("job assignment local root unavailable")
+			client.warnMessage("job assignment local root unavailable: " + message.JobID)
+			return nil
 		}
 		if err := jobowner.Assign(filepath.Join(client.jobsInboxRoot, "jobs"), message.JobID, message.Epoch); err != nil {
-			return fmt.Errorf("job assignment local write unavailable: %w", err)
+			client.warnMessage("job assignment local write unavailable: " + message.JobID)
+			return nil
 		}
 		// Monotonic: a superseded session's drain can still run while a newer
 		// session already recorded a later epoch for the same job, and the

@@ -132,7 +132,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	sink := fs.Bool("sink", false, "sink lane.event text: at most 8192 bytes, cut to that at emit (otherwise text up to 16 KiB is kept whole in the lane inbox)")
 	report := fs.String("report", "", "report path")
 	ownerLane := fs.String("owner-lane", "", "owning lane")
-	epoch := fs.Uint64("epoch", 0, "job epoch (defaults to 1)")
+	epoch := fs.Uint64("epoch", 0, "job epoch (defaults to the local grant)")
 	label := fs.String("label", "", "agent label for the relay note")
 	host := fs.String("host", "", "originating host label")
 	pane := fs.String("pane", "", "originating pane id")
@@ -281,9 +281,14 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 		return ExitUsage
 	}
 	if record.Epoch == 0 {
-		// The node scanner normalizes a missing epoch to 1; write what it reads
-		// so the dedupe key is identical on both sides.
-		record.Epoch = 1
+		// Capture the grant in the event, before the scanner or a later grant
+		// can change which attempt produced it.
+		epoch, err := jobRecordEpoch(filepath.Join(root, "jobs"), record.JobID)
+		if err != nil {
+			fmt.Fprintln(stderr, "emit: job assignment unavailable")
+			return ExitInternal
+		}
+		record.Epoch = epoch
 	}
 	if !hubAgentLabelPattern.MatchString(record.AgentLabel) {
 		record.AgentLabel = ""

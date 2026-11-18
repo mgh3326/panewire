@@ -36,7 +36,11 @@ func (h *HubServer) transferJobOwner(ctx context.Context, id, from, to string, e
 		if !held && (!supported || current == (fleet.JobOwner{})) {
 			return nil
 		}
-		return h.saveOwnerAssignment(hubOwnerAssignment{Job: id, Node: to, Epoch: epoch + 1}, false)
+		assignment, err := h.successorOwnerAssignment(id, from, to, epoch)
+		if err != nil {
+			return err
+		}
+		return h.saveOwnerAssignment(assignment, false)
 	}
 	if !supported {
 		h.noteJobFenceSupport(false)
@@ -176,13 +180,19 @@ func (h *HubServer) readJobOwner(ctx context.Context, id string) (fleet.JobOwner
 }
 
 // firstSeenJobOwned uses hk's owner, or a persisted hub assignment for a
-// legacy record. A heartbeat alone can only register the legacy first epoch.
-func (h *HubServer) firstSeenJobOwned(ctx context.Context, id, node string, epoch uint64) bool {
-	owner, supported, exists, err := h.readJobOwner(ctx, id)
-	if err != nil {
-		return false
+// legacy record. The caller holds the per-job lock through admission.
+func (h *HubServer) firstSeenJobOwned(ctx context.Context, id, node string, epoch uint64, terminalAllowed bool) bool {
+	record, exists, err := h.readJobRecord(ctx, id)
+	var owner fleet.JobOwner
+	var supported bool
+	if err == nil && exists {
+		state, _ := record["state"].(string)
+		if !terminalAllowed && hkTerminalState(state) {
+			return false
+		}
+		owner, supported, err = fleet.JobOwnerFromRecord(record)
 	}
-	if exists && supported && owner.Node != "" {
+	if err == nil && exists && supported && owner.Node != "" {
 		return owner.Node == node && owner.Epoch == epoch
 	}
 	assignment, held, assignmentErr := h.ownerAssignment(id)
@@ -193,15 +203,19 @@ func (h *HubServer) firstSeenJobOwned(ctx context.Context, id, node string, epoc
 		if assignment.Ended || assignment.Node != node || assignment.Epoch != epoch {
 			return false
 		}
-		// A missed startup sweep must not strand a known later assignment.
-		h.seedOwnerAssignment(ctx, assignment)
-		owner, supported, exists, err = h.readJobOwner(ctx, id)
-		if err != nil {
+		// The saved predecessor can lag an HK CAS until the journal is
+		// reconciled. Never use it as an outage or empty-owner fallback.
+		pending, pendingErr := h.hasPendingOwnerTransfer(id)
+		if pendingErr != nil || pending {
 			return false
 		}
+		if err == nil {
+			h.scheduleOwnerSeed(assignment)
+		}
+		return true
 	}
-	if !exists || !supported || owner.Node == "" {
-		return held || epoch == 1
+	if err != nil {
+		return false
 	}
-	return owner.Node == node && owner.Epoch == epoch
+	return (!exists || !supported || owner.Node == "") && epoch == 1
 }
