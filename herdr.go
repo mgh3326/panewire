@@ -10,6 +10,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/agybusy"
 )
 
 // Herdr's ordinary API is one request per connection. Subscription is the
@@ -185,9 +187,42 @@ func (c *HerdrClient) agentStates(ctx context.Context) ([]HerdrAgentState, error
 		if !validObservedAgentStatus(status) {
 			continue
 		}
+		status = c.agyBusyStatus(ctx, pane.PaneID, pane.Agent, status)
 		states = append(states, HerdrAgentState{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, Label: pane.Label, AgentName: pane.Name, DisplayLabel: displayLabel, Harness: pane.Harness, Status: status, Revision: pane.Revision, SourceStateChangeSeq: pane.StateChangeSeq, InteractiveReady: pane.InteractiveReady, Authoritative: true})
 	}
 	return states, nil
+}
+
+// agyBusyStatus applies the agy busy check (hk 5241) to the status herdr
+// reports for pane: harness is the pane's agent name, and the visible screen is
+// read over the socket only for an agy pane herdr reports idle or done.
+// docs/relay-harness-delivery.md ("agy busy check") has the rule.
+func (c *HerdrClient) agyBusyStatus(ctx context.Context, pane, harness, status string) string {
+	return agybusy.Status(harness, status, func() (string, error) {
+		evidence, err := readPane(ctx, c, paneIdentity{PaneID: pane}, "visible")
+		return evidence.Text, err
+	})
+}
+
+// agyEventStatus is agyBusyStatus for one status-changed event, which names no
+// agent: the harness comes from agent.get, and only an idle or done event is
+// read at all. A pane whose harness cannot be read keeps the status herdr sent;
+// the next snapshot judges it again.
+func (c *HerdrClient) agyEventStatus(ctx context.Context, pane, status string) string {
+	if status != "idle" && status != "done" {
+		return status
+	}
+	raw, err := c.Call(ctx, "agent.get", map[string]any{"target": pane})
+	if err != nil {
+		return status
+	}
+	var got struct {
+		Agent map[string]any `json:"agent"`
+	}
+	if json.Unmarshal(raw, &got) != nil {
+		return status
+	}
+	return c.agyBusyStatus(ctx, pane, aString(got.Agent, "agent"), status)
 }
 
 type HerdrEvent struct {
