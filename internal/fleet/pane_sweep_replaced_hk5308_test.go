@@ -131,3 +131,21 @@ func TestPaneSweepTellsTheOwnerLaneAboutAReplacedClose(t *testing.T) {
 		t.Fatalf("text = %q", text)
 	}
 }
+
+// The successor owns the task, so its completion never ends the predecessor:
+// a replaced job whose task reads completed still records its own end (lost,
+// its hk record was spawned), not completed for work its successor did.
+func TestPaneSweepRecordsAReplacedJobsOwnEndNotTheSuccessorsTask(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	pane := f.job("j", "implementer", "42")
+	putEvent(t, f.a, "j", "job.replaced", map[string]any{"replaced_by": "succ-j", "task_id": "42"})
+	f.tasks["42"] = "merged"
+	f.status[pane] = "blocked"
+	f.at(0)
+	if !slices.Equal(f.closed(), []string{pane}) {
+		t.Fatalf("closed = %v; info = %q", f.closed(), f.info)
+	}
+	if got := f.store.records["j"]["state"]; got != "lost" {
+		t.Fatalf("predecessor's hk record state = %v, want lost (its own end), not the successor's task end", got)
+	}
+}

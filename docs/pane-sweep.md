@@ -172,6 +172,8 @@ forever (hk 5308).
 - The close is the same close as any ended pane: the ownership proof, the job's
   end lock (a hub close that owns the end is respected, `hub_close_owns_end`),
   then `herdr pane close`. The sweep issues no close op itself.
+- The job's own end is recorded (`lost`, or `completed` by its own record), not
+  the successor's task end, even when the task has ended.
 - The worktree is kept (`task worktree kept reason=replaced`). The hk task is
   left alone: the last screen goes to `<job dir>/pane-screen.txt` only, and no
   failure rep is recorded for the replaced job.

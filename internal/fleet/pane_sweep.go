@@ -650,6 +650,11 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		// A task that ended decides the end state; a closed job whose task is
 		// still live, or unreadable, ends by its own record.
 		end, eligible := paneSweepTaskEnd(status)
+		if replaced {
+			// The successor owns the task: a replaced job's end is its own
+			// record's, so a task that ended never sets its state (hk record).
+			eligible = false
+		}
 		if !eligible {
 			// A task that is live again has no end to date: forget the first
 			// sighting of an earlier end, so a task that ends again starts a
