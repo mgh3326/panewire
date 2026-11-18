@@ -22,7 +22,8 @@ import (
 //     on, so the running node advertises it at its next re-check. hk 4745's
 //     rollout runs it once the hub issuer is deployed.
 //   - `drain`, withdrawal for rollback: quiesce closes without restarting the
-//     node, then report pending jobs until settlement finishes them.
+//     node, then report pending jobs until settlement finishes them and the
+//     hub has acknowledged every close the drain cancelled (hk 5073).
 //
 // list nil runs ps.
 func runNodeCloseOpsCLI(args []string, stdout, stderr io.Writer, list fleet.ProcessLister) int {
@@ -52,6 +53,18 @@ func runNodeCloseOpsCLI(args []string, stdout, stderr io.Writer, list fleet.Proc
 		}
 		if len(pending) != 0 {
 			fmt.Fprintf(stdout, "close ops draining; pending jobs: %v\n", pending)
+			return ExitConditionInvalid
+		}
+		// A drain-cancelled close the hub has not acknowledged is not drained:
+		// the hub reads the cancellation on its own pass, and a rolled-back
+		// binary would no longer answer it (hk 5073).
+		unacked, err := fleet.PendingHubCloseAckJobs(jobs)
+		if err != nil {
+			fmt.Fprintf(stderr, "panewire node close-ops drain: %v\n", err)
+			return ExitInternal
+		}
+		if len(unacked) != 0 {
+			fmt.Fprintf(stdout, "close ops draining; waiting for the hub to acknowledge cancelled closes of jobs: %v\n", unacked)
 			return ExitConditionInvalid
 		}
 		fmt.Fprintln(stdout, "close ops drained; no pending jobs")

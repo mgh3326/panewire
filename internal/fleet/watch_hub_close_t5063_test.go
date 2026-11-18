@@ -26,6 +26,13 @@ func TestPendingHubCloseJobsSkipsHubPlacementOnly_t5063(t *testing.T) {
 	if slices.Contains(pending, "placement-only") {
 		t.Fatalf("PendingHubCloseJobs returned placement-only job: %v", pending)
 	}
+	pendingAcks, err := PendingHubCloseAckJobs(a.Jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(pendingAcks, "placement-only") {
+		t.Fatalf("PendingHubCloseAckJobs returned placement-only job: %v", pendingAcks)
+	}
 
 	// A regular job with an open hub-close intent is still listed.
 	in := liveIntent(t, a)
