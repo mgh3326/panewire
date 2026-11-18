@@ -221,8 +221,8 @@ func TestSupersedeExplicitParentClosesIdleParentOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.noMoreCommands(t)
-	if got := f.superseded(); got != f.successor {
-		t.Fatalf("job.superseded=%q, want %q", got, f.successor)
+	if got := f.superseded(); got != "" {
+		t.Fatalf("the hub writes no hk marker on a parent it does not host (the node's lost record carries superseded_by): %q", got)
 	}
 	infos := supersedeInfos(f.destination)
 	if len(infos) != 1 || !strings.Contains(infos[0].Text, "[panewire] closed parent-job on machine-a: superseded by successor-job") {
@@ -343,9 +343,6 @@ func TestSupersedeWorkingParentStaysPendingUntilItStops(t *testing.T) {
 			t.Fatalf("a %s parent must leave the row pending with no request: %+v", status, row)
 		}
 	}
-	if got := f.superseded(); got != f.successor {
-		t.Fatalf("a waiting parent is still recorded superseded, got %q", got)
-	}
 	if infos := supersedeInfos(f.destination); len(infos) != 0 {
 		t.Fatalf("no info before the close: %+v", infos)
 	}
@@ -401,65 +398,70 @@ func TestSupersedeRestartAfterCloseRequestResumesIt(t *testing.T) {
 	}
 }
 
-// flakySupersededStore fails hk writes of the superseded field while told to.
-type flakySupersededStore struct {
+// flakyJobReads fails hk reads of job records while told to.
+type flakyJobReads struct {
 	fleet.JobStore
-	mu    sync.Mutex
-	fail  bool
-	tries int
+	mu   sync.Mutex
+	fail bool
 }
 
-func (s *flakySupersededStore) Put(ctx context.Context, id string, fields map[string]any) error {
-	if _, ok := fields["superseded"]; ok {
-		s.mu.Lock()
-		s.tries++
-		fail := s.fail
-		s.mu.Unlock()
-		if fail {
-			return errors.New("handoffkeep unavailable")
-		}
+func (s *flakyJobReads) Get(ctx context.Context, id string) (map[string]any, error) {
+	s.mu.Lock()
+	fail := s.fail
+	s.mu.Unlock()
+	if fail {
+		return nil, errors.New("handoffkeep unavailable")
 	}
-	return s.JobStore.Put(ctx, id, fields)
+	return s.JobStore.Get(ctx, id)
 }
 
-func (s *flakySupersededStore) setFail(fail bool) {
+func (s *flakyJobReads) setFail(fail bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fail = fail
 }
 
-func (s *flakySupersededStore) attempts() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.tries
-}
-
-// TestSupersedeFailedHKWriteIsRetriedNotConsumed is acceptance: a failed
-// job.superseded write leaves the row pending with no close request; the next
-// pass writes it and goes on, and later passes do not write again.
-func TestSupersedeFailedHKWriteIsRetriedNotConsumed(t *testing.T) {
+// TestSupersedeFailedHKAccessIsRetriedNotConsumed is acceptance: the hub
+// writes no parent record itself (the node's settlement writes the lost
+// record, which the hub reads back), so a settlement not yet proved and an
+// unreadable hk both leave the row pending, and the info line is owed once.
+func TestSupersedeFailedHKAccessIsRetriedNotConsumed(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	flaky := &flakySupersededStore{JobStore: f.jobs, fail: true}
+	f.land(t, f.successorTask("implementer", "parent", true))
+	if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), supersedeClosed); err != nil {
+		t.Fatal(err)
+	}
+	// The node closed the pane but has not settled the hk record yet.
+	if err := f.step(t, poolStatus(fleet.CloseOpClosed, false, false)); err != nil {
+		t.Fatal(err)
+	}
+	if row := f.onlyRow(t); row.Phase != poolActionPending {
+		t.Fatalf("a closed but unsettled request stays pending: %+v", row)
+	}
+	if err := f.step(t, poolStatus(fleet.CloseOpClosed, false, true)); err != nil {
+		t.Fatal(err)
+	}
+	// Settled, but hk cannot be read: the finish is retried, not consumed.
+	flaky := &flakyJobReads{JobStore: f.jobs, fail: true}
 	f.hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		return &fleet.App{JobStore: flaky, Out: out, Err: errout}, nil
 	}
-	f.land(t, f.successorTask("implementer", "parent", true))
-	if err := f.step(t); err == nil {
-		t.Fatal("a failed hk write must not be consumed")
+	f.nodeEnds(supersedeEndReason(f.successor))
+	if err := f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)); err == nil {
+		t.Fatal("an unreadable hk must not finish the row")
 	}
-	if row := f.onlyRow(t); row.Phase != poolActionPending || row.Data.Supersede.Recorded {
-		t.Fatalf("row=%+v", row)
+	if infos := supersedeInfos(f.destination); len(infos) != 0 {
+		t.Fatalf("no info before the record is read: %+v", infos)
 	}
 	flaky.setFail(false)
-	f.closeIdleParent(t)
-	if got := f.superseded(); got != f.successor {
-		t.Fatalf("retry must confirm the record: %q", got)
-	}
-	if got := flaky.attempts(); got != 2 {
-		t.Fatalf("want one failed and one confirming write, got %d", got)
+	if err := f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)); err != nil {
+		t.Fatal(err)
 	}
 	if infos := supersedeInfos(f.destination); len(infos) != 1 {
-		t.Fatalf("one info: %+v", infos)
+		t.Fatalf("one info once hk is readable: %+v", infos)
+	}
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionDone {
+		t.Fatalf("rows=%+v", rows)
 	}
 }
 
@@ -951,7 +953,6 @@ func TestSupersedeOffSwitchFencesAStoredButUnsentRequest(t *testing.T) {
 			// Store the request without sending it, as a stop between the
 			// save and the send leaves it.
 			row := f.onlyRow(t)
-			row.Data.Supersede.Recorded = true
 			row.Data.Args = &nodePaneCloseOpArgs{RequestID: row.ID, Job: f.job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project", EndReason: row.Data.EndReason}
 			if err := f.hub.inbox.store.savePoolAction(t.Context(), row); err != nil {
 				t.Fatal(err)
@@ -1021,7 +1022,6 @@ func (f *supersedeFixture) restartHubWith(t *testing.T, on bool) {
 func (f *supersedeFixture) storeUnsentRequest(t *testing.T) {
 	t.Helper()
 	row := f.onlyRow(t)
-	row.Data.Supersede.Recorded = true
 	row.Data.Args = &nodePaneCloseOpArgs{RequestID: row.ID, Job: f.job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project", EndReason: row.Data.EndReason}
 	if err := f.hub.inbox.store.savePoolAction(t.Context(), row); err != nil {
 		t.Fatal(err)
@@ -1080,18 +1080,17 @@ func TestSupersedeOffStartRevokesIntentsAndRowsBeforeAnyWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.restartHubWith(t, false)
+	// The off start itself ends the unsent row, in a final phase every binary
+	// reads (a rollback must not dispatch it); no reconcile has run.
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
+		t.Fatalf("an off start must end a row that sent nothing: %+v", rows)
+	}
 	f.restartHubWith(t, true)
 	f.hub.sweepSupersedeLandings(t.Context())
 	if pending := f.pendingLandings(t); len(pending) != 0 {
 		t.Fatalf("an intent of an earlier generation is cancelled: %+v", pending)
 	}
-	if err := f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)); err != nil {
-		t.Fatal(err)
-	}
 	f.noMoreCommands(t)
-	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
-		t.Fatalf("a row of an earlier generation that sent nothing must end: %+v", rows)
-	}
 }
 
 // TestSupersedeOffStartFailsWhenTheFenceCannotBeRecorded: an off start that
@@ -1105,10 +1104,47 @@ func TestSupersedeOffStartFailsWhenTheFenceCannotBeRecorded(t *testing.T) {
 	if err := f.hub.initSupersedeFence(); err == nil {
 		t.Fatal("an off start must fail when the fence is not recorded")
 	}
+	// An enabled start that cannot read the fence keeps the configured switch:
+	// work is withheld and left unchanged, not ended.
 	f.hub.supersedeClose = true
-	if err := f.hub.initSupersedeFence(); err != nil || f.hub.supersedeClose {
-		t.Fatalf("an enabled start that cannot read the fence keeps dispatch closed: err=%v on=%v", err, f.hub.supersedeClose)
+	if err := f.hub.initSupersedeFence(); err != nil || !f.hub.supersedeClose {
+		t.Fatalf("an enabled start must not clear the switch: err=%v on=%v", err, f.hub.supersedeClose)
 	}
+	if fenced, err := f.hub.supersedeFenced(t.Context(), poolAction{Data: poolActionData{Supersede: &poolSupersede{Fence: 1}}}); err == nil || !fenced {
+		t.Fatalf("an unreadable fence withholds dispatch with an error: fenced=%v err=%v", fenced, err)
+	}
+}
+
+// TestSupersedeUnreadableFenceLeavesPendingWorkUntouched: while the fence is
+// unreadable the landing pass ends nothing, and once it reads again the work
+// resumes (review round 6).
+func TestSupersedeUnreadableFenceLeavesPendingWorkUntouched(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.hub.mu.Lock()
+	delete(f.hub.jobs, f.job)
+	f.hub.mu.Unlock()
+	f.land(t, f.successorTask("implementer", "parent", true)) // pending, parent unknown
+	if len(f.pendingLandings(t)) != 1 {
+		t.Fatal("the intent is pending")
+	}
+	if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `ALTER TABLE supersede_fence RENAME TO supersede_fence_away`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.hub.initSupersedeFence(); err != nil || !f.hub.supersedeClose {
+		t.Fatalf("enabled start: err=%v on=%v", err, f.hub.supersedeClose)
+	}
+	f.hub.sweepSupersedeLandings(t.Context())
+	if len(f.pendingLandings(t)) != 1 {
+		t.Fatal("an unreadable fence must not end a pending intent")
+	}
+	if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `ALTER TABLE supersede_fence_away RENAME TO supersede_fence`); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.mu.Lock()
+	f.hub.jobs[f.job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: f.job, OwnerLane: "parent", Epoch: 1, Pane: roleHeldPane}, Node: "machine-a", LastSeen: time.Now().UTC()}
+	f.hub.mu.Unlock()
+	f.hub.sweepSupersedeLandings(t.Context())
+	f.onlyRow(t)
 }
 
 // TestSupersedeCancelledRowCreatesNoReplacement: a revoked request the node
@@ -1125,5 +1161,99 @@ func TestSupersedeCancelledRowCreatesNoReplacement(t *testing.T) {
 		if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
 			t.Fatalf("%s: a cancelled row must end without a replacement: %+v", state, rows)
 		}
+	}
+}
+
+// TestSupersedeRevokedRequestWithNoAttemptOnTheNodeIsRetired (review round 6):
+// when the node holds no attempt the stored request could bind to (its job
+// directory expired), a close op for it cannot close anything and no
+// tombstone can be written, so the revoked row retires on that proof alone.
+func TestSupersedeRevokedRequestWithNoAttemptOnTheNodeIsRetired(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.land(t, f.successorTask("implementer", "parent", true))
+	f.storeUnsentRequest(t)
+	f.hub.supersedeClose = false
+	gone := poolActionReply{op: nodeCommandPaneCloseStatus, result: map[string]any{"state": nodeCloseOpNone, "released": false, "settled": false, "attempt": ""}}
+	if err := f.step(t, gone); err != nil {
+		t.Fatal(err)
+	}
+	f.noMoreCommands(t)
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
+		t.Fatalf("rows=%+v", rows)
+	}
+	// An ordinary none (the node still has the job) is not a tombstone.
+	g := newSupersedeFixture(t, nil)
+	g.land(t, g.successorTask("implementer", "parent", true))
+	g.storeUnsentRequest(t)
+	g.hub.supersedeClose = false
+	noRelease := poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": nodeCloseOpNone, "released": false, "settled": false, "attempt": "00002-job.spawned.json"}}
+	if err := g.step(t, supersedeNoneStatus, noRelease); err == nil {
+		t.Fatal("an ordinary none answer must not retire a revoked request")
+	}
+	if got := g.onlyRow(t); got.Phase != poolActionPending {
+		t.Fatalf("row=%+v", got)
+	}
+}
+
+// TestSupersedeRetriesShareOneChainAndBudget (review round 6): an unknown
+// request that already has a successor, or whose chain spent the budget,
+// mints no further request.
+func TestSupersedeRetriesShareOneChainAndBudget(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.land(t, f.successorTask("implementer", "parent", true))
+	f.storeUnsentRequest(t)
+	unknown := poolStatus(fleet.CloseOpUnknown, false, false)
+	if err := f.step(t, unknown, supersedeProbe("idle")); err != nil {
+		t.Fatal(err)
+	}
+	rows := f.rows(t)
+	if len(rows) != 2 {
+		t.Fatalf("an unknown request mints one successor: %+v", rows)
+	}
+	var first, second poolAction
+	for _, row := range rows {
+		if row.Data.Args != nil {
+			first = row
+		} else {
+			second = row
+		}
+	}
+	if second.Data.Supersede.Generation != first.Data.Supersede.Generation+1 {
+		t.Fatalf("the unknown retry must spend the shared budget: %+v %+v", first.Data.Supersede, second.Data.Supersede)
+	}
+	if may, err := f.hub.supersedeMayRetry(t.Context(), first); err != nil || may {
+		t.Fatalf("a request whose chain already has a live successor must not mint another: may=%v err=%v", may, err)
+	}
+	// The budget caps unknown retries too.
+	spent := first
+	spent.Data.Supersede = &poolSupersede{Generation: supersedeMaxGenerations - 1, Fence: first.Data.Supersede.Fence}
+	if may, err := f.hub.supersedeMayRetry(t.Context(), spent); err != nil || may {
+		t.Fatalf("a spent budget must not retry: may=%v err=%v", may, err)
+	}
+}
+
+// TestHubBuiltSuccessorsNeverArmTheirParentsClose (review round 6): a quota
+// replacement and an author ladder step copy the replaced request; the copy is
+// no submitter's typed --parent-job.
+func TestHubBuiltSuccessorsNeverArmTheirParentsClose(t *testing.T) {
+	old := quotaHolderRequest("implementer", "mwr-9-p1")
+	old.ParentJobExplicit = true
+	old.Args = append(old.Args, "--parent-job", "grand-parent")
+	replaced, err := quotaReplacementRequest(old, "mwr-9-p1", "mwr-9-p1-q1", "claude", "claude", "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.ParentJobExplicit {
+		t.Fatal("a quota replacement must not inherit the explicit parent flag")
+	}
+	f := newEscalateFixture(t, "author-explicit")
+	holder := escalateHolderRequest(f.job)
+	holder.ParentJobExplicit = true
+	next, err := escalateAuthorSubmission(holder, f.request(), f.job+"-l1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ParentJobExplicit {
+		t.Fatal("an author ladder step must not inherit the explicit parent flag")
 	}
 }

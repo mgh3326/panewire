@@ -55,9 +55,6 @@ type poolSupersede struct {
 	// still the parent's (a close racing a state change); each starts a new
 	// row, so a refusal is not final while the pane remains.
 	Generation uint8 `json:",omitempty"`
-	// Recorded is set once job.superseded is confirmed in hk; a failed write
-	// leaves it false so the next pass retries.
-	Recorded bool `json:",omitempty"`
 	// Fence is the supersede fence generation the row was queued under. A hub
 	// started with the switch off advances the fence, which cancels the row
 	// for dispatch in every later hub (initSupersedeFence).
@@ -147,11 +144,20 @@ func (h *HubServer) initSupersedeFence() error {
 		if err := h.inbox.store.advanceSupersedeFence(ctx); err != nil {
 			return fmt.Errorf("supersede fence not recorded: %w", err)
 		}
+		// Rows that sent nothing end now, in a form a pre-change binary also
+		// ignores (a rollback must not dispatch a revoked row). Rows with a
+		// stored request stay for the node release (docs/config.md, rolling
+		// back).
+		if err := h.inbox.store.refuseUnsentSupersedeActions(ctx); err != nil {
+			return fmt.Errorf("supersede rows not cancelled: %w", err)
+		}
 		return nil
 	}
 	if _, err := h.inbox.store.supersedeGeneration(ctx); err != nil {
-		h.supersedeClose = false
-		h.logger.Warn("successor close disabled: the supersede fence is unreadable", "error", h.inbox.store.loggable("supersede fence", err))
+		// The configured switch stays on: the fence being unreadable is not a
+		// revocation. Every dispatch and intent pass reads the fence itself
+		// and withholds work (leaving it unchanged) until a read succeeds.
+		h.logger.Warn("successor close withheld: the supersede fence is unreadable", "error", h.inbox.store.loggable("supersede fence", err))
 	}
 	return nil
 }
@@ -370,7 +376,7 @@ func (h *HubServer) createSupersedeAction(ctx context.Context, landing supersede
 
 // prepareSupersedeClose runs the supersede-specific steps of a pending row
 // before the shared close protocol: a parent that ended or moved needs no
-// close, and job.superseded is recorded once. It reports stop when the row is
+// close. It reports stop when the row is
 // finished or waiting; an error leaves the row pending for the next pass.
 func (h *HubServer) prepareSupersedeClose(ctx context.Context, action *poolAction) (stop bool, err error) {
 	data := action.Data.Supersede
@@ -400,26 +406,6 @@ func (h *HubServer) prepareSupersedeClose(ctx context.Context, action *poolActio
 		// Nothing was sent, so there is nothing to release: the parent ended
 		// or another owner holds it now.
 		return true, h.refusePoolAction(ctx, *action)
-	}
-	if data.Recorded {
-		return false, nil
-	}
-	app, err := h.newSpawnApp(io.Discard, io.Discard)
-	if err != nil {
-		return true, err
-	}
-	if err := app.CheckTrust(); err != nil {
-		return true, err
-	}
-	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	err = app.MarkJobSuperseded(writeCtx, action.Job, data.Successor)
-	cancel()
-	if err != nil {
-		return true, fmt.Errorf("job.superseded not recorded: %w", err)
-	}
-	data.Recorded = true
-	if err := h.inbox.store.savePoolAction(ctx, *action); err != nil {
-		return true, err
 	}
 	return false, nil
 }
@@ -464,7 +450,7 @@ func (h *HubServer) refuseCloseAction(ctx context.Context, action poolAction) er
 		next.Data.TargetAttempt = action.Data.Args.Attempt
 	}
 	next.Data.Args, next.Data.RetryID, next.Data.RetryAfter, next.Data.RetryCount = nil, "", 0, 0
-	next.Data.Supersede = &poolSupersede{Successor: data.Successor, Generation: data.Generation + 1, Recorded: data.Recorded, Fence: data.Fence}
+	next.Data.Supersede = &poolSupersede{Successor: data.Successor, Generation: data.Generation + 1, Fence: data.Fence}
 	action.Phase = poolActionRefused
 	if err := h.inbox.store.replaceSupersedeAction(ctx, action, next); err != nil {
 		return err
@@ -474,6 +460,26 @@ func (h *HubServer) refuseCloseAction(ctx context.Context, action poolAction) er
 	h.loopNoteDone(loopPoolActions, action.ID)
 	h.logger.Info("successor close action retried", "node", next.Node, "job", next.Job, "action", next.ID, "retry_of", action.ID, "generation", next.Data.Supersede.Generation)
 	return nil
+}
+
+// supersedeMayRetry reports whether an unknown supersede request may mint a
+// successor: only while no other request of the parent is live and the shared
+// budget of supersedeMaxGenerations is not spent.
+func (h *HubServer) supersedeMayRetry(ctx context.Context, action poolAction) (bool, error) {
+	data := action.Data.Supersede
+	if data == nil || int(data.Generation)+1 >= supersedeMaxGenerations {
+		return false, nil
+	}
+	rows, err := h.inbox.store.supersedeActionsOf(ctx, action.Job)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if row.ID != action.ID && row.Phase != poolActionRefused && row.Phase != poolActionDone {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // supersedeEventID is the fixed id of the one info line a supersede close owes

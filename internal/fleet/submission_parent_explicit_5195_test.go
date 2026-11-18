@@ -92,3 +92,29 @@ func TestSubmissionRecordsWhetherParentJobWasExplicit_5195(t *testing.T) {
 		}
 	})
 }
+
+// A replay must restate its provenance: a rerun that reaches the parent only
+// through ARBITER_JOB does not match an explicit receipt, and the reverse
+// (review round 6). An identical replay returns the saved request.
+func TestSubmissionReplayComparesParentProvenance_5195(t *testing.T) {
+	t.Setenv("ARBITER_JOB", "")
+	a, s := parentExplicitFixture(t, "--parent-job", "parent-job")
+	request, err := a.PrepareSubmission(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := a.saveSubmission(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again := request
+	if replay, err := a.saveSubmission(again); err != nil || replay.RequestID != saved.RequestID || !replay.ParentJobExplicit {
+		t.Fatalf("an identical replay returns the saved request: %+v %v", replay, err)
+	}
+	inherited := request
+	inherited.RequestID = "d676220b-e763-4af1-aefd-0000000000f1"
+	inherited.ParentJobExplicit = false
+	if _, err := a.saveSubmission(inherited); err == nil || code(err) != exitDuplicate {
+		t.Fatalf("an inherited replay of an explicit receipt must be refused: %v", err)
+	}
+}

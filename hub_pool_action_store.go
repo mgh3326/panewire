@@ -462,3 +462,24 @@ func (s *laneInboxStore) insertSupersedeAction(parent context.Context, action po
 	}
 	return nil
 }
+
+// refuseUnsentSupersedeActions ends every pending supersede_close row that has
+// stored no close request, so nothing was ever sent for it. The off start runs
+// it after advancing the fence: the revocation of such a row is then a plain
+// final phase, which any binary reads, with no node I/O.
+func (s *laneInboxStore) refuseUnsentSupersedeActions(parent context.Context) error {
+	actions, err := s.activePoolActions(parent)
+	if err != nil {
+		return err
+	}
+	for _, action := range actions {
+		if action.Data.Kind != poolActionKindSupersedeClose || action.Phase != poolActionPending || action.Data.Args != nil {
+			continue
+		}
+		action.Phase = poolActionRefused
+		if err := s.savePoolAction(parent, action); err != nil {
+			return err
+		}
+	}
+	return nil
+}

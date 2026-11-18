@@ -444,10 +444,3 @@ func (a *App) MarkJobLostBecause(ctx context.Context, id, endReason string) erro
 	}
 	return a.putJobRecord(ctx, id, record)
 }
-
-// MarkJobSuperseded records the successor that replaced id. The record stays
-// live; the hub closes the pane through the jobs-close reap path, which never
-// removes the worktree the successor may be using.
-func (a *App) MarkJobSuperseded(ctx context.Context, id, successor string) error {
-	return a.putJobRecord(ctx, id, map[string]any{"superseded": successor})
-}

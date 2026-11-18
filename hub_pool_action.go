@@ -178,6 +178,14 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		if err != nil {
 			return err
 		}
+		if fenced && status.State == nodeCloseOpNone && status.Attempt == "" && action.Data.Args != nil {
+			// The node holds no attempt this request could bind to (its job
+			// directory is gone, or it never recorded one), so a close op for
+			// it can only answer not-a-job or mismatch: nothing is left to
+			// fence, and no tombstone can be written for a job the node no
+			// longer has.
+			return h.refusePoolAction(ctx, action)
+		}
 		if fenced && (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) {
 			// The switch is off, or a hub started with it off moved the
 			// fence since this row was queued: a request stored but not
@@ -218,6 +226,13 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		}
 		if action.Data.Args == nil || status.Attempt == "" || status.Attempt != action.Data.Args.Attempt {
 			return nil
+		}
+		if action.Data.Kind == poolActionKindSupersedeClose {
+			// One retry chain per parent, with one budget shared with the
+			// refused-close retries (refuseCloseAction).
+			if may, err := h.supersedeMayRetry(ctx, action); err != nil || !may {
+				return err
+			}
 		}
 		return h.retryUnknownPoolAction(ctx, action)
 	case fleet.CloseOpClosed, fleet.CloseOpGone:
@@ -313,6 +328,11 @@ func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolActio
 	}
 	retry := action
 	retry.ID = id
+	if retry.Data.Supersede != nil {
+		next := *retry.Data.Supersede
+		next.Generation++
+		retry.Data.Supersede = &next
+	}
 	retry.Data.TargetAttempt = action.Data.Args.Attempt
 	retry.Data.Args = nil
 	retry.Data.RetryID = ""
