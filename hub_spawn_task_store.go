@@ -244,7 +244,8 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	if err := s.backfillSpawnTaskFailNotices(ctx, time.Now().UTC()); err != nil {
 		return err
 	}
-	return nil
+	// The placement-record and notice outboxes (hk 5298; postgres: 0028).
+	return s.ensureSpawnOutboxes(ctx)
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {
@@ -638,6 +639,9 @@ func queueSpawnNoticeRows(ctx context.Context, s *laneInboxStore, tx *sql.Tx, ta
 	}
 	for _, n := range lanes {
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), n.id, task.Request.RequestID, task.Job, n.lane, raw, now.UnixMilli()); err != nil {
+			return err
+		}
+		if err := s.enqueueSpawnNotice(ctx, tx, n.id); err != nil {
 			return err
 		}
 	}
