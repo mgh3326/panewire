@@ -151,7 +151,7 @@ func (a *App) requestVerdict(ctx context.Context, r QuotaRequest) (req admission
 	}
 	in = admissionInputs{Now: a.Now(), Rows: admissionRows(rows), Policy: policy, Seats: a.Policy.Profiles}
 	if a.LiveAccountJobs != nil {
-		in.RunningJobs, _ = a.LiveAccountJobs(ctx, a.RequestID)
+		in.RunningJobs, in.RunningJobsErr = a.LiveAccountJobs(ctx, a.RequestID)
 	}
 	d = in.admit(req)
 	if !d.OK && d.Exit != gateUnmeasurable {

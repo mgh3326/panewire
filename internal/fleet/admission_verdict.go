@@ -128,8 +128,9 @@ type admissionInputs struct {
 	AccountScoped bool
 	// RunningJobs maps account keys to running job IDs, used by the
 	// commandcode weekly window limit (hk 5113).
-	RunningJobs map[string]string
-	AccountKey  string
+	RunningJobs    map[string]string
+	RunningJobsErr error
+	AccountKey     string
 }
 
 // admissionVerdict is the gate's decision, in the fields its receipt carries.
@@ -190,6 +191,9 @@ func (in admissionInputs) commandcodeBusyRefusal(pool string, buckets []admissio
 	}
 	for _, b := range buckets {
 		if b.Window == "7d" && b.ScopeKind == "account" && b.Used != nil && *b.Used >= 75.0 {
+			if in.RunningJobsErr != nil {
+				return "running_jobs_lookup_failed"
+			}
 			accountKey := in.AccountKey
 			if accountKey == "" && in.Readings["commandcode"].FP != "" {
 				accountKey = "commandcode:" + in.Readings["commandcode"].FP

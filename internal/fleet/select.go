@@ -347,9 +347,10 @@ type selPlan struct {
 	// pool's observation history (select_burn.go). A plan built without
 	// admission inputs (a unit test) leaves it nil and the policy defaults
 	// apply.
-	burnRate    func(pool string, window time.Duration) burnRate
-	admPolicy   admissionPolicy
-	runningJobs map[string]string
+	burnRate       func(pool string, window time.Duration) burnRate
+	admPolicy      admissionPolicy
+	runningJobs    map[string]string
+	runningJobsErr error
 }
 
 func (p *selPlan) poolCutoff(pool string) float64 {
@@ -944,7 +945,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		p.admPolicy = admPolicy
 	}
 	if a.LiveAccountJobs != nil {
-		p.runningJobs, _ = a.LiveAccountJobs(ctx, a.RequestID)
+		p.runningJobs, p.runningJobsErr = a.LiveAccountJobs(ctx, a.RequestID)
 	}
 	if req.expectedUnreadable {
 		p.degraded = append(p.degraded, "expected_unreadable")

@@ -250,3 +250,53 @@ func TestOtherPoolAt95PercentUnchanged_t5113(t *testing.T) {
 		t.Fatalf("chosen pool = %q, want codex", sel.chosen.row.Pool)
 	}
 }
+
+func TestCommandcodeRunningJobsLookupErrorRefused_t5113(t *testing.T) {
+	a0, _ := ccAccountsFixture(t, map[string]*PoolView{})
+	now := a0.Now()
+	a, s := ccAccountsFixture(t, map[string]*PoolView{
+		ccKeyA: ccView(now, 10, 80, 3),
+		ccKeyB: ccView(now, 10, 30, 3),
+	})
+	lookupErr := fmt.Errorf("inbox store unavailable")
+	a.LiveAccountJobs = func(_ context.Context, _ string) (map[string]string, error) {
+		return nil, lookupErr
+	}
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil || sel.chosen == nil {
+		t.Fatalf("choice failed: %v", err)
+	}
+	// Account B (at 30%, not near limit) must be chosen; Account A (80% near limit) must be dropped
+	if sel.chosen.accountKey != ccKeyB {
+		t.Fatalf("chosen account %s, want %s", sel.chosen.accountKey, ccKeyB)
+	}
+	cands := ccCandidates(sel)
+	candA := cands[ccKeyA]
+	if candA.outcome != "dropped:running_jobs_lookup_failed" {
+		t.Fatalf("Account A outcome = %q, want %q", candA.outcome, "dropped:running_jobs_lookup_failed")
+	}
+
+	// Also verify native gate with lookup error on near-limit account
+	gateApp, _, _ := switchApp(t, gateModeNative, nil, Result{Code: 99})
+	gateApp.Config.Local = map[string]any{"presence_id": "mac-personal"}
+	gateApp.Source = &fakePlacementSource{presence: []PresenceRecord{
+		{HostID: "mac-personal", AccountKey: ccKeyA, LastSeen: switchNow.Add(-time.Minute)},
+	}}
+	gateApp.SharedLatest = func(_ context.Context, key string) (shared.Latest, error) {
+		return shared.Latest{Observation: switchReading(10, 80)}, nil
+	}
+	gateApp.LiveAccountJobs = func(_ context.Context, _ string) (map[string]string, error) {
+		return nil, lookupErr
+	}
+	res := gateApp.nativeGate(context.Background(), QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "implementer"}, true)
+	if res.Code != gateBlocked {
+		t.Fatalf("native gate code = %d, want blocked (%d): %s", res.Code, gateBlocked, res.Out)
+	}
+	var receipt gateReceipt
+	if err := json.Unmarshal([]byte(res.Out), &receipt); err != nil {
+		t.Fatalf("unmarshal receipt: %v", err)
+	}
+	if !strings.Contains(receipt.Reason, "running_jobs_lookup_failed") {
+		t.Fatalf("native gate receipt reason %q, want running_jobs_lookup_failed", receipt.Reason)
+	}
+}

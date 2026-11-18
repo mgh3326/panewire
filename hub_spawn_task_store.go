@@ -426,6 +426,20 @@ func (s *laneInboxStore) beginSpawnSend(parent context.Context, task hubSpawnTas
 	return n == 1, err
 }
 
+// recordPlacedAccount saves the placed account key and pool on the operation
+// before dispatch, so in-flight operations are counted by liveAccountJobs (hk 5113).
+func (s *laneInboxStore) recordPlacedAccount(parent context.Context, requestID string, attempt int, pool, accountKey string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	outcome := hubSpawnOutcome{Pool: pool, AccountKey: accountKey}
+	raw, err := json.Marshal(outcome)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant')`), string(raw), requestID, attempt)
+	return err
+}
+
 // Unknown observations retain the reservation. Only a definitive result may
 // release it, and only when the executing node has attested complete cleanup.
 func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) (bool, error) {

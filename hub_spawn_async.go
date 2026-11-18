@@ -684,6 +684,9 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 				var saved fleet.PlacementTrace
 				transport.snapshotReady = readErr == nil && !recorded && json.Unmarshal(payload, &saved) == nil && saved.Chosen == tr.Chosen && saved.Profile == tr.Profile
 			}
+			if tr.AccountKey != "" && h.inbox != nil {
+				_ = h.inbox.store.recordPlacedAccount(parent, task.Request.RequestID, task.Attempt, tr.Pool, tr.AccountKey)
+			}
 		}
 	}
 	if ctx.Err() != nil {
@@ -1569,6 +1572,12 @@ func spawnNodeOutcome(task hubSpawnTask, node hubSpawnRequest, result hubSpawnRe
 		outcome.AccountKey = result.Receipt.AccountKey
 		outcome.Role = result.Receipt.Role
 		outcome.LaneUnregistered = result.Receipt.LaneUnregistered
+	}
+	if outcome.AccountKey == "" {
+		outcome.AccountKey = task.Outcome.AccountKey
+	}
+	if outcome.Pool == "" {
+		outcome.Pool = task.Outcome.Pool
 	}
 	if outcome.RC != 0 {
 		outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))

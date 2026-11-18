@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
@@ -105,9 +106,12 @@ func (h *HubServer) liveAccountJobs(ctx context.Context, exceptRequest string) (
 	if err != nil {
 		return nil, err
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	jobs := map[string]string{}
+	type liveCandidate struct {
+		accountKey string
+		jobID      string
+		jobName    string
+	}
+	var candidates []liveCandidate
 	for _, task := range tasks {
 		if task.Request.RequestID == exceptRequest {
 			continue
@@ -119,12 +123,33 @@ func (h *HubServer) liveAccountJobs(ctx context.Context, exceptRequest string) (
 		if jobID == "" {
 			jobID = task.Request.RequestID
 		}
-		if rec := h.jobs[task.Job]; rec != nil && rec.Completed {
-			continue
+		accountKey := task.Outcome.AccountKey
+		if accountKey == "" && h.inbox != nil {
+			if payload, _, _, err := h.inbox.store.spawnPlacementSnapshot(ctx, task.Request.RequestID, task.Attempt); err == nil && len(payload) > 0 {
+				var tr fleet.PlacementTrace
+				if json.Unmarshal(payload, &tr) == nil {
+					accountKey = tr.AccountKey
+				}
+			}
 		}
-		if task.Outcome.AccountKey != "" {
-			jobs[task.Outcome.AccountKey] = jobID
+		if accountKey != "" {
+			candidates = append(candidates, liveCandidate{
+				accountKey: accountKey,
+				jobID:      jobID,
+				jobName:    task.Job,
+			})
 		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	jobs := map[string]string{}
+	for _, c := range candidates {
+		if c.jobName != "" {
+			if rec := h.jobs[c.jobName]; rec != nil && rec.Completed {
+				continue
+			}
+		}
+		jobs[c.accountKey] = c.jobID
 	}
 	return jobs, nil
 }
