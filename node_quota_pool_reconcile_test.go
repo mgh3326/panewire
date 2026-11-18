@@ -278,7 +278,7 @@ func TestQuotaPoolReconcileDaemonFlag(t *testing.T) {
 	}
 }
 
-func TestQuotaPoolReconcileKeepsAndLogsUnnamedRows(t *testing.T) {
+func TestQuotaPoolReconcileRefusesUnnamedRowsInSessionHoldingJobs(t *testing.T) {
 	var buf bytes.Buffer
 	prevLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -290,7 +290,7 @@ func TestQuotaPoolReconcileKeepsAndLogsUnnamedRows(t *testing.T) {
 	base := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
 	now := base
 	store := &arbiter.Store{DB: arbiter.StatePath(filepath.Join(root, "data")), Inbox: jobs, Now: func() time.Time { return now }}
-	job := "gone-job"
+	job := "held-job"
 	label := "label-" + job
 	if _, err := store.Claim(ctx, arbiter.Claim{Job: job, Lane: "owner", T: "T2", AgentLabel: label}); err != nil {
 		t.Fatal(err)
@@ -298,7 +298,7 @@ func TestQuotaPoolReconcileKeepsAndLogsUnnamedRows(t *testing.T) {
 	if _, err := store.RecordQuotaPool(ctx, arbiter.QuotaRun{Job: job, Profile: "fixture", Gate: arbiter.Gate{Pool: "example"}}); err != nil {
 		t.Fatal(err)
 	}
-	writeQuotaPoolReconcileSpawnedEvent(t, jobs, job, "default")
+	writeQuotaPoolReconcileSpawnedEvent(t, jobs, job, "custom")
 	now = base.Add(20 * time.Minute)
 	client, err := NewHubClient(HubClientConfig{URL: "ws://127.0.0.1", MachineID: "node-a", Token: "fixture", JobsInboxRoot: root, AllowInsecureForTests: true, QuotaPoolReconcile: true})
 	if err != nil {
@@ -309,15 +309,16 @@ func TestQuotaPoolReconcileKeepsAndLogsUnnamedRows(t *testing.T) {
 	}
 	client.quotaReconcile.agents = func(_ context.Context, session string) ([]nodeHerdrRow, error) {
 		return []nodeHerdrRow{
-			{nodeAgentRow: nodeAgentRow{Name: "", AgentStatus: "idle"}},
+			{nodeAgentRow: nodeAgentRow{Name: "", AgentStatus: "working"}},
 		}, nil
 	}
 	client.reconcileNodeQuotaPools(ctx)
 
-	if pools, err := store.QuotaPools(ctx, job); err != nil || len(pools) != 0 {
-		t.Fatalf("gone job pools=%v err=%v, want released despite unnamed row", pools, err)
+	// An unnamed row in a session holding a job fails closed: held job must NOT be released
+	if pools, err := store.QuotaPools(ctx, job); err != nil || len(pools) != 1 || pools[0] != "example" {
+		t.Fatalf("held job pools=%v err=%v, want retained when session has unnamed row", pools, err)
 	}
-	if !strings.Contains(buf.String(), "herdr agent snapshot row without a name kept") {
-		t.Fatalf("logs %q do not mention keeping unnamed row", buf.String())
+	if !strings.Contains(buf.String(), "herdr agent snapshot has row without a name") {
+		t.Fatalf("logs %q do not mention unnamed row", buf.String())
 	}
 }

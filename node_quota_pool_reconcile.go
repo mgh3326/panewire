@@ -67,20 +67,20 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 		readAgents = client.readNodeAgentsInSession
 	}
 	result, err := app.ReconcileLedgerForJobs(passCtx, func(ctx context.Context, jobs []string) ([]arbiter.Agent, error) {
-		sessions := make(map[string]bool)
+		sessionJobs := make(map[string]int)
 		for _, job := range jobs {
 			session, err := client.nodeJobHerdrSession(job)
 			if err != nil {
 				return nil, err
 			}
-			sessions[firstNonempty(session, app.HerdrSession)] = true
+			sessionJobs[firstNonempty(session, app.HerdrSession)]++
 		}
-		if len(sessions) == 0 {
-			sessions[app.HerdrSession] = true
-		}
-		names := make([]string, 0, len(sessions))
-		for session := range sessions {
+		names := make([]string, 0, len(sessionJobs))
+		for session := range sessionJobs {
 			names = append(names, session)
+		}
+		if len(names) == 0 {
+			names = append(names, app.HerdrSession)
 		}
 		sort.Strings(names)
 		client.nodeCommandMu.Lock()
@@ -96,7 +96,10 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 					return nil, errors.New("herdr agent snapshot has incomplete identity")
 				}
 				if row.Name == "" {
-					slog.Info("herdr agent snapshot row without a name kept", "session", session, "status", row.AgentStatus)
+					slog.Warn("herdr agent snapshot has row without a name", "session", session, "status", row.AgentStatus)
+					if sessionJobs[session] > 0 {
+						return nil, errors.New("herdr agent snapshot has incomplete identity for session holding jobs")
+					}
 				}
 				agents = append(agents, arbiter.Agent{Status: row.AgentStatus, Name: row.Name})
 			}
