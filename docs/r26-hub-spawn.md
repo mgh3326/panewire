@@ -77,8 +77,10 @@ Request:
   entries, all within the 200-char bound — (spaces and shell metacharacters
   rejected),
   and `wait_seconds` is 1..300. `--role` accepts `implementer`
-  or `reviewer` (`consult` for an operator); `--author-family` accepts `anthropic`, `openai`,
-  `google`, `xai`, `deepseek`, `meta`, `mistral`, or `other`; job values use
+  or `reviewer` (`consult` for an operator); `--author-family` accepts the one list in
+  `internal/spawnargs/author_family.go` (every seat family in `policy.json`: `anthropic`,
+  `cognition`, `deepseek`, `google`, `meta`, `minimax`, `mistral`, `mixed`, `openai`, `other`,
+  `qwen`, `upstage`, `xai`, `zhipu`); job values use
   `^[A-Za-z0-9._-]{1,128}$`; `--review-pass` is one digit 1..9 and sets the
   reviewer reservation key to `task:reviewer:p<N>`
   ([hub-spawn-operations.md](hub-spawn-operations.md)).
