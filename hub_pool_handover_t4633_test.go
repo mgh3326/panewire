@@ -368,7 +368,7 @@ func TestPoolHandoverSurvivesHubRestartAtEveryStep(t *testing.T) {
 	// claims the same request again, which is the same operation.
 	action = readOnlyPoolAction(t, f.hub)
 	action.Data.Handover.Submitted = false
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f) // after the submit
@@ -411,7 +411,7 @@ func TestPoolHandoverReplaysTheRequestAfterRetryablePlacement(t *testing.T) {
 		t.Fatalf("task=%+v err=%v, want retryable", task, err)
 	}
 	action.Data.Handover.Submitted = false // crash before that flag was saved
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f)
@@ -684,7 +684,7 @@ func TestPoolHandoverReplaysAMissedWaitNotice(t *testing.T) {
 	f := handoverFixture(t, job, 3, 3*time.Hour)
 	exhaustion := window5h()
 	row := poolAction{ID: "wait-row", Job: job, Node: "machine-a", Epoch: 1, Phase: poolActionDone, Data: poolActionData{Owner: "parent", Kind: poolActionKindWait, Handover: &poolHandover{Pool: "claude", Cause: exhaustion.Cause, Reset: exhaustion.Reset.Unix()}}}
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), row); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), row, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	sweepHandover(t, f, exhaustion, nil)
@@ -701,7 +701,7 @@ func TestPoolHandoverWithdrawsBeforeTheClose(t *testing.T) {
 	sweepHandover(t, f, window5h(), handoverReadReply(job))
 	action := readOnlyPoolAction(t, f.hub)
 	action.Data.Handover.Reset = time.Now().Add(-time.Minute).Unix()
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := runPoolActionStep(t, f.hub, f.node, action, poolStatus(nodeCloseOpNone, false, false), releasedReply); err != nil {
@@ -777,7 +777,7 @@ func TestPoolHandoverMovedJobKeepsAClaimedSuccessor(t *testing.T) {
 	// The claim committed; a crash lost the Submitted flag; then the job moved.
 	action := readOnlyPoolAction(t, f.hub)
 	action.Data.Handover.Submitted = false
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.hub.mu.Lock()
@@ -823,7 +823,7 @@ func TestPoolHandoverRechecksBeforeAnyCloseIsRegistered(t *testing.T) {
 	action := readOnlyPoolAction(t, f.hub)
 	checkout := action.Data.Handover.Successor.Repository.Checkout
 	action.Data.Args = &nodePaneCloseOpArgs{RequestID: action.ID, Job: job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: job, AgentStatus: "idle", Cwd: "/work/project.checkout", EndReason: action.Data.EndReason, Handover: &nodeHandoverCloseGuard{Origin: checkout.Origin, Branch: checkout.Branch, Commit: checkout.Sha}}
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	f.hub.handoverInputs = func(context.Context, string) handoverInputs { return handoverInputs{bound: "someone-else"} }
@@ -843,7 +843,7 @@ func TestPoolHandoverHoldsSavedCloseWhenAttemptIsUnreadable(t *testing.T) {
 	action := readOnlyPoolAction(t, f.hub)
 	checkout := action.Data.Handover.Successor.Repository.Checkout
 	action.Data.Args = &nodePaneCloseOpArgs{RequestID: action.ID, Job: job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: job, AgentStatus: "idle", Cwd: "/work/project.checkout", EndReason: action.Data.EndReason, Handover: &nodeHandoverCloseGuard{Origin: checkout.Origin, Branch: checkout.Branch, Commit: checkout.Sha}}
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	status := poolStatus(nodeCloseOpNone, false, false)
@@ -977,7 +977,7 @@ func TestPoolHandoverWaitReplayReleasesTheSweepClaim(t *testing.T) {
 	f := handoverFixture(t, job, 3, 3*time.Hour)
 	exhaustion := window5h()
 	row := poolAction{ID: "wait-row", Job: job, Node: "machine-a", Epoch: 1, Phase: poolActionDone, Data: poolActionData{Owner: "parent", Kind: poolActionKindWait, Handover: &poolHandover{Pool: "claude", Cause: exhaustion.Cause, Reset: exhaustion.Reset.Unix()}}}
-	if err := f.hub.inbox.store.insertPoolAction(t.Context(), row); err != nil {
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), row, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	// sweepExhaustedPool releases a notified implementer only for this reason.
@@ -1057,7 +1057,7 @@ func TestPoolHandoverClaimReplaysAfterACrash(t *testing.T) {
 	finishSettled(t, f)
 	action := readOnlyPoolAction(t, f.hub)
 	action.Data.Handover.Submitted = false
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	finishSettled(t, f)

@@ -53,6 +53,7 @@ func newR19eFixture(t *testing.T) *r19eFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	useLegacyOwnerStore(hub)
 	// The lane target is an ordinary connected node; only its relay channel is
 	// observed here.
 	relays := make(chan hubRelayInjectEvent, 8)
@@ -322,6 +323,7 @@ func TestR19eLateRegistrationRejectsUnprovableEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	useLegacyOwnerStore(hub)
 	now := time.Now().UTC()
 	if hub.lateRegisterJobCompletion(r19eWorkerNode, hubJobEventPayload{JobID: "job-x", Epoch: 4, AgentLabel: "agent"}, now) {
 		t.Fatal("self-promoted epoch was late-registered")

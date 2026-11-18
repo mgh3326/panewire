@@ -10,8 +10,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 const defaultHubJobActiveMaxAge = 72 * time.Hour
@@ -280,7 +281,10 @@ func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job 
 		}
 		epoch := event.Epoch
 		if epoch == 0 {
-			epoch = 1
+			epoch = event.Payload.OwnerEpoch
+			if epoch == 0 {
+				epoch = 1
+			}
 		}
 		// Every relayed job.* kind except a completion states why. This is
 		// also the echo guard: the hub's own revocation marker carries no
@@ -352,7 +356,10 @@ func hubJobHasFlatCompletion(events []hubIndexedEvent, epoch uint64) bool {
 		}
 		kind, recordEpoch := events[i].kind, event.Epoch
 		if recordEpoch == 0 {
-			recordEpoch = 1
+			recordEpoch = event.Payload.OwnerEpoch
+			if recordEpoch == 0 {
+				recordEpoch = 1
+			}
 		}
 		if (kind == "job.completed" || kind == "job.completion") && recordEpoch == epoch {
 			return true
@@ -393,7 +400,10 @@ func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 		if (kind == "job.completed" || kind == "job.completion") && !event.eventTime(entry, eventsDir).Before(time.Now().Add(-hubJobActiveMaxAge())) {
 			epoch := event.Epoch
 			if epoch == 0 {
-				epoch = 1
+				epoch = event.Payload.OwnerEpoch
+				if epoch == 0 {
+					epoch = 1
+				}
 			}
 			completed = HubActiveJob{JobID: jobID, Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: event.reportPath(), ReportLastLine: event.reportLastLine()}
 		}
@@ -432,6 +442,7 @@ type hubInboxEvent struct {
 	Truncated      bool   `json:"truncated"`
 	Ceiling        bool   `json:"ceiling,omitempty"`
 	Payload        struct {
+		OwnerEpoch     uint64 `json:"owner_epoch,omitempty"`
 		Late           bool   `json:"late,omitempty"`
 		AgentLabel     string `json:"agent_label"`
 		OwnerLane      string `json:"owner_lane"`
@@ -579,42 +590,8 @@ func hubEventSequence(name string) (uint64, bool) {
 }
 
 func writeHubRevocation(inboxRoot string, revoked hubJobRevokedEvent) error {
-	if inboxRoot == "" || !hubJobIDPattern.MatchString(revoked.JobID) || revoked.Epoch == 0 {
+	if inboxRoot == "" {
 		return fmt.Errorf("invalid job revocation")
 	}
-	jobDir := filepath.Join(inboxRoot, "jobs", revoked.JobID)
-	eventsDir := filepath.Join(jobDir, "events")
-	if err := os.MkdirAll(eventsDir, 0700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(filepath.Join(jobDir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0o666)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-
-	entries, err := os.ReadDir(eventsDir)
-	if err != nil {
-		return err
-	}
-	var highest uint64
-	for _, entry := range entries {
-		if seq, ok := hubEventSequence(entry.Name()); ok && seq > highest {
-			highest = seq
-		}
-	}
-	contents, err := json.Marshal(struct {
-		Type  string `json:"type"`
-		JobID string `json:"job_id"`
-		Epoch uint64 `json:"epoch"`
-	}{Type: "job.revoked", JobID: revoked.JobID, Epoch: revoked.Epoch})
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(eventsDir, fmt.Sprintf("%05d-job.revoked.json", highest+1))
-	return replaceFileAtomically(path, ".revocation-*", contents, 0600)
+	return jobowner.Revoke(filepath.Join(inboxRoot, "jobs"), revoked.JobID, revoked.Epoch)
 }

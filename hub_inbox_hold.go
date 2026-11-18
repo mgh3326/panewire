@@ -13,7 +13,11 @@ import (
 
 // Claim the complete lane queue in one transaction. The first arrival owns the
 // cap; later arrivals cannot extend it. A claim survives hub restart.
-func (h *HubServer) makeHeldBatches() error {
+//
+// It returns the earliest hold deadline (unix ms) of a lane it left held, and
+// those lanes: a hold also ends when the receiver stops working, which no
+// store write records, so the gate watches them (inbox_work_gate.go).
+func (h *HubServer) makeHeldBatches() (int64, []string, error) {
 	s := h.inbox.store
 	ctx, done := s.op(s.life)
 	defer done()
@@ -21,36 +25,40 @@ func (h *HubServer) makeHeldBatches() error {
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE hold_until>0 AND digest_batch='' AND acked_at=0 AND superseded_at=0 ORDER BY id`)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	groups := map[string][]laneInboxItem{}
 	for rows.Next() {
 		item, err := scanLaneInbox(rows)
 		if err != nil {
 			rows.Close()
-			return err
+			return 0, nil, err
 		}
 		groups[item.Lane] = append(groups[item.Lane], item)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	created := false
+	var due int64
+	var watch []string
 	for lane, items := range groups {
 		if h.receiverInboxState(lane).working && h.now().UnixMilli() < items[0].HoldUntil {
+			due = earliestDue(due, items[0].HoldUntil)
+			watch = append(watch, lane)
 			continue
 		}
 		id := "held-" + h.now().UTC().Format("20060102T150405.000000000Z") + "-" + uuid.NewString()
 		text := heldBatchText(items)
 		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`), id, lane, text); err != nil {
-			return err
+			return 0, nil, err
 		}
 		created = true
 		ids := make([]int64, len(items))
@@ -58,16 +66,16 @@ func (h *HubServer) makeHeldBatches() error {
 			ids[n] = i.ID
 		}
 		if err := s.updateIDs(ctx, tx, `UPDATE lane_inbox SET digest_batch=?`, []any{id}, ids); err != nil {
-			return err
+			return 0, nil, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return 0, nil, err
 	}
 	if created {
 		s.noteBatchesChanged()
 	}
-	return nil
+	return due, watch, nil
 }
 
 var heldNoticeKind = regexp.MustCompile(`(?i)\b(?:READY|MERGED|FINDINGS|BLOCKED)\b`)

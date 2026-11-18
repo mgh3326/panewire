@@ -47,5 +47,10 @@ func (s *laneInboxStore) releaseBatchClaims(id string) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Released claims are unclaimed work again: the next pass escalates them.
+	s.noteWorkChanged()
+	return nil
 }

@@ -99,6 +99,7 @@ func TestR18EnvelopeHeartbeatThenFlatCompletionRelays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	useLegacyOwnerStore(h)
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 1)}
 	h.nodes["node-a"] = &hubNodeRecord{agent: agent}
 	client := &HubClient{jobsInboxRoot: root, assignedJobs: map[string]uint64{}, completedJobs: map[string]uint64{}, completedReports: map[string]struct{}{}}

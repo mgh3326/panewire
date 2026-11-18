@@ -19,7 +19,7 @@ func TestPoolHandoverMissingJobNotifiesWhileKeepingFence(t *testing.T) {
 			if reason == "close attempt unavailable" {
 				checkout := action.Data.Handover.Successor.Repository.Checkout
 				action.Data.Args = &nodePaneCloseOpArgs{RequestID: action.ID, Job: job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: job, AgentStatus: "idle", Cwd: "/work/project.checkout", EndReason: action.Data.EndReason, Handover: &nodeHandoverCloseGuard{Origin: checkout.Origin, Branch: checkout.Branch, Commit: checkout.Sha}}
-				if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+				if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -150,7 +150,7 @@ func TestPoolHandoverNoticeWaitsForContinuousFailure(t *testing.T) {
 	action := readOnlyPoolAction(t, f.hub)
 	checkout := action.Data.Handover.Successor.Repository.Checkout
 	action.Data.Args = &nodePaneCloseOpArgs{RequestID: action.ID, Job: job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: job, AgentStatus: "idle", Cwd: "/work/project.checkout", EndReason: action.Data.EndReason, Handover: &nodeHandoverCloseGuard{Origin: checkout.Origin, Branch: checkout.Branch, Commit: checkout.Sha}}
-	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)

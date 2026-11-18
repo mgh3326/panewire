@@ -75,7 +75,7 @@ type jobCloseRecord struct {
 	Source    string `json:"source"`
 	Host      string `json:"host"`
 	CreatedAt string `json:"created_at"`
-	Epoch     int    `json:"epoch"`
+	Epoch     uint64 `json:"epoch"`
 }
 
 type jobCloseOptions struct {
@@ -264,6 +264,10 @@ func scanJobCloseState(eventsDir string) (jobCloseState, error) {
 // publish see one state. The record lands by link, which never replaces an
 // existing name; a collision rescans and retries.
 func (c *jobCLI) publishJobClose(jobDir, eventsDir string, options jobCloseOptions, source string) (jobCloseRecord, string, error) {
+	epoch, err := jobRecordEpoch(filepath.Dir(jobDir), options.job)
+	if err != nil {
+		return jobCloseRecord{}, "", &jobExit{code: 1, message: "close: job assignment unavailable"}
+	}
 	lock, err := os.OpenFile(filepath.Join(jobDir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0o666)
 	if err != nil {
 		return jobCloseRecord{}, "", &jobExit{code: 1, message: "close: " + err.Error()}
@@ -285,7 +289,7 @@ func (c *jobCLI) publishJobClose(jobDir, eventsDir string, options jobCloseOptio
 		record := jobCloseRecord{
 			Kind: jobCloseKind, JobID: options.job, OwnerLane: state.owner, ClosedBy: options.lane,
 			Outcome: options.outcome, Reason: options.reason, Source: source, Host: host,
-			CreatedAt: c.now().UTC().Format("2006-01-02T15:04:05Z"), Epoch: 1,
+			CreatedAt: c.now().UTC().Format("2006-01-02T15:04:05Z"), Epoch: epoch,
 		}
 		if options.override {
 			record.Override = "operator"

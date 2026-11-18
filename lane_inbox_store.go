@@ -44,6 +44,12 @@ type laneInboxStore struct {
 	// fallback lapses, so an idle hub does not scan either table every tick
 	// (hk 4910).
 	batchesGen atomic.Uint64
+	// workGen counts the writes that can create or change batch work: an
+	// insert, a hold or digest change, a read, ack, supersede or claim
+	// release on lane_inbox. The flush builds batches only when it moves, the
+	// earliest known due time passes, or the safety fallback lapses
+	// (inbox_work_gate.go).
+	workGen atomic.Uint64
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration
@@ -338,6 +344,15 @@ func (s *laneInboxStore) markBatchSent(id string) error {
 // read on its next pass. Every writer that can change which batches are
 // pending, what they count, or whether they are retired calls it.
 func (s *laneInboxStore) noteBatchesChanged() { s.batchesGen.Add(1) }
+
+// noteWorkChanged marks batch work stale: the next flush tick builds held and
+// digest batches. Every writer that can create or change that work calls it
+// after its commit; the list is in docs/quiet-delivery.md.
+func (s *laneInboxStore) noteWorkChanged() { s.workGen.Add(1) }
+
+// workVersion is the batch-work change counter; the flush keeps the value
+// its last pass started at and compares.
+func (s *laneInboxStore) workVersion() uint64 { return s.workGen.Load() }
 
 // batchesVersion is the pending batch page's change counter. The flush keeps
 // the value it last read at and compares.
@@ -674,6 +689,10 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 		// that batch; note it only after the commit the page can see.
 		s.noteBatchesChanged()
 	}
+	if n == 1 {
+		// A new row can carry a hold, a digest window or a deadline.
+		s.noteWorkChanged()
+	}
 	if n == 1 && (class == "inbox" || mustAck) {
 		close(s.notify)
 		s.notify = make(chan struct{})
@@ -847,6 +866,7 @@ func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxIt
 	}
 	if n, _ := updated.RowsAffected(); n > 0 {
 		s.noteBatchesChanged()
+		s.noteWorkChanged()
 	}
 	return scanLaneInbox(s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE id=? AND (?='' OR lane=?)`), id, lane, lane))
 }
@@ -873,6 +893,7 @@ func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (in
 	}
 	if acked > 0 {
 		s.noteBatchesChanged()
+		s.noteWorkChanged()
 	}
 	return acked, nil
 }
@@ -925,16 +946,25 @@ func (s *laneInboxStore) counts(lane string) (map[string]int, error) {
 // items. A crash before sending leaves a pending batch; a crash after sending
 // retries the same relay event ID. Escalations never claim an item twice.
 func (s *laneInboxStore) makeBatches(now time.Time) error {
+	_, err := s.makeBatchesDue(now)
+	return err
+}
+
+// makeBatchesDue is makeBatches that also returns the earliest time (unix
+// ms) a digest or escalation not yet claimed falls due, or 0 for none. A
+// value at or before now means unclaimed work is left for the next pass.
+func (s *laneInboxStore) makeBatchesDue(now time.Time) (int64, error) {
 	ctx, done := s.op(s.life)
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 	created := false
+	var due int64
 	for _, escalation := range []bool{false, true} {
 		filter := `class='interrupt' AND acked_at=0 AND superseded_at=0 AND digest_at>0 AND digest_batch='' AND hold_until=0`
 		if escalation {
@@ -946,21 +976,21 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 		}
 		rows, err := tx.QueryContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE `+filter+` ORDER BY id`), args...)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		groups := map[string][]laneInboxItem{}
 		for rows.Next() {
 			i, e := scanLaneInbox(rows)
 			if e != nil {
 				rows.Close()
-				return e
+				return 0, e
 			}
 			groups[i.Lane] = append(groups[i.Lane], i)
 		}
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
-			return err
+			return 0, err
 		}
 		lanes := make([]string, 0, len(groups))
 		for lane := range groups {
@@ -971,6 +1001,9 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 			items := groups[lane]
 			if !escalation {
 				if items[0].DigestAt > now.UnixMilli() {
+					// The lane makes progress only when its first item's
+					// window ends, whatever later items carry.
+					due = earliestDue(due, items[0].DigestAt)
 					continue
 				}
 				// A late flush must not widen the configured arrival window.
@@ -978,6 +1011,11 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 				end := 1
 				for end < len(items) && items[end].CreatedAt <= cutoff {
 					end++
+				}
+				// Items past the cutoff stay unclaimed; the first of them is
+				// the lane's next progress.
+				if end < len(items) {
+					due = earliestDue(due, items[end].DigestAt)
 				}
 				items = items[:end]
 			}
@@ -993,7 +1031,7 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 				column = "escalation_batch"
 			}
 			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`), id, lane, text); err != nil {
-				return err
+				return 0, err
 			}
 			created = true
 			ids := make([]int64, len(items))
@@ -1001,17 +1039,34 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 				ids[n] = i.ID
 			}
 			if err := s.updateIDs(ctx, tx, `UPDATE lane_inbox SET `+column+`=?`, []any{id}, ids); err != nil {
-				return err
+				return 0, err
 			}
 		}
 	}
+	// Escalations are selected only once due, so the next one is a separate
+	// read: the earliest deadline of an unread inbox item no batch claims.
+	var next sql.NullInt64
+	if err := tx.QueryRowContext(ctx, s.q(`SELECT min(due_at) FROM lane_inbox WHERE class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND due_at>? AND escalation_batch=''`), now.UnixMilli()).Scan(&next); err != nil {
+		return 0, err
+	}
+	if next.Valid {
+		due = earliestDue(due, next.Int64)
+	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return 0, err
 	}
 	if created {
 		s.noteBatchesChanged()
 	}
-	return nil
+	return due, nil
+}
+
+// earliestDue is the smaller positive of two due times (unix ms); 0 is none.
+func earliestDue(a, b int64) int64 {
+	if a <= 0 || (b > 0 && b < a) {
+		return b
+	}
+	return a
 }
 
 // laneInboxPendingBatchesQuery is the batch page without its order (SQLite's

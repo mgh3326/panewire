@@ -79,6 +79,13 @@ func (h *HubServer) pruneInbox() {
 	if _, err := h.inbox.store.prune(now, h.inbox.policy.Retention); err != nil {
 		h.logger.Warn("inbox retention prune failed", "error", h.inbox.store.loggable("retention", err))
 	}
+	// The hub store's other tables run in the same pass (hk 5297).
+	counts, err := h.inbox.store.pruneHubStore(now, hubStoreRetentionBatch)
+	if err != nil {
+		h.logger.Warn("hub store retention prune failed", "error", h.inbox.store.loggable("retention", err))
+	} else if counts.total() > 0 {
+		h.logger.Info("hub store retention pruned", counts.attrs()...)
+	}
 }
 
 // recordDelivery preserves receiver confirmation independently of handoffkeep.

@@ -45,6 +45,8 @@ type hubInbox struct {
 	// only when the counter moves or the fallback lapses (hk 4910).
 	batchesSeen uint64
 	batchesAt   time.Time
+	// work gates held and digest batch building (inbox_work_gate.go).
+	work inboxWorkGate
 	// wakes holds each inbox-only lane's coalescing window (inbox_wake.go).
 	wakes inboxWakes
 }
@@ -599,22 +601,35 @@ func (h *HubServer) flushInbox() {
 	h.loopClearSilent("hub_inbox.go:persistDisabled")
 	failed := false
 	defer func() { h.noteInboxFlushResult(failed) }()
-	// A held-batching failure must not starve ordinary digests or batches
-	// that are already pending for other lanes.
-	if err := h.makeHeldBatches(); err != nil {
-		if h.closeCtx.Err() != nil {
+	// An idle tick builds nothing: held and digest batches are built only when
+	// a write was noted, a known deadline passed, a watched hold may have
+	// ended, or the safety fallback lapsed (hk 5301).
+	if build, gen := h.batchWorkDue(h.now()); build {
+		var due, heldDue int64
+		var watch []string
+		var buildFailed bool
+		// A held-batching failure must not starve ordinary digests or batches
+		// that are already pending for other lanes.
+		var err error
+		if heldDue, watch, err = h.makeHeldBatches(); err != nil {
+			if h.closeCtx.Err() != nil {
+				return
+			}
+			h.logger.Error("held inbox batching failed; continuing with ordinary batches")
+			failed, buildFailed = true, true
+		}
+		batchDue, err := h.inbox.store.makeBatchesDue(h.now().UTC())
+		if err != nil {
+			if h.closeCtx.Err() != nil {
+				return
+			}
+			h.logger.Error("inbox batching failed")
+			h.inbox.noteBatchWork(gen, 0, nil, h.now(), false)
+			failed = true
 			return
 		}
-		h.logger.Error("held inbox batching failed; continuing with ordinary batches")
-		failed = true
-	}
-	if err := h.inbox.store.makeBatches(h.now().UTC()); err != nil {
-		if h.closeCtx.Err() != nil {
-			return
-		}
-		h.logger.Error("inbox batching failed")
-		failed = true
-		return
+		due = earliestDue(heldDue, batchDue)
+		h.inbox.noteBatchWork(gen, due, watch, h.now(), !buildFailed)
 	}
 	// The batch page names rows no time-based rule creates or retires: a
 	// batch lands by batching, leaves by relay, retire or quarantine, and its
