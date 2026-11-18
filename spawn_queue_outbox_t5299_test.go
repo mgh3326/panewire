@@ -662,3 +662,20 @@ func TestJudgedBacklogEmptiesTheOutbox_t5299(t *testing.T) {
 		t.Fatalf("a judged failure posted: %+v", got)
 	}
 }
+
+// An outbox row whose operation retention removed is dropped by the sweep, not
+// retried forever.
+func TestTaskFailSweepDropsAnOrphanedOutboxRow_t5299(t *testing.T) {
+	h, fake := taskFailOutboxHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	task := failTaskForOutbox(t, h, 1)
+	if _, err := h.inbox.store.db.Exec(`DELETE FROM spawn_operations WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if got := outboxRows(t, h.inbox.store); len(got) != 0 {
+		t.Fatalf("outbox after the operation was removed = %v, want empty", got)
+	}
+	if got := taskFailComments(t, fake); len(got) != 0 {
+		t.Fatalf("a removed operation posted: %+v", got)
+	}
+}

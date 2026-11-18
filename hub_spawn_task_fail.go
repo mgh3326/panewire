@@ -45,6 +45,8 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -131,6 +133,15 @@ func (s *laneInboxStore) markSpawnTaskFailNotice(parent context.Context, request
 		return false, err
 	}
 	return n == 1, tx.Commit()
+}
+
+// dropSpawnTaskFailNotice deletes a request's outbox row without marking
+// anything, for a row whose operation no longer exists.
+func (s *laneInboxStore) dropSpawnTaskFailNotice(parent context.Context, requestID string) error {
+	ctx, done := s.op(context.WithoutCancel(parent))
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM task_fail_notice_outbox WHERE request_id=?`), requestID)
+	return err
 }
 
 // deferSpawnTaskFailNotice records a row's next attempt after hk did not take
@@ -293,6 +304,11 @@ func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID strin
 	defer h.spawnActions.end(requestID)
 	task, err := h.inbox.store.spawnTask(ctx, requestID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Retention removed the operation (hk 5297) before its comment
+			// went out: nothing is left to tell, so the row goes too.
+			_ = h.inbox.store.dropSpawnTaskFailNotice(ctx, requestID)
+		}
 		return
 	}
 	if task.Status != "failed" && task.Status != "refused" {
