@@ -37,8 +37,12 @@ type hubSpawnOutcome struct {
 	E6Arm string `json:"e6_arm,omitempty"`
 	// LaneUnregistered: the pane exists but hub lane registration failed.
 	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
-	Retryable        bool `json:"retryable,omitempty"`
-	NodeResult       bool `json:"node_result,omitempty"`
+	// AfterUnresolved marks a SPAWNED notice whose landing followed an
+	// unresolved notice of the same attempt (hk 5267). It is set on the notice
+	// payload only, never on the stored operation outcome.
+	AfterUnresolved bool `json:"after_unresolved,omitempty"`
+	Retryable       bool `json:"retryable,omitempty"`
+	NodeResult      bool `json:"node_result,omitempty"`
 	// CheckoutMode is the node's answer for a checkout spec, "sparse",
 	// "full" or "branch" (hk 5098, hk 5118): the stored outcome keeps it for a
 	// status read after the immediate spawn answer is gone.
@@ -564,6 +568,13 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if status == "reconciling" {
 		return true, tx.Commit()
 	}
+	// A bound deadline_exceeded is not final either (hk 5267): a late node
+	// result settles it, or the stale probe's final answer does, and until one
+	// does the owner hears nothing. The probe's horizon notice is
+	// noteUnresolvedSpawn. An unbound deadline is final and notifies below.
+	if status == "deadline_exceeded" && task.Node != nil {
+		return true, tx.Commit()
+	}
 	// A successor armed at acceptance becomes a pending intent in the same
 	// transaction as its outcome, only while the fence is still the one it was
 	// armed under: a store failure here rolls the outcome back, so a landing
@@ -575,7 +586,28 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 			}
 		}
 	}
-	if err = queueSpawnNotifications(ctx, s, tx, task, status, string(raw), now); err != nil {
+	// A landing that follows an unresolved notice of the same attempt is told
+	// as a correction. The flag rides on the notice only; the operation keeps
+	// the plain outcome. The status UPDATE above holds the row's write lock, so
+	// the unresolved notice either committed before this check or never will.
+	noticeRaw := string(raw)
+	afterUnresolved := false
+	if status == "succeeded" && task.Node != nil {
+		noticed, err := spawnUnresolvedNoticed(ctx, s, tx, task)
+		if err != nil {
+			return false, err
+		}
+		if noticed {
+			afterUnresolved = true
+			outcome.AfterUnresolved = true
+			corrected, err := json.Marshal(outcome)
+			if err != nil {
+				return false, err
+			}
+			noticeRaw = string(corrected)
+		}
+	}
+	if err = queueSpawnNotifications(ctx, s, tx, task, status, noticeRaw, now, afterUnresolved); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
@@ -584,12 +616,22 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 // queueSpawnNotifications writes the outbox rows an outcome owes: one for the
 // owner lane, and for a refusal or an unstarted end one for the submitting
 // lane too.
-func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx, task hubSpawnTask, status, raw string, now time.Time) error {
+func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx, task hubSpawnTask, status, raw string, now time.Time, afterUnresolved bool) error {
 	eventID := fmt.Sprintf("%s:%d:%s", task.Request.RequestID, task.Attempt, status)
-	// The owner keeps the bare event id. A failed or retryable spawn also tells
-	// the submitting lane, whose only other sign of it was ACCEPTED.
+	// A correction goes to every recipient that was told the unresolved
+	// failure, the submitter included (hk 5267 review).
+	submitterCopy := afterUnresolved || status == "failed" || status == "retryable" || status == "given_up" || status == "refused" || status == "cancelled"
+	return queueSpawnNoticeRows(ctx, s, tx, task, eventID, raw, now, submitterCopy)
+}
+
+// queueSpawnNoticeRows writes one outbox row per recipient in the caller's
+// transaction. The owner keeps the bare event id. A failure that submitterCopy
+// names also tells the submitting lane, whose only other sign of it was
+// ACCEPTED; its event id is the same id with `:<lane>` appended. The event id
+// is the dedupe key across restarts, so a repeated write is a no-op.
+func queueSpawnNoticeRows(ctx context.Context, s *laneInboxStore, tx *sql.Tx, task hubSpawnTask, eventID, raw string, now time.Time, submitterCopy bool) error {
 	lanes := []struct{ id, lane string }{{eventID, task.Owner}}
-	if status == "failed" || status == "retryable" || status == "given_up" || status == "refused" || status == "cancelled" {
+	if submitterCopy {
 		if lane := spawnSubmitterLane(task.Request.Args); lane != "" && lane != task.Owner {
 			lanes = append(lanes, struct{ id, lane string }{eventID + ":" + lane, lane})
 		}

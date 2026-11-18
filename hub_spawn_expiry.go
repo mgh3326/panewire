@@ -143,7 +143,7 @@ func (s *laneInboxStore) releaseEndedSpawn(ctx context.Context, tx *sql.Tx, task
 	if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
 		return err
 	}
-	return queueSpawnNotifications(ctx, s, tx, task, status, raw, now)
+	return queueSpawnNotifications(ctx, s, tx, task, status, raw, now, false)
 }
 
 // spawnHoldsClaim reports a request whose hk job may be claimed on a host:

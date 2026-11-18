@@ -64,6 +64,9 @@ func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
 		return
 	}
 	for _, n := range h.readSpawnNotifications(ctx, spawnNoticePending) {
+		if h.correctionAwaitsUnresolved(ctx, n) {
+			continue
+		}
 		h.routeSpawnNotification(ctx, n)
 	}
 	h.flushHeldSpawnNotifications(ctx)
@@ -148,6 +151,9 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 	var result hubSpawnOutcome
 	if json.Unmarshal([]byte(n.raw), &result) != nil {
 		return
+	}
+	if h.spawnNoticeRelayFilter != nil && h.spawnNoticeRelayFilter(n.id) {
+		return // held unrouted for this pass, as a failed relay leaves it
 	}
 	event := spawnNotificationEvent(n, result)
 	switch h.spawnNoticeFor(ctx, n, result) {

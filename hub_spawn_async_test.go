@@ -260,6 +260,18 @@ func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.recordSpawnTrace(task, result)
+	// A bound timeout is held (hk 5267): its traffic is the transaction alone.
+	// The failure event comes with the unresolved notice at the horizon.
+	transport.mu.Lock()
+	held := len(transport.events)
+	transport.mu.Unlock()
+	if held != 1 {
+		t.Fatalf("held timeout traffic=%d, want the transaction alone", held)
+	}
+	if queued, err := h.inbox.store.noteUnresolvedSpawn(t.Context(), task, time.Now()); err != nil || !queued {
+		t.Fatalf("unresolved queued=%v err=%v", queued, err)
+	}
+	h.recordUnresolvedSpawnError(task)
 	r := httptest.NewRequest("GET", "/healthz", nil)
 	h.Handler().ServeHTTP(httptest.NewRecorder(), r)
 	transport.mu.Lock()
@@ -275,7 +287,7 @@ func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 			failure = e
 		}
 	}
-	if tx == nil || tx.Transaction != "runtug.spawn" || len(tx.Spans) != 5 || failure == nil || strings.Join(failure.Fingerprint, ":") != "spawn:landing:timeout" {
+	if tx == nil || tx.Transaction != "runtug.spawn" || len(tx.Spans) != 5 || failure == nil || strings.Join(failure.Fingerprint, ":") != "spawn:landing:"+spawnUnresolvedReason {
 		t.Fatalf("tx=%+v failure=%+v", tx, failure)
 	}
 	raw, _ := json.Marshal(transport.events)
