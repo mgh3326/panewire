@@ -49,8 +49,19 @@ const placementSnapshotFrozen = 2
 func (s *laneInboxStore) saveSpawnPlacementSnapshot(parent context.Context, requestID string, attempt int, payload []byte, delivery string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?) ON CONFLICT(request_id,attempt) DO UPDATE SET payload=excluded.payload,delivery=excluded.delivery WHERE spawn_placement_snapshots.recorded=0`), requestID, attempt, string(payload), delivery)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?) ON CONFLICT(request_id,attempt) DO UPDATE SET payload=excluded.payload,delivery=excluded.delivery WHERE spawn_placement_snapshots.recorded=0`), requestID, attempt, string(payload), delivery); err != nil {
+		return err
+	}
+	// The outbox row lands with the snapshot it names (hk 5298).
+	if err := s.enqueuePlacementRecord(ctx, tx, requestID, attempt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // spawnPlacementSnapshot reads the persisted placement trace of one attempt,
@@ -163,8 +174,20 @@ func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusi
 func (s *laneInboxStore) markSpawnPlacementRecorded(parent context.Context, requestID string, attempt int) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET recorded=1 WHERE request_id=? AND attempt=?`), requestID, attempt)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET recorded=1 WHERE request_id=? AND attempt=?`), requestID, attempt); err != nil {
+		return err
+	}
+	// The mark and the outbox delete commit together: the row never leaves
+	// before the seal, and a seal never leaves the row behind (hk 5298).
+	if err := s.dequeuePlacementRecord(ctx, tx, requestID, attempt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // freezeSpawnPlacementForRetry keeps a completed attempt self-contained before
@@ -204,11 +227,13 @@ type pendingPlacementSnapshot struct {
 }
 
 // pendingPlacementSnapshots lists the attempts whose records are not yet
-// sealed: awaiting a terminal result, or spooled and undelivered.
+// sealed: awaiting a terminal result, or spooled and undelivered. It reads the
+// outbox, oldest operation first, so a hub with nothing owed reads an empty
+// table and never the snapshot history (hk 5298).
 func (s *laneInboxStore) pendingPlacementSnapshots(parent context.Context) ([]pendingPlacementSnapshot, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT p.request_id,p.attempt,o.job,o.status,o.attempt,p.payload,p.delivery FROM spawn_placement_snapshots p JOIN spawn_operations o ON o.request_id=p.request_id WHERE p.recorded<>1`)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.request_id,p.attempt,o.job,o.status,o.attempt,p.payload,p.delivery FROM placement_record_outbox x JOIN spawn_placement_snapshots p ON p.request_id=x.request_id AND p.attempt=x.attempt JOIN spawn_operations o ON o.request_id=p.request_id WHERE p.recorded<>1 ORDER BY o.created_ms,p.request_id,p.attempt`)
 	if err != nil {
 		return nil, err
 	}
@@ -683,20 +708,33 @@ func (h *HubServer) forgetPlacementTraceBase(requestID string, attempt int) {
 func (s *laneInboxStore) saveDeferredPlacementSnapshot(parent context.Context, d placementDeferredSave) (bool, *placementDeferredBase, error) {
 	ctx, done := s.op(parent)
 	defer done()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, nil, err
+	}
+	defer tx.Rollback()
 	var result sql.Result
-	var err error
 	if d.Base != nil && d.Base.Exists {
-		result, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET payload=?,delivery=? WHERE request_id=? AND attempt=? AND recorded=0 AND payload=? AND delivery=?`), string(d.Payload), d.Delivery, d.RequestID, d.Attempt, string(d.Base.Payload), d.Base.Delivery)
+		result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET payload=?,delivery=? WHERE request_id=? AND attempt=? AND recorded=0 AND payload=? AND delivery=?`), string(d.Payload), d.Delivery, d.RequestID, d.Attempt, string(d.Base.Payload), d.Base.Delivery)
 	} else {
-		result, err = s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?) ON CONFLICT(request_id,attempt) DO NOTHING`), d.RequestID, d.Attempt, string(d.Payload), d.Delivery)
+		result, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?) ON CONFLICT(request_id,attempt) DO NOTHING`), d.RequestID, d.Attempt, string(d.Payload), d.Delivery)
 	}
 	if err != nil {
 		return false, nil, err
 	}
-	if n, err := result.RowsAffected(); err != nil || n != 0 {
-		if err != nil {
+	written, err := result.RowsAffected()
+	if err != nil {
+		return false, nil, err
+	}
+	if written != 0 {
+		if err := s.enqueuePlacementRecord(ctx, tx, d.RequestID, d.Attempt); err != nil {
 			return false, nil, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, nil, err
+	}
+	if written != 0 {
 		return true, &placementDeferredBase{Exists: true, Payload: d.Payload, Delivery: d.Delivery}, nil
 	}
 	var payload, delivery string
@@ -991,13 +1029,13 @@ func (h *HubServer) placementRecordApp(delivery string) (*fleet.App, error) {
 
 // pendingPlacementRecords reports whether any attempt's snapshot still waits
 // for its record. The flush checks this cheap row before paying for the
-// delivery App.
+// delivery App; it reads the outbox, which is empty when nothing is owed.
 func (h *HubServer) pendingPlacementRecords(ctx context.Context) bool {
 	if h.inbox == nil {
 		return false
 	}
 	var one int
-	err := h.inbox.store.db.QueryRowContext(ctx, `SELECT 1 FROM spawn_placement_snapshots WHERE recorded<>1 LIMIT 1`).Scan(&one)
+	err := h.inbox.store.db.QueryRowContext(ctx, `SELECT 1 FROM placement_record_outbox LIMIT 1`).Scan(&one)
 	return err == nil
 }
 

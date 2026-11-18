@@ -26,7 +26,9 @@ package panewire
 //
 // delivered=0 rows are not yet routed, delivered=2 are held for their
 // requester, delivered=3 are being published at expiry, delivered=1 are done
-// (delivered, filed in hk, or superseded).
+// (delivered, filed in hk, or superseded). The router pages only
+// spawn_notice_outbox (hub_spawn_outbox.go): a row is in it exactly while its
+// notification is not done.
 
 import (
 	"context"
@@ -76,7 +78,7 @@ func (h *HubServer) readSpawnNotifications(ctx context.Context, state int) []spa
 	store := h.inbox.store
 	op, done := store.op(ctx)
 	defer done()
-	rows, err := store.db.QueryContext(op, store.q(`SELECT event_id,request_id,job,owner,result,created_ms FROM spawn_notifications WHERE delivered=? ORDER BY created_ms LIMIT 32`), state)
+	rows, err := store.db.QueryContext(op, store.q(`SELECT n.event_id,n.request_id,n.job,n.owner,n.result,n.created_ms FROM spawn_notice_outbox o JOIN spawn_notifications n ON n.event_id=o.event_id WHERE n.delivered=? ORDER BY n.created_ms,n.event_id LIMIT 32`), state)
 	if err != nil {
 		return nil
 	}
@@ -96,7 +98,23 @@ func (h *HubServer) setSpawnNotificationState(ctx context.Context, id string, fr
 	store := h.inbox.store
 	op, done := store.op(ctx)
 	defer done()
-	_, _ = store.db.ExecContext(op, store.q(`UPDATE spawn_notifications SET delivered=? WHERE event_id=? AND delivered=?`), to, id, from)
+	tx, err := store.db.BeginTx(op, nil)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(op, store.q(`UPDATE spawn_notifications SET delivered=? WHERE event_id=? AND delivered=?`), to, id, from); err != nil {
+		return
+	}
+	// A delivered row leaves the outbox in the transaction that marks it, so a
+	// crash before this commit leaves it owed and the next flush sends it
+	// again under the same event id (hk 5298).
+	if to == spawnNoticeDone {
+		if err := store.dequeueDeliveredSpawnNotice(op, tx, id); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit()
 }
 
 func spawnNotificationEvent(n spawnNotification, result hubSpawnOutcome) hubJobEventPayload {
