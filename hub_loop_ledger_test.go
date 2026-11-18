@@ -63,11 +63,9 @@ func TestLoopLedgerSpawnScanErrorCountsLogsRowAndNotice(t *testing.T) {
 	h.spawnCoordinatorScan(ctx, func(hubSpawnTask) bool { return true })
 
 	snap := h.loopSnapshot()
-	if snap[loopSpawnCoordinator].Errors < 1 {
-		t.Fatalf("spawn coordinator errors=%d, want >= 1", snap[loopSpawnCoordinator].Errors)
-	}
-	if snap[loopSpawnCoordinator].SilentErrors < 1 {
-		t.Fatalf("spawn coordinator silent errors=%d, want >= 1", snap[loopSpawnCoordinator].SilentErrors)
+	if snap[loopSpawnCoordinator].Errors != 2 || snap[loopSpawnCoordinator].SilentErrors != 2 {
+		t.Fatalf("spawn coordinator errors=%d silent=%d, want 2 and 2 (one per failing path per streak, not per sweep)",
+			snap[loopSpawnCoordinator].Errors, snap[loopSpawnCoordinator].SilentErrors)
 	}
 	if got := loopLedgerCountLines(&logs, "hub loop silent error"); got != 2 {
 		t.Fatalf("silent log lines=%d, want 2 (one per failing path per streak), log:\n%s", got, logs.String())
