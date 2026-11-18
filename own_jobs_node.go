@@ -127,10 +127,13 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 		return nodeJobReapResult{Outcome: nodeJobReapPaneChanged, Pane: target.pane}, ""
 	}
 	if args.Force && args.Expect != "" {
-		// A forced close that carries what an earlier proof saw rechecks
-		// it atomically with the close: the pane may have resumed since
-		// the proof, and closing a working pane is never allowed. A pane
-		// that finished meanwhile (idle or done) is still safe to close.
+		// A forced close that carries what an earlier proof saw re-reads
+		// the pane just before closing and refuses a pane that resumed
+		// working or otherwise left the proven state. A pane that finished
+		// meanwhile (idle or done) is still safe to close. The recheck
+		// narrows the race to the close call itself: herdr's pane close
+		// takes only the pane id, so a pane answered between this read and
+		// the close is still closed.
 		fresh, found, err := client.nodeJobReapRow(ctx, args.Job, target.pane)
 		if err != nil {
 			return nil, "herdr_failed"

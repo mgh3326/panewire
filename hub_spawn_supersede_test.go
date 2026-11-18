@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -517,4 +518,120 @@ func TestNodeJobReapForcedExpectRecheck(t *testing.T) {
 	if _, code, _ := serve(t, "blocked", "working"); code == "" {
 		t.Fatal("an invalid expectation must be refused")
 	}
+}
+
+// TestSupersedeSweepRearmsAfterReconnect: the restart order. The first sweep
+// runs before the parent's node reports, so h.jobs is empty; when the node
+// later reports the parent live, a later sweep must still re-arm it from hk
+// and close it once idle.
+func TestSupersedeSweepRearmsAfterReconnect(t *testing.T) {
+	f := newSupersedeFixture(t)
+	// First sweep with no jobs known: records nothing, and must not latch
+	// the rebuild shut.
+	f.hub.sweepSupersededParents()
+	if _, ok := f.hub.supersededParents[f.parent]; ok {
+		t.Fatal("an unknown parent must not be re-armed")
+	}
+	// The node reports the parent live only afterwards; hk kept the
+	// pre-restart superseded record all along.
+	f.seedParent(t, "spawned")
+	f.jobs.mu.Lock()
+	f.jobs.records[f.parent]["superseded"] = f.successor
+	f.jobs.mu.Unlock()
+	done := make(chan struct{})
+	go func() { f.hub.sweepSupersededParents(); close(done) }()
+	command := serveReap(t, f, nodeJobReapClosed, "w1:p1")
+	if reapForceOf(t, command) {
+		t.Fatalf("rebuilt idle close must not use force")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rebuilt sweep did not finish")
+	}
+	if infos := supersedeInfos(f.destination); len(infos) != 1 {
+		t.Fatalf("rebuilt close owes one info: %+v", infos)
+	}
+}
+
+// TestSupersedeSweepDoesNotWaitOutAHungNode: the deferred pass runs off the
+// maintenance ticker. Sweep returns promptly while a parent's node stays
+// silent; the background pass closes the parent once the node answers.
+func TestSupersedeSweepDoesNotWaitOutAHungNode(t *testing.T) {
+	f := newSupersedeFixture(t)
+	f.seedParent(t, "spawned")
+	f.hub.noteSuperseded(f.parent, f.successor)
+	// The destination agent is a test fake with no connection: keep the
+	// tick from pinging it.
+	f.hub.mu.Lock()
+	if rec := f.hub.nodes["machine-b"]; rec != nil {
+		rec.lastPing, rec.lastKeepaliveSent, rec.state = time.Now().UTC(), time.Now().UTC(), "connected"
+		rec.stateSince = time.Now().UTC()
+	}
+	f.hub.mu.Unlock()
+	swept := make(chan struct{})
+	go func() { f.hub.Sweep(); close(swept) }()
+	select {
+	case <-swept:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Sweep held the tick waiting out a silent node")
+	}
+	command := serveReap(t, f, nodeJobReapClosed, "w1:p1")
+	if reapForceOf(t, command) {
+		t.Fatalf("idle close must not use force")
+	}
+	eventually(t, 5*time.Second, "the background pass to close and notify", func() bool {
+		f.hub.mu.Lock()
+		_, deferred := f.hub.supersededParents[f.parent]
+		f.hub.mu.Unlock()
+		return !deferred && len(supersedeInfos(f.destination)) == 1
+	})
+}
+
+// TestSupersedeWorkingTickWritesSupersededOnce: a working parent held across
+// sweeps costs one hk superseded write, not one per tick.
+func TestSupersedeWorkingTickWritesSupersededOnce(t *testing.T) {
+	f := newSupersedeFixture(t)
+	f.seedParent(t, "spawned")
+	counting := &countingSupersededStore{JobStore: f.jobs}
+	f.hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: counting, Out: out, Err: errout}, nil
+	}
+	serve := func(outcome string) {
+		done := make(chan struct{})
+		go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
+		serveReap(t, f, outcome, "w1:p1")
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("supersede did not finish")
+		}
+	}
+	serve(nodeJobReapJobWorking)
+	serve(nodeJobReapJobWorking)
+	if got := counting.supersededWrites(); got != 1 {
+		t.Fatalf("two working ticks wrote job.superseded %d times, want 1", got)
+	}
+}
+
+// countingSupersededStore counts hk writes of the superseded field.
+type countingSupersededStore struct {
+	fleet.JobStore
+	mu     sync.Mutex
+	writes int
+}
+
+func (s *countingSupersededStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	if _, ok := fields["superseded"]; ok {
+		s.mu.Lock()
+		s.writes++
+		s.mu.Unlock()
+	}
+	return s.JobStore.Put(ctx, id, fields)
+}
+
+func (s *countingSupersededStore) supersededWrites() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writes
 }

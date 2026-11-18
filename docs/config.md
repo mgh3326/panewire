@@ -1101,7 +1101,9 @@ Once that implementer successor lands, the hub also ends the parent's pane
 itself through the jobs-close reap path (`hub_spawn_supersede.go`): a parent
 whose pane is `idle`, `done` or `blocked` closes at landing (a blocked pane
 is proven blocked first, then closed carrying that proof, which the node
-rechecks atomically); a parent that is still `working` is recorded as
+re-reads just before closing; the recheck narrows the race to the close call
+itself, since herdr's pane close takes only the pane id); a parent that is
+still `working` is recorded as
 superseded by the successor (`job.superseded` on the parent) and closed at
 the first sweep where it is no longer working. A parent spawned with
 `--keep` is never closed, the worktree is never removed (the successor may

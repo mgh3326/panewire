@@ -796,10 +796,12 @@ carry the receipt's label; a pane id is host-local and reused, so a different
 label is another pane. `pane.close`'s settle applies to a non-forced close:
 two matching reads one interval apart, an unchanged `state_change_seq` where
 herdr reports one, and an empty composer both times. A forced close carrying
-`expect` re-reads the verified pane atomically with the close and refuses
-when the pane is no longer as proven: `working` reads as `job-working`, and
-any other unexpected non-finished status as `pane-changed`. A finished pane
-(`idle` or `done`) stays closable whatever was expected.
+`expect` re-reads the verified pane just before closing and refuses when the
+pane is no longer as proven: `working` reads as `job-working`, and any other
+unexpected non-finished status as `pane-changed`. A finished pane (`idle` or
+`done`) stays closable whatever was expected. The recheck narrows the race to
+the close call itself: herdr's `pane close` takes only the pane id, so a pane
+answered between the recheck and the close is still closed.
 
 | `outcome` | `pane` | Meaning |
 | --- | --- | --- |

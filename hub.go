@@ -660,9 +660,15 @@ type HubServer struct {
 	// hub closes each entry at the first sweep where its pane is no longer
 	// working, through the jobs-close reap path. Guarded by mu.
 	supersededParents map[string]string
-	// supersededRebuilt marks the first sweepSupersededParents pass, which
-	// re-arms pre-restart deferred parents from hk. Guarded by mu.
-	supersededRebuilt  bool
+	// supersededChecked names the hub jobs whose hk record the deferred
+	// rebuild already read once. A job is checked on the first sweep that
+	// sees it live, so parents that appear after a restart (their nodes
+	// report later) are still re-armed. Guarded by mu.
+	supersededChecked map[string]bool
+	// supersededSweepMu keeps at most one deferred-parent pass in flight;
+	// the Sweep ticker never waits out a hung node (see
+	// startSupersededSweep).
+	supersededSweepMu  sync.Mutex
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool
@@ -2629,7 +2635,7 @@ func (h *HubServer) Sweep() {
 	h.startFleetLoadPublish(now)
 	h.logRouteHits(now)
 	h.sweepOrphanedJobs(now)
-	h.sweepSupersededParents()
+	h.startSupersededSweep()
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)
