@@ -20,8 +20,6 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
-
-	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // spawnUnresolvedStatus is the event-id status of the unresolved notice. It is
@@ -110,8 +108,7 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	}
 	// The completed job must carry the request's task identity, or it is not
 	// this request's landing (hk 5267 review).
-	want, known := spawnExpectedTaskID(parent, app, task)
-	if !known || spawnRecordTaskID(record) != want {
+	if !spawnRecordMatchesRequest(task, record) {
 		return false
 	}
 	outcome := hubSpawnOutcome{RC: 0, Stage: "landing", Host: task.Node.Machine, Pane: pane, Profile: spawnRecordString(record, "profile"), Model: spawnRecordString(record, "model"), E6Arm: task.Request.E6Arm}
@@ -124,27 +121,22 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	return true
 }
 
-// spawnExpectedTaskID is the task identity a completed job must carry for task:
-// the request's --task, or for a --parent-job request the parent job's task.
-// The node claims a parent-job child under the parent's task (internal/fleet/
-// spawn.go), so the parent record is the identity. It reports false when
-// neither is known.
-func spawnExpectedTaskID(parent context.Context, app *fleet.App, task hubSpawnTask) (string, bool) {
-	if want := hubSpawnArg(task.Request.Args, "--task"); want != "" {
-		return want, true
+// spawnRecordMatchesRequest reports whether a completed job record is this
+// request's landing. With --task, the record's task_id must equal it. A
+// --parent-job request has no --task: the node claims the child under the
+// parent's task (internal/fleet/spawn.go), and the child's own record names the
+// parent it was spawned from (jobs.go parent_job). That field is checked,
+// not the parent's record, because a parent may exist only in the node's local
+// ledger (mergewake review, hk 5267). A request with neither refuses.
+func spawnRecordMatchesRequest(task hubSpawnTask, record map[string]any) bool {
+	if want := hubSpawnFlagArg(task.Request.Args, "--task"); want != "" {
+		return spawnRecordTaskID(record) == want
 	}
 	parentJob := hubSpawnFlagArg(task.Request.Args, "--parent-job")
 	if parentJob == "" {
-		return "", false
+		return false
 	}
-	readCtx, cancel := context.WithTimeout(parent, 5*time.Second)
-	defer cancel()
-	record, exists, err := app.ExistingJob(readCtx, parentJob)
-	if err != nil || !exists {
-		return "", false
-	}
-	id := spawnRecordTaskID(record)
-	return id, id != ""
+	return spawnRecordString(record, "parent_job") == parentJob && spawnRecordTaskID(record) != ""
 }
 
 // spawnRecordTaskID renders a job record's task id as a plain decimal. Job

@@ -502,9 +502,10 @@ func TestStrandedCompletedJobWithoutTaskArgRefuses_5267(t *testing.T) {
 	}
 }
 
-// A --parent-job child settles from its parent's task identity: the completed
-// job carries the parent's task, so the landing is this request's (hk 5267
-// review). A different parent task does not settle it.
+// A --parent-job child settles from the parent it names in its own record,
+// even when the parent exists only in the node's local ledger and hk has no
+// parent record (mergewake review, hk 5267). A child whose record names a
+// different parent does not settle.
 func TestStrandedCompletedJobParentJobIdentity_5267(t *testing.T) {
 	childArgs := func(s *strandedSpawn) []string {
 		var args []string
@@ -517,26 +518,39 @@ func TestStrandedCompletedJobParentJobIdentity_5267(t *testing.T) {
 		}
 		return append(args, "--parent-job", "parent-1")
 	}
-	t.Run("parent task matches", func(t *testing.T) {
+	t.Run("local-only parent settles", func(t *testing.T) {
 		s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
 		s.task.Request.Args = childArgs(s)
-		parent := map[string]any{"task_id": float64(1000000)}
 		record := completedJobRecord("machine-a")
-		record["task_id"] = float64(1000000)
-		useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: record, parents: map[string]map[string]any{"parent-1": parent}})
+		record["parent_job"] = "parent-1"
+		useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: record})
 		s.run(t)()
 		if got := s.status(t); got.Status != "succeeded" {
-			t.Fatalf("parent-job child did not settle from its parent's task: status=%s", got.Status)
+			t.Fatalf("local-only parent child did not settle: status=%s", got.Status)
 		}
 	})
-	t.Run("parent task differs", func(t *testing.T) {
+	t.Run("child names another parent", func(t *testing.T) {
 		s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
 		s.task.Request.Args = childArgs(s)
-		parent := map[string]any{"task_id": float64(43)}
-		useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: completedJobRecord("machine-a"), parents: map[string]map[string]any{"parent-1": parent}})
+		record := completedJobRecord("machine-a")
+		record["parent_job"] = "parent-2"
+		useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: record})
 		s.run(t)()
 		if got := s.status(t); got.Status != "deadline_exceeded" {
-			t.Fatalf("a foreign parent task settled the child: status=%s", got.Status)
+			t.Fatalf("a child of another parent settled the request: status=%s", got.Status)
 		}
 	})
+}
+
+// A free-text flag value that looks like --task=<id> does not shadow the
+// request's real --task (mergewake review, hk 5267): the strict flag reader
+// skips the value of --purpose.
+func TestStrandedCompletedJobTaskFlagNotShadowed_5267(t *testing.T) {
+	s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
+	s.task.Request.Args = append([]string{"--purpose", "--task=999"}, s.task.Request.Args...)
+	useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: completedJobRecord("machine-a")})
+	s.run(t)()
+	if got := s.status(t); got.Status != "succeeded" {
+		t.Fatalf("a --task= value in free text refused a valid landing: status=%s", got.Status)
+	}
 }
