@@ -2554,6 +2554,20 @@ hk through `handoffkeep_env` in the node's `spawn.json`. After a close it also
 removes the worktree the node prepared, unless `[sweep].remove_worktrees` is
 `false`; see [pane-sweep.md](pane-sweep.md#the-worktree).
 
+## Quota pool reconciliation
+
+`panewire daemon` can periodically reconcile the host-local arbiter ledger
+(`quota_pool_records` and leased jobs) against live Herdr agents.
+Because reconciliation deletes stale quota records and releases orphaned jobs,
+the pass is opt-in:
+
+- `--quota-pool-reconcile` — enables periodic quota pool reconciliation (default `false`).
+
+When enabled, the node reconciles every 5 minutes with a 15-second deadline:
+- An empty agent snapshot across all sessions never releases everything while jobs are held (refuses the pass with an error and no writes). On a node where all sessions report zero agents while jobs are held, reconciliation remains blocked until at least one agent is observed or jobs are cleared, preventing false releases during Herdr restarts.
+- An unnamed agent row in a session holding jobs fails closed with an error and is logged; held jobs are not released on incomplete identity evidence.
+- Required Herdr session read failures fail closed with no changes to the ledger.
+
 ## Lane registration failure
 
 A spawn registers the new pane's lane with the hub (`panewire lanes add`). A
