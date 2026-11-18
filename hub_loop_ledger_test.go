@@ -358,3 +358,15 @@ func TestLoopLedgerDrainIdleCountsNoMade(t *testing.T) {
 		t.Fatalf("idle drain made=%d, want 0", got)
 	}
 }
+
+// A backoff pause is an intentional gate, not a stopped loop: the inbox
+// records last_tick even while nextAttempt is in the future.
+func TestLoopLedgerInboxBackoffStillTicks(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	h.inbox.nextAttempt = now.Add(time.Minute)
+	h.flushInbox()
+	if last := h.loopSnapshot()[loopInbox].LastTick; last.IsZero() {
+		t.Fatalf("inbox last_tick not recorded during backoff")
+	}
+}
