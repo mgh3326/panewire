@@ -96,6 +96,14 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 		if client.quotaEmptySince == nil {
 			client.quotaEmptySince = make(map[string]time.Time)
 		}
+		// A session that holds no job this pass ends its window. Otherwise a job
+		// that joins it later would inherit the old start and skip its own
+		// 10-minute confirmation.
+		for session := range client.quotaEmptySince {
+			if len(sessionJobIDs[session]) == 0 {
+				delete(client.quotaEmptySince, session)
+			}
+		}
 
 		now := client.nowUTC()
 		agents := make([]arbiter.Agent, 0)
