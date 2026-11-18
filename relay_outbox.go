@@ -123,10 +123,9 @@ func (s *Store) RelayOutboxState(ctx context.Context, key relayOutboxKey) (relay
 	return state, nil
 }
 
-// UnpersistedRelayOutboxKey returns the one outstanding key that can raise a
-// scanned event after a restart lost its in-memory assignment epoch. It never
-// lowers a live event: doing so would fold a new assignment epoch into a stale
-// unpersisted row for the same file.
+// UnpersistedRelayOutboxKey returns the one outstanding identity for a scanned
+// event. The caller compares its epoch with the event file before reusing it.
+// A lower stored epoch never replaces a newer event's identity.
 func (s *Store) UnpersistedRelayOutboxKey(ctx context.Context, key relayOutboxKey) (relayOutboxKey, bool, error) {
 	if key.Kind == "lane.event" {
 		return relayOutboxKey{}, false, nil

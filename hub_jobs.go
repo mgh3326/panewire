@@ -245,6 +245,50 @@ func validRelayFinalText(value string) bool {
 }
 
 func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, received time.Time) {
+	h.observeActiveJobsContext(h.closeCtx, machineID, active, received)
+}
+
+func (h *HubServer) observeActiveJobsContext(parent context.Context, machineID string, active []HubActiveJob, received time.Time) {
+	// Resolve unknown grants outside mu: a restarted hub must not let an old
+	// epoch-1 heartbeat claim a job whose hk owner is already elsewhere.
+	h.mu.Lock()
+	unknown := make([]HubActiveJob, 0)
+	for _, job := range active {
+		if h.jobs[job.JobID] == nil {
+			unknown = append(unknown, job)
+		}
+	}
+	h.mu.Unlock()
+	ctx, cancel := context.WithTimeout(parent, nodeLoopHKTimeout)
+	for i, job := range unknown {
+		deadline, _ := ctx.Deadline()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		lookup, stop := context.WithTimeout(ctx, remaining/time.Duration(len(unknown)-i))
+		unlock, lockErr := h.poolActionLocks.lock(lookup, job.JobID)
+		if lockErr != nil {
+			stop()
+			continue
+		}
+		assignment, held, err := h.ownerAssignment(job.JobID)
+		if err != nil || held && assignment.Ended && assignment.Node == machineID && assignment.Epoch == job.Epoch {
+			unlock()
+			stop()
+			continue
+		}
+		if h.firstSeenJobOwned(lookup, job.JobID, machineID, job.Epoch, false) && ctx.Err() == nil {
+			h.mu.Lock()
+			if h.nodes[machineID] != nil && h.jobs[job.JobID] == nil {
+				h.jobs[job.JobID] = &hubJobRecord{HubActiveJob: job, Node: machineID, LastSeen: received, FencedNodes: make(map[string]uint64)}
+			}
+			h.mu.Unlock()
+		}
+		unlock()
+		stop()
+	}
+	cancel()
 	seen := make(map[string]struct{}, len(active))
 	var claimed []claimedPlacement
 	h.mu.Lock()
@@ -268,14 +312,9 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		}
 		current := h.jobs[job.JobID]
 		if current == nil {
-			// Epoch 1 is issued by the hub for a first-seen job. A node cannot
-			// establish authority by presenting an arbitrary higher epoch.
-			if job.Epoch == 1 {
-				h.jobs[job.JobID] = &hubJobRecord{HubActiveJob: job, Node: machineID, LastSeen: received, FencedNodes: make(map[string]uint64)}
-			}
 			continue
 		}
-		if current.Completed || current.Node != machineID || current.Epoch != job.Epoch {
+		if current.Completed || current.Reassigning || current.Node != machineID || current.Epoch != job.Epoch {
 			// A stale or self-promoted heartbeat is presence-only. It must not
 			// modify ownership, epoch, fencing, or liveness of the true owner.
 			continue
@@ -311,7 +350,7 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		if _, stillActive := seen[id]; stillActive {
 			continue
 		}
-		if current.Node == machineID && current.Orphaned {
+		if current.Node == machineID && current.Orphaned && !current.Reassigning {
 			current.Orphaned, current.Completed = false, true
 			h.queueJobEventLocked("job.recovered", hubJobEventPayload{JobID: id, Node: machineID, Epoch: current.Epoch, LastSeen: received})
 		}
@@ -375,11 +414,49 @@ func (h *HubServer) acknowledgeRevocation(machineID string, ack hubJobEventPaylo
 	return true
 }
 
+// lockEndingAssignment serializes a terminal event with reassignment and
+// persists its end before the in-memory record can be lost on restart.
+func (h *HubServer) lockEndingAssignment(machineID string, event hubJobEventPayload) (func(), bool) {
+	h.mu.Lock()
+	job := h.jobs[event.JobID]
+	valid := job != nil && !job.Reassigning && job.Epoch == event.Epoch && job.Node == machineID
+	h.mu.Unlock()
+	if !valid {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
+	unlock, err := h.poolActionLocks.lock(ctx, event.JobID)
+	if err != nil {
+		cancel()
+		return nil, false
+	}
+	release := func() { unlock(); cancel() }
+	h.mu.Lock()
+	job = h.jobs[event.JobID]
+	valid = job != nil && !job.Reassigning && job.Epoch == event.Epoch && job.Node == machineID
+	h.mu.Unlock()
+	if !valid {
+		release()
+		return nil, false
+	}
+	if err := h.endOwnerAssignment(event.JobID, machineID, event.Epoch); err != nil {
+		h.logger.Warn("job assignment end unavailable", "job", event.JobID)
+		release()
+		return nil, false
+	}
+	return release, true
+}
+
 func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEventPayload, received time.Time) bool {
+	unlock, ok := h.lockEndingAssignment(machineID, completion)
+	if !ok {
+		return false
+	}
+	defer unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	job := h.jobs[completion.JobID]
-	if job == nil || job.Epoch != completion.Epoch || job.Node != machineID {
+	if job == nil || job.Reassigning || job.Epoch != completion.Epoch || job.Node != machineID {
 		return false // epoch fencing: stale completion is deliberately invisible.
 	}
 	wasOrphaned := job.Orphaned
@@ -395,10 +472,15 @@ func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEven
 // epoch fencing. A cancelled job did not come back, so no job.recovered event
 // is queued — the console feed records a revoked entry on the first close.
 func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayload, received time.Time) bool {
+	unlock, ok := h.lockEndingAssignment(machineID, event)
+	if !ok {
+		return false
+	}
+	defer unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	job := h.jobs[event.JobID]
-	if job == nil || job.Epoch != event.Epoch || job.Node != machineID {
+	if job == nil || job.Reassigning || job.Epoch != event.Epoch || job.Node != machineID {
 		return false
 	}
 	alreadyClosed := job.Completed
@@ -418,12 +500,29 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 // Completed set, which keeps it out of the orphan sweep and out of
 // reassignJob: it is a receipt, never a redispatch candidate.
 //
-// Registration is restricted to epoch 1 for the same reason observeActiveJobs
-// is: every epoch above 1 was issued by the hub, so a first-seen job claiming
-// one cannot be proving anything. A higher-epoch record is still relayed; only
-// its bookkeeping entry is declined.
+// A later epoch is accepted only when hk confirms the node's grant; an old hk
+// or a missing record retains the original epoch-1 rule.
 func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJobEventPayload, received time.Time) bool {
-	if completion.Epoch != 1 || !hubAgentLabelPattern.MatchString(completion.AgentLabel) {
+	if !hubAgentLabelPattern.MatchString(completion.AgentLabel) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
+	defer cancel()
+	unlock, err := h.poolActionLocks.lock(ctx, completion.JobID)
+	if err != nil {
+		return false
+	}
+	defer unlock()
+	if !h.firstSeenJobOwned(ctx, completion.JobID, machineID, completion.Epoch, true) {
+		return false
+	}
+	h.mu.Lock()
+	if h.jobs[completion.JobID] != nil {
+		h.mu.Unlock()
+		return false
+	}
+	h.mu.Unlock()
+	if err := h.endOwnerAssignment(completion.JobID, machineID, completion.Epoch); err != nil {
 		return false
 	}
 	h.mu.Lock()
@@ -594,7 +693,16 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, error) {
 		h.mu.Unlock()
 		return hubJobEventPayload{}, errors.New("job reassignment rejected")
 	}
-	from := job.Node
+	from, epoch := job.Node, job.Epoch
+	job.Reassigning = true
+	h.mu.Unlock()
+	err = h.transferJobOwner(ctx, jobID, from, to, epoch)
+	h.mu.Lock()
+	job.Reassigning = false
+	if err != nil {
+		h.mu.Unlock()
+		return hubJobEventPayload{}, err
+	}
 	job.Epoch++
 	if job.FencedNodes == nil {
 		job.FencedNodes = make(map[string]uint64)

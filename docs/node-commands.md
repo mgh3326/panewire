@@ -635,6 +635,58 @@ without a heartbeat. Tests in
 [node_pane_close_epoch_test.go](../node_pane_close_epoch_test.go) exercise the
 fence, terminal races, epoch, and restart rules.
 
+The handoffkeep job record also carries an owner node and hub epoch. A node's
+completion, escalation, usage, model, quota-stop, sweep, reap, and report-pin writes
+condition their updates on that local grant. The node persists later hub
+assignments, so a restarted node keeps the issued epoch. Each operation keeps
+the grant it started with, even if the job is later assigned back to the same
+node at a newer epoch. Before delivering a reassignment, the hub atomically
+transfers the hk owner with the old owner as `expected_owner`; a stale transfer
+is refused and names the current owner.
+A node that receives `409 job_owner_mismatch` reads the owner again. If the
+hub seeded this same node at its current grant epoch, it retries once with that
+owner as the condition. If hk names a newer grant to the same node that is not
+yet persisted locally, the write waits for a later assignment directive without
+revoking the job. Other mismatches record the same local revocation as a hub
+notice: the attempt makes no further job-record writes and the existing pane
+sweep closes the local pane. A delayed refusal or hub revocation cannot revoke a
+newer local grant. The hub checks the durable hk owner before finishing an old
+pool action, including after restart.
+Local quota cleanup releases a pool only while the captured grant is still
+current. If the grant has advanced, it logs and retains the ambiguous row;
+hk 5294 tracks recording the acquisition epoch needed to reclaim it safely.
+
+An older hk omits both owner fields from a job read. Panewire sends no fence
+fields to that server and logs once per streak while retaining legacy behavior.
+When hk gains fence support, the hub adopts a live, unfenced job only from an
+assignment it holds durably, with a conditional empty-owner update at the
+current epoch. The hub seeds asynchronously after landing and also checks
+persisted assignments after restart and on heartbeat. Between the node's HK
+claim and that seed, upgraded nodes condition their writes on an empty owner;
+they never claim it. Before reassigning an empty-owner job, the hub first seeds
+its current owner and then transfers the fence. Without a durable assignment,
+the hub leaves the job unfenced and cannot reassign it; jobs dispatched by an
+older hub without a held assignment must finish before this limitation clears.
+A later assignment back to the same node requires a fresh claim or spawn
+before that node's prior revocation is cleared.
+Older node binaries can still issue an unconditional write while being upgraded.
+Upgrade every node before advertising `close_ops_v1`: the current rollout is
+v0.0.540 followed by the release containing this fence.
+An old attempt still running when the same node receives a later grant can emit
+an event under that later epoch; launch-bound attempt identity is tracked in
+hk 5310.
+If the hub cannot read the job record, it refuses reassignment until it can
+establish whether fencing is supported. If hk rejects a terminal ownership
+transfer with `job_state_conflict`, the hub refuses the reassignment and names
+the reason; it does not bypass the fence. Conditional terminal owner-only
+transfers await deployment of hk 5303.
+The hub stores assignments and transfer intents alongside its SQLite inbox,
+or under its panewire state directory when it uses PostgreSQL or no inbox.
+Keep that directory across hub restarts: recovery checks hk's node, epoch, and
+non-terminal state before redelivering a successor's durable assignment. It
+removes the transfer intent after persisting that assignment, which also retains
+the predecessors needed to restore revocation delivery after another restart.
+
 Rollout order: deploy the hub with this guard, upgrade the node binaries,
 run `panewire node close-ops enable` on each node, then run
 `panewire node close-ops advertise` on each. Before any binary rollback, run

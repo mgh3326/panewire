@@ -18,14 +18,17 @@ type jobSession struct {
 // recordJobUsage writes usage and skills independently of model, since hk
 // accepts only those fields after a job becomes terminal. Reap reads replace
 // completion reads only when they contain figures or a readable skill list.
-func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
+func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) error {
+	ctx = withJobEpoch(ctx, j)
 	session, ok := a.readJobSession(ctx, j, atReap)
 	if !ok {
-		return
+		return nil
 	}
-	a.writeJobSession(ctx, j, session)
+	if err := a.writeJobSession(ctx, j, session); IsJobReassigned(err) {
+		return err
+	}
 	if atReap || j.Terminal || session.usage.Model == "" {
-		return
+		return nil
 	}
 	store, e := a.jobStore()
 	if e == nil {
@@ -33,21 +36,21 @@ func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 		rec, e = store.Get(ctx, j.ID)
 		if e != nil {
 			a.warnUsageOperation("model state read", e)
-			return
+			return e
 		}
 		switch str(rec, "state") {
 		case "completed", "escalated", "lost":
-			return
+			return nil
 		}
 		if a.hubReassigned(j) {
-			// The model is this node's session; the record is the new owner's.
-			return
+			return errJobReassigned
 		}
-		e = store.Put(ctx, j.ID, map[string]any{"model": session.usage.Model})
+		e = a.putJobRecord(ctx, j.ID, map[string]any{"model": session.usage.Model})
 	}
 	if e != nil {
 		a.warnUsageOperation("model write", e)
 	}
+	return e
 }
 
 // readJobSession reads the job's token usage and skill calls from its harness
@@ -78,10 +81,10 @@ func (a *App) readJobSession(ctx context.Context, j Job, atReap bool) (jobSessio
 // writeJobSession writes usage and skills in one PUT, the only update hk
 // accepts after a job is terminal. A refusal is a warning: job end is never
 // failed by a record write.
-func (a *App) writeJobSession(ctx context.Context, j Job, session jobSession) {
+func (a *App) writeJobSession(ctx context.Context, j Job, session jobSession) error {
+	ctx = withJobEpoch(ctx, j)
 	if a.hubReassigned(j) {
-		// The usage is this node's session; the record is the new owner's.
-		return
+		return errJobReassigned
 	}
 	id := j.ID
 	fields := map[string]any{"skills_supported": session.skills.Supported}
@@ -91,9 +94,11 @@ func (a *App) writeJobSession(ctx context.Context, j Job, session jobSession) {
 	if session.skills.Known && session.skills.Supported && len(session.skills.Skills) > 0 {
 		fields["skills"] = session.skills.Skills
 	}
-	if e := a.putJobRecord(ctx, id, fields); e != nil {
-		a.warnUsageOperation("usage write", e)
+	err := a.putJobRecord(ctx, id, fields)
+	if err != nil {
+		a.warnUsageOperation("usage write", err)
 	}
+	return err
 }
 
 func (a *App) warnUsageOperation(operation string, err error) {

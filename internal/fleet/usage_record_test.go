@@ -395,7 +395,9 @@ func TestModelStateReadFailureWarnsAboutRead(t *testing.T) {
 	if got := stderr.String(); !strings.Contains(got, "job model state read failed (hk status 503, code unavailable)") || strings.Contains(got, "job model write failed") {
 		t.Fatalf("warning = %q", got)
 	}
-	if rec := base.record(t, "j"); rec["model"] != nil || usageOf(t, rec)["input_tokens"] != int64(150) {
-		t.Fatalf("record = %v", rec)
+	// A failed capability read cannot prove hk is old, so neither write may
+	// be sent without an owner condition.
+	if rec := base.record(t, "j"); rec["model"] != nil || rec["usage"] != nil {
+		t.Fatalf("record = %v, want no unfenced writes after a failed read", rec)
 	}
 }

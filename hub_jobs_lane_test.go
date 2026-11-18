@@ -3,11 +3,14 @@ package panewire
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 func TestJobsLaneListing(t *testing.T) {
@@ -101,6 +104,7 @@ func TestNormalizeHubActiveJobRetainsHistoricalOwnerLane(t *testing.T) {
 
 func TestJobsListLateCompletion(t *testing.T) {
 	hub, server := pw2Hub(t, nil, "", nil)
+	lateCompletionOwner(t, hub)
 	agent := &hubAgent{transient: true}
 	hub.handleAgentMessage("node-b", "fixture", agent, []byte(`{"type":"event","kind":"job.completed","payload":{"job_id":"job-late","epoch":1,"agent_label":"agent-a","owner_lane":"lane-a"}}`))
 	status, body := (pw2Caller{"node", "node-a", pw2NodeAToken}).do(t, server, http.MethodGet, "/v1/jobs?owner_lane=lane-a", "")
@@ -114,6 +118,7 @@ func TestJobsListLateCompletion(t *testing.T) {
 
 func TestJobsListTrustsRemoteNodeAttribution(t *testing.T) {
 	hub, server := pw2Hub(t, nil, "", nil)
+	lateCompletionOwner(t, hub)
 	remote := pw2Caller{"remote", "node-b", pw2NodeBToken}
 	if status, _ := remote.do(t, server, http.MethodGet, "/v1/jobs?owner_lane=lane-a", ""); status != http.StatusForbidden {
 		t.Fatalf("remote lane read: got %d, want 403", status)
@@ -128,5 +133,14 @@ func TestJobsListTrustsRemoteNodeAttribution(t *testing.T) {
 	}
 	if status != http.StatusOK || json.Unmarshal([]byte(body), &result) != nil || len(result.Jobs) != 1 || result.Jobs[0].JobID != "job-reported" || result.Jobs[0].Machine != "node-b" || result.Jobs[0].State != "completed" {
 		t.Fatalf("status=%d body=%s", status, body)
+	}
+}
+
+func lateCompletionOwner(t *testing.T, hub *HubServer) {
+	t.Helper()
+	hub.ownerTransferDir = t.TempDir()
+	hk := &ownerFenceHK{record: map[string]any{"state": "completed", "owner_node": "node-b", "owner_epoch": float64(1)}}
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: hk, Out: out, Err: errout}, nil
 	}
 }

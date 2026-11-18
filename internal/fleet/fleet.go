@@ -157,16 +157,18 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var er struct {
-			Code    string `json:"error"`
-			Reason  string `json:"reason"`
-			Pattern string `json:"pattern"`
+			Code       string `json:"error"`
+			Reason     string `json:"reason"`
+			Pattern    string `json:"pattern"`
+			OwnerNode  string `json:"owner_node"`
+			OwnerEpoch uint64 `json:"owner_epoch"`
 		}
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&er)
 		pattern := ""
 		if safeHKPattern.MatchString(er.Pattern) {
 			pattern = er.Pattern
 		}
-		return &BackendError{Status: resp.StatusCode, Code: er.Code, Reason: backendReason(er.Reason), Pattern: pattern}
+		return &BackendError{Status: resp.StatusCode, Code: er.Code, Reason: backendReason(er.Reason), Pattern: pattern, OwnerNode: er.OwnerNode, OwnerEpoch: er.OwnerEpoch}
 	}
 	if out != nil {
 		if e := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out); e != nil {
@@ -191,10 +193,12 @@ func hkRequestTimedOut(err error) bool {
 // hk's store-authored refusal reason (the failing field or rule, hk #197),
 // bounded and flattened to one line; nothing else of the body is kept.
 type BackendError struct {
-	Status  int
-	Code    string
-	Reason  string
-	Pattern string
+	Status     int
+	Code       string
+	Reason     string
+	Pattern    string
+	OwnerNode  string
+	OwnerEpoch uint64
 }
 
 var safeHKPattern = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)

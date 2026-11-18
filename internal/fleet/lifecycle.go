@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 func (a *App) lifecycle(ctx context.Context, kind string, args []string) error {
@@ -42,6 +43,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if e != nil {
 		return e
 	}
+	ctx = withJobEpoch(ctx, j)
 	if kind == "restore" {
 		if *report != "" || *question != "" {
 			return fail(exitUsage, "restore accepts only JOB")
@@ -290,17 +292,40 @@ func canonicalJSON(v any) (string, bool) {
 	return string(b), true
 }
 
+// releaseQuota releases the captured attempt's quota, but never quota acquired
+// after this node received a newer assignment for the same job.
 func (a *App) releaseQuota(ctx context.Context, j Job) error {
-	pools, e := a.ledger().QuotaPools(ctx, j.ID)
-	if e != nil {
-		return ledgerFail(e, "status")
+	pools, err := a.ledger().QuotaPools(ctx, j.ID)
+	if err != nil {
+		return ledgerFail(err, "status")
 	}
+	epoch := j.OwnerEpoch
+	if epoch == 0 {
+		epoch = 1
+	}
+	changed := errors.New("job assignment changed")
 	for _, pool := range pools {
 		if pool == "" {
 			return fail(exitStateConflict, "invalid quota record")
 		}
-		if e := a.ledger().ReleaseQuotaPool(ctx, j.ID, pool, false); e != nil {
-			return ledgerFail(e, "release")
+		var currentEpoch uint64
+		err := a.ledger().ReleaseQuotaPoolIf(ctx, j.ID, pool, false, func() error {
+			current, err := jobowner.Epoch(a.Jobs, j.ID)
+			if err != nil {
+				return err
+			}
+			currentEpoch = current
+			if current != epoch {
+				return changed
+			}
+			return nil
+		})
+		if errors.Is(err, changed) {
+			a.warn("quota retained for job %s pool %s: captured epoch %d, current epoch %d", j.ID, pool, epoch, currentEpoch)
+			continue
+		}
+		if err != nil {
+			return ledgerFail(err, "release")
 		}
 	}
 	return nil

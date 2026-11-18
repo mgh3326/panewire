@@ -97,6 +97,12 @@ func TestPoolActionGuardReleasedByNodeSettlement(t *testing.T) {
 	if events := spawnFailedInjections(f.destination); len(events) != 0 {
 		t.Fatalf("guarded settlement sent a notice: %+v", events)
 	}
+	if _, err := f.hub.reassignJob(action.Job, "machine-b"); err == nil || !strings.Contains(err.Error(), "not_found") {
+		t.Fatalf("missing hk record must refuse reassignment: %v", err)
+	}
+	f.jobs.mu.Lock()
+	f.jobs.records[f.job] = map[string]any{"state": "spawned"}
+	f.jobs.mu.Unlock()
 	if _, err := f.hub.reassignJob(action.Job, "machine-b"); err != nil {
 		t.Fatalf("settled node did not release the guard: %v", err)
 	}

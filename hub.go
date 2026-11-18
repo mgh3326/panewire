@@ -322,6 +322,7 @@ type hubJobRecord struct {
 	LastSeen      time.Time
 	Orphaned      bool
 	Completed     bool
+	Reassigning   bool
 	FencedNodes   map[string]uint64
 	Reassignments []hubJobReassignment
 }
@@ -542,6 +543,9 @@ type HubServer struct {
 	// accountJobsLookupFails counts the current streak of failed account
 	// occupancy lookups: one warn per streak, reset on success (hk 5124).
 	accountJobsLookupFails int
+	jobFenceLegacy         bool
+	ownerTransferDir       string
+	ownerWork              hubOwnerWork
 	poolActionLocks        hubKeyedLocks
 	poolActionMu           sync.Mutex
 	// poolActionObserved avoids repeating inventory logs while an action is active.
@@ -984,6 +988,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
+	hub.ownerTransferDir = defaultHubOwnerTransferDir(config.InboxStorePath, inbox != nil && config.InboxDatabaseURL == "")
 	hub.auth.Store(&authSet)
 	hub.oneTimeDSN = os.Getenv(crashReportDSNEnv)
 	hub.loadOneTimeActions()
@@ -1076,6 +1081,7 @@ func (h *HubServer) Close() error {
 	if h.closeCancel != nil {
 		h.closeCancel()
 	}
+	h.closeOwnerWork()
 	// The notice worker stops accepting observations, cancels its request and
 	// is joined here, so it releases its Sentry client before the store closes.
 	h.closeOneTimeNotices()
@@ -1592,7 +1598,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			h.publishFleetPublisher(machineID, received)
 			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
-			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
+			h.observeActiveJobsContext(ctx, machineID, heartbeat.ActiveJobs, received)
 			h.observeNodeLoops(machineID, heartbeat.Loops, received)
 			h.sendHeartbeatDirectives(machineID, agent)
 		}
@@ -2778,6 +2784,9 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runFleetStatus(ctx)
 	h.startSpawnCoordinator(ctx)
 	h.startConsultCoordinator(ctx)
+	// Only persisted assignments are eligible to adopt legacy hk records.
+	// HK availability must not delay startup or a later assignment's sweep.
+	go h.sweepOwnerAssignments(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
 	h.replayUndeliveredRelayEvents(ctx)

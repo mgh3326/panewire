@@ -11,10 +11,9 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/fleetevent"
 	"github.com/mgh3326/panewire/internal/hubretry"
-
-	"github.com/mgh3326/panewire/internal/arbiter"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
@@ -92,6 +91,10 @@ type App struct {
 	Wake          Waker
 	LoadRatio     func(context.Context) (float64, error)
 	JobStore      JobStore
+	// JobOwnerNode is the node daemon's authenticated machine id when known.
+	JobOwnerNode       string
+	JobFenceCapability func(bool)
+	jobFence           *jobFenceWarnings
 	// TaskState reads one hk task; nil builds it from [quota] / the
 	// handoffkeep env on first use (TaskStatus).
 	TaskState    TaskStateReader

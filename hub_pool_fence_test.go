@@ -30,6 +30,7 @@ func TestPoolActionDisabledStoreCannotProveNoPriorAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = hub.Close() })
+	useLegacyOwnerStore(hub)
 	hub.jobs[action.Job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: action.Job, Epoch: 1}, Node: action.Node, Orphaned: true}
 	// Removing a store with unresolved actions drops their fence along with
 	// the rest of that inbox's state; operators must drain it first.

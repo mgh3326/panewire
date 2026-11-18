@@ -542,10 +542,17 @@ func RecordFreeLimit(cfg devin.Config, job string, stop quotastop.Stop) error {
 // pool and reset_at. No result is written; hk takes one only with completed.
 // emit is false when quotaStopAnnounce already recorded job.lost.
 func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
+	ctx = withJobEpoch(ctx, j)
 	// After a hand-off grace the hub may already have written the record lost
 	// with the successor pointer; hk would refuse a rewrite, so leave it.
 	if (emit || !a.hkJobEnded(ctx, j.ID)) && !a.hubReassigned(j) {
 		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", ""), "at": a.Now().UTC()}); e != nil {
+			if IsJobReassigned(e) {
+				if !a.sameJobOwnerEpoch(j) {
+					return nil
+				}
+				return a.releaseQuota(ctx, j)
+			}
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
 		}
 	}
@@ -665,6 +672,7 @@ func (a *App) finishQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop)
 // positive evidence: a readable screen that still shows a stop. An unreadable
 // screen or herdr never cancels the intent.
 func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, herdrOK, present, reportPending bool, ag Agent) (quotaIntentOutcome, error) {
+	ctx = withJobEpoch(ctx, j)
 	cancel := func(reason string) (quotaIntentOutcome, error) {
 		return quotaIntentCancelled, a.event(ctx, j.ID, quotaIntentCancelKind, map[string]any{"reason": reason})
 	}
@@ -697,6 +705,9 @@ func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, h
 		return cancel("pane_moved_on")
 	}
 	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.reason, "at": a.Now().UTC()}); e != nil {
+		if IsJobOwnerMismatch(e) || errors.Is(e, errJobReassigned) {
+			return cancel("job_reassigned")
+		}
 		a.warn("quota-stop lost record not written, retrying: %v", e)
 		return quotaIntentRetry, nil
 	}
