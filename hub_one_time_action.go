@@ -104,24 +104,25 @@ func (h *HubServer) noteOneTimeAction(machine, kind, need string, at time.Time) 
 // accepted it: a 2xx for that event, not a drained queue.
 type oneTimeNotifier func(event *sentry.Event) (accepted bool, err error)
 
-// newOneTimeNotifier builds the notifier on a Sentry client of its own, so the
-// flush and the delivery counts cover only these events and never the spawn
-// trace client that Close flushes. It is nil when no DSN is configured. The DSN
-// is the panewire one, never the SDK's SENTRY_DSN fallback.
+// newOneTimeNotifier returns a notifier for the panewire DSN, or nil when no DSN
+// is configured. The DSN is the panewire one, never the SDK's SENTRY_DSN
+// fallback. Each send builds its own Sentry client and closes it, so its
+// delivery counts cover only that event: a late answer to a send that timed out
+// cannot be credited to the next one, and no transport worker outlives a send.
 func newOneTimeNotifier(dsn string) oneTimeNotifier {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
 		return nil
 	}
-	delivery := &crashDelivery{base: http.DefaultTransport}
-	options := spawnSentryOptions(dsn)
-	options.HTTPTransport = delivery
-	client, err := sentry.NewClient(options)
-	if err != nil {
-		return nil
-	}
 	return func(event *sentry.Event) (bool, error) {
-		delivery.take()
+		delivery := &crashDelivery{base: http.DefaultTransport}
+		options := spawnSentryOptions(dsn)
+		options.HTTPTransport = delivery
+		client, err := sentry.NewClient(options)
+		if err != nil {
+			return false, err
+		}
+		defer client.Close()
 		if client.CaptureEvent(event, nil, sentry.NewScope()) == nil {
 			return false, errors.New("sentry dropped the action-needed event")
 		}
@@ -136,14 +137,18 @@ func newOneTimeNotifier(dsn string) oneTimeNotifier {
 // sendOneTimeAction hands the ACTION NEEDED event to the notifier. It answers
 // an error when reporting is not configured or Sentry did not accept the event.
 func (h *HubServer) sendOneTimeAction(machine, kind, need, action string) error {
-	if h.oneTimeNotify == nil {
+	notify := h.oneTimeNotify
+	if notify == nil {
+		notify = newOneTimeNotifier(h.oneTimeDSN)
+	}
+	if notify == nil {
 		return errOneTimeSentryUnconfigured
 	}
 	// The title and fingerprint carry the action without its quotes, so one
 	// issue is one host and action and the Discord rule posts it once.
 	plain := strings.ReplaceAll(action, `"`, "")
 	event := &sentry.Event{Level: sentry.LevelWarning, Message: fmt.Sprintf("ACTION NEEDED: %s %s — %s", machine, kind, plain), Fingerprint: []string{"action-needed", machine, kind, plain}, Tags: map[string]string{"host": machine, "kind": kind, "need": need}}
-	accepted, err := h.oneTimeNotify(event)
+	accepted, err := notify(event)
 	if err != nil {
 		return err
 	}

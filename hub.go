@@ -781,8 +781,10 @@ type HubServer struct {
 	// (hub_one_time_action.go, hub_one_time_action_store.go).
 	oneTimeMu      sync.Mutex
 	oneTimeActions map[oneTimeActionKey]oneTimeActionState
-	// oneTimeNotify sends the ACTION NEEDED events; nil when no panewire DSN is
-	// configured (hub_one_time_action.go).
+	// oneTimeDSN is the panewire Sentry DSN the ACTION NEEDED events go to; ""
+	// when reporting is not configured. oneTimeNotify, when set, replaces the
+	// Sentry send (tests only; hub_one_time_action.go).
+	oneTimeDSN    string
 	oneTimeNotify oneTimeNotifier
 	fleetLoadMu   sync.Mutex
 	fleetLoadAt   time.Time // guarded by fleetLoadMu
@@ -970,7 +972,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
-	hub.oneTimeNotify = newOneTimeNotifier(os.Getenv(crashReportDSNEnv))
+	hub.oneTimeDSN = os.Getenv(crashReportDSNEnv)
 	hub.loadOneTimeActions()
 	hub.fleetStatusInterval = config.FleetStatusInterval
 	hub.fleetStatusPublish = config.FleetStatusPublish
