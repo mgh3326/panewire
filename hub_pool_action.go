@@ -173,12 +173,23 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		action.Phase = poolActionSettled
 		return h.saveFinalPoolAction(ctx, action, "settled")
 	}
-	if action.Data.Kind == poolActionKindSupersedeClose && !h.supersedeClose && (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) {
-		// The off switch fences a request that was stored but that the node
-		// has not started closing: the release leaves a tombstone, so a send
-		// that was in flight when the hub stopped cannot register later. A
-		// request the node already began (closing, final) is finished.
-		return h.releasePoolAction(ctx, action)
+	if action.Data.Kind == poolActionKindSupersedeClose {
+		fenced, err := h.supersedeFenced(ctx, action)
+		if err != nil {
+			return err
+		}
+		if fenced && (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) {
+			// The switch is off, or a hub started with it off moved the
+			// fence since this row was queued: a request stored but not
+			// begun is released, and only the release tombstone retires it,
+			// so an unanswered node leaves the row cancelled-pending across
+			// restarts. A request the node began is finished below.
+			return h.releasePoolAction(ctx, action)
+		}
+		if fenced && status.State == fleet.CloseOpUnknown {
+			// A cancelled row creates no replacement request.
+			return nil
+		}
 	}
 	if (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) && !h.nodeHasCapability(action.Node, hubCapabilityCloseOps) {
 		// Withdrawal can precede a binary rollback. Fence a request that has

@@ -303,26 +303,80 @@ func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, nex
 	return tx.Commit()
 }
 
-// supersedeLandingSchema is also installed by Postgres migration 0025.
+// supersedeFenceSchema and supersedeLandingSchema are also installed by
+// Postgres migration 0025.
+const supersedeFenceSchema = `CREATE TABLE IF NOT EXISTS supersede_fence (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation BIGINT NOT NULL)`
+
 const supersedeLandingSchema = `CREATE TABLE IF NOT EXISTS supersede_landings (
  request_id TEXT PRIMARY KEY, parent TEXT NOT NULL, successor TEXT NOT NULL, owner TEXT NOT NULL,
- created_ms BIGINT NOT NULL, tried_ms BIGINT NOT NULL DEFAULT 0,
+ created_ms BIGINT NOT NULL, tried_ms BIGINT NOT NULL DEFAULT 0, generation BIGINT NOT NULL,
  state TEXT NOT NULL CHECK(state IN ('pending','done')))`
 
+var errSupersedeFenced = errors.New("supersede generation fenced")
+
 // supersedeLanding is the durable intent of a landed explicit implementer
-// successor to close its parent (hub_spawn_supersede.go): it exists only for
-// landings that happened while --supersede-close was on, and ends once the
-// close row exists or the parent is ineligible.
+// successor to close its parent (hub_spawn_supersede.go). It exists only for
+// landings that happened while --supersede-close was on, and carries the
+// fence generation current at that moment: a later generation cancels it.
 type supersedeLanding struct {
 	RequestID, Parent, Successor, Owner string
-	Created                             int64
+	Created, Generation                 int64
+}
+
+type sqlExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// supersedeGeneration reads the fence a hub dispatches under.
+func (s *laneInboxStore) supersedeGeneration(parent context.Context) (int64, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	var generation int64
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT generation FROM supersede_fence WHERE singleton=1`)).Scan(&generation)
+	return generation, err
+}
+
+// advanceSupersedeFence revokes every landing and close row of the earlier
+// generations. A hub started with --supersede-close=false calls it before it
+// accepts any work.
+func (s *laneInboxStore) advanceSupersedeFence(parent context.Context) error {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE supersede_fence SET generation=generation+1 WHERE singleton=1`))
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return errors.New("supersede fence missing")
+	}
+	return nil
+}
+
+// insertSupersedeLanding stores the intent at the current generation; it
+// stores nothing when the fence row is absent, which the caller reads as an
+// error through the row count.
+func (s *laneInboxStore) insertSupersedeLanding(ctx context.Context, db sqlExecer, l supersedeLanding) error {
+	result, err := db.ExecContext(ctx, s.q(`INSERT INTO supersede_landings(request_id,parent,successor,owner,created_ms,tried_ms,generation,state) SELECT ?,?,?,?,?,0,generation,'pending' FROM supersede_fence WHERE singleton=1 ON CONFLICT(request_id) DO NOTHING`), l.RequestID, l.Parent, l.Successor, l.Owner, l.Created)
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		var existing string
+		if err := db.QueryRowContext(ctx, s.q(`SELECT request_id FROM supersede_landings WHERE request_id=?`), l.RequestID).Scan(&existing); err != nil {
+			return errors.New("supersede fence missing")
+		}
+	}
+	return nil
 }
 
 func (s *laneInboxStore) recordSupersedeLanding(parent context.Context, l supersedeLanding) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO supersede_landings(request_id,parent,successor,owner,created_ms,tried_ms,state) VALUES(?,?,?,?,?,0,'pending') ON CONFLICT(request_id) DO NOTHING`), l.RequestID, l.Parent, l.Successor, l.Owner, l.Created)
-	return err
+	return s.insertSupersedeLanding(ctx, s.db, l)
 }
 
 // pendingSupersedeLandings lists up to limit undecided landings, least
@@ -330,7 +384,7 @@ func (s *laneInboxStore) recordSupersedeLanding(parent context.Context, l supers
 func (s *laneInboxStore) pendingSupersedeLandings(parent context.Context, limit int) ([]supersedeLanding, error) {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id,parent,successor,owner,created_ms FROM supersede_landings WHERE state='pending' ORDER BY tried_ms, created_ms LIMIT ?`), limit)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id,parent,successor,owner,created_ms,generation FROM supersede_landings WHERE state='pending' ORDER BY tried_ms, created_ms, request_id LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +392,7 @@ func (s *laneInboxStore) pendingSupersedeLandings(parent context.Context, limit 
 	var out []supersedeLanding
 	for rows.Next() {
 		var l supersedeLanding
-		if err := rows.Scan(&l.RequestID, &l.Parent, &l.Successor, &l.Owner, &l.Created); err != nil {
+		if err := rows.Scan(&l.RequestID, &l.Parent, &l.Successor, &l.Owner, &l.Created, &l.Generation); err != nil {
 			return nil, err
 		}
 		out = append(out, l)
@@ -347,7 +401,9 @@ func (s *laneInboxStore) pendingSupersedeLandings(parent context.Context, limit 
 }
 
 // settleSupersedeLanding records a try: done ends the intent, otherwise the
-// landing goes to the back of the line.
+// landing goes to the back of the line. The sweep calls it with done false
+// before it probes anything, so a probe that uses up the pass cannot keep the
+// same landing at the head.
 func (s *laneInboxStore) settleSupersedeLanding(parent context.Context, id string, done bool, now time.Time) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
@@ -370,4 +426,23 @@ func (s *laneInboxStore) endSupersedeLandings(parent context.Context, before tim
 	}
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE supersede_landings SET state='done' WHERE state='pending' AND created_ms<?`), cutoff)
 	return err
+}
+
+// insertSupersedeAction stores a supersede_close row only while the fence is
+// still at generation, in one statement.
+func (s *laneInboxStore) insertSupersedeAction(parent context.Context, action poolAction, generation int64) error {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	data, err := json.Marshal(action.Data)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data) SELECT ?,?,?,?,?,? FROM supersede_fence WHERE singleton=1 AND generation=?`), action.ID, action.Job, action.Node, action.Epoch, action.Phase, string(data), generation)
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return errSupersedeFenced
+	}
+	return nil
 }

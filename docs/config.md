@@ -1160,20 +1160,34 @@ settlement, like every hub close), after `job.superseded` was recorded on it.
 The owner lane hears one `info` lane.event, `[panewire] closed <parent> on
 <host>: superseded by <successor>`, once the node proves the close settled.
 When an explicit implementer successor lands while the switch is on, the hub
-first stores its intent in `supersede_landings` (Postgres migration
-`0025_supersede_landings.sql`), with no availability check, then tries to queue
-the row from the landing hook. A landing the hook cannot decide (the parent's
-node is offline or not reported yet, hk or the store is unavailable, or the
-hub restarted) stays pending and is retried once a minute on its own loop, 50
-intents per pass, least recently tried first, for 48 hours, until the row
-exists or the parent is definitively ineligible. A landing while the switch is
-off stores no intent. The off switch (`--supersede-close=false`) ends every
-pending intent and every row that has sent no close request; a request that
-was stored but that the node has not begun closing is released with a
-tombstone, and one the node began is finished. Turning the switch back on
-closes nothing retroactively. A retry of a refused close stays bound to the
-attempt the refused request named. The one gap: a hub that dies between the
-spawn's `succeeded` record and the intent insert leaves that parent open.
+stores its intent in `supersede_landings` (Postgres migration
+`0025_supersede_landings.sql`) **in the same transaction that makes the spawn
+`succeeded`**: if the intent cannot be written, the outcome is rolled back and
+recovered through the usual bound-request reconciliation, so a landing is
+never committed without it. A landing while the switch is off stores no
+intent. The landing loop (its own goroutine, never the pool action
+reconciler's) queues the row, retrying every minute, 50 intents per pass,
+least recently tried first (the try is recorded before any probe), for 48
+hours, until the row exists or the parent is definitively ineligible.
+
+**The off switch is a durable fence** (consult-5195-002ed32a). A hub started
+with `--supersede-close=false` advances `supersede_fence.generation` before it
+accepts any work, and does not start if it cannot. Every landing intent and
+close row carries the generation it was queued under; a later hub, enabled or
+not, treats any of an older generation as cancelled for dispatch, without a
+sweep having run and whatever the nodes did meanwhile. A cancelled row that
+sent nothing ends. A cancelled row whose request was stored is
+cancellation-only: its node is asked for status, a request that is `none` or
+`registered` is released with the close-release tombstone, and only that
+retires it, so an offline node leaves it pending across restarts; a request
+the node already began closing is settled as usual. A cancelled row creates no
+replacement request. An enabled start only reads the fence, and keeps supersede
+dispatch closed when it cannot. The fence lives in the hub's inbox database
+(the one durable store every hub of this deployment shares), not in a separate
+file. A retry of a refused close stays bound to the attempt the refused
+request named. The one gap: a hub that dies between the node's result and the
+spawn's `succeeded` commit commits neither the outcome nor the intent, and is
+recovered like any other uncommitted landing.
 Parents that an earlier hub
 (#678) recorded as superseded in hk are not migrated: their requests carry no
 `parent_job_explicit`, so under the explicit-only rule none of them is

@@ -711,7 +711,9 @@ type HubServer struct {
 	supersedeClose     bool
 	// supersedeWarned keeps a retried landing from repeating its warn. In
 	// memory only; the durable intent is the supersede_landings row.
-	supersedeWarned  sync.Map
+	supersedeWarned sync.Map
+	// supersedeKick wakes the landing loop (wakeSupersedeLandings).
+	supersedeKick    chan struct{}
 	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
 	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.
@@ -954,7 +956,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
-		inbox: inbox, spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
+		inbox: inbox, supersedeKick: make(chan struct{}, 1), spawnKick: make(chan struct{}, 1), placementKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, consultTimeout: config.ConsultTimeout, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, unworkedLandingGrace: config.UnworkedLandingGrace, spawnStartBy: config.SpawnStartBy, spawnStartByMargin: config.SpawnStartByMargin, spawnGrantDrain: config.SpawnGrantDrain, spawnRollbackDrain: config.SpawnRollbackDrain, supersedeClose: config.SupersedeClose, alertObservations: defaultHubAlertObservations, logger: config.Logger,
 		paneSweepInterval: config.PaneSweepInterval, paneSweepAge: config.PaneSweepAge,
@@ -982,6 +984,16 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		if cleared > 0 {
 			hub.logger.Info("hub cleared reviewer role reservations", "rows", cleared)
 		}
+	}
+	if err := hub.initSupersedeFence(); err != nil {
+		hub.closeCancel()
+		if hub.inbox != nil {
+			_ = hub.inbox.store.close()
+		}
+		return nil, err
+	}
+	if hub.inbox != nil {
+		hub.inbox.store.landingIntent = hub.supersedeLandingOf
 	}
 	hub.prepareInbox()
 	if hub.inbox != nil {

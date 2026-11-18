@@ -58,6 +58,10 @@ type poolSupersede struct {
 	// Recorded is set once job.superseded is confirmed in hk; a failed write
 	// leaves it false so the next pass retries.
 	Recorded bool `json:",omitempty"`
+	// Fence is the supersede fence generation the row was queued under. A hub
+	// started with the switch off advances the fence, which cancels the row
+	// for dispatch in every later hub (initSupersedeFence).
+	Fence int64 `json:",omitempty"`
 }
 
 // supersededParentOf names the parent a landed successor replaces, or "".
@@ -117,45 +121,85 @@ func (h *HubServer) supersedeLandingOf(task hubSpawnTask) (supersedeLanding, boo
 	return supersedeLanding{RequestID: task.Request.RequestID, Parent: parent, Successor: successor, Owner: owner, Created: h.now().UnixMilli()}, true
 }
 
-// maybeSupersedeParent records the landing's intent and queues the parent's
-// close. It never fails the spawn. The intent is stored first, with no
-// availability check, so a landing the first attempt cannot decide (the
-// parent's node is offline or not reported yet, hk or the store is
-// unavailable) or a hub restart does not lose it: sweepSupersedeLandings
-// retries it.
-func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
-	landing, ok := h.supersedeLandingOf(task)
-	if !ok {
-		return
+// wakeSupersedeLandings asks the landing loop for a pass now, so a landed
+// successor's close is queued without waiting for the next tick. The intent is
+// already stored; the wake only saves time.
+func (h *HubServer) wakeSupersedeLandings() {
+	select {
+	case h.supersedeKick <- struct{}{}:
+	default:
+	}
+}
+
+// initSupersedeFence settles the switch against the durable fence before the
+// hub accepts any work. A start with the switch off advances the fence and
+// fails when it cannot: that is the revocation of every landing and close row
+// of earlier generations, and it must not depend on a later sweep, on the
+// nodes, or on the store being healthy afterwards. A start with the switch on
+// only reads the fence; when it cannot, supersede dispatch stays closed.
+func (h *HubServer) initSupersedeFence() error {
+	if h.inbox == nil {
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(h.closeCtx, 30*time.Second)
 	defer cancel()
-	if err := h.inbox.store.recordSupersedeLanding(ctx, landing); err != nil {
-		h.logger.Warn("successor close intent not stored", "parent", landing.Parent, "successor", landing.Successor, "error", h.inbox.store.loggable("successor close intent", err))
+	if !h.supersedeClose {
+		if err := h.inbox.store.advanceSupersedeFence(ctx); err != nil {
+			return fmt.Errorf("supersede fence not recorded: %w", err)
+		}
+		return nil
 	}
-	h.attemptSupersedeLanding(ctx, landing)
+	if _, err := h.inbox.store.supersedeGeneration(ctx); err != nil {
+		h.supersedeClose = false
+		h.logger.Warn("successor close disabled: the supersede fence is unreadable", "error", h.inbox.store.loggable("supersede fence", err))
+	}
+	return nil
+}
+
+// supersedeFenced reports whether a supersede row may no longer dispatch: the
+// switch is off in this process, or the fence moved past the row's generation
+// (a hub started with the switch off since). An unreadable fence is an error,
+// never permission.
+func (h *HubServer) supersedeFenced(ctx context.Context, action poolAction) (bool, error) {
+	if action.Data.Supersede == nil || !h.supersedeClose {
+		return true, nil
+	}
+	current, err := h.inbox.store.supersedeGeneration(ctx)
+	if err != nil {
+		return true, err
+	}
+	return action.Data.Supersede.Fence != current, nil
 }
 
 // attemptSupersedeLanding tries to queue the landing's close and settles its
 // intent when the landing is decided: its row is queued or it is definitively
-// ineligible.
+// ineligible. The try is recorded first, so a probe that consumes the pass
+// cannot keep the same landing at the head of the line.
 func (h *HubServer) attemptSupersedeLanding(ctx context.Context, landing supersedeLanding) {
-	retry, err := h.createSupersedeAction(ctx, landing.Parent, landing.Successor, landing.Owner)
+	store := h.inbox.store
+	if err := store.settleSupersedeLanding(ctx, landing.RequestID, false, h.now()); err != nil {
+		h.logger.Warn("successor close intent not settled", "parent", landing.Parent, "error", store.loggable("successor close intent", err))
+		return
+	}
+	retry, err := h.createSupersedeAction(ctx, landing)
 	if err != nil {
 		// One warn per request: a retried landing must not repeat it.
 		if _, seen := h.supersedeWarned.LoadOrStore(landing.RequestID, struct{}{}); !seen {
 			h.logger.Warn("successor close not queued", "parent", landing.Parent, "successor", landing.Successor, "retry", retry, "reason", err.Error())
 		}
 	}
-	if err := h.inbox.store.settleSupersedeLanding(ctx, landing.RequestID, !retry, h.now()); err != nil {
-		h.logger.Warn("successor close intent not settled", "parent", landing.Parent, "error", h.inbox.store.loggable("successor close intent", err))
+	if !retry {
+		if err := store.settleSupersedeLanding(ctx, landing.RequestID, true, h.now()); err != nil {
+			h.logger.Warn("successor close intent not settled", "parent", landing.Parent, "error", store.loggable("successor close intent", err))
+		}
 	}
 }
 
 // sweepSupersedeLandings is one retry pass over the undecided intents. It
 // runs on its own loop, never the pool action reconciler's: a slow hk must
-// not delay a close already queued. With the switch off every intent ends, so
-// turning it back on closes nothing retroactively.
+// not delay a close already queued. With the switch off every intent ends; an
+// intent of an earlier generation is cancelled, so enabling the switch again
+// closes nothing retroactively.
 func (h *HubServer) sweepSupersedeLandings(ctx context.Context) {
 	if h.inbox == nil {
 		return
@@ -165,6 +209,11 @@ func (h *HubServer) sweepSupersedeLandings(ctx context.Context) {
 		if err := store.endSupersedeLandings(ctx, time.Time{}); err != nil {
 			h.logger.Warn("successor close intents unavailable", "error", store.loggable("successor close intents", err))
 		}
+		return
+	}
+	generation, err := store.supersedeGeneration(ctx)
+	if err != nil {
+		h.logger.Warn("successor close intents unavailable", "error", store.loggable("successor close intents", err))
 		return
 	}
 	if err := store.endSupersedeLandings(ctx, h.now().Add(-supersedeLandingWindow)); err != nil {
@@ -181,6 +230,11 @@ func (h *HubServer) sweepSupersedeLandings(ctx context.Context) {
 	for _, landing := range pending {
 		if passCtx.Err() != nil {
 			return
+		}
+		if landing.Generation != generation {
+			// Recorded before a hub started with the switch off.
+			_ = store.settleSupersedeLanding(passCtx, landing.RequestID, true, h.now())
+			continue
 		}
 		h.attemptSupersedeLanding(passCtx, landing)
 	}
@@ -200,6 +254,7 @@ func (h *HubServer) runSupersedeLandings(parent context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-h.supersedeKick:
 		}
 	}
 }
@@ -210,7 +265,8 @@ func (h *HubServer) runSupersedeLandings(parent context.Context) {
 // A nil error with no retry and no row is an expected no-op (ended parent,
 // --keep, a row already exists); an error without retry is a definitive
 // refusal. Both errors are one warn for the caller.
-func (h *HubServer) createSupersedeAction(ctx context.Context, parent, successor, succOwner string) (retry bool, err error) {
+func (h *HubServer) createSupersedeAction(ctx context.Context, landing supersedeLanding) (retry bool, err error) {
+	parent, successor, succOwner := landing.Parent, landing.Successor, landing.Owner
 	unlock, err := h.poolActionLocks.lock(ctx, parent)
 	if err != nil {
 		return true, err
@@ -300,10 +356,12 @@ func (h *HubServer) createSupersedeAction(ctx context.Context, parent, successor
 	action := poolAction{ID: id, Job: parent, Node: node, Epoch: epoch, Phase: poolActionPending, Data: poolActionData{
 		Owner: owner, Pane: pane, Label: label, EndReason: endReason,
 		Text: fmt.Sprintf("[panewire] closed %s on %s: superseded by %s", parent, node, successor),
-		Kind: poolActionKindSupersedeClose, Supersede: &poolSupersede{Successor: successor},
+		Kind: poolActionKindSupersedeClose, Supersede: &poolSupersede{Successor: successor, Fence: landing.Generation},
 	}}
-	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
-		return true, err
+	if err := h.inbox.store.insertSupersedeAction(ctx, action, landing.Generation); err != nil {
+		// A fenced landing is cancelled, never retried: a hub started with the
+		// switch off revoked it between the sweep's read and this insert.
+		return errors.Is(err, errSupersedeFenced) == false, err
 	}
 	h.poolActionObserved.Store(action.ID, struct{}{})
 	h.logger.Info("successor close action created", "node", node, "job", parent, "successor", successor, "action", action.ID)
@@ -323,12 +381,15 @@ func (h *HubServer) prepareSupersedeClose(ctx context.Context, action *poolActio
 		// A close request exists: the protocol, not this check, decides.
 		return false, nil
 	}
-	if !h.supersedeClose {
-		// The off switch also cancels a row that has sent nothing yet (it
-		// may have been queued before the flag was turned off, or waited on
-		// a working pane). A request already dispatched is finished by the
-		// protocol above, which fences it safely.
-		h.logger.Info("successor close action cancelled: --supersede-close is off", "job", action.Job, "action", action.ID)
+	fenced, err := h.supersedeFenced(ctx, *action)
+	if err != nil {
+		return true, err
+	}
+	if fenced {
+		// The switch is off or the fence moved on: a row that sent nothing
+		// ends, with no node I/O. A stored request is fenced by the shared
+		// protocol (reconcilePoolAction).
+		h.logger.Info("successor close action cancelled: --supersede-close was off", "job", action.Job, "action", action.ID)
 		return true, h.refusePoolAction(ctx, *action)
 	}
 	h.mu.Lock()
@@ -373,6 +434,13 @@ func (h *HubServer) refuseCloseAction(ctx context.Context, action poolAction) er
 	if action.Data.Kind != poolActionKindSupersedeClose || data == nil || int(data.Generation)+1 >= supersedeMaxGenerations {
 		return h.refusePoolAction(ctx, action)
 	}
+	if fenced, err := h.supersedeFenced(ctx, action); err != nil || fenced {
+		// A cancelled row asks for nothing again.
+		if err != nil {
+			return err
+		}
+		return h.refusePoolAction(ctx, action)
+	}
 	probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
 	if probe.state == heldPaneAbsent || probe.state == heldPanePresent && probe.row.PaneID != action.Data.Pane {
 		return h.refusePoolAction(ctx, action)
@@ -396,7 +464,7 @@ func (h *HubServer) refuseCloseAction(ctx context.Context, action poolAction) er
 		next.Data.TargetAttempt = action.Data.Args.Attempt
 	}
 	next.Data.Args, next.Data.RetryID, next.Data.RetryAfter, next.Data.RetryCount = nil, "", 0, 0
-	next.Data.Supersede = &poolSupersede{Successor: data.Successor, Generation: data.Generation + 1, Recorded: data.Recorded}
+	next.Data.Supersede = &poolSupersede{Successor: data.Successor, Generation: data.Generation + 1, Recorded: data.Recorded, Fence: data.Fence}
 	action.Phase = poolActionRefused
 	if err := h.inbox.store.replaceSupersedeAction(ctx, action, next); err != nil {
 		return err

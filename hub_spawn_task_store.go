@@ -529,6 +529,16 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if status == "reconciling" {
 		return true, tx.Commit()
 	}
+	// A successor that owes its parent's close stores that intent in the same
+	// transaction as its outcome: a store failure here rolls the outcome back,
+	// so a landing is never committed without it (hk 5195).
+	if status == "succeeded" && s.landingIntent != nil {
+		if landing, ok := s.landingIntent(task); ok {
+			if err = s.insertSupersedeLanding(ctx, tx, landing); err != nil {
+				return false, err
+			}
+		}
+	}
 	if err = queueSpawnNotifications(ctx, s, tx, task, status, string(raw), now); err != nil {
 		return false, err
 	}

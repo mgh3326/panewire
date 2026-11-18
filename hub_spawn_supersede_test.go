@@ -53,6 +53,18 @@ func (f *supersedeFixture) successorTask(role, owner string, explicit bool) hubS
 	}
 }
 
+// land stores the landing intent of task as the spawn completion would and
+// runs one landing pass, as the wake does.
+func (f *supersedeFixture) land(t *testing.T, task hubSpawnTask) {
+	t.Helper()
+	if landing, ok := f.hub.supersedeLandingOf(task); ok {
+		if err := f.hub.inbox.store.recordSupersedeLanding(t.Context(), landing); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.hub.sweepSupersedeLandings(t.Context())
+}
+
 func (f *supersedeFixture) rows(t *testing.T) []poolAction {
 	t.Helper()
 	rows, err := f.hub.inbox.store.supersedeActionsOf(t.Context(), f.job)
@@ -169,8 +181,8 @@ func TestSupersedeExplicitParentClosesIdleParentOnce(t *testing.T) {
 	if err := os.MkdirAll(worktree, 0755); err != nil {
 		t.Fatal(err)
 	}
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	row := f.onlyRow(t)
 	if row.Data.Kind != poolActionKindSupersedeClose || row.Job != f.job || row.Node != "machine-a" || row.Epoch != 1 || row.Data.Supersede.Successor != f.successor || row.Data.Pane != roleHeldPane || row.Data.Owner != "parent" {
 		t.Fatalf("row does not bind successor, node and epoch: %+v", row)
@@ -226,7 +238,7 @@ func TestSupersedeExplicitParentClosesIdleParentOnce(t *testing.T) {
 		t.Fatalf("row=%+v", rows)
 	}
 	// A later landing for the same parent adds no second row.
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	if rows := f.rows(t); len(rows) != 1 {
 		t.Fatalf("one row per parent, got %+v", rows)
 	}
@@ -237,7 +249,7 @@ func TestSupersedeExplicitParentClosesIdleParentOnce(t *testing.T) {
 // same.
 func TestSupersedeImplicitParentCreatesNoRow(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", false))
+	f.land(t, f.successorTask("implementer", "parent", false))
 	if rows := f.rows(t); len(rows) != 0 {
 		t.Fatalf("an implicit parent must create no row: %+v", rows)
 	}
@@ -247,7 +259,7 @@ func TestSupersedeImplicitParentCreatesNoRow(t *testing.T) {
 	}
 	task := f.successorTask("implementer", "parent", false)
 	task.Request = legacy
-	f.hub.maybeSupersedeParent(task)
+	f.land(t, task)
 	f.noMoreCommands(t)
 	if rows := f.rows(t); len(rows) != 0 {
 		t.Fatalf("a request with no field must create no row: %+v", rows)
@@ -262,7 +274,7 @@ func TestSupersedeNeverQueuesForTheseParentsOrSuccessors(t *testing.T) {
 	t.Run("reviewer and consult children", func(t *testing.T) {
 		f := newSupersedeFixture(t, nil)
 		for _, role := range []string{"reviewer", "consult"} {
-			f.hub.maybeSupersedeParent(f.successorTask(role, "parent", true))
+			f.land(t, f.successorTask(role, "parent", true))
 		}
 		if rows := f.rows(t); len(rows) != 0 {
 			t.Fatalf("a %s child must create no row: %+v", "reviewer or consult", rows)
@@ -270,7 +282,7 @@ func TestSupersedeNeverQueuesForTheseParentsOrSuccessors(t *testing.T) {
 	})
 	t.Run("keep parent", func(t *testing.T) {
 		f := newSupersedeFixture(t, func(request *fleet.Submission) { request.Args = append(request.Args, "--keep") })
-		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		f.land(t, f.successorTask("implementer", "parent", true))
 		if rows := f.rows(t); len(rows) != 0 {
 			t.Fatalf("a --keep parent must create no row: %+v", rows)
 		}
@@ -282,7 +294,7 @@ func TestSupersedeNeverQueuesForTheseParentsOrSuccessors(t *testing.T) {
 		f.hub.mu.Unlock()
 		task := f.successorTask("implementer", "parent", true)
 		task.Request.Args = []string{"--job", f.successor, "--parent-job", "local-job", "--owner", "parent", "--role", "implementer"}
-		f.hub.maybeSupersedeParent(task)
+		f.land(t, task)
 		rows, err := f.hub.inbox.store.supersedeActionsOf(t.Context(), "local-job")
 		if err != nil || len(rows) != 0 {
 			t.Fatalf("a parent with no spawn record must create no row: %+v %v", rows, err)
@@ -290,7 +302,7 @@ func TestSupersedeNeverQueuesForTheseParentsOrSuccessors(t *testing.T) {
 	})
 	t.Run("another lane", func(t *testing.T) {
 		f := newSupersedeFixture(t, nil)
-		f.hub.maybeSupersedeParent(f.successorTask("implementer", "other-lane", true))
+		f.land(t, f.successorTask("implementer", "other-lane", true))
 		if rows := f.rows(t); len(rows) != 0 {
 			t.Fatalf("a foreign successor must create no row: %+v", rows)
 		}
@@ -298,7 +310,7 @@ func TestSupersedeNeverQueuesForTheseParentsOrSuccessors(t *testing.T) {
 	t.Run("switch off", func(t *testing.T) {
 		f := newSupersedeFixture(t, nil)
 		f.hub.supersedeClose = false
-		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		f.land(t, f.successorTask("implementer", "parent", true))
 		if rows := f.rows(t); len(rows) != 0 {
 			t.Fatalf("with the switch off no row exists: %+v", rows)
 		}
@@ -308,7 +320,7 @@ func TestSupersedeNeverQueuesForTheseParentsOrSuccessors(t *testing.T) {
 		f.hub.mu.Lock()
 		f.hub.jobs[f.job].Completed = true
 		f.hub.mu.Unlock()
-		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		f.land(t, f.successorTask("implementer", "parent", true))
 		if rows := f.rows(t); len(rows) != 0 {
 			t.Fatalf("an ended parent must create no row: %+v", rows)
 		}
@@ -320,7 +332,7 @@ func TestSupersedeNeverQueuesForTheseParentsOrSuccessors(t *testing.T) {
 // the pane has stopped, closes it. A blocked pane waits too.
 func TestSupersedeWorkingParentStaysPendingUntilItStops(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	for _, status := range []string{"working", "working", "blocked"} {
 		if err := f.step(t, supersedeNoneStatus, supersedeProbe(status)); err != nil {
 			t.Fatal(err)
@@ -348,7 +360,7 @@ func TestSupersedeWorkingParentStaysPendingUntilItStops(t *testing.T) {
 // intent.
 func TestSupersedeRowSurvivesHubRestart(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	if err := f.step(t, supersedeNoneStatus, supersedeProbe("working")); err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +383,7 @@ func TestSupersedeRowSurvivesHubRestart(t *testing.T) {
 // one, then finishes.
 func TestSupersedeRestartAfterCloseRequestResumesIt(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), supersedeClosed); err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +443,7 @@ func TestSupersedeFailedHKWriteIsRetriedNotConsumed(t *testing.T) {
 	f.hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		return &fleet.App{JobStore: flaky, Out: out, Err: errout}, nil
 	}
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	if err := f.step(t); err == nil {
 		t.Fatal("a failed hk write must not be consumed")
 	}
@@ -457,7 +469,7 @@ func TestSupersedeFailedHKWriteIsRetriedNotConsumed(t *testing.T) {
 func TestSupersedePaneThatChangedHandsIsRefusedWithoutClosing(t *testing.T) {
 	t.Run("hub read finds another pane under the label", func(t *testing.T) {
 		f := newSupersedeFixture(t, nil)
-		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		f.land(t, f.successorTask("implementer", "parent", true))
 		other := poolActionReply{op: nodeCommandAgentsList, result: map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{{PaneID: "w9:p9", Name: "parent-job", AgentStatus: "idle", Cwd: "/work/project"}}, "panes_ok": true}}
 		release := poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": "00002-job.spawned.json"}}
 		if err := f.step(t, supersedeNoneStatus, other, release); err != nil {
@@ -470,7 +482,7 @@ func TestSupersedePaneThatChangedHandsIsRefusedWithoutClosing(t *testing.T) {
 	})
 	t.Run("node refuses the binding", func(t *testing.T) {
 		f := newSupersedeFixture(t, nil)
-		f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+		f.land(t, f.successorTask("implementer", "parent", true))
 		mismatch := poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": nodeCloseOpMismatch, "replayed": false}}
 		release := poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": "00002-job.spawned.json"}}
 		if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), mismatch, release); err != nil {
@@ -492,7 +504,7 @@ func TestSupersedePaneThatChangedHandsIsRefusedWithoutClosing(t *testing.T) {
 // ending, and the parent closes once it has stopped. The retry is bounded.
 func TestSupersedeRefusalWhilePaneRemainsIsAskedAgain(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	first := f.onlyRow(t)
 	refused := poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpRefused, "replayed": false}}
 	if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), refused, supersedeProbe("working")); err != nil {
@@ -521,7 +533,7 @@ func TestSupersedeRefusalWhilePaneRemainsIsAskedAgain(t *testing.T) {
 	// Bounded: every refusal with the pane still there asks again, up to the
 	// cap, then the row ends for good.
 	g := newSupersedeFixture(t, nil)
-	g.hub.maybeSupersedeParent(g.successorTask("implementer", "parent", true))
+	g.land(t, g.successorTask("implementer", "parent", true))
 	for i := 0; i < supersedeMaxGenerations; i++ {
 		replies := []poolActionReply{supersedeNoneStatus, supersedeProbe("idle"), refused}
 		if i < supersedeMaxGenerations-1 {
@@ -540,40 +552,57 @@ func TestSupersedeRefusalWhilePaneRemainsIsAskedAgain(t *testing.T) {
 	}
 }
 
-// TestSupersedeLandingHookQueuesRowFromTheSucceededSpawn: the succeeded spawn
-// operation itself creates the row, but only for an explicit parent.
-func TestSupersedeLandingHookQueuesRowFromTheSucceededSpawn(t *testing.T) {
-	for _, explicit := range []bool{true, false} {
+// TestSupersedeIntentIsCommittedWithTheSucceededSpawn (consult-5195-002ed32a):
+// the landing's intent is written in the transaction that makes the successor
+// succeeded, only for an explicit implementer parent and only while the switch
+// is on; when the intent cannot be stored the outcome is rolled back, so a
+// landing is never committed without it.
+func TestSupersedeIntentIsCommittedWithTheSucceededSpawn(t *testing.T) {
+	t.Run("explicit", func(t *testing.T) {
 		f := newSupersedeFixture(t, nil)
+		f.hub.inbox.store.landingIntent = f.hub.supersedeLandingOf
+		f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true)
+		if pending := f.pendingLandings(t); len(pending) != 1 || pending[0].RequestID != "d676220b-e763-4af1-aefd-000000000002" {
+			t.Fatalf("the spawn's own transaction must store the intent: %+v", pending)
+		}
+		f.hub.sweepSupersedeLandings(t.Context())
+		f.onlyRow(t)
+	})
+	t.Run("implicit or switch off", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.inbox.store.landingIntent = f.hub.supersedeLandingOf
+		f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, false)
+		f.hub.supersedeClose = false
+		f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000003", "successor-2", true)
+		f.hub.supersedeClose = true
+		if pending := f.pendingLandings(t); len(pending) != 0 {
+			t.Fatalf("no intent for an implicit parent or while off: %+v", pending)
+		}
+	})
+	t.Run("a failed intent write rolls the outcome back", func(t *testing.T) {
+		f := newSupersedeFixture(t, nil)
+		f.hub.inbox.store.landingIntent = f.hub.supersedeLandingOf
+		if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `DROP TABLE supersede_landings`); err != nil {
+			t.Fatal(err)
+		}
 		request := durableSpawnRequest()
 		request.RequestID = "d676220b-e763-4af1-aefd-000000000002"
 		request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", f.successor, "--job", f.successor, "--t", "T1", "--parent-job", f.job, "--owner", "parent", "--role", "implementer", "--host", "auto", "--report-relative", f.successor + "/report.md"}
-		request.ParentJobExplicit = explicit
+		request.ParentJobExplicit = true
 		request.Repository.Worktree = f.successor + "-checkout"
 		request.Repository.Checkout.Dir = f.successor + "-checkout"
 		task, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, f.successor, "parent", time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
-		changed, err := f.hub.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"})
-		if err != nil || !changed {
-			t.Fatalf("successor spawn must land: changed=%v err=%v", changed, err)
+		if changed, err := f.hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Pane: "w9:p9"}, time.Now()); err == nil || changed {
+			t.Fatalf("the outcome must not commit without its intent: changed=%v err=%v", changed, err)
 		}
-		if explicit {
-			eventually(t, 3*time.Second, "the landing to queue the close row", func() bool {
-				rows, err := f.hub.inbox.store.supersedeActionsOf(t.Context(), f.job)
-				return err == nil && len(rows) == 1
-			})
-			continue
+		saved, err := f.hub.inbox.store.spawnTask(t.Context(), request.RequestID)
+		if err != nil || saved.Status == "succeeded" {
+			t.Fatalf("the landing must stay uncommitted: %+v %v", saved, err)
 		}
-		// An implicit parent queues nothing; the landing hook has run once
-		// the next explicit landing's row exists, so check after a real
-		// explicit landing for another parent in this same hub.
-		f.hub.maybeSupersedeParent(task)
-		if rows := f.rows(t); len(rows) != 0 {
-			t.Fatalf("an implicit landing must queue nothing: %+v", rows)
-		}
-	}
+	})
 }
 
 // TestSupersedeNeverSendsReapOrWorktreeCommands: the hub no longer closes a
@@ -582,7 +611,7 @@ func TestSupersedeLandingHookQueuesRowFromTheSucceededSpawn(t *testing.T) {
 // pane read go to the node.
 func TestSupersedeNeverSendsReapOrWorktreeCommands(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	allowed := map[string]bool{nodeCommandPaneCloseStatus: true, nodeCommandAgentsList: true, nodeCommandPaneCloseOp: true}
 	pass := func(replies ...poolActionReply) {
 		done := make(chan error, 1)
@@ -669,7 +698,7 @@ func TestSupersedeCloseIsOnByDefaultOnTheHubCommandLine(t *testing.T) {
 // touches a request already dispatched.
 func TestSupersedeOffSwitchCancelsRowsThatSentNothing(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	if err := f.step(t, supersedeNoneStatus, supersedeProbe("working")); err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +715,7 @@ func TestSupersedeOffSwitchCancelsRowsThatSentNothing(t *testing.T) {
 
 	// A dispatched request is finished, not abandoned.
 	g := newSupersedeFixture(t, nil)
-	g.hub.maybeSupersedeParent(g.successorTask("implementer", "parent", true))
+	g.land(t, g.successorTask("implementer", "parent", true))
 	if err := g.step(t, supersedeNoneStatus, supersedeProbe("idle"), supersedeClosed); err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +769,7 @@ func TestSupersedeLandingThatCouldNotDecideIsRetried(t *testing.T) {
 	delete(f.hub.jobs, f.job)
 	f.hub.mu.Unlock()
 	task := f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true)
-	f.hub.maybeSupersedeParent(task)
+	f.land(t, task)
 	if rows := f.rows(t); len(rows) != 0 {
 		t.Fatalf("no row while the parent is unknown: %+v", rows)
 	}
@@ -771,7 +800,7 @@ func TestSupersedeIntentSurvivesHubRestartBeforeTheRowExists(t *testing.T) {
 	f.hub.mu.Lock()
 	delete(f.hub.jobs, f.job)
 	f.hub.mu.Unlock()
-	f.hub.maybeSupersedeParent(f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true))
+	f.land(t, f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true))
 	restartPoolActionHub(t, f.quotaReplaceFixture)
 	f.hub.supersedeClose = true
 	f.hub.mu.Lock()
@@ -788,7 +817,7 @@ func TestSupersedeIntentSurvivesHubRestartBeforeTheRowExists(t *testing.T) {
 func TestSupersedeLandingsFromADisabledPeriodCloseNothing(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
 	f.hub.supersedeClose = false
-	f.hub.maybeSupersedeParent(f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true))
+	f.land(t, f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000002", f.successor, true))
 	f.hub.supersedeClose = true
 	f.hub.sweepSupersedeLandings(t.Context())
 	if len(f.pendingLandings(t)) != 0 || len(f.rows(t)) != 0 {
@@ -798,7 +827,7 @@ func TestSupersedeLandingsFromADisabledPeriodCloseNothing(t *testing.T) {
 	f.hub.mu.Lock()
 	delete(f.hub.jobs, f.job)
 	f.hub.mu.Unlock()
-	f.hub.maybeSupersedeParent(f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000003", "successor-2", true))
+	f.land(t, f.landSuccessor(t, "d676220b-e763-4af1-aefd-000000000003", "successor-2", true))
 	if len(f.pendingLandings(t)) != 1 {
 		t.Fatal("the undecided intent is stored")
 	}
@@ -848,7 +877,7 @@ func TestSupersedeOffSwitchFencesAStoredButUnsentRequest(t *testing.T) {
 	}{{"none", nodeCloseOpNone, false}, {"registered", fleet.CloseOpRegistered, false}, {"closing", fleet.CloseOpClosing, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSupersedeFixture(t, nil)
-			f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+			f.land(t, f.successorTask("implementer", "parent", true))
 			// Store the request without sending it, as a stop between the
 			// save and the send leaves it.
 			row := f.onlyRow(t)
@@ -884,7 +913,7 @@ func TestSupersedeOffSwitchFencesAStoredButUnsentRequest(t *testing.T) {
 // attempt on the same pane is released, never closed.
 func TestSupersedeRetryStaysBoundToTheRefusedAttempt(t *testing.T) {
 	f := newSupersedeFixture(t, nil)
-	f.hub.maybeSupersedeParent(f.successorTask("implementer", "parent", true))
+	f.land(t, f.successorTask("implementer", "parent", true))
 	refused := poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpPreempted, "replayed": false}}
 	if err := f.step(t, supersedeNoneStatus, supersedeProbe("idle"), refused, supersedeProbe("idle")); err != nil {
 		t.Fatal(err)
@@ -902,5 +931,129 @@ func TestSupersedeRetryStaysBoundToTheRefusedAttempt(t *testing.T) {
 	f.noMoreCommands(t)
 	if rows := f.rows(t); rows[len(rows)-1].Phase != poolActionRefused {
 		t.Fatalf("a new attempt must never be closed by the old request: %+v", rows)
+	}
+}
+
+// restartHubWith restarts the fixture's hub with the switch set as given, as an
+// operator restarting it with or without --supersede-close.
+func (f *supersedeFixture) restartHubWith(t *testing.T, on bool) {
+	t.Helper()
+	f.hub.supersedeClose = on
+	restartPoolActionHub(t, f.quotaReplaceFixture)
+	f.hub.mu.Lock()
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
+	f.hub.jobs[f.job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: f.job, OwnerLane: "parent", Epoch: 1, Pane: roleHeldPane}, Node: "machine-a", LastSeen: time.Now().UTC()}
+	f.hub.mu.Unlock()
+}
+
+// storeUnsentRequest saves a close request on the row without sending it, as a
+// stop between the save and the send leaves it.
+func (f *supersedeFixture) storeUnsentRequest(t *testing.T) {
+	t.Helper()
+	row := f.onlyRow(t)
+	row.Data.Supersede.Recorded = true
+	row.Data.Args = &nodePaneCloseOpArgs{RequestID: row.ID, Job: f.job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project", EndReason: row.Data.EndReason}
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), row); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSupersedeRevocationSurvivesAnOfflineNodeAndAnEnabledRestart is
+// consult-5195-002ed32a (PRRT_kwDOUGxnCM642fyp): a hub started with the switch
+// off revokes a stored request; a later enabled hub, started before the node
+// reconnects and so unable to release it, must not send it. It stays
+// cancellation-only until the release tombstone is proved.
+func TestSupersedeRevocationSurvivesAnOfflineNodeAndAnEnabledRestart(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.land(t, f.successorTask("implementer", "parent", true))
+	f.storeUnsentRequest(t)
+	f.restartHubWith(t, false) // off start: advances the fence, node never asked
+	f.restartHubWith(t, true)  // enabled start, node still unreachable for release
+	row := f.onlyRow(t)
+	// The node does not answer the status call: the row must stay pending and
+	// nothing may be sent.
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- f.hub.reconcilePoolAction(ctx, row) }()
+	command := nodeCommandRead(t, f.node)
+	if string(command["op"]) != `"`+nodeCommandPaneCloseStatus+`"` {
+		t.Fatalf("a revoked request must first ask the node's status, got %s", command["op"])
+	}
+	if err := <-done; err == nil {
+		t.Fatal("an unanswered node must leave the revoked row pending")
+	}
+	if got := f.onlyRow(t); got.Phase != poolActionPending {
+		t.Fatalf("row=%+v", got)
+	}
+	// The node answers later: the request is released, never sent.
+	release := poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": "00002-job.spawned.json"}}
+	if err := f.step(t, supersedeNoneStatus, release); err != nil {
+		t.Fatal(err)
+	}
+	f.noMoreCommands(t)
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
+		t.Fatalf("rows=%+v", rows)
+	}
+}
+
+// TestSupersedeOffStartRevokesIntentsAndRowsBeforeAnyWork: an off start moves
+// the fence synchronously; a later enabled hub cancels a landing intent and a
+// row that sent nothing without any sweep having run in between.
+func TestSupersedeOffStartRevokesIntentsAndRowsBeforeAnyWork(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	f.land(t, f.successorTask("implementer", "parent", true)) // a row queued
+	f.hub.mu.Lock()
+	delete(f.hub.jobs, f.job)
+	f.hub.mu.Unlock()
+	if err := f.hub.inbox.store.recordSupersedeLanding(t.Context(), supersedeLanding{RequestID: "req-old", Parent: "other-parent", Successor: "succ-old", Owner: "parent", Created: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	f.restartHubWith(t, false)
+	f.restartHubWith(t, true)
+	f.hub.sweepSupersedeLandings(t.Context())
+	if pending := f.pendingLandings(t); len(pending) != 0 {
+		t.Fatalf("an intent of an earlier generation is cancelled: %+v", pending)
+	}
+	if err := f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)); err != nil {
+		t.Fatal(err)
+	}
+	f.noMoreCommands(t)
+	if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
+		t.Fatalf("a row of an earlier generation that sent nothing must end: %+v", rows)
+	}
+}
+
+// TestSupersedeOffStartFailsWhenTheFenceCannotBeRecorded: an off start that
+// cannot persist the revocation does not run.
+func TestSupersedeOffStartFailsWhenTheFenceCannotBeRecorded(t *testing.T) {
+	f := newSupersedeFixture(t, nil)
+	if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `DROP TABLE supersede_fence`); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.supersedeClose = false
+	if err := f.hub.initSupersedeFence(); err == nil {
+		t.Fatal("an off start must fail when the fence is not recorded")
+	}
+	f.hub.supersedeClose = true
+	if err := f.hub.initSupersedeFence(); err != nil || f.hub.supersedeClose {
+		t.Fatalf("an enabled start that cannot read the fence keeps dispatch closed: err=%v on=%v", err, f.hub.supersedeClose)
+	}
+}
+
+// TestSupersedeCancelledRowCreatesNoReplacement: a revoked request the node
+// refuses or loses is never asked again under a new id.
+func TestSupersedeCancelledRowCreatesNoReplacement(t *testing.T) {
+	for _, state := range []string{fleet.CloseOpRefused, fleet.CloseOpPreempted} {
+		f := newSupersedeFixture(t, nil)
+		f.land(t, f.successorTask("implementer", "parent", true))
+		f.storeUnsentRequest(t)
+		f.hub.supersedeClose = false
+		if err := f.step(t, poolStatus(state, false, false)); err != nil {
+			t.Fatal(err)
+		}
+		if rows := f.rows(t); len(rows) != 1 || rows[0].Phase != poolActionRefused {
+			t.Fatalf("%s: a cancelled row must end without a replacement: %+v", state, rows)
+		}
 	}
 }
