@@ -95,6 +95,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	consultTimeout := flags.Duration("consult-timeout", defaultHubConsultTimeout, "how long one consult may take from request to answer")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
 	placementPolicyPath := flags.String("placement-policy", "/etc/panewire/placement.json", "operator-owned JSON placement policy (hot-reloaded)")
+	supersedeClose := flags.Bool("supersede-close", true, "let a landed implementer successor that named its parent with --parent-job close that parent's pane through a durable action (hk 5140, hk 5195); --supersede-close=false turns it off")
 	spawnRollbackDrain := flags.Bool("spawn-rollback-drain", false, "accept no spawn submission and start no quota hand-off or consult spawn, while queued spawns settle, before a hub rollback past parking")
 	spawnGrantDrain := flags.Bool("spawn-grant-drain", false, "bind no new grant-required spawn and start no quota hand-off, to drain *_grant rows before a hub rollback")
 	uiAllowCFOnly := flags.Bool("ui-allow-cf-only", false, "serve /ui only to Cloudflare Access identities or loopback clients")
@@ -213,10 +214,19 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
 		}
 	}
+	if !*supersedeClose && (*deliveryPolicyPath == "off" || (*inboxStorePath == "" && os.Getenv(hubDatabaseURLEnv) == "")) {
+		// A start that runs without the inbox (the kill switch never opens
+		// the database; an empty --inbox-store with no database URL opens
+		// none) could not record the revocation that --supersede-close=false
+		// promises (supersede_fence, hk 5195), and a later start on the same
+		// store would resume what it meant to revoke. Start once with the
+		// inbox.
+		return nil, "", ExitUsage, errors.New("--supersede-close=false cannot be recorded when the hub runs without its inbox database (--delivery-policy=off, or an empty --inbox-store with no " + hubDatabaseURLEnv + "); start once with the inbox")
+	}
 	if *paneSweepInterval < 0 || (*paneSweepInterval > 0 && *paneSweepInterval < minTaskPaneSweepInterval) || *paneSweepAge < 0 || *paneSweepAge > time.Duration(nodePaneSweepMaxAgeSeconds)*time.Second {
 		return nil, "", ExitConditionInvalid, errors.New("hub pane sweep flags are invalid")
 	}
-	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, PaneSweepInterval: *paneSweepInterval, PaneSweepAge: *paneSweepAge, FleetStatusInterval: *fleetStatusInterval, LoopsNoticeLane: *loopsNoticeLane, ConsultTimeout: *consultTimeout, Logger: logger, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, PRStatusHost: *prStatusHost, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, SpawnGrantDrain: *spawnGrantDrain, SpawnRollbackDrain: *spawnRollbackDrain, handoffkeep: handoffkeep})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, PaneSweepInterval: *paneSweepInterval, PaneSweepAge: *paneSweepAge, FleetStatusInterval: *fleetStatusInterval, LoopsNoticeLane: *loopsNoticeLane, ConsultTimeout: *consultTimeout, Logger: logger, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, PRStatusHost: *prStatusHost, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, SpawnGrantDrain: *spawnGrantDrain, SpawnRollbackDrain: *spawnRollbackDrain, SupersedeClose: *supersedeClose, handoffkeep: handoffkeep})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, fmt.Errorf("hub configuration is invalid: %w", err)
 	}

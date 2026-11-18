@@ -47,6 +47,9 @@ type laneInboxStore struct {
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration
+	// landingIntent, set by the hub, decides inside the spawn completion
+	// transaction whether a succeeded successor owes a supersede close.
+	landingIntent func(hubSpawnTask) (supersedeLanding, bool)
 	// spawnFrozen refuses every new spawn row (--spawn-rollback-drain).
 	spawnFrozen bool
 }
@@ -152,6 +155,10 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		`CREATE INDEX IF NOT EXISTS pool_actions_phase ON pool_actions(phase, id)`,
 		accountCreditMarkSchema,
 		oneTimeActionSchema,
+		supersedeFenceSchema,
+		`INSERT OR IGNORE INTO supersede_fence(singleton,generation) VALUES(1,1)`,
+		supersedeLandingSchema,
+		`CREATE INDEX IF NOT EXISTS supersede_landings_pending ON supersede_landings(state, tried_ms, created_ms)`,
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			db.Close()

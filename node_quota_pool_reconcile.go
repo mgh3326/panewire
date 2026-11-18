@@ -21,7 +21,7 @@ const (
 // this node's Herdr agents. The ledger's identity and startup guards decide
 // which absent jobs are safe to release.
 func (client *HubClient) runQuotaPoolReconcile(ctx context.Context) {
-	if client.jobsInboxRoot == "" {
+	if client.jobsInboxRoot == "" || !client.quotaPoolReconcile {
 		return
 	}
 	pass := client.quotaReconcile.pass
@@ -46,6 +46,9 @@ func (client *HubClient) runQuotaPoolReconcile(ctx context.Context) {
 }
 
 func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
+	if !client.quotaPoolReconcile {
+		return
+	}
 	newApp := client.quotaReconcile.app
 	if newApp == nil {
 		newApp = func() (*fleet.App, error) { return fleet.New(slogWarnWriter{}, slogWarnWriter{}) }
@@ -64,20 +67,20 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 		readAgents = client.readNodeAgentsInSession
 	}
 	result, err := app.ReconcileLedgerForJobs(passCtx, func(ctx context.Context, jobs []string) ([]arbiter.Agent, error) {
-		sessions := make(map[string]bool)
+		sessionJobs := make(map[string]int)
 		for _, job := range jobs {
 			session, err := client.nodeJobHerdrSession(job)
 			if err != nil {
 				return nil, err
 			}
-			sessions[firstNonempty(session, app.HerdrSession)] = true
+			sessionJobs[firstNonempty(session, app.HerdrSession)]++
 		}
-		if len(sessions) == 0 {
-			sessions[app.HerdrSession] = true
-		}
-		names := make([]string, 0, len(sessions))
-		for session := range sessions {
+		names := make([]string, 0, len(sessionJobs))
+		for session := range sessionJobs {
 			names = append(names, session)
+		}
+		if len(names) == 0 {
+			names = append(names, app.HerdrSession)
 		}
 		sort.Strings(names)
 		client.nodeCommandMu.Lock()
@@ -89,11 +92,20 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 				return nil, err
 			}
 			for _, row := range rows {
-				if row.Name == "" || row.AgentStatus == "" {
+				if row.AgentStatus == "" {
 					return nil, errors.New("herdr agent snapshot has incomplete identity")
+				}
+				if row.Name == "" {
+					slog.Warn("herdr agent snapshot has row without a name", "session", session, "status", row.AgentStatus)
+					if sessionJobs[session] > 0 {
+						return nil, errors.New("herdr agent snapshot has incomplete identity for session holding jobs")
+					}
 				}
 				agents = append(agents, arbiter.Agent{Status: row.AgentStatus, Name: row.Name})
 			}
+		}
+		if len(jobs) > 0 && len(agents) == 0 {
+			return nil, errors.New("herdr agent snapshot is empty while jobs are held")
 		}
 		return agents, nil
 	})

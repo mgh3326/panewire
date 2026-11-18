@@ -65,6 +65,11 @@ type Submission struct {
 	// first: a hub that predates it would run the job in the node's cwd_map
 	// path instead of the named commit. Never on the wire.
 	CheckoutSpec bool `json:"-"`
+	// ParentJobExplicit records that the submitter typed --parent-job on its
+	// command line, as opposed to a parent filled from ARBITER_JOB. The hub
+	// closes a replaced parent's pane only when it is true (hk 5195). An
+	// older client sends no field, which reads as not explicit.
+	ParentJobExplicit bool `json:"parent_job_explicit,omitempty"`
 }
 
 type LadderStepIdentity struct {
@@ -417,7 +422,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 			return Submission{}, fail(exitUsage, "%v", err)
 		}
 	}
-	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, CheckoutSpec: spec != nil, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn), StartConditions: conditions, ExpiresSeconds: expiresSeconds}
+	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, CheckoutSpec: spec != nil, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn), StartConditions: conditions, ExpiresSeconds: expiresSeconds, ParentJobExplicit: s.parentJobExplicit && s.ParentJob != ""}
 	if _, err = ValidateSubmission(request); err != nil {
 		return Submission{}, err
 	}
@@ -461,6 +466,9 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	}
 	if s.Task != "" && s.ParentJob != "" {
 		return s, fail(exitUsage, "--task and --parent-job are exclusive")
+	}
+	if request.ParentJobExplicit && s.ParentJob == "" {
+		return s, fail(exitUsage, "parent_job_explicit without --parent-job; rebuild the request with panewire spawn")
 	}
 	if s.Owner == "" {
 		return s, fail(exitUsage, "supply --owner LANE so completion can be delivered")

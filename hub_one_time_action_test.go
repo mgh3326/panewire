@@ -393,3 +393,52 @@ func TestOneTimeActionSendsOneSentryWarning(t *testing.T) {
 		t.Fatalf("event=%+v", event)
 	}
 }
+
+// A need of a kind no readiness report covers (kiro, opencode) is never
+// cleared by a report: the report says nothing about it, so its refusal is not
+// told again on every cycle.
+func TestOneTimeActionUncoveredKindIsNotClearedByReports(t *testing.T) {
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+	h.noteOneTimeAction("oci", "kiro", oneTimeLoginMissing, start)
+	covered := func(at time.Time) *fleet.Readiness {
+		return &fleet.Readiness{CheckedAt: at, Harnesses: map[string]fleet.HarnessReadiness{
+			"claude": {Installed: true, Login: fleet.ReadinessLoginPresent},
+		}}
+	}
+	for _, at := range []time.Time{start.Add(time.Minute), start.Add(time.Minute + cycle), start.Add(time.Minute + 2*cycle)} {
+		h.noteReadinessActions("oci", covered(at), at)
+	}
+	later := start.Add(time.Minute + 3*cycle)
+	h.noteOneTimeAction("oci", "kiro", oneTimeLoginMissing, later)
+	if got := oneTimeMessages(transport); len(got) != 1 || got[0] != "ACTION NEEDED: oci kiro — log in" {
+		t.Fatalf("an uncovered need was told again after reports that do not cover it: %q", got)
+	}
+}
+
+// Without a configured Sentry reporter nothing is delivered, so the need is not
+// recorded as told: a later report, once reporting is configured, tells it.
+func TestOneTimeActionUntoldWhenSentryIsNotConfigured(t *testing.T) {
+	t.Setenv(crashReportDSNEnv, "")
+	h := newOneTimeHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	now := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	h.noteOneTimeAction("oci", "codex", fleet.DialogCodexHooksReview, now)
+	h.oneTimeMu.Lock()
+	recorded := len(h.oneTimeActions)
+	h.oneTimeMu.Unlock()
+	if recorded != 0 {
+		t.Fatalf("an undelivered need was recorded as told: %d", recorded)
+	}
+	told, err := h.inbox.store.oneTimeActions(t.Context())
+	if err != nil || len(told) != 0 {
+		t.Fatalf("an undelivered need was stored as told: %v %v", told, err)
+	}
+
+	transport := oneTimeSentry(t, h)
+	h.noteOneTimeAction("oci", "codex", fleet.DialogCodexHooksReview, now.Add(5*time.Minute))
+	if got := oneTimeMessages(transport); len(got) != 1 || got[0] != "ACTION NEEDED: oci codex — run codex once and choose Trust all and continue" {
+		t.Fatalf("the need was not told once reporting is configured: %q", got)
+	}
+}

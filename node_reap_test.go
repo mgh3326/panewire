@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mgh3326/panewire/internal/arbiter"
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const (
@@ -403,6 +406,17 @@ func nodeReapNode(t *testing.T, hub *HubServer, server *httptest.Server, machine
 		t.Fatal(err)
 	}
 	client.nodeHerdr = fake.run
+	// Run starts a quota-pool reconcile that passes once at startup and reads
+	// the ledger, then lists agents through nodeHerdr. The default ledger is
+	// process-wide (every test shares XDG_DATA_HOME), so once an earlier test
+	// has created it, that background pass reaches this fake and its
+	// "agent list" calls leak into the assertions below. Give the node a
+	// private ledger that does not exist: the pass fails closed before it
+	// reads Herdr, so the fake sees only this test's requests.
+	ledger := &arbiter.Store{DB: arbiter.StatePath(t.TempDir()), Inbox: t.TempDir()}
+	client.quotaReconcile.app = func() (*fleet.App, error) {
+		return &fleet.App{Arbiter: ledger}, nil
+	}
 	if len(lifecycle) > 0 {
 		client.nodeLifecycle = lifecycle[0]
 	}

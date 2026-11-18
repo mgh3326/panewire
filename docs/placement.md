@@ -360,13 +360,18 @@ ACTION NEEDED: oci codex — run codex once and choose Trust all and continue
 A need is a readiness `dialog` value or `login: missing`; a refusal above counts
 as a report of the same need. The text carries the host, the kind and the
 action only, never screen content. The hub tells each (host, kind, need) once
-while it stands. The told state is kept in the hub store (table
-`one_time_action_notices`, Postgres migration 0025) and read back at start, so a
+while it stands, and records it as told only after the Sentry transport accepts
+and flushes the event (bounded at 2 s). With no Sentry DSN nothing is told, and
+the next report tries again. The told state is kept in the hub store (table
+`one_time_action_notices`, Postgres migration 0026) and read back at start, so a
 hub restart does not tell a standing need again. A need clears only when a
 readiness report shows it gone and it stays gone for one full readiness cycle
 (5 minutes): a report that shows it again inside that cycle cancels the clear
 and tells nothing. A report computed before the notice cannot clear it, and a
-need that clears and comes back is told again.
+need that clears and comes back is told again. A need of a kind the readiness
+report does not cover (kiro, opencode) is never cleared by a report, so it
+stays told until its row is cleared by hand. This is a known gap: no path clears
+it yet, not even a successful launch of that kind.
 
 ### Spawner configuration
 

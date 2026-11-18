@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -52,9 +53,19 @@ func oneTimeActionFor(kind, need string) string {
 	return ""
 }
 
+// oneTimeSentryFlushTimeout bounds the wait for the transport to accept the
+// notice before the need is recorded as told.
+const oneTimeSentryFlushTimeout = 2 * time.Second
+
+// errOneTimeSentryUnconfigured says no Sentry DSN is set, so nothing is sent.
+var errOneTimeSentryUnconfigured = errors.New("sentry is not configured")
+
 // noteOneTimeAction tells the operator about a need the first time it is seen
 // for (machine, kind, need). A later sighting while the need is told sends
-// nothing; it only restarts the clear countdown if the need had gone.
+// nothing; it only restarts the clear countdown if the need had gone. A need is
+// recorded as told only once the Sentry transport has accepted and flushed its
+// notice; until then the next report tries again. oneTimeMu is held across the
+// send, so two sightings cannot both tell one need.
 func (h *HubServer) noteOneTimeAction(machine, kind, need string, at time.Time) {
 	action := oneTimeActionFor(kind, need)
 	if action == "" || machine == "" || kind == "" {
@@ -62,13 +73,21 @@ func (h *HubServer) noteOneTimeAction(machine, kind, need string, at time.Time) 
 	}
 	key := oneTimeActionKey{machine, kind, need}
 	h.oneTimeMu.Lock()
+	defer h.oneTimeMu.Unlock()
 	if state, told := h.oneTimeActions[key]; told {
 		if !state.GoneSince.IsZero() {
 			state.GoneSince = time.Time{}
 			h.oneTimeActions[key] = state
 			h.putOneTimeActionLocked(key, state)
 		}
-		h.oneTimeMu.Unlock()
+		return
+	}
+	if err := h.sendOneTimeAction(machine, kind, need, action); err != nil {
+		if errors.Is(err, errOneTimeSentryUnconfigured) {
+			h.logger.Debug("one-time action not told: no Sentry DSN", "host", machine, "kind", kind, "need", need)
+		} else {
+			h.logger.Warn("one-time action not told; the next readiness report tries again", "host", machine, "kind", kind, "need", need, "error", err)
+		}
 		return
 	}
 	if h.oneTimeActions == nil {
@@ -77,15 +96,29 @@ func (h *HubServer) noteOneTimeAction(machine, kind, need string, at time.Time) 
 	state := oneTimeActionState{ToldAt: at}
 	h.oneTimeActions[key] = state
 	h.putOneTimeActionLocked(key, state)
-	h.oneTimeMu.Unlock()
 	h.logger.Warn("host needs a one-time action", "host", machine, "kind", kind, "need", need)
-	if client := h.spawnSentryClient(); client != nil {
-		hub := sentry.NewHub(client, sentry.NewScope())
-		// The title and fingerprint carry the action without its quotes, so one
-		// issue is one host and action and the Discord rule posts it once.
-		plain := strings.ReplaceAll(action, `"`, "")
-		hub.CaptureEvent(&sentry.Event{Level: sentry.LevelWarning, Message: fmt.Sprintf("ACTION NEEDED: %s %s — %s", machine, kind, plain), Fingerprint: []string{"action-needed", machine, kind, plain}, Tags: map[string]string{"host": machine, "kind": kind, "need": need}})
+}
+
+// sendOneTimeAction hands the ACTION NEEDED event to the Sentry transport and
+// waits, bounded, for it to flush. It answers an error when reporting is not
+// configured or the event was not accepted.
+func (h *HubServer) sendOneTimeAction(machine, kind, need, action string) error {
+	client := h.spawnSentryClient()
+	if client == nil || client.Options().Dsn == "" {
+		return errOneTimeSentryUnconfigured
 	}
+	hub := sentry.NewHub(client, sentry.NewScope())
+	// The title and fingerprint carry the action without its quotes, so one
+	// issue is one host and action and the Discord rule posts it once.
+	plain := strings.ReplaceAll(action, `"`, "")
+	event := &sentry.Event{Level: sentry.LevelWarning, Message: fmt.Sprintf("ACTION NEEDED: %s %s — %s", machine, kind, plain), Fingerprint: []string{"action-needed", machine, kind, plain}, Tags: map[string]string{"host": machine, "kind": kind, "need": need}}
+	if hub.CaptureEvent(event) == nil {
+		return errors.New("sentry dropped the action-needed event")
+	}
+	if !client.Flush(oneTimeSentryFlushTimeout) {
+		return errors.New("sentry did not flush the action-needed event in time")
+	}
+	return nil
 }
 
 // noteOneTimeActionRefusal reads a failed node result the spawn engine made
@@ -137,10 +170,13 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
 	for key, state := range h.oneTimeActions {
-		if key.machine != machine || !report.CheckedAt.After(state.ToldAt) {
+		// A kind the report does not cover (kiro, opencode) says nothing about the
+		// need, so it can neither show it gone nor clear it.
+		harness, covered := report.Harnesses[key.kind]
+		if key.machine != machine || !covered || !report.CheckedAt.After(state.ToldAt) {
 			continue
 		}
-		shows := readinessShowsNeed(report.Harnesses[key.kind], key.need)
+		shows := readinessShowsNeed(harness, key.need)
 		switch {
 		case shows && !state.GoneSince.IsZero():
 			state.GoneSince = time.Time{}

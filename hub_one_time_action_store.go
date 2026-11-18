@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// oneTimeActionSchema is also installed by Postgres migration 0025. The
+// oneTimeActionSchema is also installed by Postgres migration 0026. The
 // milliseconds are UTC; gone_ms is 0 while the need shows.
 const oneTimeActionSchema = `CREATE TABLE IF NOT EXISTS one_time_action_notices (
  machine TEXT NOT NULL, kind TEXT NOT NULL, need TEXT NOT NULL,

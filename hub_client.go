@@ -57,6 +57,7 @@ type HubClientConfig struct {
 	PreferRetry           time.Duration
 	Version               string
 	AllowInsecureForTests bool
+	QuotaPoolReconcile    bool
 	Dial                  HubDial
 	Wait                  HubWait
 	Warn                  func(string)
@@ -211,11 +212,12 @@ type HubClient struct {
 	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
 	// Job dir TTL loop (node_pane_sweep.go): hourly and independent of the
 	// pane sweep interval, so a node without a sweep still expires dirs.
-	jobDirTTLTicks <-chan time.Time      // fixture seam; nil uses a ticker.
-	jobDirTTLPass  func(context.Context) // fixture seam; nil runs the real pass.
-	quotaReconcile quotaPoolReconcileHooks
-	nodeTaskState  fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
-	nodePR         fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
+	jobDirTTLTicks     <-chan time.Time      // fixture seam; nil uses a ticker.
+	jobDirTTLPass      func(context.Context) // fixture seam; nil runs the real pass.
+	quotaPoolReconcile bool
+	quotaReconcile     quotaPoolReconcileHooks
+	nodeTaskState      fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
+	nodePR             fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
 
 	// taskPaneSweepMu serializes the node's sweeps over one shared sweeper: the
 	// local pass and the hub's pane.sweep command (node_pane_sweep_ended.go).
@@ -396,7 +398,8 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	}
 	client := &HubClient{
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnConfigDefault: config.SpawnConfigPath == "", spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
-		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
+		quotaPoolReconcile: config.QuotaPoolReconcile,
+		failoverWakeOn:     config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		helloAckTimeout: config.helloAckTimeout,
 		relayControl:    newClientRelayControlState(config),
 		checks:          cloneHubChecks(config.Checks), execute: config.Execute,
