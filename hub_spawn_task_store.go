@@ -172,7 +172,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	if s.dialect == laneInboxPostgres {
 		// The schema is migrated; the outboxes still reconcile with the history
 		// at every start (hk 5298).
-		ctx, done := s.op(s.life)
+		ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 		defer done()
 		return s.reconcileSpawnOutboxes(ctx)
 	}
@@ -248,8 +248,10 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	if err := s.backfillSpawnTaskFailNotices(ctx, time.Now().UTC()); err != nil {
 		return err
 	}
-	// The placement-record and notice outboxes (hk 5298; postgres: 0028).
-	return s.ensureSpawnOutboxes(ctx)
+	// The placement-record and notice outboxes (hk 5298; postgres: 0028). They
+	// take the startup deadline from the store's life, not what is left of this
+	// call's ordinary one: the reconcile reads the history's owed rows.
+	return s.ensureSpawnOutboxes(s.life)
 }
 
 func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submission, job, owner string, now time.Time) (hubSpawnTask, bool, error) {

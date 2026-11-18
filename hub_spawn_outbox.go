@@ -77,15 +77,27 @@ func (s *laneInboxStore) dequeueDeliveredSpawnNotice(ctx context.Context, x sqlE
 	return err
 }
 
+// The owed rows of the two history tables, as a partial index each: the
+// reconcile below reads only these, so its cost follows the rows still owed
+// (a handful), not the retained history. The predicates match the reconcile's
+// word for word, which is what lets either planner use them. Postgres makes
+// the same two in migration 0028.
+const (
+	spawnPlacementUnsealedIndex        = `CREATE INDEX IF NOT EXISTS spawn_placement_snapshots_unsealed ON spawn_placement_snapshots(request_id,attempt) WHERE recorded<>1`
+	spawnNotificationsUndeliveredIndex = `CREATE INDEX IF NOT EXISTS spawn_notifications_undelivered ON spawn_notifications(event_id) WHERE delivered<>1`
+)
+
 // ensureSpawnOutboxes creates the SQLite outbox tables and reconciles both
 // outboxes with the history tables (reconcileSpawnOutboxes). Postgres gets its
 // tables from migration 0028.
 func (s *laneInboxStore) ensureSpawnOutboxes(parent context.Context) error {
-	ctx, done := s.op(parent)
+	ctx, done := s.opWithin(parent, laneInboxStartupTimeout)
 	defer done()
 	for _, statement := range []string{
 		`CREATE TABLE IF NOT EXISTS placement_record_outbox (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,PRIMARY KEY(request_id,attempt))`,
 		`CREATE TABLE IF NOT EXISTS spawn_notice_outbox (event_id TEXT PRIMARY KEY)`,
+		spawnPlacementUnsealedIndex,
+		spawnNotificationsUndeliveredIndex,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
@@ -101,7 +113,8 @@ func (s *laneInboxStore) ensureSpawnOutboxes(parent context.Context) error {
 // before the outboxes (a rollback) writes snapshots and notifications and
 // seals them without touching the outboxes, so the first start after returning
 // to this release must carry over what that binary left pending and drop what
-// it finished. All four statements commit together.
+// it finished. All four statements commit together. The caller gives it the
+// startup deadline, not the ordinary per-operation one.
 func (s *laneInboxStore) reconcileSpawnOutboxes(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

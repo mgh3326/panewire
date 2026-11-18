@@ -306,3 +306,51 @@ func TestSpawnOutboxNoticeLifecycle_t5298(t *testing.T) {
 		t.Fatalf("router paged the notification history: %d events", rows())
 	}
 }
+
+// The start-up reconcile reads only the rows still owed. Each history table has
+// a partial index on its owed predicate, and the SQLite planner uses it for the
+// reconcile's own selects, so the cost follows the pending rows and not the
+// retained history (review of hk 5298).
+func TestSpawnOutboxReconcileReadsOwedRowsByIndex_t5298(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		if err := s.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		catalog := `SELECT name FROM sqlite_master WHERE type='index'`
+		if s.dialect == laneInboxPostgres {
+			catalog = `SELECT indexname FROM pg_indexes WHERE schemaname=current_schema()`
+		}
+		have := outboxKeys(t, s, catalog)
+		for _, name := range []string{"spawn_placement_snapshots_unsealed", "spawn_notifications_undelivered"} {
+			if !slices.Contains(have, name) {
+				t.Fatalf("index %s missing from %v", name, have)
+			}
+		}
+		if s.dialect == laneInboxPostgres {
+			return // the planner's choice on an empty table proves nothing; CI checks the index exists
+		}
+		for query, index := range map[string]string{
+			`SELECT request_id,attempt FROM spawn_placement_snapshots WHERE recorded<>1`: "spawn_placement_snapshots_unsealed",
+			`SELECT event_id FROM spawn_notifications WHERE delivered<>1`:                "spawn_notifications_undelivered",
+		} {
+			rows, err := s.db.Query(`EXPLAIN QUERY PLAN ` + query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var details []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				details = append(details, detail)
+			}
+			rows.Close()
+			if plan := strings.Join(details, " | "); !strings.Contains(plan, "INDEX "+index) {
+				t.Fatalf("plan for %q does not use %s: %s", query, index, plan)
+			}
+		}
+	})
+}
