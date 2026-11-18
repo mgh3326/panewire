@@ -709,13 +709,9 @@ type HubServer struct {
 	spawnGrantDrain    bool
 	spawnRollbackDrain bool
 	supersedeClose     bool
-	// supersedeWarned and supersedeDecided keep a retried landing from
-	// repeating its warn or its evaluation; supersedeScanned paces the retry
-	// pass (hub_spawn_supersede.go). In memory only: the durable intent is
-	// the pool_actions row, and a restart merely re-evaluates.
+	// supersedeWarned keeps a retried landing from repeating its warn. In
+	// memory only; the durable intent is the supersede_landings row.
 	supersedeWarned  sync.Map
-	supersedeDecided sync.Map
-	supersedeScanned atomic.Int64
 	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
 	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.

@@ -77,85 +77,129 @@ func supersedeCloseStatus(status string) bool {
 	return status == "idle" || status == "done"
 }
 
-// supersedeLandingWindow bounds how long after a spawn was accepted the hub
-// keeps retrying to queue its parent's close. A request lives at most 24 hours
-// before it lands, plus the run time of its attempt.
-const supersedeLandingWindow = 48 * time.Hour
+const (
+	// supersedeLandingWindow bounds how long after a landing the hub keeps
+	// retrying to queue its parent's close.
+	supersedeLandingWindow = 48 * time.Hour
+	// supersedeLandingInterval paces the retry pass; each pass tries at most
+	// supersedeLandingBatch landings within supersedeLandingBudget.
+	supersedeLandingInterval = time.Minute
+	supersedeLandingBatch    = 50
+	supersedeLandingBudget   = 25 * time.Second
+)
 
-// supersedeScanInterval paces the retry pass over recent landings.
-const supersedeScanInterval = time.Minute
-
-// maybeSupersedeParent queues the parent's close after a landed spawn. It
-// never fails the spawn. A landing that cannot be decided yet (the parent's
-// node is offline, hk or the store is unavailable) is retried by
-// retrySupersedeLandings from the succeeded spawn operation itself.
-func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
-	h.trySupersedeParent(task)
-}
-
-// trySupersedeParent reports done when the landing is decided: its row is
-// queued or it is definitively ineligible. A transient failure reports false.
-func (h *HubServer) trySupersedeParent(task hubSpawnTask) (done bool) {
+// supersedeLandingOf is the durable intent of a landed successor, or false
+// when the landing never owes a close: the switch is off, the parent was not
+// typed explicitly, or the successor is not an implementer that names one.
+func (h *HubServer) supersedeLandingOf(task hubSpawnTask) (supersedeLanding, bool) {
 	if !h.supersedeClose || h.inbox == nil {
-		return true
+		return supersedeLanding{}, false
 	}
 	parent := supersededParentOf(task)
 	successor := task.Job
 	if parent == "" || successor == "" || parent == successor {
-		return true
+		return supersedeLanding{}, false
 	}
 	// An implicit parent (ARBITER_JOB) never closes anything: nobody asked
 	// for a replacement.
 	if !task.Request.ParentJobExplicit {
-		return true
+		return supersedeLanding{}, false
 	}
 	// Only an implementer successor takes over: a reviewer or consult child
 	// must never close its parent's pane (docs/config.md).
 	if hubSpawnFlagArg(task.Request.Args, "--role") != "implementer" {
-		return true
+		return supersedeLanding{}, false
 	}
-	succOwner := task.Owner
-	if succOwner == "" {
-		succOwner = hubSpawnFlagArg(task.Request.Args, "--owner")
+	owner := task.Owner
+	if owner == "" {
+		owner = hubSpawnFlagArg(task.Request.Args, "--owner")
+	}
+	return supersedeLanding{RequestID: task.Request.RequestID, Parent: parent, Successor: successor, Owner: owner, Created: h.now().UnixMilli()}, true
+}
+
+// maybeSupersedeParent records the landing's intent and queues the parent's
+// close. It never fails the spawn. The intent is stored first, with no
+// availability check, so a landing the first attempt cannot decide (the
+// parent's node is offline or not reported yet, hk or the store is
+// unavailable) or a hub restart does not lose it: sweepSupersedeLandings
+// retries it.
+func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
+	landing, ok := h.supersedeLandingOf(task)
+	if !ok {
+		return
 	}
 	ctx, cancel := context.WithTimeout(h.closeCtx, 30*time.Second)
 	defer cancel()
-	retry, err := h.createSupersedeAction(ctx, parent, successor, succOwner)
-	if err != nil {
-		// One warn per request: a retried landing must not repeat it.
-		if _, seen := h.supersedeWarned.LoadOrStore(task.Request.RequestID, struct{}{}); !seen {
-			h.logger.Warn("successor close not queued", "parent", parent, "successor", successor, "retry", retry, "reason", err.Error())
-		}
+	if err := h.inbox.store.recordSupersedeLanding(ctx, landing); err != nil {
+		h.logger.Warn("successor close intent not stored", "parent", landing.Parent, "successor", landing.Successor, "error", h.inbox.store.loggable("successor close intent", err))
 	}
-	return !retry
+	h.attemptSupersedeLanding(ctx, landing)
 }
 
-// retrySupersedeLandings queues the close of every recent explicit landing
-// whose first attempt could not decide, so a parent whose node reconnects
-// later, or a hub that restarted between the landing and the row insert, is
-// not lost. It runs on the pool action loop, at most once a minute.
-func (h *HubServer) retrySupersedeLandings(ctx context.Context) {
-	if !h.supersedeClose || h.inbox == nil {
-		return
-	}
-	now := h.now().UnixMilli()
-	if last := h.supersedeScanned.Load(); now-last < supersedeScanInterval.Milliseconds() || !h.supersedeScanned.CompareAndSwap(last, now) {
-		return
-	}
-	tasks, err := h.inbox.store.recentExplicitParentSpawns(ctx, h.now().Add(-supersedeLandingWindow))
+// attemptSupersedeLanding tries to queue the landing's close and settles its
+// intent when the landing is decided: its row is queued or it is definitively
+// ineligible.
+func (h *HubServer) attemptSupersedeLanding(ctx context.Context, landing supersedeLanding) {
+	retry, err := h.createSupersedeAction(ctx, landing.Parent, landing.Successor, landing.Owner)
 	if err != nil {
-		h.logger.Warn("successor close landings unavailable", "error", h.inbox.store.loggable("successor close landings", err))
+		// One warn per request: a retried landing must not repeat it.
+		if _, seen := h.supersedeWarned.LoadOrStore(landing.RequestID, struct{}{}); !seen {
+			h.logger.Warn("successor close not queued", "parent", landing.Parent, "successor", landing.Successor, "retry", retry, "reason", err.Error())
+		}
+	}
+	if err := h.inbox.store.settleSupersedeLanding(ctx, landing.RequestID, !retry, h.now()); err != nil {
+		h.logger.Warn("successor close intent not settled", "parent", landing.Parent, "error", h.inbox.store.loggable("successor close intent", err))
+	}
+}
+
+// sweepSupersedeLandings is one retry pass over the undecided intents. It
+// runs on its own loop, never the pool action reconciler's: a slow hk must
+// not delay a close already queued. With the switch off every intent ends, so
+// turning it back on closes nothing retroactively.
+func (h *HubServer) sweepSupersedeLandings(ctx context.Context) {
+	if h.inbox == nil {
 		return
 	}
-	for _, task := range tasks {
-		if ctx.Err() != nil {
+	store := h.inbox.store
+	if !h.supersedeClose {
+		if err := store.endSupersedeLandings(ctx, time.Time{}); err != nil {
+			h.logger.Warn("successor close intents unavailable", "error", store.loggable("successor close intents", err))
+		}
+		return
+	}
+	if err := store.endSupersedeLandings(ctx, h.now().Add(-supersedeLandingWindow)); err != nil {
+		h.logger.Warn("successor close intents unavailable", "error", store.loggable("successor close intents", err))
+		return
+	}
+	pending, err := store.pendingSupersedeLandings(ctx, supersedeLandingBatch)
+	if err != nil {
+		h.logger.Warn("successor close intents unavailable", "error", store.loggable("successor close intents", err))
+		return
+	}
+	passCtx, cancel := context.WithTimeout(ctx, supersedeLandingBudget)
+	defer cancel()
+	for _, landing := range pending {
+		if passCtx.Err() != nil {
 			return
 		}
-		if _, decided := h.supersedeDecided.Load(task.Request.RequestID); decided {
-			continue
-		}
-		if h.trySupersedeParent(task) {
-			h.supersedeDecided.Store(task.Request.RequestID, struct{}{})
+		h.attemptSupersedeLanding(passCtx, landing)
+	}
+}
+
+// runSupersedeLandings drives sweepSupersedeLandings until ctx ends.
+func (h *HubServer) runSupersedeLandings(parent context.Context) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	stop := context.AfterFunc(h.closeCtx, cancel)
+	defer stop()
+	ticker := time.NewTicker(supersedeLandingInterval)
+	defer ticker.Stop()
+	for {
+		h.sweepSupersedeLandings(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }
@@ -343,7 +387,15 @@ func (h *HubServer) refuseCloseAction(ctx context.Context, action poolAction) er
 	next := action
 	next.ID, next.Phase = id, poolActionPending
 	next.Data = action.Data
-	next.Data.Args, next.Data.TargetAttempt, next.Data.RetryID, next.Data.RetryAfter, next.Data.RetryCount = nil, "", "", 0, 0
+	// The retry stays bound to the attempt the refused request named: a
+	// close that the node refused because the job was re-prompted into a new
+	// attempt on the same pane must not close that new session (the shared
+	// protocol releases a request whose attempt moved).
+	next.Data.TargetAttempt = action.Data.TargetAttempt
+	if action.Data.Args != nil {
+		next.Data.TargetAttempt = action.Data.Args.Attempt
+	}
+	next.Data.Args, next.Data.RetryID, next.Data.RetryAfter, next.Data.RetryCount = nil, "", 0, 0
 	next.Data.Supersede = &poolSupersede{Successor: data.Successor, Generation: data.Generation + 1, Recorded: data.Recorded}
 	action.Phase = poolActionRefused
 	if err := h.inbox.store.replaceSupersedeAction(ctx, action, next); err != nil {

@@ -303,26 +303,71 @@ func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, nex
 	return tx.Commit()
 }
 
-// recentExplicitParentSpawns lists the succeeded spawns accepted since the
-// cutoff whose --parent-job was typed explicitly: the landings a supersede
-// close may still owe (hub_spawn_supersede.go).
-func (s *laneInboxStore) recentExplicitParentSpawns(parent context.Context, since time.Time) ([]hubSpawnTask, error) {
+// supersedeLandingSchema is also installed by Postgres migration 0025.
+const supersedeLandingSchema = `CREATE TABLE IF NOT EXISTS supersede_landings (
+ request_id TEXT PRIMARY KEY, parent TEXT NOT NULL, successor TEXT NOT NULL, owner TEXT NOT NULL,
+ created_ms BIGINT NOT NULL, tried_ms BIGINT NOT NULL DEFAULT 0,
+ state TEXT NOT NULL CHECK(state IN ('pending','done')))`
+
+// supersedeLanding is the durable intent of a landed explicit implementer
+// successor to close its parent (hub_spawn_supersede.go): it exists only for
+// landings that happened while --supersede-close was on, and ends once the
+// close row exists or the parent is ineligible.
+type supersedeLanding struct {
+	RequestID, Parent, Successor, Owner string
+	Created                             int64
+}
+
+func (s *laneInboxStore) recordSupersedeLanding(parent context.Context, l supersedeLanding) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status='succeeded' AND created_ms>=? AND payload LIKE ? ORDER BY created_ms DESC LIMIT 500`), since.UnixMilli(), `%"parent_job_explicit":true%`)
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO supersede_landings(request_id,parent,successor,owner,created_ms,tried_ms,state) VALUES(?,?,?,?,?,0,'pending') ON CONFLICT(request_id) DO NOTHING`), l.RequestID, l.Parent, l.Successor, l.Owner, l.Created)
+	return err
+}
+
+// pendingSupersedeLandings lists up to limit undecided landings, least
+// recently tried first so a few stuck ones never starve the rest.
+func (s *laneInboxStore) pendingSupersedeLandings(parent context.Context, limit int) ([]supersedeLanding, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id,parent,successor,owner,created_ms FROM supersede_landings WHERE state='pending' ORDER BY tried_ms, created_ms LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var tasks []hubSpawnTask
+	var out []supersedeLanding
 	for rows.Next() {
-		task, err := scanSpawnTask(rows)
-		if err != nil {
+		var l supersedeLanding
+		if err := rows.Scan(&l.RequestID, &l.Parent, &l.Successor, &l.Owner, &l.Created); err != nil {
 			return nil, err
 		}
-		if task.Request.ParentJobExplicit {
-			tasks = append(tasks, task)
-		}
+		out = append(out, l)
 	}
-	return tasks, rows.Err()
+	return out, rows.Err()
+}
+
+// settleSupersedeLanding records a try: done ends the intent, otherwise the
+// landing goes to the back of the line.
+func (s *laneInboxStore) settleSupersedeLanding(parent context.Context, id string, done bool, now time.Time) error {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	state := "pending"
+	if done {
+		state = "done"
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE supersede_landings SET state=?,tried_ms=? WHERE request_id=? AND state='pending'`), state, now.UnixMilli(), id)
+	return err
+}
+
+// endSupersedeLandings ends every pending landing created before cutoff (all
+// of them when cutoff is zero): the retry window passed, or the switch is off.
+func (s *laneInboxStore) endSupersedeLandings(parent context.Context, before time.Time) error {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	cutoff := before.UnixMilli()
+	if before.IsZero() {
+		cutoff = 1<<62 - 1
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE supersede_landings SET state='done' WHERE state='pending' AND created_ms<?`), cutoff)
+	return err
 }

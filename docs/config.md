@@ -1159,13 +1159,22 @@ ends `lost` with `end_reason=superseded_by=<successor>` (written by the node's
 settlement, like every hub close), after `job.superseded` was recorded on it.
 The owner lane hears one `info` lane.event, `[panewire] closed <parent> on
 <host>: superseded by <successor>`, once the node proves the close settled.
-A row is queued from the landing hook. A landing the hook cannot decide (the
-parent's node is offline or not reported yet, hk or the store is unavailable,
-or the hub restarted before the insert) is retried once a minute from the
-succeeded spawn operation itself, for 48 hours after the request was accepted,
-until the row exists or the parent is definitively ineligible. The off switch
-(`--supersede-close=false`) also ends a row that has sent no close request
-yet; a request already dispatched is finished. Parents that an earlier hub
+When an explicit implementer successor lands while the switch is on, the hub
+first stores its intent in `supersede_landings` (Postgres migration
+`0025_supersede_landings.sql`), with no availability check, then tries to queue
+the row from the landing hook. A landing the hook cannot decide (the parent's
+node is offline or not reported yet, hk or the store is unavailable, or the
+hub restarted) stays pending and is retried once a minute on its own loop, 50
+intents per pass, least recently tried first, for 48 hours, until the row
+exists or the parent is definitively ineligible. A landing while the switch is
+off stores no intent. The off switch (`--supersede-close=false`) ends every
+pending intent and every row that has sent no close request; a request that
+was stored but that the node has not begun closing is released with a
+tombstone, and one the node began is finished. Turning the switch back on
+closes nothing retroactively. A retry of a refused close stays bound to the
+attempt the refused request named. The one gap: a hub that dies between the
+spawn's `succeeded` record and the intent insert leaves that parent open.
+Parents that an earlier hub
 (#678) recorded as superseded in hk are not migrated: their requests carry no
 `parent_job_explicit`, so under the explicit-only rule none of them is
 eligible; close them by hand.

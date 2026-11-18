@@ -87,8 +87,9 @@ func (h *HubServer) startPoolActions(ctx context.Context) {
 		return
 	}
 	h.poolActionOnce.Do(func() {
-		h.spawnWorkers.Add(1)
+		h.spawnWorkers.Add(2)
 		go func() { defer h.spawnWorkers.Done(); h.runPoolActions(ctx) }()
+		go func() { defer h.spawnWorkers.Done(); h.runSupersedeLandings(ctx) }()
 	})
 }
 
@@ -104,7 +105,6 @@ func (h *HubServer) runPoolActions(parent context.Context) {
 	defer ticker.Stop()
 	for {
 		h.reconcilePoolActions(ctx)
-		h.retrySupersedeLandings(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -172,6 +172,13 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	if status.Settled {
 		action.Phase = poolActionSettled
 		return h.saveFinalPoolAction(ctx, action, "settled")
+	}
+	if action.Data.Kind == poolActionKindSupersedeClose && !h.supersedeClose && (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) {
+		// The off switch fences a request that was stored but that the node
+		// has not started closing: the release leaves a tombstone, so a send
+		// that was in flight when the hub stopped cannot register later. A
+		// request the node already began (closing, final) is finished.
+		return h.releasePoolAction(ctx, action)
 	}
 	if (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) && !h.nodeHasCapability(action.Node, hubCapabilityCloseOps) {
 		// Withdrawal can precede a binary rollback. Fence a request that has

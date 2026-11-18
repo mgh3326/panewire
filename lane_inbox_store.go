@@ -151,6 +151,8 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		`CREATE INDEX IF NOT EXISTS pool_actions_job ON pool_actions(job, phase)`,
 		`CREATE INDEX IF NOT EXISTS pool_actions_phase ON pool_actions(phase, id)`,
 		accountCreditMarkSchema,
+		supersedeLandingSchema,
+		`CREATE INDEX IF NOT EXISTS supersede_landings_pending ON supersede_landings(state, tried_ms, created_ms)`,
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			db.Close()
