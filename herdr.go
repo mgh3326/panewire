@@ -206,21 +206,21 @@ func (c *HerdrClient) agyBusyStatus(ctx context.Context, pane, harness, status s
 
 // agyEventStatus is agyBusyStatus for one status-changed event, which names no
 // agent: the harness comes from agent.get, and only an idle or done event is
-// read at all. A pane whose harness cannot be read keeps the status herdr sent;
-// the next snapshot judges it again.
+// read at all. A pane whose harness cannot be read is busy, the same as an
+// unreadable screen: the event names no harness, so the check cannot clear it.
 func (c *HerdrClient) agyEventStatus(ctx context.Context, pane, status string) string {
 	if status != "idle" && status != "done" {
 		return status
 	}
 	raw, err := c.Call(ctx, "agent.get", map[string]any{"target": pane})
 	if err != nil {
-		return status
+		return "working"
 	}
 	var got struct {
 		Agent map[string]any `json:"agent"`
 	}
 	if json.Unmarshal(raw, &got) != nil {
-		return status
+		return "working"
 	}
 	return c.agyBusyStatus(ctx, pane, aString(got.Agent, "agent"), status)
 }

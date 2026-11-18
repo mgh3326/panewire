@@ -188,6 +188,25 @@ func TestDaemonEventJudgesAgyDoneByItsScreen(t *testing.T) {
 	}
 }
 
+// An event names no agent, so when agent.get fails the harness is unknown and
+// the pane is busy: unreadable means busy (hk 5241, mergewake finding).
+func TestDaemonEventUnreadableAgentGetIsWorking(t *testing.T) {
+	server := startFakeHerdrPaneServer(t, func(params map[string]any) string {
+		if _, ok := params["source"]; ok {
+			t.Fatal("a pane whose agent cannot be read must not be screen-judged as idle")
+		}
+		return `"error":{"code":"pane_not_found","message":"gone"}`
+	})
+	client, err := NewHerdrClient(server.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if got := client.agyEventStatus(context.Background(), "w:p1", "done"); got != "working" {
+		t.Fatalf("agyEventStatus with agent.get error = %q, want working", got)
+	}
+}
+
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
