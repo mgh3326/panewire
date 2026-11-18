@@ -600,3 +600,32 @@ func TestLoopLedgerTransientSilentErrorNoticesOnce(t *testing.T) {
 		}
 	}
 }
+
+// A failed row PUT backs off like an unreadable row: the next tick makes
+// no new PUT until the backoff has passed.
+func TestLoopLedgerFailedPublishBacksOff(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	publishes := 0
+	publishErr := errors.New("hk unreachable")
+	h := loopLedgerTestHub(t, &now, nil)
+	h.loopsDocPublish = func(_ context.Context, _, _ string) error { publishes++; return publishErr }
+	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return false, nil }
+	ctx := context.Background()
+
+	h.loopTick(loopSpawnCoordinator)
+	now = time.Date(2026, 11, 19, 0, 1, 0, 0, time.UTC)
+	h.maybeWriteLoopsRow(ctx)
+	if publishes != 1 {
+		t.Fatalf("publishes=%d, want 1", publishes)
+	}
+	h.maybeWriteLoopsRow(ctx)
+	if publishes != 1 {
+		t.Fatalf("publishes=%d after an immediate retry, want still 1", publishes)
+	}
+	publishErr = nil
+	now = now.Add(2 * loopsRowRetryAfter)
+	h.maybeWriteLoopsRow(ctx)
+	if publishes != 2 {
+		t.Fatalf("publishes=%d after the backoff, want 2", publishes)
+	}
+}
