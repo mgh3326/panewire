@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -634,4 +635,73 @@ func (s *countingSupersededStore) supersededWrites() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.writes
+}
+
+// TestSupersedeFailedWriteRetriedUntilConfirmed: a failed job.superseded
+// write is not forgotten. The next working tick retries it, and ticks after
+// confirmation write nothing.
+func TestSupersedeFailedWriteRetriedUntilConfirmed(t *testing.T) {
+	f := newSupersedeFixture(t)
+	f.seedParent(t, "spawned")
+	flaky := &flakySupersededStore{JobStore: f.jobs, fail: true}
+	f.hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: flaky, Out: out, Err: errout}, nil
+	}
+	serve := func(outcome string) {
+		done := make(chan struct{})
+		go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
+		serveReap(t, f, outcome, "w1:p1")
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("supersede did not finish")
+		}
+	}
+	serve(nodeJobReapJobWorking)
+	flaky.setFail(false)
+	serve(nodeJobReapJobWorking)
+	serve(nodeJobReapJobWorking)
+	if got, ok := supersededOf(t, f); !ok || got != f.successor {
+		t.Fatalf("retry must confirm the record: %q %v", got, ok)
+	}
+	if got := flaky.attempts(); got != 2 {
+		t.Fatalf("want one failed plus one confirming write and one suppressed tick, got %d attempts", got)
+	}
+	if !strings.Contains(f.logs.String(), "successor close failed") {
+		t.Fatal("the failed write owes one warn")
+	}
+}
+
+// flakySupersededStore fails hk writes of the superseded field while told to,
+// counting every attempt.
+type flakySupersededStore struct {
+	fleet.JobStore
+	mu    sync.Mutex
+	fail  bool
+	tries int
+}
+
+func (s *flakySupersededStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	if _, ok := fields["superseded"]; ok {
+		s.mu.Lock()
+		s.tries++
+		fail := s.fail
+		s.mu.Unlock()
+		if fail {
+			return errors.New("handoffkeep unavailable")
+		}
+	}
+	return s.JobStore.Put(ctx, id, fields)
+}
+
+func (s *flakySupersededStore) setFail(fail bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fail = fail
+}
+
+func (s *flakySupersededStore) attempts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tries
 }

@@ -656,10 +656,10 @@ type HubServer struct {
 	// reads each hk record once while the job stays in its window.
 	reviewerEndSettled map[string]bool
 	// supersededParents records a parent job a landed successor replaced but
-	// whose pane was still working: parent job id to successor job id. The
+	// whose pane was still working: parent job id to its deferred close. The
 	// hub closes each entry at the first sweep where its pane is no longer
 	// working, through the jobs-close reap path. Guarded by mu.
-	supersededParents map[string]string
+	supersededParents map[string]supersededEntry
 	// supersededChecked names the hub jobs whose hk record the deferred
 	// rebuild already read once. A job is checked on the first sweep that
 	// sees it live, so parents that appear after a restart (their nodes

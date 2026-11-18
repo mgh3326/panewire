@@ -99,9 +99,7 @@ func (h *HubServer) supersedeParent(parent, successor, owner, node string) {
 	}
 	reaped, transportErr := h.reapParentOnce(node, parent, owner, false, "")
 	if transportErr != "" {
-		if h.noteSuperseded(parent, successor) {
-			h.writeSupersededBestEffort(parent, successor)
-		}
+		h.recordSuperseded(parent, successor)
 		h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor, "reason", transportErr)
 		return
 	}
@@ -114,10 +112,8 @@ func (h *HubServer) supersedeParent(parent, successor, owner, node string) {
 			h.logger.Warn("successor close failed", "parent", parent, "successor", successor)
 		}
 	case nodeJobReapJobWorking:
-		if h.noteSuperseded(parent, successor) {
-			if err := h.writeSupersededBestEffort(parent, successor); err != nil {
-				h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor)
-			}
+		if h.recordSuperseded(parent, successor) {
+			h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor)
 		}
 	case nodeJobReapPaneBlocked:
 		// The forced close carries what the proof saw (blocked): the node
@@ -128,9 +124,7 @@ func (h *HubServer) supersedeParent(parent, successor, owner, node string) {
 		// the pane id.
 		forced, forcedErr := h.reapParentOnce(node, parent, owner, true, "blocked")
 		if forcedErr != "" {
-			if h.noteSuperseded(parent, successor) {
-				h.writeSupersededBestEffort(parent, successor)
-			}
+			h.recordSuperseded(parent, successor)
 			h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor, "reason", forcedErr)
 			return
 		}
@@ -150,23 +144,17 @@ func (h *HubServer) supersedeParent(parent, successor, owner, node string) {
 			// to the close call itself; it cannot close the gap between
 			// that read and herdr's pane close, which takes only the pane
 			// id.
-			if h.noteSuperseded(parent, successor) {
-				if err := h.writeSupersededBestEffort(parent, successor); err != nil {
-					h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor)
-				}
+			if h.recordSuperseded(parent, successor) {
+				h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor)
 			}
 		default:
-			if h.noteSuperseded(parent, successor) {
-				h.writeSupersededBestEffort(parent, successor)
-			}
+			h.recordSuperseded(parent, successor)
 			h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor, "reason", forced.Outcome)
 		}
 	case nodeJobReapProtected, nodeJobReapNotAJob, nodeJobReapOwnerMismatch:
 		h.clearSuperseded(parent)
 	default:
-		if h.noteSuperseded(parent, successor) {
-			h.writeSupersededBestEffort(parent, successor)
-		}
+		h.recordSuperseded(parent, successor)
 		h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor, "reason", reaped.Outcome)
 	}
 }
@@ -273,21 +261,56 @@ func (h *HubServer) notifySuperseded(parent, successor, owner, host string) erro
 	return nil
 }
 
+// supersededEntry is one deferred parent close: who replaces the parent, and
+// whether job.superseded is confirmed in hk. A failed hk write leaves
+// recorded false so later ticks retry until it succeeds; a confirmed write
+// suppresses repeats.
+type supersededEntry struct {
+	successor string
+	recorded  bool
+}
+
 // noteSuperseded records parent as replaced by successor. It reports whether
-// the entry is new or names a new successor: only then does the caller write
-// job.superseded, so a working parent held across ticks costs one hk write,
-// not one per sweep.
+// job.superseded still lacks a confirmed write: a new or changed pair, or a
+// pair whose write has not succeeded yet. Callers write only then, and mark
+// the write, so a working parent held across ticks costs one hk write on
+// success while a failed write is retried.
 func (h *HubServer) noteSuperseded(parent, successor string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.supersededParents == nil {
-		h.supersededParents = map[string]string{}
+		h.supersededParents = map[string]supersededEntry{}
 	}
-	if h.supersededParents[parent] == successor {
+	if e, ok := h.supersededParents[parent]; !ok || e.successor != successor {
+		h.supersededParents[parent] = supersededEntry{successor: successor}
+		return true
+	}
+	return !h.supersededParents[parent].recorded
+}
+
+// markSupersededWritten confirms the hk write for the pair, unless a newer
+// successor replaced it meanwhile.
+func (h *HubServer) markSupersededWritten(parent, successor string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if e, ok := h.supersededParents[parent]; ok && e.successor == successor {
+		e.recorded = true
+		h.supersededParents[parent] = e
+	}
+}
+
+// recordSuperseded notes the pair and writes job.superseded unless a
+// confirmed write already covers it. It reports whether the pair still lacks
+// confirmation, so the caller warns only then.
+func (h *HubServer) recordSuperseded(parent, successor string) bool {
+	if !h.noteSuperseded(parent, successor) {
 		return false
 	}
-	h.supersededParents[parent] = successor
-	return true
+	if err := h.writeSupersededBestEffort(parent, successor); err != nil {
+		return true
+	}
+	h.markSupersededWritten(parent, successor)
+	return false
 }
 
 func (h *HubServer) clearSuperseded(parent string) {
@@ -338,6 +361,7 @@ func (h *HubServer) rebuildSupersededFromHK() {
 		}
 		if succ, _ := record["superseded"].(string); succ != "" {
 			h.noteSuperseded(id, succ)
+			h.markSupersededWritten(id, succ)
 		}
 		h.markSupersededChecked(id)
 	}
@@ -373,8 +397,8 @@ func (h *HubServer) sweepSupersededParents() {
 	h.rebuildSupersededFromHK()
 	h.mu.Lock()
 	pending := make(map[string]string, len(h.supersededParents))
-	for parent, successor := range h.supersededParents {
-		pending[parent] = successor
+	for parent, entry := range h.supersededParents {
+		pending[parent] = entry.successor
 	}
 	h.mu.Unlock()
 	for parent, successor := range pending {
