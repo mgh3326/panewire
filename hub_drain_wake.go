@@ -51,20 +51,25 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 	if h.drainWake == nil {
 		owed, err := h.inbox.store.drainWakeOwed(ctx)
 		if err != nil {
+			h.loopNoteSilentError(loopLaneStallDrainWake, "hub_drain_wake.go:drainWakeOwed", err)
 			h.logger.Warn("drain wake skipped: owed lines unreadable; retrying on the next sweep", "error", err)
 			return
 		}
+		h.loopClearSilent("hub_drain_wake.go:drainWakeOwed")
 		h.drainWake = owed
 	}
 	if h.drainWakeDelivered == nil {
 		h.drainWakeDelivered = make(chan drainWakeDelivery, 64)
 	}
 	h.drainWakeSettle(ctx)
+	h.loopTick(loopLaneStallDrainWake)
 	if h.drainWakeUnreported() {
 		// A connected host has not heartbeated its active jobs since its hello,
 		// so every lane count is a lower bound. Observe nothing; keep each lane's state.
+		h.loopNoteSilentError(loopLaneStallDrainWake, "hub_drain_wake.go:unreported", nil)
 		return
 	}
+	h.loopClearSilent("hub_drain_wake.go:unreported")
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	for lane := range routes {
 		if ctx.Err() != nil {
@@ -81,6 +86,15 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 		}
 		before := *state
 		h.drainWakeLaneStep(ctx, lane, state, routes, now)
+		if !before.pending && state.pending {
+			h.loopNoteMade(loopLaneStallDrainWake, lane)
+		}
+		if before.pending && !state.pending {
+			h.loopNoteDone(loopLaneStallDrainWake, lane)
+		}
+		if !state.lastSent.Equal(before.lastSent) {
+			h.loopNoteDone(loopLaneStallDrainWake, lane)
+		}
 		if state.pending == before.pending && state.lastSent.Equal(before.lastSent) && !state.unsaved {
 			continue
 		}

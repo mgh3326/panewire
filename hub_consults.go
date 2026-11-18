@@ -462,12 +462,16 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 	if h.inbox == nil {
 		return
 	}
+	h.loopTick(loopConsultCoordinator)
 	active, err := h.inbox.store.activeConsults(ctx)
 	if err != nil {
+		h.loopNoteSilentError(loopConsultCoordinator, "hub_consults.go:activeConsults", err)
 		return
 	}
+	h.loopClearSilent("hub_consults.go:activeConsults")
 	var app *fleet.App
 	for _, c := range active {
+		h.loopNoteMade(loopConsultCoordinator, c.ID)
 		if ctx.Err() != nil {
 			return
 		}
@@ -688,7 +692,9 @@ func (h *HubServer) failConsult(ctx context.Context, c hubConsult, reason string
 	c.State = consultFailed
 	c.Reason = utf8PrefixWithin(reason, consultReasonLimit)
 	_ = h.saveConsult(ctx, c)
-	// A failed or timed-out consult must not leave its agent pane burning
+	// The failed state is the consult's terminal outcome. A later pass that
+	// re-fails the same row counts nothing more: done dedupes by consult.
+	h.loopNoteDone(loopConsultCoordinator, c.ID)
 	// quota. Close the pane and mark the job lost when the node still lists
 	// it; a pane that changed or a node that cannot answer is left alone.
 	h.cancelConsultJob(ctx, c)
@@ -735,6 +741,7 @@ func (h *HubServer) notifyConsultAnswered(ctx context.Context, c hubConsult) {
 		// A tool requester polls; no event is owed, so the row is done.
 		c.Notified = true
 		_ = h.saveConsult(ctx, c)
+		h.loopNoteDone(loopConsultCoordinator, c.ID)
 		return
 	}
 	text := fmt.Sprintf("consult %s answered for task %s: apply %s", c.ID, c.Task, c.AnswerDoc)
@@ -749,4 +756,5 @@ func (h *HubServer) notifyConsultAnswered(ctx context.Context, c hubConsult) {
 	}
 	c.Notified = true
 	_ = h.saveConsult(ctx, c)
+	h.loopNoteDone(loopConsultCoordinator, c.ID)
 }

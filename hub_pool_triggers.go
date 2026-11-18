@@ -59,11 +59,14 @@ func (h *HubServer) checkPoolTriggers(ctx context.Context) {
 	if h.inbox == nil {
 		return
 	}
+	h.loopTick(loopPoolTriggers)
 	tasks, err := h.liveSpawnTasks(ctx)
 	if err != nil {
+		h.loopNoteSilentError(loopPoolTriggers, "hub_pool_triggers.go:liveSpawnTasks", err)
 		h.logger.Warn("pool trigger could not list live jobs", "error", err)
 		return
 	}
+	h.loopClearSilent("hub_pool_triggers.go:liveSpawnTasks")
 	pools := liveSpawnPools(tasks)
 	if len(pools) == 0 {
 		return
@@ -119,9 +122,11 @@ func liveSpawnPools(tasks []hubSpawnTask) []string {
 func (h *HubServer) checkRetiredPools(ctx context.Context, pools []string) {
 	rows, err := h.poolCatalogRows(ctx)
 	if err != nil {
-		h.logger.Debug("pool trigger catalog read failed", "error", err)
+		h.loopNoteSilentError(loopPoolTriggers, "hub_pool_triggers.go:poolCatalogRows", err)
+		h.logger.Warn("pool trigger catalog read failed", "error", err)
 		return
 	}
+	h.loopClearSilent("hub_pool_triggers.go:poolCatalogRows")
 	for _, pool := range pools {
 		found, live := catalogPool(rows, pool)
 		switch {

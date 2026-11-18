@@ -43,8 +43,16 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 		return
 	}
 	requests, err := h.inbox.store.waitingSpawnRequests(ctx)
-	if err != nil || len(requests) == 0 {
+	if err != nil {
+		h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_start_conditions.go:waitingSpawnRequests", err)
 		return
+	}
+	h.loopClearSilent("hub_spawn_start_conditions.go:waitingSpawnRequests")
+	if len(requests) == 0 {
+		return
+	}
+	for _, task := range requests {
+		h.loopNoteMade(loopSpawnCoordinator, task.Request.RequestID)
 	}
 	// Expiry needs no hk data: a waiting row is given up at its limit even
 	// while the condition read is failing.
@@ -52,8 +60,11 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 	active := make([]hubSpawnTask, 0, len(requests))
 	for _, task := range requests {
 		if !task.Expires.IsZero() && !now.Before(task.Expires) {
-			if _, err := h.inbox.store.giveUpWaitingSpawn(ctx, task, now); err != nil {
+			changed, err := h.inbox.store.giveUpWaitingSpawn(ctx, task, now)
+			if err != nil {
 				h.logger.Warn("hub spawn waiting expiry not recorded", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
+			} else if changed {
+				h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 			}
 			continue
 		}
@@ -77,6 +88,8 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 			changed, err := h.inbox.store.releaseWaitingSpawn(ctx, task, now)
 			if err != nil {
 				h.logger.Warn("hub spawn start condition not released", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
+			} else if changed {
+				h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 			}
 			released = released || changed
 		case "waiting":
@@ -84,9 +97,13 @@ func (h *HubServer) checkWaitingSpawns(ctx context.Context) {
 				h.logger.Warn("hub spawn start condition result not recorded", "request_id", task.Request.RequestID, "job", task.Job, "error", err)
 			}
 		case "refused":
-			h.endWaitingSpawn(ctx, task, "refused", result.Reason, 78)
+			if h.endWaitingSpawn(ctx, task, "refused", result.Reason, 78) {
+				h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
+			}
 		case "cancelled":
-			h.endWaitingSpawn(ctx, task, "cancelled", result.Reason, 84)
+			if h.endWaitingSpawn(ctx, task, "cancelled", result.Reason, 84) {
+				h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
+			}
 		}
 	}
 	if released {
@@ -138,15 +155,18 @@ func readStartConditionSnapshot(ctx context.Context, requests [][]fleet.StartCon
 	return snapshot, nil
 }
 
-// endWaitingSpawn records a terminal start-condition outcome for one row.
-func (h *HubServer) endWaitingSpawn(ctx context.Context, task hubSpawnTask, status, reason string, rc int) {
+// endWaitingSpawn records a terminal start-condition outcome for one row,
+// reporting whether the row actually left waiting.
+func (h *HubServer) endWaitingSpawn(ctx context.Context, task hubSpawnTask, status, reason string, rc int) bool {
 	fix := "Nothing was started. Correct the --after predicate or submit again without it."
 	if status == "cancelled" {
 		fix = "Nothing was started. The task an --after predicate named was dropped or duplicated; submit again without that predicate."
 	}
-	if _, err := h.inbox.store.endWaitingSpawn(ctx, task, status, reason, fix, rc, h.now().UTC()); err != nil {
+	changed, err := h.inbox.store.endWaitingSpawn(ctx, task, status, reason, fix, rc, h.now().UTC())
+	if err != nil {
 		h.logger.Warn("hub spawn start condition outcome not recorded", "request_id", task.Request.RequestID, "job", task.Job, "status", status, "error", err)
 	}
+	return changed && err == nil
 }
 
 // beginWaitingSpawnCheck records this check's time and reports whether it may

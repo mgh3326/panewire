@@ -155,6 +155,16 @@ type HubServerConfig struct {
 	// FleetStatusPublish replaces the hk document write in tests; nil writes
 	// with fleet.PutHKDocument under the hub's hk credential.
 	FleetStatusPublish func(context.Context, string) error
+	// LoopsNoticeLane is the lane the loop-ledger silent-stop notice goes to
+	// (docs/loops.md). Empty selects defaultLoopsNoticeLane.
+	LoopsNoticeLane string
+	// LoopsDocPublish replaces the daily loops-row hk write in tests; nil
+	// writes with fleet.PutHKDocument under the hub's hk credential.
+	LoopsDocPublish func(context.Context, string, string) error
+	// LoopsDocExists reports whether a daily loops-row document already
+	// exists; a non-nil error means the read itself failed for any reason
+	// other than absence. Nil reads it with the hub's hk credential.
+	LoopsDocExists func(context.Context, string) (bool, error)
 	// FleetStatusPlans replaces the per-grade plan in tests; nil runs the
 	// hub's own fleet App as a read-only dry run.
 	FleetStatusPlans func(context.Context) []fleet.StatusPlan
@@ -702,6 +712,15 @@ type HubServer struct {
 	// keeps at most one load publication in flight (docs/fleet-state.md).
 	fleetState     *fleetStateStore
 	fleetStateOnce sync.Once
+	// loops is the hub loop ledger (hk 5116, docs/loops.md): one row per hub
+	// mechanism. Guarded by loopsMu, never by mu. loopsLane, loopsDocPublish
+	// and loopsDocExists are the --loops-notice-lane value and the hk test
+	// seams.
+	loopsMu         sync.Mutex
+	loops           *loopLedgerState
+	loopsLane       string
+	loopsDocPublish func(context.Context, string, string) error
+	loopsDocExists  func(context.Context, string) (bool, error)
 	// fleetStatusInterval is how often the fleet status snapshot is written;
 	// zero disables it. fleetStatusPublish and fleetStatusPlanFn are the
 	// test seams for the hk write and the per-grade plan (fleet_status.go).
@@ -905,10 +924,14 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
-	hub.fleetState = newFleetStateStore()
 	hub.fleetStatusInterval = config.FleetStatusInterval
 	hub.fleetStatusPublish = config.FleetStatusPublish
 	hub.fleetStatusPlanFn = config.FleetStatusPlans
+	hub.loops = newLoopLedgerState()
+	hub.loopsLane = config.LoopsNoticeLane
+	hub.loopsDocPublish = config.LoopsDocPublish
+	hub.loopsDocExists = config.LoopsDocExists
+	hub.fleetState = newFleetStateStore()
 	hub.quietTimings = defaultDesignQuietTimings()
 	if hub.inbox != nil {
 		cleared, err := hub.inbox.store.clearReviewerReservations()
@@ -2671,6 +2694,8 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 			return
 		case <-ticker.C:
 			h.Sweep()
+			h.maybeWriteLoopsRow(ctx)
+			h.maybeSendLoopsNotice(ctx)
 			// An idle hub serves no authenticated request to notice an auth
 			// file change, so the tick checks it too: a revoked node token's
 			// websocket closes within one interval without HTTP traffic.
