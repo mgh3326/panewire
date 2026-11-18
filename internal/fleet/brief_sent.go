@@ -77,7 +77,10 @@ func (a *App) adoptBriefSent(ctx context.Context, j Job) (Job, error) {
 func (a *App) briefSentReceipt(events []Event, id string) map[string]any {
 	var receipt map[string]any
 	ended := false
-	for _, event := range events {
+	// Ledger sequence, not timestamp: a node clock stepped back before a retry
+	// of the same job would otherwise sort the retry's claim and receipt before
+	// the first attempt's, and the closed pane of the first would look current.
+	for _, event := range ledgerOrder(events) {
 		switch event.Kind {
 		case eventBriefSent:
 			receipt, ended = event.Payload, false

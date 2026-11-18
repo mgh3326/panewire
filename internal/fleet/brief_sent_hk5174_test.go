@@ -3,10 +3,13 @@ package fleet
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // briefSentFixture is the record of a pane the node could not confirm (rc 76):
@@ -258,4 +261,49 @@ func adoptFixture(t *testing.T, a *App) Job {
 		t.Fatal(err)
 	}
 	return adopted
+}
+
+// putEventAt writes the next ledger event with an explicit timestamp, so a test
+// can step the node clock back between two attempts of one job.
+func putEventAt(t *testing.T, a *App, job, kind string, p map[string]any, at time.Time) {
+	t.Helper()
+	dir := filepath.Join(a.Jobs, job, "events")
+	files, _ := os.ReadDir(dir)
+	b, _ := json.Marshal(map[string]any{"kind": kind, "payload": p, "created_at": at.Format(time.RFC3339Nano)})
+	if e := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%05d-%s.json", len(files)+1, kind)), b, 0600); e != nil {
+		t.Fatal(e)
+	}
+}
+
+// The node clock stepped back before a same-job retry: by timestamp the retry's
+// claim and receipt sort before the first attempt's receipt and failure marker,
+// but in ledger order the retry is the newest attempt and is still confirming.
+// The first attempt's closed pane must not be adopted for it.
+func TestBriefReceiptFollowsLedgerOrderAcrossClockStepBack(t *testing.T) {
+	a, _, report, result := strictClaimedWithoutReceiptFixture(t)
+	base := a.Now()
+	first := briefSentPayload(t, a, "the brief\n")
+	first["pane_id"] = "w:old"
+	second := briefSentPayload(t, a, "the brief\n")
+	second["pane_id"] = "w:new"
+	claim := map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "role": "reviewer"}
+	putEventAt(t, a, "j", eventBriefSent, first, base.Add(10*time.Minute))
+	putEventAt(t, a, "j", "job.spawn_retryable", map[string]any{}, base.Add(11*time.Minute))
+	// The retry, after the clock stepped back an hour.
+	putEventAt(t, a, "j", "job.reclaim", claim, base.Add(-50*time.Minute))
+	putEventAt(t, a, "j", eventBriefSent, second, base.Add(-49*time.Minute))
+	events, err := a.events("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.briefSentReceipt(events, "j"); got != nil {
+		t.Fatalf("adopted pane %q while the retry is still confirming", str(got, "pane_id"))
+	}
+	err = strictDone(t, a, report, result)
+	assertStrictFailure(t, a, err, exitStateConflict, "no_spawn_evidence")
+	for _, ev := range mustEvents(t, a, "j") {
+		if ev.Kind == "job.spawned" {
+			t.Fatal("job.spawned adopted from the first attempt")
+		}
+	}
 }
