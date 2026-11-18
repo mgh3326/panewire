@@ -478,6 +478,10 @@ type HubServer struct {
 	// consultPlan resolves a consult seat and its spawn submission. Nil uses
 	// the hub's own fleet App (fleet.App.PlanConsult); tests inject one.
 	consultPlan func(context.Context, fleet.ConsultPlanInput) (fleet.ConsultPlan, error)
+	// consultTaskBinding reads the job a task is bound to, the repository
+	// evidence of a consult whose author job is unknown. Nil uses
+	// fleet.TaskBinding; tests inject one.
+	consultTaskBinding func(context.Context, string) (string, error)
 	// quotaReplacePoll overrides how often a quota-stop replacement looks for
 	// its successor's outcome; zero uses quotaReplacePoll.
 	quotaReplacePoll time.Duration
