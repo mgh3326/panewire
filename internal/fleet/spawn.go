@@ -16,6 +16,7 @@ import (
 	"github.com/mgh3326/handoffkeep/client"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 type Spawn struct {
@@ -1311,6 +1312,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	pane := ""
 	pool := ""
+	// The row records the grant this attempt starts under, so its release
+	// finds the row whatever grant the job holds by then (hk 5294).
+	quotaEpoch, e := jobowner.Epoch(a.Jobs, s.Job)
+	if e != nil {
+		return fail(exitStateConflict, "job assignment unreadable: %v", e)
+	}
 	defer func() {
 		if !committed {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -1323,7 +1330,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 				}
 			}
 			if pool != "" && retrySafe {
-				if e := a.ledger().ReleaseQuotaPool(cleanup, s.Job, pool, false); e != nil {
+				if _, e := a.ledger().ReleaseQuotaPoolEpoch(cleanup, s.Job, pool, quotaEpoch, nil); e != nil {
 					retrySafe = false
 					a.warn("quota cleanup failed: %v", e)
 				}
@@ -1331,7 +1338,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}()
 	startedQuotaClaim := time.Now()
-	rec, e := a.ledger().RecordQuotaPool(ctx, arbiter.QuotaRun{Job: s.Job, Profile: seat.gateName(), LaunchProfile: launchProfile(seat.Canon, launch.Effort), Gate: granted})
+	rec, e := a.ledger().RecordQuotaPool(ctx, arbiter.QuotaRun{Job: s.Job, Profile: seat.gateName(), LaunchProfile: launchProfile(seat.Canon, launch.Effort), Gate: granted, Epoch: quotaEpoch})
 	a.stage("claim", startedQuotaClaim)
 	if e != nil {
 		return ledgerFail(e, "lease")

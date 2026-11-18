@@ -5,6 +5,8 @@
 //
 //   - $XDG_DATA_HOME/arbiter/state.db, a SQLite database, schema version 2
 //     (tables meta, jobs, quota_pool_records, leases, lease_history, events);
+//     plus the additive quota_pool_epochs side table (see epochDDL), which
+//     the script and older binaries neither read nor need;
 //   - <jobs root>/<job>/events/NNNNN-<kind>.json, one artifact per event,
 //     written under <jobs root>/<job>/.wrk-events.lock.
 //
@@ -209,6 +211,25 @@ var ddl = []string{
 	)`,
 }
 
+// epochDDL is the additive side table that records which hub grant epoch
+// acquired each quota_pool_records row (hk 5294). quota_pool_records has no
+// room for it and its schema is frozen, so the epoch lives beside it and the
+// schema version stays 2: the arbiter script and older panewire binaries
+// check only meta.schema_version and name the columns they read, so they open
+// the file unchanged and simply never see the side table.
+//
+// started_at copies the row's own started_at. A side row describes a quota row
+// only while both agree, so a quota row an older binary deleted and recorded
+// again (it knows nothing of this table) reads as having no epoch rather than
+// inheriting the dead attempt's.
+const epochDDL = `CREATE TABLE IF NOT EXISTS quota_pool_epochs (
+		job_id     TEXT    NOT NULL,
+		pool       TEXT    NOT NULL,
+		epoch      INTEGER NOT NULL,
+		started_at TEXT    NOT NULL,
+		PRIMARY KEY (job_id, pool)
+	)`
+
 // conn is one open database handle.
 type conn struct {
 	db  *sql.DB
@@ -287,6 +308,12 @@ func (s *Store) rw(ctx context.Context, bootstrap bool) (*conn, error) {
 	if e = s.checkSchema(ctx, c); e != nil {
 		c.Close()
 		return nil, e
+	}
+	// Every reader of the side table opens through here, so it exists by then;
+	// a ledger an older binary created gets it on its first write by this one.
+	if _, e = c.c.ExecContext(ctx, epochDDL); e != nil {
+		c.Close()
+		return nil, errf(ExitStorage, "cannot open the state db %s: %v", s.DB, e)
 	}
 	return c, nil
 }
