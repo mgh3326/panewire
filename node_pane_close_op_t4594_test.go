@@ -939,6 +939,36 @@ func TestCloseOpEndLockWaitIsBounded_t4652(t *testing.T) {
 	}
 }
 
+// Review findings 4613454435 & 4613443524 (hk 5063): bindCloseOp's end-lock
+// wait is bounded to hubCloseBindEndLockBudget (500ms) rather than waiting out
+// the full 20s nodeCommandRunTimeout, so that it fails fast with journal_failed
+// and releases nodeCommandMu when a concurrent sweep holds the end lock.
+func TestCloseOpEndLockWaitFailsFastUnderLongCommandTimeout_t5063(t *testing.T) {
+	inbox := t.TempDir()
+	client := closeOpNode(t, inbox, idlePaneHerdr())
+	unlock, err := fleet.LockJobEnd(filepath.Join(inbox, "jobs", closeOpJob))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var args nodePaneCloseOpArgs
+	raw, _ := json.Marshal(closeOpArgs("op-1"))
+	if err := json.Unmarshal(raw, &args); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, code := client.nodePaneCloseOp(ctx, args)
+	elapsed := time.Since(start)
+	if code != "journal_failed" {
+		t.Fatalf("code=%q, want journal_failed", code)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("took %v, want fail fast within ~hubCloseBindEndLockBudget (500ms)", elapsed)
+	}
+}
+
 // FenceState: an intent stays open while the fake's settlement is pending.
 func (f *fakeHubClose) FenceState(string) (bool, bool, error) {
 	return f.state == fleet.HubClosePending && len(f.intents) > 0, true, nil

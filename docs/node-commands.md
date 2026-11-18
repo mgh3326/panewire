@@ -310,7 +310,9 @@ current registration advertises it. `CloseOpsReady` has three parts:
   executable is named) must be the job's aware watcher.
   - An aware watcher is one that holds
     `jobs/<job>/.panewire-watch-hubclose-v3.lock` for its whole life, and
-    lends its watch lock (below).
+    lends its watch lock (below). A degraded watcher (whose lock-lending socket
+    failed) holds `.panewire-watch-hubclose-degraded.lock` and defers by exiting
+    when a hub-close intent is open; it does not block the node's readiness scan.
   - A watcher of an older binary holds only `.panewire-watch.lock`, or that
     and the v1 or v2 lock. A v1 watcher lacks the stale-decision check below;
     a v2 one cannot lend its lock.

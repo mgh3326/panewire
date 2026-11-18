@@ -109,7 +109,8 @@ const (
 	hubCloseWatchLockV1 = ".panewire-watch-hubclose.lock"
 	// hubCloseWatchLockV2 is held by a watcher that defers but cannot lend
 	// its watch lock (BorrowWatchLock): incompatible.
-	hubCloseWatchLockV2 = ".panewire-watch-hubclose-v2.lock"
+	hubCloseWatchLockV2       = ".panewire-watch-hubclose-v2.lock"
+	hubCloseWatchLockDegraded = ".panewire-watch-hubclose-degraded.lock"
 )
 
 // FenceWatchers takes the job's watch lock for the node, without blocking,
@@ -169,6 +170,10 @@ const (
 	HubCloseWatcherNone HubCloseWatcher = iota
 	// HubCloseWatcherAware: a watcher that defers to hub-close intents runs.
 	HubCloseWatcherAware
+	// HubCloseWatcherDegraded: a watcher of this binary runs, but lock-lending
+	// is disabled (e.g. socket directory is not private); it defers by
+	// exiting when a hub-close intent is open.
+	HubCloseWatcherDegraded
 	// HubCloseWatcherIncompatible: a watcher that does not read hub-close
 	// intents (an older binary that outlived a node upgrade) runs.
 	HubCloseWatcherIncompatible
@@ -188,6 +193,9 @@ func ProbeHubCloseWatcher(jobDir string) (HubCloseWatcher, error) {
 	}
 	if aware, e := held(hubCloseWatchLock); e != nil || aware {
 		return HubCloseWatcherAware, e
+	}
+	if degraded, e := held(hubCloseWatchLockDegraded); e != nil || degraded {
+		return HubCloseWatcherDegraded, e
 	}
 	// A watcher takes the watch lock before the hub-close one, so a watcher
 	// caught in between reads as incompatible: the hub retries. So does a v1

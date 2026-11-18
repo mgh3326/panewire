@@ -205,11 +205,22 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	// The lending socket is up before the capability lock, so a watcher the
 	// node probes as aware can always lend its watch lock. If the socket
 	// cannot be served (e.g. its directory is not private), the watcher
-	// continues without lock-lending or hub-close awareness rather than
-	// abandoning the job.
+	// continues without lock-lending rather than abandoning the job, holding
+	// hubCloseWatchLockDegraded so node readiness does not treat it as an older
+	// binary.
 	stopLending, e := serveWatchLock(filepath.Join(a.Jobs, id), lock)
+	var lendingDisabled bool
 	if e != nil {
 		a.warn("watch-lock lending disabled for job %s: %v", id, e)
+		lendingDisabled = true
+		degradedLock, e := secureOpen(filepath.Join(a.Jobs, id, hubCloseWatchLockDegraded), true, a.warn)
+		if e != nil {
+			return e
+		}
+		defer degradedLock.Close()
+		if e := syscall.Flock(int(degradedLock.Fd()), syscall.LOCK_EX); e != nil {
+			return e
+		}
 	} else {
 		defer stopLending()
 		// Held for the watcher's life: it tells the node this watcher defers to
@@ -264,6 +275,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// The node's final job.lost closes the intent and ends this watch; a
 		// request that closed nothing hands the job back.
 		if _, ok := pendingHubCloseIntent(j); ok {
+			if lendingDisabled {
+				// Lending is disabled: the node cannot borrow our watch lock,
+				// and settlement needs to fence it. Exit so the node can take
+				// the fence without spinning on an intent that only the node's
+				// settlement can end.
+				return nil
+			}
 			if err := a.Sleep(ctx, 5*time.Second); err != nil {
 				return err
 			}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // F3 (hk 5063): if serveWatchLock fails (e.g. because the socket directory is
@@ -126,5 +127,83 @@ func TestPrivateDirOwnerAndPrivacyGuards_t5063(t *testing.T) {
 	longPath := filepath.Join(temp, strings.Repeat("z", 100))
 	if _, err := watchLockSocketDir(longPath); err == nil {
 		t.Fatal("watchLockSocketDir succeeded with non-private /tmp/panewire-<uid>")
+	}
+}
+
+// Review finding 4613454419 (hk 5063): when lending is disabled, the watcher
+// must not spin on an open hub-close intent; it exits immediately so the node
+// can take the fence without stalling.
+func TestWatcherExitsOnOpenIntentWhenLendingDisabled_t5063(t *testing.T) {
+	base := filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
+
+	a, _ := hubCloseFixture(t)
+	longID := "j-" + strings.Repeat("x", 100)
+	if e := a.event(context.Background(), longID, "job.spawned", map[string]any{
+		"pane_id": "w:p1", "label": "agent-long", "role": "reviewer", "herdr_session": "old-session",
+	}); e != nil {
+		t.Fatal(e)
+	}
+	// Record an open hub-close intent before watch starts.
+	if e := a.event(context.Background(), longID, hubCloseIntentKind, map[string]any{
+		"request_id": "req-1", "attempt": "old-session", "pane": "w:p1", "label": "agent-long", "end_reason": hubCloseReason,
+	}); e != nil {
+		t.Fatal(e)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Watch must exit immediately (return nil) without sleeping or stalling on the intent.
+	if err := a.watch(ctx, []string{longID}); err != nil {
+		t.Fatalf("watch returned error on open intent when degraded: %v", err)
+	}
+
+	// Once watch returns, its watch lock is released so FenceWatchers can take the fence.
+	jobDir := filepath.Join(a.Jobs, longID)
+	release, ok, err := FenceWatchers(jobDir)
+	if err != nil || !ok {
+		t.Fatalf("FenceWatchers failed after watcher exited: ok=%v err=%v", ok, err)
+	}
+	release()
+}
+
+// Review finding 4613443497 (hk 5063): a degraded watcher holding
+// hubCloseWatchLockDegraded reports HubCloseWatcherDegraded and does not block
+// HubCloseWatchersReady or CloseOpsReady for the node.
+func TestDegradedWatcherDoesNotBlockHubCloseWatchersReady_t5063(t *testing.T) {
+	jobs := t.TempDir()
+	jobDir := filepath.Join(jobs, "job-deg")
+	holdLock(t, jobDir, jobWatchLock)
+	holdLock(t, jobDir, hubCloseWatchLockDegraded)
+
+	status, err := ProbeHubCloseWatcher(jobDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != HubCloseWatcherDegraded {
+		t.Fatalf("ProbeHubCloseWatcher = %v, want HubCloseWatcherDegraded", status)
+	}
+
+	ready, err := HubCloseWatchersReady(context.Background(), jobs, listing("  101 /usr/local/bin/panewire _watch job-deg\n"))
+	if err != nil || !ready {
+		t.Fatalf("HubCloseWatchersReady = %v, err = %v, want true", ready, err)
+	}
+
+	now := time.Now().UTC()
+	if err := EnableCloseOps(context.Background(), jobs, listing("  101 /usr/local/bin/panewire _watch job-deg\n"), now); err != nil {
+		t.Fatalf("EnableCloseOps failed with degraded watcher: %v", err)
+	}
+	if err := AdvertiseCloseOps(jobs, now); err != nil {
+		t.Fatalf("AdvertiseCloseOps failed: %v", err)
+	}
+	if !CloseOpsReady(context.Background(), jobs, listing("  101 /usr/local/bin/panewire _watch job-deg\n")) {
+		t.Fatal("CloseOpsReady = false, want true with degraded watcher")
 	}
 }

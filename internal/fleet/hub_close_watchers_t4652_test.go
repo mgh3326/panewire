@@ -36,6 +36,8 @@ func TestHubCloseWatchersReady_t4652(t *testing.T) {
 	jobs := t.TempDir()
 	holdLock(t, filepath.Join(jobs, "job-a"), jobWatchLock)
 	holdLock(t, filepath.Join(jobs, "job-a"), hubCloseWatchLock)
+	holdLock(t, filepath.Join(jobs, "job-deg"), jobWatchLock)
+	holdLock(t, filepath.Join(jobs, "job-deg"), hubCloseWatchLockDegraded)
 	holdLock(t, filepath.Join(jobs, "job-v1"), jobWatchLock)
 	holdLock(t, filepath.Join(jobs, "job-v1"), hubCloseWatchLockV1)
 	holdLock(t, filepath.Join(jobs, "job-old"), jobWatchLock)
@@ -47,6 +49,7 @@ func TestHubCloseWatchersReady_t4652(t *testing.T) {
 		want bool
 	}{
 		"aware watcher":           {"  101 /usr/local/bin/panewire _watch job-a --rearmed\n", true},
+		"degraded watcher":        {"  103 /usr/local/bin/panewire _watch job-deg\n", true},
 		"renamed binary, aware":   {"  102 /usr/local/bin/panewire.prev _watch job-a\n", true},
 		"v1 watcher":              {"  202 /old/panewire _watch job-v1\n", false},
 		"older watcher":           {"  203 /old/panewire _watch job-old\n", false},
