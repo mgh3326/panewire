@@ -353,12 +353,18 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 		closeArgs.QuestionJob = args.Job
 	}
 	var prepared nodeHandoverPrepared
-	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
+	checkEpoch := func() error {
 		if client.jobsInboxRoot != "" {
 			epoch, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
 			if err != nil || epoch > args.Epoch {
 				return nodeCloseHookStop{code: "epoch_mismatch"}
 			}
+		}
+		return nil
+	}
+	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
+		if err := checkEpoch(); err != nil {
+			return err
 		}
 		// The proof is read again after the settle: the job's watcher, a
 		// separate process, may have recorded a re-prompt or an end of the
@@ -403,11 +409,18 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
 			}
 		}
+		if err := checkEpoch(); err != nil {
+			op.State, op.Updated = fleet.CloseOpPreempted, client.nowUTC()
+			if writeErr := fleet.WriteCloseOp(job, op); writeErr != nil {
+				return writeErr
+			}
+			return err
+		}
 		return nil
 	})
 	if code != "" {
-		// The journal keeps registered or closing; a repeat of this request
-		// id settles it.
+		// The journal retains its latest state; a repeat of this request id
+		// settles or replays it.
 		return nil, code
 	}
 	switch result.Outcome {

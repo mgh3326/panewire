@@ -1160,6 +1160,25 @@ func TestJobOwnerFenceCloseRechecksGrantAfterSettle_t5067(t *testing.T) {
 	}
 }
 
+func TestJobOwnerFenceCloseRechecksGrantAtFinalLook_t5067(t *testing.T) {
+	inbox := t.TempDir()
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	run := fake.run
+	client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "pane" && args[1] == "read" && fake.called("pane", "read") == 1 {
+			if err := jobowner.Assign(filepath.Join(inbox, "jobs"), closeOpJob, 3); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return run(ctx, args...)
+	}
+	_, code := nodeRun(t, client, nodeCommandPaneCloseOp, closeOpArgs("op-final-epoch"))
+	if code != "epoch_mismatch" || fake.called("pane", "close") != 0 {
+		t.Fatalf("final close with newer grant: code=%q close calls=%d", code, fake.called("pane", "close"))
+	}
+}
+
 func TestJobOwnerFenceHTTPMismatchNamesCurrentOwner_t5067(t *testing.T) {
 	var update map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
