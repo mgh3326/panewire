@@ -53,7 +53,7 @@ func testMustAckTypesStayUnreadUntilInboxAck(t *testing.T, storage hubInboxStora
 			defer closeServer()
 			now := time.Now()
 			if storage.path != "" {
-				storage.path = filepath.Join(t.TempDir(), "inbox.sqlite3")
+				storage.path = freshLaneInboxFile(t)
 			}
 			h, agent := quietHubOn(t, storage, "default", hk, &now)
 			e := quietEvent("ev-"+typ, "[worker] "+strings.ToUpper(typ)+" | pr 7")
