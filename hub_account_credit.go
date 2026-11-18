@@ -25,14 +25,14 @@ const accountCreditMarkPool = "commandcode"
 // after a failed read (a busy store at hub start must not leave every mark
 // unserved for the process lifetime). A successful load merges into memory,
 // keeping any newer mark this process already wrote.
-func (h *HubServer) ensureAccountCreditMarks() {
+func (h *HubServer) ensureAccountCreditMarks() error {
 	if h.inbox == nil {
-		return
+		return nil
 	}
 	h.accountCreditLoadMu.Lock()
 	defer h.accountCreditLoadMu.Unlock()
 	if h.accountCreditLoaded {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -48,7 +48,7 @@ func (h *HubServer) ensureAccountCreditMarks() {
 		} else {
 			h.logger.Debug("account credit marks still unreadable", "error", err)
 		}
-		return
+		return err
 	}
 	h.accountCreditLoadFailed = false
 	h.mu.Lock()
@@ -62,6 +62,7 @@ func (h *HubServer) ensureAccountCreditMarks() {
 		}
 	}
 	h.accountCreditLoaded = true
+	return nil
 }
 
 // accountCreditMarkActive reports whether account's mark still holds at now:
@@ -94,7 +95,7 @@ func (h *HubServer) accountCreditMarkActive(account string, mark accountCreditMa
 // already holds is left as it is, so repeated passes do not extend its TTL; a
 // mark that lifted starts a new episode with the new time.
 func (h *HubServer) markAccountCreditExhausted(pool, account string, at time.Time) error {
-	h.ensureAccountCreditMarks()
+	_ = h.ensureAccountCreditMarks()
 	at = at.UTC()
 	h.mu.Lock()
 	prior, found := h.accountCreditMarks[account]
@@ -126,7 +127,7 @@ func (h *HubServer) accountCreditMarkHeld(account string, now time.Time) bool {
 	if account == "" {
 		return false
 	}
-	h.ensureAccountCreditMarks()
+	_ = h.ensureAccountCreditMarks()
 	h.mu.Lock()
 	mark, found := h.accountCreditMarks[account]
 	h.mu.Unlock()
@@ -169,8 +170,8 @@ func (h *HubServer) handOffAccountCreditStopped(ctx context.Context, task hubSpa
 // snapshotAccountCreditMarks answers the marks still holding at now for the
 // fleet snapshot, dropping (and durably forgetting) the lifted ones so a hub
 // restart cannot read them as holding again.
-func (h *HubServer) snapshotAccountCreditMarks(now time.Time) map[string]time.Time {
-	h.ensureAccountCreditMarks()
+func (h *HubServer) snapshotAccountCreditMarks(now time.Time) (map[string]time.Time, error) {
+	loadErr := h.ensureAccountCreditMarks()
 	h.mu.Lock()
 	var active map[string]time.Time
 	var lifted []accountCreditMark
@@ -187,7 +188,7 @@ func (h *HubServer) snapshotAccountCreditMarks(now time.Time) map[string]time.Ti
 	}
 	h.mu.Unlock()
 	if h.inbox == nil || len(lifted) == 0 {
-		return active
+		return active, loadErr
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -207,5 +208,5 @@ func (h *HubServer) snapshotAccountCreditMarks(now time.Time) map[string]time.Ti
 			h.mu.Unlock()
 		}
 	}
-	return active
+	return active, loadErr
 }

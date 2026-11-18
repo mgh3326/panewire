@@ -147,6 +147,30 @@ func TestCommandcodeBalanceSelection_t5138(t *testing.T) {
 		}
 	})
 
+	t.Run("the newer mark episode survives the merge", func(t *testing.T) {
+		a, s := ccAccountsFixture(t, map[string]*PoolView{
+			ccKeyA: withBalance(ccView(now, 10, 30, 3), ptrF(12)),
+			ccKeyB: withBalance(ccView(now, 10, 40, 3), ptrF(17)),
+		})
+		// The cached snapshot still carries the old episode T1; the fresh read
+		// has a newer rejection T3, after the cached balance T2 (now-1m). Only
+		// a balance after T3 may lift it, so the account must stay dropped.
+		a.State = &fakeStateReader{snap: FleetSnapshot{V: 1, At: now, AccountCreditExhausted: map[string]time.Time{ccKeyA: now.Add(-3 * time.Hour)}}}
+		a.AccountCreditMarks = func(context.Context) (map[string]time.Time, error) {
+			return map[string]time.Time{ccKeyA: now.Add(-30 * time.Second)}, nil
+		}
+		sel, err := a.selectProfile(context.Background(), s)
+		if err != nil || sel.chosen == nil {
+			t.Fatalf("no choice: %v", err)
+		}
+		if c := ccCandidates(sel)[ccKeyA]; c.outcome != "dropped:credit_exhausted account="+ccKeyA {
+			t.Fatalf("the stale episode lifted a newer mark: %s", c.outcome)
+		}
+		if sel.chosen.accountKey != ccKeyB {
+			t.Fatalf("chosen account %s, want %s", sel.chosen.accountKey, ccKeyB)
+		}
+	})
+
 	t.Run("a failed mark read refuses commandcode accounts", func(t *testing.T) {
 		a, s := ccAccountsFixture(t, map[string]*PoolView{
 			ccKeyA: ccView(now, 10, 30, 3),

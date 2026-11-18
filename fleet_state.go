@@ -564,10 +564,15 @@ func (h *HubServer) handleAccountCreditMarks(writer http.ResponseWriter, request
 		return
 	}
 	now := h.now().UTC()
+	marks, err := h.snapshotAccountCreditMarks(now)
+	if err != nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "account_credit_marks_unavailable"})
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"v":                        fleetStateVersion,
 		"at":                       now,
-		"account_credit_exhausted": h.snapshotAccountCreditMarks(now),
+		"account_credit_exhausted": marks,
 	})
 }
 

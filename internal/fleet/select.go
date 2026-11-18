@@ -361,8 +361,10 @@ type selPlan struct {
 	accountMarksUnknown bool
 }
 
-// mergeAccountCredit adds marks to the plan, keeping the earlier time for an
-// account present in both sources.
+// mergeAccountCredit adds marks to the plan, keeping the later (current)
+// episode for an account present in both sources. A cached snapshot can hold
+// an episode a fresh read has superseded; the newest mark is the one a balance
+// must postdate to lift it.
 func (p *selPlan) mergeAccountCredit(marks map[string]time.Time) {
 	if len(marks) == 0 {
 		return
@@ -371,7 +373,7 @@ func (p *selPlan) mergeAccountCredit(marks map[string]time.Time) {
 		p.accountCredit = map[string]time.Time{}
 	}
 	for account, at := range marks {
-		if prior, held := p.accountCredit[account]; !held || at.Before(prior) {
+		if prior, held := p.accountCredit[account]; !held || at.After(prior) {
 			p.accountCredit[account] = at
 		}
 	}

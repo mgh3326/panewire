@@ -30,7 +30,7 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 		// The hub owns the durable account credit marks: its in-process
 		// selection reads them directly, in addition to the snapshot (hk 5138).
 		app.AccountCreditMarks = func(context.Context) (map[string]time.Time, error) {
-			return h.snapshotAccountCreditMarks(h.now().UTC()), nil
+			return h.snapshotAccountCreditMarks(h.now().UTC())
 		}
 	}
 	return app, err

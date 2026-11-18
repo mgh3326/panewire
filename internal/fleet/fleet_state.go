@@ -204,12 +204,17 @@ func (a *App) accountCreditMarks(ctx context.Context) (marks map[string]time.Tim
 	return m, true, err != nil
 }
 
-// snapshotAccountCredit is the snapshot's mark set, nil when it carries none.
+// snapshotAccountCredit is a copy of the snapshot's mark set (the snapshot is
+// cached and shared), nil when it carries none.
 func snapshotAccountCredit(snapshot *FleetSnapshot) map[string]time.Time {
 	if snapshot == nil || len(snapshot.AccountCreditExhausted) == 0 {
 		return nil
 	}
-	return snapshot.AccountCreditExhausted
+	out := make(map[string]time.Time, len(snapshot.AccountCreditExhausted))
+	for account, at := range snapshot.AccountCreditExhausted {
+		out[account] = at
+	}
+	return out
 }
 
 // fleetSnapshot answers the run's current snapshot, reading it at most once

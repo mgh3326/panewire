@@ -130,7 +130,7 @@ func TestCommandcodeCreditMarkSurvivesRestartAndLifts(t *testing.T) {
 	second := newHub()
 	defer second.Close()
 	now = at.Add(time.Hour)
-	marks := second.snapshotAccountCreditMarks(now)
+	marks := marksAt(second, now)
 	if got, ok := marks[ccMarkAccountA]; !ok || !got.Equal(at) {
 		t.Fatalf("marks after restart = %+v, want %s at %v", marks, ccMarkAccountA, at)
 	}
@@ -146,17 +146,17 @@ func TestCommandcodeCreditMarkSurvivesRestartAndLifts(t *testing.T) {
 
 	// A reading with no balance says nothing about the credits: the mark holds.
 	publish(nil, at.Add(30*time.Minute))
-	if _, held := second.snapshotAccountCreditMarks(now)[ccMarkAccountA]; !held {
+	if _, held := marksAt(second, now)[ccMarkAccountA]; !held {
 		t.Fatal("a reading with no balance lifted the mark")
 	}
 	// Below one credit is still an exhausted account: the mark holds.
 	publish(balance(0.5), at.Add(40*time.Minute))
-	if _, held := second.snapshotAccountCreditMarks(now)[ccMarkAccountA]; !held {
+	if _, held := marksAt(second, now)[ccMarkAccountA]; !held {
 		t.Fatal("a reading below one credit lifted the mark")
 	}
 	// At least one credit is the fresh report that lifts it.
 	publish(balance(1), at.Add(50*time.Minute))
-	if marks := second.snapshotAccountCreditMarks(now); len(marks) != 0 {
+	if marks := marksAt(second, now); len(marks) != 0 {
 		t.Fatalf("a reading with credits did not lift the mark: %+v", marks)
 	}
 
@@ -165,10 +165,10 @@ func TestCommandcodeCreditMarkSurvivesRestartAndLifts(t *testing.T) {
 	if err := second.markAccountCreditExhausted("commandcode", ccMarkAccountB, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, held := second.snapshotAccountCreditMarks(now)[ccMarkAccountB]; !held {
+	if _, held := marksAt(second, now)[ccMarkAccountB]; !held {
 		t.Fatal("the new mark does not hold")
 	}
-	if marks := second.snapshotAccountCreditMarks(now.Add(24 * time.Hour)); len(marks) != 0 {
+	if marks := marksAt(second, now.Add(24*time.Hour)); len(marks) != 0 {
 		t.Fatalf("the mark outlived 24 h: %+v", marks)
 	}
 }
@@ -232,10 +232,10 @@ func TestAccountCreditMarkLoadRetriesAfterFailure(t *testing.T) {
 		}
 		return f.hub.inbox.store.accountCreditMarks(ctx)
 	}
-	if marks := f.hub.snapshotAccountCreditMarks(at); len(marks) != 0 {
-		t.Fatalf("a failed load served marks: %+v", marks)
+	if marks, err := f.hub.snapshotAccountCreditMarks(at); err == nil || len(marks) != 0 {
+		t.Fatalf("a failed load = %+v, %v; want an error and no marks", marks, err)
 	}
-	marks := f.hub.snapshotAccountCreditMarks(at)
+	marks := marksAt(f.hub, at)
 	if _, ok := marks[ccMarkAccountA]; !ok || calls != 2 {
 		t.Fatalf("retry marks=%+v calls=%d, want %s after a second read", marks, calls, ccMarkAccountA)
 	}
@@ -299,13 +299,13 @@ func TestAccountCreditMarkDeleteRetries_t5138(t *testing.T) {
 		}
 		return f.hub.inbox.store.deleteAccountCreditMark(ctx, account, marked)
 	}
-	if marks := f.hub.snapshotAccountCreditMarks(at.Add(2 * time.Minute)); len(marks) != 0 {
+	if marks := marksAt(f.hub, at.Add(2*time.Minute)); len(marks) != 0 {
 		t.Fatalf("a lifted mark was served: %+v", marks)
 	}
 	if rows, err := f.hub.inbox.store.accountCreditMarks(t.Context()); err != nil || len(rows) != 1 {
 		t.Fatalf("rows after failed delete = %+v, %v; want the row kept", rows, err)
 	}
-	if marks := f.hub.snapshotAccountCreditMarks(at.Add(2 * time.Minute)); len(marks) != 0 {
+	if marks := marksAt(f.hub, at.Add(2*time.Minute)); len(marks) != 0 {
 		t.Fatalf("retry served a lifted mark: %+v", marks)
 	}
 	if rows, err := f.hub.inbox.store.accountCreditMarks(t.Context()); err != nil || len(rows) != 0 {
@@ -313,5 +313,39 @@ func TestAccountCreditMarkDeleteRetries_t5138(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("delete attempts = %d, want 2", attempts)
+	}
+}
+
+// marksAt reads the hub's active marks or fails the test.
+func marksAt(h *HubServer, at time.Time) map[string]time.Time {
+	marks, err := h.snapshotAccountCreditMarks(at)
+	if err != nil {
+		panic(err)
+	}
+	return marks
+}
+
+// hk 5138: a configured mark read that fails is an error on the marks route,
+// so selection fails closed instead of reading an empty map as "no marks".
+func TestAccountCreditMarksEndpointFailsClosed_t5138(t *testing.T) {
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:         map[string]string{"operator": fsOperatorToken},
+		InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hub.Close() })
+	hub.accountCreditRead = func(context.Context) (map[string]accountCreditMark, error) {
+		return nil, errors.New("store busy")
+	}
+	if _, err := hub.snapshotAccountCreditMarks(hub.now()); err == nil {
+		t.Fatal("a failed load reported success")
+	}
+	server := httptest.NewServer(hub.Handler())
+	defer server.Close()
+	if status, body := fsGet(t, server, "/v1/state/account-credit", fsOperator()); status != 503 {
+		t.Fatalf("GET account-credit = %d %s, want 503", status, body)
 	}
 }

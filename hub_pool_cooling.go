@@ -78,7 +78,8 @@ func (h *HubServer) observePoolCooling(reason string, now time.Time) bool {
 
 func (h *HubServer) fleetSnapshot(now time.Time) fleetStateSnapshot {
 	snap := h.stateStore().snapshot(now)
-	snap.AccountCreditExhausted = h.snapshotAccountCreditMarks(now)
+	marks, _ := h.snapshotAccountCreditMarks(now)
+	snap.AccountCreditExhausted = marks
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for pool, until := range h.poolCooling {
