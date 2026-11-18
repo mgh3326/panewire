@@ -53,9 +53,10 @@ func TestPoolActionIntentCancelledRetainsReassignmentFence(t *testing.T) {
 	f.jobs.mu.Lock()
 	f.jobs.records[f.job]["state"] = "completed"
 	f.jobs.mu.Unlock()
-	if err := f.hub.reconcilePoolAction(t.Context(), guard); err != nil {
-		t.Fatal(err)
-	}
+	// The node must confirm the ack before the guard finishes (hk 5073). The
+	// live pass above left its unanswered command in the connection.
+	nodeCommandRead(t, f.node)
+	guardedPoolAckStep(t, f, guard, intentCancelledReply(action)["result"].(map[string]any))
 	if _, err := f.hub.reassignJob(action.Job, "machine-b"); err != nil {
 		t.Fatalf("terminal hk record did not release the guard: %v", err)
 	}

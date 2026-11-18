@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/quota/devin"
@@ -379,12 +382,43 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 // free-tier limit is also written to this host's free-limit record and
 // published at once, so later selections skip the free rung until its reset on
 // every host (RecordFreeLimit, publishFreeLimit).
+//
+// It takes the job's end lock, as every other local end does, and re-reads the
+// ledger under it: an announcement after a revoke, a completion or a reap
+// would become the job's newest end and read as a live hand-over
+// (announcedQuotaStop), masking the end it followed (hk 4761, from #593
+// round 6). Such a job is superseded and nothing is written.
 func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop) error {
-	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	dir := filepath.Join(a.Jobs, j.ID)
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return a.quotaStopAnnounceEndLocked(ctx, j, stop)
+	}
+	// Bounded like the operation lock: the quota-stop manager calls this
+	// with its daemon context while holding its own mutexes, and an end-lock
+	// holder can wait a long time; a timed-out hand-over is retried.
+	lockCtx, cancel := context.WithTimeout(ctx, quotaRecordLockWait)
+	defer cancel()
+	endUnlock, err := LockJobEndContext(lockCtx, dir)
+	if err != nil {
+		return err
+	}
+	defer endUnlock()
+	return a.quotaStopAnnounceEndLocked(ctx, j, stop)
+}
+
+// quotaStopAnnounceEndLocked is quotaStopAnnounce for a caller that already
+// holds the job's end lock (the watcher's end, endUnlessHubClose).
+func (a *App) quotaStopAnnounceEndLocked(ctx context.Context, j Job, stop quotastop.Stop) error {
+	unlock, err := a.lockJobOperation(ctx, j.ID, quotaRecordLockWait)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	if ended, err := a.attemptEndedBeforeAnnouncement(j.ID, j.Pane); err != nil {
+		return err
+	} else if ended {
+		return errQuotaStopSuperseded
+	}
 	if ended, err := a.endedByResultPosted(ctx, j.ID, true); err != nil {
 		return err
 	} else if ended {
@@ -395,6 +429,90 @@ func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop)
 		return errQuotaStopSuperseded
 	}
 	return a.quotaStopEvent(ctx, j, stop, false)
+}
+
+// attemptEndedBeforeAnnouncement reads the job's ledger in sequence order and
+// reports whether its current attempt already has an end a quota announcement
+// must not follow: any end marker the close protocol recognizes (a completion,
+// a settled record, an escalation, a revoke, a hand-off, a join, a reap, or a
+// loss) other than an earlier non-final quota-stop announcement, which a
+// repeat announcement may follow. A job with no ledger directory has nothing
+// to read; any other unreadable ledger is an error, never permission.
+func (a *App) attemptEndedBeforeAnnouncement(id, wantPane string) (bool, error) {
+	// Only a ledger whose events directory is absent has nothing to read; a
+	// listed event that vanished or failed to read is missing evidence.
+	if _, err := os.Lstat(filepath.Join(a.Jobs, id, "events")); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	evs, err := a.events(id)
+	if err != nil {
+		return false, err
+	}
+	// A hub revocation allocates its sequence without the ledger lock (hk
+	// 5044): a revocation published after a spawn can carry the number of an
+	// event before it, so no sequence order proves a start followed it. Any
+	// revocation tied with another event's number is therefore an end for
+	// good, until hk 5224 fences the allocation (fail closed).
+	ordered := ledgerOrder(evs)
+	seqs := map[int]int{}
+	for _, ev := range ordered {
+		seqs[ledgerSeq(ev.name)]++
+	}
+	for _, ev := range ordered {
+		if ev.Kind == "job.revoked" && seqs[ledgerSeq(ev.name)] > 1 {
+			return true, nil
+		}
+	}
+	ended, sticky := false, false
+	pane := ""
+	for _, ev := range ordered {
+		switch ev.Kind {
+		case "job.claim", "job.claimed", "job.reclaim":
+			ended, sticky = false, false
+		case "job.spawned":
+			pane = str(ev.Payload, "pane_id")
+			if str(ev.Payload, "adopted_from") != "" {
+				// Late bookkeeping for the attempt already running, as
+				// reassignedInLedger reads it: no new ownership.
+				continue
+			}
+			ended, sticky = false, false
+		case "job.reprompted":
+			// A re-prompt revives a live attempt, not a reaped or revoked one:
+			// it restores no ownership (foldJob keeps Reaped, and
+			// reassignedInLedger keeps a revocation, across it).
+			ended = false
+		case "job.completed", "job.completion", eventRecordSettled, "job.escalate", "job.joined",
+			"job.handed_off":
+			ended = true
+		case "job.revoked", "job.reaped":
+			sticky = true
+		case "job.lost":
+			if str(ev.Payload, "reason") != "quota_stop" || boolean(ev.Payload, "final", false) {
+				ended = true
+			}
+		}
+	}
+	// An observation of another pane belongs to an earlier attempt.
+	if wantPane != "" && pane != "" && pane != wantPane {
+		return true, nil
+	}
+	ended = ended || sticky
+	return ended, nil
+}
+
+// ledgerSeq is the numeric sequence prefix of a ledger file name, -1 when
+// there is none.
+func ledgerSeq(name string) int {
+	i := strings.IndexByte(name, '-')
+	if i <= 0 {
+		return -1
+	}
+	n, err := strconv.Atoi(name[:i])
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // quotaRecordLockWait bounds how long a quota-stop record waits for the job's
@@ -482,7 +600,13 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 // quotaStopFinish announces job.lost (when emit) and releases the quota lease.
 func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	if emit {
-		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil && !errors.Is(e, errQuotaStopSuperseded) {
+		// The caller (the watcher's end) holds the end lock already.
+		if e := a.quotaStopAnnounceEndLocked(ctx, j, stop); e != nil && !errors.Is(e, errQuotaStopSuperseded) {
+			// The hk record is already lost: an announcement that could not
+			// read the ledger must not also keep the lease held.
+			if re := a.releaseQuota(ctx, j); re != nil {
+				return errors.Join(e, re)
+			}
 			return e
 		}
 	}
@@ -529,7 +653,7 @@ func pendingQuotaIntent(j Job) (quotaIntent, bool) {
 }
 
 func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop) error {
-	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	unlock, err := a.lockJobOperation(ctx, j.ID, quotaRecordLockWait)
 	if err != nil {
 		return err
 	}
