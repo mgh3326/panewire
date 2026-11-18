@@ -291,6 +291,28 @@ func (c *handoffkeepRelayClient) appendEvent(ctx context.Context, event handoffk
 	return stored, status, nil
 }
 
+// postTaskComment appends one comment to an hk task. 201 is the new comment;
+// 200 covers a server that answers an already-recorded write as success. The
+// route takes no idempotency key: the caller owns de-duplication through its
+// durable posted-at mark, and retries an unknown outcome only inside its
+// bounded backoff. An hk answer lost after hk stored the write, or a hub
+// that stops between the post and the mark, reposts once: exactly-once per
+// mark write, at-least-once across that window.
+func (c *handoffkeepRelayClient) postTaskComment(ctx context.Context, taskID int64, body string) (int, error) {
+	if taskID < 1 {
+		return 0, errors.New("handoffkeep task id is invalid")
+	}
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return 0, errors.New("handoffkeep request encoding failed")
+	}
+	status, _, err := c.do(ctx, http.MethodPost, c.endpoint("/v1/tasks/"+strconv.FormatInt(taskID, 10)+"/comments"), payload)
+	if err != nil {
+		return 0, err
+	}
+	return status, nil
+}
+
 func (c *handoffkeepRelayClient) markDelivered(ctx context.Context, id int64, machine, pane string) error {
 	if id < 1 {
 		return errors.New("handoffkeep relay event id is invalid")
