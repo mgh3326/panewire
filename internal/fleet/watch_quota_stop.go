@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -379,12 +380,36 @@ func announcedQuotaStop(j Job) (quotastop.Stop, bool) {
 // free-tier limit is also written to this host's free-limit record and
 // published at once, so later selections skip the free rung until its reset on
 // every host (RecordFreeLimit, publishFreeLimit).
+//
+// It takes the job's end lock, as every other local end does, and re-reads the
+// ledger under it: an announcement after a revoke, a completion or a reap
+// would become the job's newest end and read as a live hand-over
+// (announcedQuotaStop), masking the end it followed (hk 4761, from #593
+// round 6). Such a job is superseded and nothing is written.
 func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop) error {
-	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	dir := filepath.Join(a.Jobs, j.ID)
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return a.quotaStopAnnounceEndLocked(ctx, j, stop)
+	}
+	endUnlock, err := LockJobEndContext(ctx, dir)
+	if err != nil {
+		return err
+	}
+	defer endUnlock()
+	return a.quotaStopAnnounceEndLocked(ctx, j, stop)
+}
+
+// quotaStopAnnounceEndLocked is quotaStopAnnounce for a caller that already
+// holds the job's end lock (the watcher's end, endUnlessHubClose).
+func (a *App) quotaStopAnnounceEndLocked(ctx context.Context, j Job, stop quotastop.Stop) error {
+	unlock, err := a.lockJobOperation(ctx, j.ID, quotaRecordLockWait)
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	if fresh, err := a.job(j.ID); err == nil && endedOtherThanByAnnouncement(fresh) {
+		return errQuotaStopSuperseded
+	}
 	if ended, err := a.endedByResultPosted(ctx, j.ID, true); err != nil {
 		return err
 	} else if ended {
@@ -395,6 +420,21 @@ func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop)
 		return errQuotaStopSuperseded
 	}
 	return a.quotaStopEvent(ctx, j, stop, false)
+}
+
+// endedOtherThanByAnnouncement reports whether the job's attempt has a local
+// end that a quota announcement must not follow: a reap, or a terminal event
+// other than an earlier non-final quota-stop announcement (a repeat announce
+// of the same stop is allowed, as before).
+func endedOtherThanByAnnouncement(j Job) bool {
+	if j.Reaped {
+		return true
+	}
+	if !j.Terminal {
+		return false
+	}
+	_, announced := announcedQuotaStop(j)
+	return !announced
 }
 
 // quotaRecordLockWait bounds how long a quota-stop record waits for the job's
@@ -482,7 +522,8 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 // quotaStopFinish announces job.lost (when emit) and releases the quota lease.
 func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	if emit {
-		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil && !errors.Is(e, errQuotaStopSuperseded) {
+		// The caller (the watcher's end) holds the end lock already.
+		if e := a.quotaStopAnnounceEndLocked(ctx, j, stop); e != nil && !errors.Is(e, errQuotaStopSuperseded) {
 			return e
 		}
 	}
@@ -529,7 +570,7 @@ func pendingQuotaIntent(j Job) (quotaIntent, bool) {
 }
 
 func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop) error {
-	unlock, err := a.lockJobOperation(j.ID, quotaRecordLockWait)
+	unlock, err := a.lockJobOperation(ctx, j.ID, quotaRecordLockWait)
 	if err != nil {
 		return err
 	}
