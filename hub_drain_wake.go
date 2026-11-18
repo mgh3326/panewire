@@ -86,8 +86,11 @@ func (h *HubServer) sweepDrainWakes(ctx context.Context, now time.Time) {
 		}
 		before := *state
 		h.drainWakeLaneStep(ctx, lane, state, routes, now)
-		if before.pending {
+		if !before.pending && state.pending {
 			h.loopAddMade(loopLaneStallDrainWake, 1)
+		}
+		if before.pending && !state.pending {
+			h.loopAddDone(loopLaneStallDrainWake, 1)
 		}
 		if !state.lastSent.Equal(before.lastSent) {
 			h.loopAddDone(loopLaneStallDrainWake, 1)

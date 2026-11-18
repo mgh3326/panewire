@@ -111,6 +111,12 @@ type loopLedgerState struct {
 	silentStreak map[string]bool
 	noticeSent   map[string]string
 	rowDate      string
+	// progressBase holds each mechanism's cumulative made/done at the
+	// start of progressDate; the progress rule runs on the current
+	// date's deltas so a long healthy history cannot mask a new stall.
+	progressBase  map[loopMechanism][2]int64
+	progressDate  string
+	rowRetryAfter time.Time
 }
 
 func newLoopLedgerState() *loopLedgerState {
@@ -118,6 +124,7 @@ func newLoopLedgerState() *loopLedgerState {
 		stats:        make(map[loopMechanism]*loopStat),
 		silentStreak: make(map[string]bool),
 		noticeSent:   make(map[string]string),
+		progressBase: make(map[loopMechanism][2]int64),
 	}
 }
 
@@ -197,20 +204,21 @@ func (h *HubServer) loopNoteError(m loopMechanism) {
 	st.statFor(m).Errors++
 }
 
-// loopNoteSilentError counts a previously silent error path and logs one line
-// per failure streak. A repeated failure with the same key logs nothing until
-// loopClearSilent retires the streak with a success.
+// loopNoteSilentError counts a previously silent error path when its failure
+// streak starts, and logs one line per streak: every later failure with the
+// same key counts and logs nothing until loopClearSilent retires the streak
+// with a success, so a latched outage cannot flood the ledger's counters.
 func (h *HubServer) loopNoteSilentError(m loopMechanism, key string, err error) {
 	if h == nil {
 		return
 	}
 	st := h.loopLedger()
 	st.mu.Lock()
-	st.statFor(m).Errors++
-	st.statFor(m).SilentErrors++
 	streak := st.silentStreak[key]
 	if !streak {
 		st.silentStreak[key] = true
+		st.statFor(m).Errors++
+		st.statFor(m).SilentErrors++
 	}
 	st.mu.Unlock()
 	if streak {
@@ -381,10 +389,17 @@ func (h *HubServer) loopsRowState(ctx context.Context, key string) (exists, unkn
 	return false, true
 }
 
+// loopsRowRetryAfter bounds how often an unreadable row is re-read: the
+// synchronous hk GET must not hold the maintenance tick on every pass while
+// hk is unreachable.
+const loopsRowRetryAfter = time.Minute
+
 // maybeWriteLoopsRow writes exactly one daily row per UTC date. It is called
 // from the hub's slow sweeps; a failed write or an unreadable row counts in
 // the ledger (against fleet_status, the hub's other hk writer) and is
-// retried on the next sweep.
+// retried on the next sweep (an unreadable row at most once a minute).
+// Rolling into a new date also re-baselines the progress rule to the
+// cumulative counters, so the rule always runs on the current date's deltas.
 func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 	if h == nil {
 		return
@@ -397,11 +412,24 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 		st.mu.Unlock()
 		return
 	}
+	if st.progressDate != date {
+		st.progressDate = date
+		for m, s := range st.stats {
+			st.progressBase[m] = [2]int64{s.Made, s.Done}
+		}
+	}
+	if now.Before(st.rowRetryAfter) {
+		st.mu.Unlock()
+		return
+	}
 	st.mu.Unlock()
 	exists, unknown := h.loopsRowState(ctx, loopsRowKey(date))
 	if unknown {
 		h.loopNoteError(loopFleetStatus)
 		h.logger.Warn("hub loops row unreadable; retrying", "key", loopsRowKey(date))
+		st.mu.Lock()
+		st.rowRetryAfter = now.Add(loopsRowRetryAfter)
+		st.mu.Unlock()
 		return
 	}
 	if exists {
@@ -452,16 +480,25 @@ func (h *HubServer) loopsStaleHits(now time.Time) []loopMechanism {
 }
 
 // loopsProgressHits returns mechanisms with made >= floor that finished
-// nothing or nearly nothing: done == 0, or done/made < ratio.
+// nothing or nearly nothing since the current UTC date began: done == 0, or
+// done/made < ratio. The window is the date's deltas off the cumulative
+// counters, so a long healthy history cannot mask a stall that started today.
 func (h *HubServer) loopsProgressHits() []loopMechanism {
-	snap := h.loopSnapshot()
+	st := h.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	var hits []loopMechanism
 	for _, m := range loopMechanisms {
-		s := snap[m]
-		if s.Made < loopMadeFloor {
+		s, ok := st.stats[m]
+		var made, done int64
+		if ok {
+			base := st.progressBase[m]
+			made, done = s.Made-base[0], s.Done-base[1]
+		}
+		if made < loopMadeFloor {
 			continue
 		}
-		if s.Done == 0 || float64(s.Done)/float64(s.Made) < loopDoneRatio {
+		if done == 0 || float64(done)/float64(made) < loopDoneRatio {
 			hits = append(hits, m)
 		}
 	}

@@ -303,10 +303,11 @@ func TestLoopLedgerDisabledLoopsExcludedFromStale(t *testing.T) {
 func TestLoopLedgerUnreadableRowSkipsWriteAndRetries(t *testing.T) {
 	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	published := 0
+	reads := 0
 	readErr := errors.New("hk timeout")
 	h := loopLedgerTestHub(t, &now, nil)
 	h.loopsDocPublish = func(_ context.Context, _, _ string) error { published++; return nil }
-	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return false, readErr }
+	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { reads++; return false, readErr }
 	ctx := context.Background()
 
 	for _, m := range loopMechanisms {
@@ -316,10 +317,15 @@ func TestLoopLedgerUnreadableRowSkipsWriteAndRetries(t *testing.T) {
 	if published != 0 {
 		t.Fatalf("unreadable row published=%d, want 0", published)
 	}
+	h.maybeWriteLoopsRow(ctx)
+	if reads != 1 {
+		t.Fatalf("row reads=%d, want 1: an unreadable row backs off instead of reading every tick", reads)
+	}
 	if got := h.loopSnapshot()[loopFleetStatus].Errors; got < 1 {
 		t.Fatalf("fleet_status errors=%d, want >= 1 for the unreadable row", got)
 	}
 	readErr = nil
+	now = now.Add(2 * loopsRowRetryAfter)
 	h.maybeWriteLoopsRow(ctx)
 	if published != 1 {
 		t.Fatalf("retried publishes=%d, want 1", published)
@@ -368,5 +374,72 @@ func TestLoopLedgerInboxBackoffStillTicks(t *testing.T) {
 	h.flushInbox()
 	if last := h.loopSnapshot()[loopInbox].LastTick; last.IsZero() {
 		t.Fatalf("inbox last_tick not recorded during backoff")
+	}
+}
+
+// An owed drain edge counts one made; sweeps while the line stays owed
+// without progress count nothing, so an interval-gated line cannot trip the
+// progress notice.
+func TestLoopLedgerDrainOwedEdgeCountsOnce(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	h.reportRelayPath = r20LanesFile(t, `{"lanes":{"x-design":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	ctx := context.Background()
+	h.drainWake = map[string]*drainWakeLane{"x-design": {known: true, drained: false}}
+	h.sweepDrainWakes(ctx, now)
+	snap := h.loopSnapshot()[loopLaneStallDrainWake]
+	if snap.Made != 1 || snap.Done != 0 {
+		t.Fatalf("owed edge made=%d done=%d, want 1 and 0", snap.Made, snap.Done)
+	}
+	// The line stays owed behind the interval gate: no further counts.
+	h.drainWake["x-design"].lastSent = now
+	h.sweepDrainWakes(ctx, now)
+	snap = h.loopSnapshot()[loopLaneStallDrainWake]
+	if snap.Made != 1 || snap.Done != 0 {
+		t.Fatalf("gated sweep made=%d done=%d, want still 1 and 0", snap.Made, snap.Done)
+	}
+}
+
+// A busy lane clears its owed line without a send: the clear counts as done,
+// balancing the edge's made.
+func TestLoopLedgerDrainBusyClearCountsDone(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	h.reportRelayPath = r20LanesFile(t, `{"lanes":{"x-design":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	ctx := context.Background()
+	h.mu.Lock()
+	h.nodes["machine-a"] = &hubNodeRecord{machineID: "machine-a", state: "connected", activeReported: true, activeJobs: map[string]HubActiveJob{"job-1": {JobID: "job-1", OwnerLane: "x-design"}}}
+	h.mu.Unlock()
+	h.drainWake = map[string]*drainWakeLane{"x-design": {known: true, drained: true, pending: true}}
+	h.sweepDrainWakes(ctx, now)
+	snap := h.loopSnapshot()[loopLaneStallDrainWake]
+	if snap.Made != 0 || snap.Done != 1 {
+		t.Fatalf("busy clear made=%d done=%d, want 0 and 1", snap.Made, snap.Done)
+	}
+}
+
+// A long healthy history must not mask a stall that started today: the
+// progress rule runs on the current date's deltas.
+func TestLoopLedgerProgressStallAfterHealthyHistory(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	for _, m := range loopMechanisms {
+		h.loopTick(m)
+	}
+	h.loopAddMade(loopSpawnCoordinator, 5000)
+	h.loopAddDone(loopSpawnCoordinator, 5000)
+	h.loopsDocPublish = func(_ context.Context, _, _ string) error { return nil }
+	h.loopsDocExists = func(_ context.Context, _ string) (bool, error) { return true, nil }
+	h.maybeWriteLoopsRow(ctx)
+	h.loopAddMade(loopSpawnCoordinator, 100)
+	found := false
+	for _, m := range h.loopsProgressHits() {
+		if m == loopSpawnCoordinator {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("stalled spawn coordinator has no progress hit after a healthy history: %+v", h.loopSnapshot()[loopSpawnCoordinator])
 	}
 }

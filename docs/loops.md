@@ -14,7 +14,7 @@ hk 5117 adds per-node rows beside these.
 |---|---|---|---|
 | `spawn_coordinator` | 2 s | pending `spawn_operations` rows seen in the scan (plus waiting rows released by the start-condition check) | rows handed to a worker or a node dispatch (a start-condition release, give-up, refusal or cancellation also counts) |
 | `consult_coordinator` | 5 s | active consult rows read | consults answered, timed out, failed, respawned or settled |
-| `lane_stall_drain_wake` | keepalive (10 s) | stall candidates observed, plus drain sweeps where a lane owed a line | stall alarms activated plus drain lines queued to a design lane's pane |
+| `lane_stall_drain_wake` | keepalive (10 s) | stall candidates observed, plus drain lines newly owed (one per owed edge, not per sweep) | stall alarms activated, plus owed drain lines sent or cleared |
 | `inbox` | 100 ms | batches listed for flush, plus inbox-wake lanes due at a window end | batches handed to the relay (marked sent), plus wake lines sent |
 | `quota_ladder` | 2 m | quota successor rows plus expired ladder stages seen | hk records written with `replaced_by`, plus ladder stages activated, discarded or cancelled |
 | `pool_triggers_exhausted` | 10 m | live pools checked | exhausted-pool sweeps started (retired or credit-exhausted) |
@@ -31,8 +31,9 @@ mechanisms report 0 until they observe backlog.
 ## Silent error paths
 
 Every error path counts in the ledger. The paths that were silent before this
-change also log, rate-limited to one line per failure streak (the next failure
-after a success logs again):
+change also log, rate-limited to one line per failure streak, and count once
+per streak (a latched outage counts one error no matter how many sweeps it
+spans; the next failure after a success counts and logs again):
 
 - `hub_spawn_async.go`: the pending-scan page read, and the ordinary pending read
 - `hub_spawn_start_conditions.go`: the waiting-rows read
@@ -59,7 +60,9 @@ the hub's hk document writer (the same path the fleet status writer uses):
 One document per day: the writer records the date it wrote, skips a date it
 already wrote, and treats an existing document (for example after a hub
 restart) as written — already written is never rewritten. A failed write
-counts against `fleet_status` in the ledger and is retried on the next sweep.
+or an unreadable row counts against `fleet_status` in the ledger and is
+retried; an unreadable row is re-read at most once a minute so a hk outage
+cannot hold the maintenance tick on every pass.
 
 ## Notice
 
@@ -67,7 +70,9 @@ The notice goes to `--loops-notice-lane` (default `panewire-design`), one
 lane.event line per hit mechanism. It fires when any of these holds:
 
 - `last_tick` is older than three intervals for the mechanism;
-- `made` ≥ 20 and `done` = 0, or `done/made` < 10%;
+- `made` ≥ 20 and `done` = 0, or `done/made` < 10%, counted over the current
+  UTC date (the counters re-baseline at midnight, so a long healthy history
+  cannot mask a stall that started today);
 - a previously silent error path counted ≥ 1.
 
 Thresholds (`3`, `20`, `10%`) live in `hub_loop_ledger.go` (`loopStaleIntervals`,
