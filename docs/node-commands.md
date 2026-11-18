@@ -780,11 +780,14 @@ reservation (hk 4737). A failed ledger read or handoffkeep write answers
 
 ### `job.reap`
 
-`args: {job, lane, force}` — all three required, and `force:false` must be
-stated. This is the node half of `panewire jobs close`
-([jobs-own.md](jobs-own.md)): the hub has already checked that the caller's
-lane owns the job, and the node re-proves it from the job's own ledger and
-herdr before it closes a pane it did not spawn in this process.
+`args: {job, lane, force, expect?}` — `job`, `lane` and `force` are required,
+and `force:false` must be stated. `expect`, when present, must be a closable
+status (`idle`, `done` or `blocked`); a node that predates it refuses the
+frame as `invalid_args` without acting. This is the node half of
+`panewire jobs close` ([jobs-own.md](jobs-own.md)): the hub has already
+checked that the caller's lane owns the job, and the node re-proves it from
+the job's own ledger and herdr before it closes a pane it did not spawn in
+this process.
 
 The node reads `<inbox>/jobs/<job>/events` and takes the owner lane from the
 newest claim, and the pane, label and keep flag from the `job.spawned` receipt.
@@ -792,14 +795,18 @@ It then re-reads `herdr agent list` and requires the row for that pane id to
 carry the receipt's label; a pane id is host-local and reused, so a different
 label is another pane. `pane.close`'s settle applies to a non-forced close:
 two matching reads one interval apart, an unchanged `state_change_seq` where
-herdr reports one, and an empty composer both times.
+herdr reports one, and an empty composer both times. A forced close carrying
+`expect` re-reads the verified pane atomically with the close and refuses
+when the pane is no longer as proven: `working` reads as `job-working`, and
+any other unexpected non-finished status as `pane-changed`. A finished pane
+(`idle` or `done`) stays closable whatever was expected.
 
 | `outcome` | `pane` | Meaning |
 | --- | --- | --- |
 | `closed` | the closed pane | Matched and `herdr pane close` succeeded. |
 | `pane-gone` | the receipt's pane, when it names one | No such agent pane; nothing to close. With no pane, the ledger names none and the node verified nothing. |
-| `pane-changed` | the receipt's pane | The pane carries another label, is in no closable status, or its composer is not proven empty; not closed. |
-| `job-working` | the receipt's pane | The pane is `working`; `force` closes it. Not closed. |
+| `pane-changed` | the receipt's pane | The pane carries another label, is in no closable status, its composer is not proven empty, or a forced `expect` recheck found it no longer as proven and not finished; not closed. |
+| `job-working` | the receipt's pane | The pane is `working`; plain `force` closes it, but a forced close carrying `expect` refuses. Not closed. |
 | `pane-blocked` | the receipt's pane | The pane waits at a prompt; `force` closes it. Not closed. |
 | `protected` | the receipt's pane | The job was spawned with `--keep`; never closed, whatever `force` says. |
 | `owner-mismatch` | the receipt's pane | The ledger's owner lane is not `lane`; not closed. |

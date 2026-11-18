@@ -8,18 +8,24 @@ import (
 	"time"
 )
 
-// Successor-closes-parent (hk 5140): when a spawn with --parent-job P lands,
-// the hub ends P itself through the jobs-close reap path.
+// Successor-closes-parent (hk 5140): when an implementer spawn with
+// --parent-job P lands, the hub ends P itself through the jobs-close reap
+// path. Only implementer successors take over; reviewer and consult children
+// never close their parent, and the successor must own the parent's lane.
 //
 //   - Reap's safety holds: never a pane that is not P's, never a job spawned
 //     with --keep, and never a worktree removal (reap closes the pane only).
 //   - An idle, done or blocked parent closes at landing; a working parent is
 //     recorded as superseded and closed at the first sweep where it is no
 //     longer working. Force is never used on a working pane: a blocked pane
-//     is proven blocked first (one unforced reap) and only then closed with
-//     force.
+//     is proven blocked first (one unforced reap) and the forced close
+//     carries that proof, which the node rechecks atomically with the
+//     close, so a pane that resumed working since the proof is refused
+//     instead of killed.
 //   - The hub writes job.superseded (successor id) on P and sends one info
-//     lane.event to P's owner lane once the pane is closed.
+//     lane.event to P's owner lane once the pane is closed. Deferred parents
+//     are rebuilt from hk after a hub restart, so no recorded parent is
+//     lost with the in-memory map.
 //   - An unknown or already-ended parent is a no-op. A close failure never
 //     fails the successor's spawn; it logs one warn and retries on the sweep.
 //
@@ -38,6 +44,11 @@ func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
 	if parent == "" || successor == "" || parent == successor {
 		return
 	}
+	// Only an implementer successor takes over: a reviewer or consult
+	// child must never close its parent's pane (docs/config.md).
+	if hubSpawnFlagArg(task.Request.Args, "--role") != "implementer" {
+		return
+	}
 	h.mu.Lock()
 	job := h.jobs[parent]
 	var node, owner string
@@ -48,6 +59,17 @@ func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
 	}
 	h.mu.Unlock()
 	if job == nil || completed || node == "" || owner == "" {
+		return
+	}
+	// The successor may only end a parent it owns: the forced path could
+	// otherwise close another lane's blocked pane, which is usually an
+	// open operator decision.
+	succOwner := task.Owner
+	if succOwner == "" {
+		succOwner = hubSpawnFlagArg(task.Request.Args, "--owner")
+	}
+	if succOwner != owner {
+		h.logger.Warn("successor close refused: successor owner differs", "parent", parent, "successor", successor, "owner", owner, "successor_owner", succOwner)
 		return
 	}
 	h.supersedeParent(parent, successor, owner, node)
@@ -75,7 +97,7 @@ func (h *HubServer) supersedeParent(parent, successor, owner, node string) {
 		h.clearSuperseded(parent)
 		return
 	}
-	reaped, transportErr := h.reapParentOnce(node, parent, owner, false)
+	reaped, transportErr := h.reapParentOnce(node, parent, owner, false, "")
 	if transportErr != "" {
 		h.noteSuperseded(parent, successor)
 		h.writeSupersededBestEffort(parent, successor)
@@ -96,7 +118,10 @@ func (h *HubServer) supersedeParent(parent, successor, owner, node string) {
 			h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor)
 		}
 	case nodeJobReapPaneBlocked:
-		forced, forcedErr := h.reapParentOnce(node, parent, owner, true)
+		// The forced close carries what the proof saw (blocked): the node
+		// rechecks it atomically with the close, so a pane that resumed
+		// working since the proof is refused instead of killed.
+		forced, forcedErr := h.reapParentOnce(node, parent, owner, true, "blocked")
 		if forcedErr != "" {
 			h.noteSuperseded(parent, successor)
 			h.writeSupersededBestEffort(parent, successor)
@@ -113,6 +138,13 @@ func (h *HubServer) supersedeParent(parent, successor, owner, node string) {
 			}
 		case nodeJobReapProtected, nodeJobReapNotAJob, nodeJobReapOwnerMismatch:
 			h.clearSuperseded(parent)
+		case nodeJobReapJobWorking:
+			// The pane resumed after the blocked proof; wait for the sweep
+			// like any other working pane.
+			h.noteSuperseded(parent, successor)
+			if err := h.writeSupersededBestEffort(parent, successor); err != nil {
+				h.logger.Warn("successor close failed, will retry", "parent", parent, "successor", successor)
+			}
 		default:
 			h.noteSuperseded(parent, successor)
 			h.writeSupersededBestEffort(parent, successor)
@@ -151,8 +183,8 @@ func (h *HubServer) supersededParentTerminal(parent string) bool {
 // reapParentOnce runs one jobs-close reap against the parent's node and
 // retires the lane rows the node verified, exactly as handleJobReap does. A
 // non-empty transport error means the pane was not proven anything about.
-func (h *HubServer) reapParentOnce(node, job, lane string, force bool) (nodeJobReapResult, string) {
-	args, _ := json.Marshal(nodeJobReapArgs{Job: job, Lane: lane, Force: force})
+func (h *HubServer) reapParentOnce(node, job, lane string, force bool, expect string) (nodeJobReapResult, string) {
+	args, _ := json.Marshal(nodeJobReapArgs{Job: job, Lane: lane, Force: force, Expect: expect})
 	commandStart := h.now().UTC()
 	pending, requestID, state, sent := h.sendNodeCommand(node, nodeCommandJobReap, args)
 	if !sent {
@@ -244,9 +276,55 @@ func (h *HubServer) clearSuperseded(parent string) {
 	delete(h.supersededParents, parent)
 }
 
+// rebuildSupersededFromHK re-arms deferred parents recorded before a hub
+// restart. job.superseded survives in hk while the in-memory map does not;
+// the first sweep re-reads each live hub job once and re-notes the ones
+// whose record names a successor and is not terminal.
+func (h *HubServer) rebuildSupersededFromHK() {
+	h.mu.Lock()
+	if h.supersededRebuilt {
+		h.mu.Unlock()
+		return
+	}
+	h.supersededRebuilt = true
+	type liveJob struct{ id, node, owner string }
+	var jobs []liveJob
+	for id, job := range h.jobs {
+		if job == nil || job.Completed {
+			continue
+		}
+		jobs = append(jobs, liveJob{id: id, node: job.Node, owner: job.OwnerLane})
+	}
+	h.mu.Unlock()
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		return
+	}
+	if err := app.CheckTrust(); err != nil {
+		return
+	}
+	for _, job := range jobs {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		record, found, err := app.ExistingJob(ctx, job.id)
+		cancel()
+		if err != nil || !found {
+			continue
+		}
+		if state, _ := record["state"].(string); hkTerminalState(state) {
+			continue
+		}
+		if succ, _ := record["superseded"].(string); succ != "" {
+			h.noteSuperseded(job.id, succ)
+		}
+	}
+}
+
 // sweepSupersededParents retries every deferred parent close. It runs on the
 // hub's Sweep: the first pass where the pane is no longer working closes it.
+// The first sweep after a hub start re-arms entries recorded before the
+// restart from their hk job.superseded records.
 func (h *HubServer) sweepSupersededParents() {
+	h.rebuildSupersededFromHK()
 	h.mu.Lock()
 	pending := make(map[string]string, len(h.supersededParents))
 	for parent, successor := range h.supersededParents {

@@ -659,7 +659,10 @@ type HubServer struct {
 	// whose pane was still working: parent job id to successor job id. The
 	// hub closes each entry at the first sweep where its pane is no longer
 	// working, through the jobs-close reap path. Guarded by mu.
-	supersededParents  map[string]string
+	supersededParents map[string]string
+	// supersededRebuilt marks the first sweepSupersededParents pass, which
+	// re-arms pre-restart deferred parents from hk. Guarded by mu.
+	supersededRebuilt  bool
 	spawnStartBy       time.Duration
 	spawnStartByMargin time.Duration
 	spawnGrantDrain    bool

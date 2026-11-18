@@ -30,6 +30,12 @@ type nodeJobReapArgs struct {
 	Job   string `json:"job"`
 	Lane  string `json:"lane"`
 	Force bool   `json:"force"`
+	// Expect is the agent status a forced close must still see on the
+	// verified pane, or "" for no recheck. A forced close that finds the
+	// pane working, gone, relabeled or otherwise not as proven refuses
+	// instead of closing a resumed session. Human `jobs close --force`
+	// sends none and keeps its old meaning.
+	Expect string `json:"expect,omitempty"`
 }
 
 // nodeJobReapResult names the pane the node acted on, so the hub retires the
@@ -40,7 +46,10 @@ type nodeJobReapResult struct {
 }
 
 func validNodeJobReapArgs(args nodeJobReapArgs) bool {
-	return validNodeJobName(args.Job) && validLaneReference(args.Lane)
+	if !validNodeJobName(args.Job) || !validLaneReference(args.Lane) {
+		return false
+	}
+	return args.Expect == "" || nodePaneClosableStatus[args.Expect]
 }
 
 func validNodeJobReapResult(result nodeJobReapResult) bool {
@@ -116,6 +125,28 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 	// names is what proves the pane still runs this job.
 	if target.label == "" || row.Name != target.label {
 		return nodeJobReapResult{Outcome: nodeJobReapPaneChanged, Pane: target.pane}, ""
+	}
+	if args.Force && args.Expect != "" {
+		// A forced close that carries what an earlier proof saw rechecks
+		// it atomically with the close: the pane may have resumed since
+		// the proof, and closing a working pane is never allowed. A pane
+		// that finished meanwhile (idle or done) is still safe to close.
+		fresh, found, err := client.nodeJobReapRow(ctx, args.Job, target.pane)
+		if err != nil {
+			return nil, "herdr_failed"
+		}
+		if !found {
+			return nodeJobReapResult{Outcome: nodeJobReapPaneGone, Pane: target.pane}, ""
+		}
+		if target.label == "" || fresh.Name != target.label {
+			return nodeJobReapResult{Outcome: nodeJobReapPaneChanged, Pane: target.pane}, ""
+		}
+		switch {
+		case fresh.AgentStatus == "working":
+			return nodeJobReapResult{Outcome: nodeJobReapJobWorking, Pane: target.pane}, ""
+		case fresh.AgentStatus != args.Expect && !nodePaneIdleStatus[fresh.AgentStatus]:
+			return nodeJobReapResult{Outcome: nodeJobReapPaneChanged, Pane: target.pane}, ""
+		}
 	}
 	if !args.Force {
 		switch {

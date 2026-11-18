@@ -91,6 +91,15 @@ func reapForceOf(t *testing.T, command map[string]json.RawMessage) bool {
 	return args.Force
 }
 
+func reapExpectOf(t *testing.T, command map[string]json.RawMessage) string {
+	t.Helper()
+	var args nodeJobReapArgs
+	if err := json.Unmarshal(command["args"], &args); err != nil {
+		t.Fatal(err)
+	}
+	return args.Expect
+}
+
 func tryNodeCommand(conn *websocket.Conn) (map[string]json.RawMessage, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -244,6 +253,9 @@ func TestSupersedeBlockedParentClosesWithForce(t *testing.T) {
 	if !reapForceOf(t, second) {
 		t.Fatalf("blocked close uses force after the proof: %v", second["args"])
 	}
+	if got := reapExpectOf(t, second); got != "blocked" {
+		t.Fatalf("forced close must carry the blocked proof, got %q", got)
+	}
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -360,4 +372,149 @@ func TestSupersedeLandingHookClosesIdleParent(t *testing.T) {
 		got, ok := supersededOf(t, f)
 		return ok && got == f.successor && len(supersedeInfos(f.destination)) == 1
 	})
+}
+
+// TestSupersedeReviewerChildLeavesParentRunning: only an implementer
+// successor takes over; reviewer and consult children must never close the
+// parent pane, even with an explicit --parent-job.
+func TestSupersedeReviewerChildLeavesParentRunning(t *testing.T) {
+	for _, role := range []string{"reviewer", "consult"} {
+		t.Run(role, func(t *testing.T) {
+			f := newSupersedeFixture(t)
+			f.seedParent(t, "spawned")
+			task := hubSpawnTask{
+				Job:     f.successor,
+				Owner:   "parent",
+				Request: fleet.Submission{RequestID: "d676220b-e763-4af1-aefd-0000000000a1", Args: []string{"--job", f.successor, "--parent-job", f.parent, "--owner", "parent", "--role", role}},
+			}
+			f.hub.maybeSupersedeParent(task)
+			if extra, ok := tryNodeCommand(f.node); ok {
+				t.Fatalf("a %s child must not reach the node: %v", role, extra)
+			}
+			if _, ok := supersededOf(t, f); ok {
+				t.Fatalf("a %s child must never record superseded", role)
+			}
+			if infos := supersedeInfos(f.destination); len(infos) != 0 {
+				t.Fatalf("a %s child sends no info: %+v", role, infos)
+			}
+		})
+	}
+}
+
+// TestSupersedeOwnerMismatchLeavesParentRunning: the successor may only end
+// a parent in its own lane. Another lane's blocked pane is usually an open
+// operator decision, so a foreign successor leaves it running with one warn.
+func TestSupersedeOwnerMismatchLeavesParentRunning(t *testing.T) {
+	f := newSupersedeFixture(t)
+	f.seedParent(t, "spawned")
+	task := hubSpawnTask{
+		Job:     f.successor,
+		Owner:   "other-lane",
+		Request: fleet.Submission{RequestID: "d676220b-e763-4af1-aefd-0000000000a2", Args: []string{"--job", f.successor, "--parent-job", f.parent, "--owner", "other-lane", "--role", "implementer"}},
+	}
+	f.hub.maybeSupersedeParent(task)
+	if extra, ok := tryNodeCommand(f.node); ok {
+		t.Fatalf("a foreign successor must not reach the node: %v", extra)
+	}
+	if _, ok := supersededOf(t, f); ok {
+		t.Fatal("a foreign successor must never record superseded")
+	}
+	if infos := supersedeInfos(f.destination); len(infos) != 0 {
+		t.Fatalf("a foreign successor sends no info: %+v", infos)
+	}
+	if got := strings.Count(f.logs.String(), "successor close refused"); got != 1 {
+		t.Fatalf("refusal owes one warn, got %d: %s", got, f.logs.String())
+	}
+}
+
+// TestSupersedeSweepRebuildsFromHK: a parent recorded before a hub restart
+// is re-armed from its hk job.superseded record on the first sweep and
+// closed once idle, even though the in-memory map is empty.
+func TestSupersedeSweepRebuildsFromHK(t *testing.T) {
+	f := newSupersedeFixture(t)
+	f.seedParent(t, "spawned")
+	f.jobs.mu.Lock()
+	f.jobs.records[f.parent]["superseded"] = f.successor
+	f.jobs.mu.Unlock()
+	if _, rebuilt := f.hub.supersededParents[f.parent]; rebuilt {
+		t.Fatal("fixture must start with an empty deferred map")
+	}
+	done := make(chan struct{})
+	go func() { f.hub.sweepSupersededParents(); close(done) }()
+	command := serveReap(t, f, nodeJobReapClosed, "w1:p1")
+	if reapForceOf(t, command) {
+		t.Fatalf("rebuilt idle close must not use force")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rebuilt sweep did not finish")
+	}
+	if got, ok := supersededOf(t, f); !ok || got != f.successor {
+		t.Fatalf("hk superseded must survive the close: %q %v", got, ok)
+	}
+	if infos := supersedeInfos(f.destination); len(infos) != 1 {
+		t.Fatalf("rebuilt close owes one info: %+v", infos)
+	}
+}
+
+// TestSupersedeForcedCloseRefusesResumedPane: a pane that resumes working
+// between the blocked proof and the forced close is refused, not killed. It
+// waits for the sweep like any other working pane, with no failure warn.
+func TestSupersedeForcedCloseRefusesResumedPane(t *testing.T) {
+	f := newSupersedeFixture(t)
+	f.seedParent(t, "spawned")
+	done := make(chan struct{})
+	go func() { f.hub.supersedeParent(f.parent, f.successor, "parent", "machine-a"); close(done) }()
+	first := serveReap(t, f, nodeJobReapPaneBlocked, "w1:p1")
+	if reapForceOf(t, first) {
+		t.Fatalf("blocked must be proven without force first")
+	}
+	second := serveReap(t, f, nodeJobReapJobWorking, "w1:p1")
+	if !reapForceOf(t, second) || reapExpectOf(t, second) != "blocked" {
+		t.Fatalf("resumed pane must still be rechecked with the proof: %v", second["args"])
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("supersede did not finish")
+	}
+	if got, ok := supersededOf(t, f); !ok || got != f.successor {
+		t.Fatalf("resumed parent stays recorded: %q %v", got, ok)
+	}
+	if infos := supersedeInfos(f.destination); len(infos) != 0 {
+		t.Fatalf("no info before the close: %+v", infos)
+	}
+	if strings.Contains(f.logs.String(), "successor close failed") {
+		t.Fatalf("a refused resume is a defer, not a failure: %s", f.logs.String())
+	}
+}
+
+// TestNodeJobReapForcedExpectRecheck: a forced close carrying the proven
+// status closes a still-blocked or finished pane, refuses a resumed working
+// pane without closing it, and refuses an invalid expectation.
+func TestNodeJobReapForcedExpectRecheck(t *testing.T) {
+	events := []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", false)}
+	serve := func(t *testing.T, listed string, expect string, extra ...map[string]json.RawMessage) (map[string]any, string, int) {
+		t.Helper()
+		inbox := t.TempDir()
+		markLostJobEvents(t, inbox, "job-a", events...)
+		fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", listed, "/work/a"))}, read: nodeReapScreen("❯ ")}
+		client := &HubClient{jobsInboxRoot: inbox, nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}
+		result, code := nodeRun(t, client, nodeCommandJobReap, nodeJobReapArgs{Job: "job-a", Lane: "lane-a", Force: true, Expect: expect})
+		_ = extra
+		return result, code, fake.called("pane", "close")
+	}
+	if result, code, closes := serve(t, "blocked", "blocked"); code != "" || result["outcome"] != nodeJobReapClosed || closes != 1 {
+		t.Fatalf("still-blocked forced close: result=%v code=%q closes=%d", result, code, closes)
+	}
+	if result, code, closes := serve(t, "working", "blocked"); code != "" || result["outcome"] != nodeJobReapJobWorking || closes != 0 {
+		t.Fatalf("resumed working pane must be refused: result=%v code=%q closes=%d", result, code, closes)
+	}
+	if result, code, closes := serve(t, "idle", "blocked"); code != "" || result["outcome"] != nodeJobReapClosed || closes != 1 {
+		t.Fatalf("finished pane stays closable: result=%v code=%q closes=%d", result, code, closes)
+	}
+	if _, code, _ := serve(t, "blocked", "working"); code == "" {
+		t.Fatal("an invalid expectation must be refused")
+	}
 }
