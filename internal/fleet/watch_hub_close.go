@@ -296,7 +296,7 @@ func (a *App) endUnlessHubClose(id string, seen Job, end func(j Job) error) (def
 	// The attempt or its effective end changed since the snapshot (a
 	// re-prompt, a reclaim, a reap, a revocation, a completion): the decision
 	// is stale.
-	if view.decision() != viewLedger(seen.Events).decision() {
+	if j.OwnerEpoch != seen.OwnerEpoch || view.decision() != viewLedger(seen.Events).decision() {
 		return true, nil
 	}
 	return false, end(j)
@@ -559,7 +559,7 @@ func (a *App) lockUnchangedEnd(ctx context.Context, seen Job) (Job, func(), stri
 }
 
 func sameJobLedger(a, b Job) bool {
-	return reflect.DeepEqual(ledgerOrder(a.Events), ledgerOrder(b.Events))
+	return a.OwnerEpoch == b.OwnerEpoch && reflect.DeepEqual(ledgerOrder(a.Events), ledgerOrder(b.Events))
 }
 
 // hubCloseOpenNow reads whether any hub-close intent of the job is open. A
@@ -680,11 +680,7 @@ func (a *App) settleHubClose(ctx context.Context, id string, listed func(ctx con
 	// have recorded a newer one since the poll's snapshot. The job (its
 	// receipt pane and session, reaped) is folded in the same sequence order
 	// as the intent, never by timestamp.
-	evs, e := a.events(id)
-	if e != nil {
-		return HubClosePending, e
-	}
-	j, e := foldJob(id, ledgerOrder(evs))
+	j, e := a.job(id)
 	if e != nil {
 		return HubClosePending, e
 	}
@@ -721,6 +717,7 @@ var settlementBetweenDrainAndJournalReads func()
 // settleHubCloseIntent drives one open intent one step; the caller holds the
 // job's end lock and folded j under it.
 func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent, ended, reassigned bool, listed func(ctx context.Context, session, pane string) (bool, error), needHK func() error) (HubCloseState, error) {
+	ctx = withJobEpoch(ctx, j)
 	cancel := func(reason string) (HubCloseState, error) {
 		payload := map[string]any{"request_id": in.RequestID, "reason": reason}
 		if reason == hubCloseRollbackUnproven {
@@ -874,6 +871,12 @@ func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent
 			return a.finishHubClose(ctx, current, in, true), nil
 		}
 		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.EndReason, "at": a.Now().UTC()}); e != nil {
+			if IsJobReassigned(e) {
+				if !a.sameJobOwnerEpoch(j) {
+					return cancel("owner_changed")
+				}
+				return a.finishHubClose(ctx, current, in, true), nil
+			}
 			a.warn("hub close lost record not written, retrying: %v", e)
 			return HubClosePending, nil
 		}

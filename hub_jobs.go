@@ -245,6 +245,26 @@ func validRelayFinalText(value string) bool {
 }
 
 func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, received time.Time) {
+	// Resolve unknown grants outside mu: a restarted hub must not let an old
+	// epoch-1 heartbeat claim a job whose hk owner is already elsewhere.
+	h.mu.Lock()
+	unknown := make([]HubActiveJob, 0)
+	for _, job := range active {
+		if h.jobs[job.JobID] == nil {
+			unknown = append(unknown, job)
+		}
+	}
+	h.mu.Unlock()
+	type jobGrant struct {
+		id    string
+		epoch uint64
+	}
+	admitted := make(map[jobGrant]bool, len(unknown))
+	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
+	for _, job := range unknown {
+		admitted[jobGrant{job.JobID, job.Epoch}] = h.firstSeenJobOwned(ctx, job.JobID, machineID, job.Epoch)
+	}
+	cancel()
 	seen := make(map[string]struct{}, len(active))
 	var claimed []claimedPlacement
 	h.mu.Lock()
@@ -268,14 +288,14 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		}
 		current := h.jobs[job.JobID]
 		if current == nil {
-			// Epoch 1 is issued by the hub for a first-seen job. A node cannot
-			// establish authority by presenting an arbitrary higher epoch.
-			if job.Epoch == 1 {
+			// A stored hk grant proves a later epoch; a node cannot promote
+			// itself merely by presenting one.
+			if admitted[jobGrant{job.JobID, job.Epoch}] {
 				h.jobs[job.JobID] = &hubJobRecord{HubActiveJob: job, Node: machineID, LastSeen: received, FencedNodes: make(map[string]uint64)}
 			}
 			continue
 		}
-		if current.Completed || current.Node != machineID || current.Epoch != job.Epoch {
+		if current.Completed || current.Reassigning || current.Node != machineID || current.Epoch != job.Epoch {
 			// A stale or self-promoted heartbeat is presence-only. It must not
 			// modify ownership, epoch, fencing, or liveness of the true owner.
 			continue
@@ -311,7 +331,7 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		if _, stillActive := seen[id]; stillActive {
 			continue
 		}
-		if current.Node == machineID && current.Orphaned {
+		if current.Node == machineID && current.Orphaned && !current.Reassigning {
 			current.Orphaned, current.Completed = false, true
 			h.queueJobEventLocked("job.recovered", hubJobEventPayload{JobID: id, Node: machineID, Epoch: current.Epoch, LastSeen: received})
 		}
@@ -379,7 +399,7 @@ func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEven
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	job := h.jobs[completion.JobID]
-	if job == nil || job.Epoch != completion.Epoch || job.Node != machineID {
+	if job == nil || job.Reassigning || job.Epoch != completion.Epoch || job.Node != machineID {
 		return false // epoch fencing: stale completion is deliberately invisible.
 	}
 	wasOrphaned := job.Orphaned
@@ -398,7 +418,7 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	job := h.jobs[event.JobID]
-	if job == nil || job.Epoch != event.Epoch || job.Node != machineID {
+	if job == nil || job.Reassigning || job.Epoch != event.Epoch || job.Node != machineID {
 		return false
 	}
 	alreadyClosed := job.Completed
@@ -418,12 +438,16 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 // Completed set, which keeps it out of the orphan sweep and out of
 // reassignJob: it is a receipt, never a redispatch candidate.
 //
-// Registration is restricted to epoch 1 for the same reason observeActiveJobs
-// is: every epoch above 1 was issued by the hub, so a first-seen job claiming
-// one cannot be proving anything. A higher-epoch record is still relayed; only
-// its bookkeeping entry is declined.
+// A later epoch is accepted only when hk confirms the node's grant; an old hk
+// or a missing record retains the original epoch-1 rule.
 func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJobEventPayload, received time.Time) bool {
-	if completion.Epoch != 1 || !hubAgentLabelPattern.MatchString(completion.AgentLabel) {
+	if !hubAgentLabelPattern.MatchString(completion.AgentLabel) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(h.closeCtx, nodeLoopHKTimeout)
+	owned := h.firstSeenJobOwned(ctx, completion.JobID, machineID, completion.Epoch)
+	cancel()
+	if !owned {
 		return false
 	}
 	h.mu.Lock()
@@ -594,7 +618,16 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, error) {
 		h.mu.Unlock()
 		return hubJobEventPayload{}, errors.New("job reassignment rejected")
 	}
-	from := job.Node
+	from, epoch := job.Node, job.Epoch
+	job.Reassigning = true
+	h.mu.Unlock()
+	err = h.transferJobOwner(ctx, jobID, from, to, epoch)
+	h.mu.Lock()
+	job.Reassigning = false
+	if err != nil {
+		h.mu.Unlock()
+		return hubJobEventPayload{}, err
+	}
 	job.Epoch++
 	if job.FencedNodes == nil {
 		job.FencedNodes = make(map[string]uint64)

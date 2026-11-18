@@ -490,7 +490,23 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	cancel()
 	state, _ := record["state"].(string)
 	reason, _ := record["end_reason"].(string)
-	if err != nil || !exists || !hkTerminalState(state) {
+	if err != nil || !exists {
+		return errors.New("terminal job record unavailable")
+	}
+	moved, err = poolActionOwnerMoved(action, record)
+	if err != nil {
+		return err
+	}
+	if moved {
+		action.Phase = poolActionDone
+		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			return err
+		}
+		h.poolActionObserved.Delete(action.ID)
+		h.loopNoteDone(loopPoolActions, action.ID)
+		return nil
+	}
+	if !hkTerminalState(state) {
 		return errors.New("terminal job record unavailable")
 	}
 	if err := h.inbox.store.releaseCompletedSpawnRoleOf(ctx, action.Data.SpawnRequest); err != nil {

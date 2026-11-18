@@ -500,7 +500,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		}
 		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
 			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
-				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+				if e := a.putJobRecord(withJobEpoch(ctx, j), id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+					if IsJobReassigned(e) {
+						return nil
+					}
 					a.jobRecordFailed(ctx, id, "lost", e)
 				}
 				if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane, "reason": "decision_unanswered"}); e != nil {
@@ -619,7 +622,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// intent with its event.
 		if missing >= 2 && !handOff.active && !quotaRetry {
 			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
-				if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+				if e := a.putJobRecord(withJobEpoch(ctx, j), id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
+					if IsJobReassigned(e) {
+						return nil
+					}
 					a.jobRecordFailed(ctx, id, "lost", e)
 				}
 				if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane}); e != nil {

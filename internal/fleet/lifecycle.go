@@ -42,6 +42,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if e != nil {
 		return e
 	}
+	ctx = withJobEpoch(ctx, j)
 	if kind == "restore" {
 		if *report != "" || *question != "" {
 			return fail(exitUsage, "restore accepts only JOB")

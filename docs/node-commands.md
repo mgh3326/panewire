@@ -635,6 +635,25 @@ without a heartbeat. Tests in
 [node_pane_close_epoch_test.go](../node_pane_close_epoch_test.go) exercise the
 fence, terminal races, epoch, and restart rules.
 
+The handoffkeep job record also carries an owner node and hub epoch. A node
+establishes its initial fence at landing (or with a pre-landing abort), and its
+completion, escalation, usage, model, quota-stop, sweep, reap, and report-pin writes
+condition their updates on that local grant. The node persists later hub
+assignments, so a restarted node keeps the issued epoch. Each operation keeps
+the grant it started with, even if the job is later assigned back to the same
+node at a newer epoch. Before delivering a reassignment, the hub atomically transfers the hk owner with the old owner as
+`expected_owner`; a stale transfer is refused and names the current owner.
+A node that receives `409 job_owner_mismatch` records the same local revocation
+as a hub notice: it makes no further job-record writes for that attempt and the
+existing pane sweep closes the local pane. The hub checks the durable hk owner
+before finishing an old pool action, including after restart.
+
+An older hk omits both owner fields from a job read. Panewire sends no fence
+fields to that server and logs once per streak while retaining legacy behavior.
+If the hub cannot read the job record, it refuses reassignment until it can
+establish whether fencing is supported. If hk rejects a terminal ownership transfer with `job_state_conflict`, the hub
+refuses the reassignment and names the reason; it does not bypass the fence.
+
 Rollout order: deploy the hub with this guard, upgrade the node binaries,
 run `panewire node close-ops enable` on each node, then run
 `panewire node close-ops advertise` on each. Before any binary rollback, run

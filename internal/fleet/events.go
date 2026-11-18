@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 type Event struct {
@@ -40,6 +42,8 @@ type Job struct {
 	// is cleared only by a new claim or spawn. A writer of that record asks
 	// hubReassigned, which reads the ledger again, not this snapshot.
 	Reassigned bool
+	// OwnerEpoch is the local hub grant when this job snapshot was read.
+	OwnerEpoch uint64
 	// SpawnRole is the role the job.spawned receipt names (reviewer, consult, ...).
 	// The claim records only implementer or builder, so the role a quota stop is
 	// handled by comes from here (QuotaRole).
@@ -161,11 +165,30 @@ func (a *App) events(id string) ([]Event, error) {
 	return out, nil
 }
 func (a *App) job(id string) (Job, error) {
-	evs, e := a.events(id)
-	if e != nil {
-		return Job{ID: id, Events: evs}, e
+	if !validID(id) {
+		return Job{ID: id}, fail(exitUsage, "invalid job id")
 	}
-	return foldJob(id, evs)
+	epoch, err := jobowner.Epoch(a.Jobs, id)
+	if err != nil {
+		return Job{ID: id}, err
+	}
+	evs, err := a.events(id)
+	if err != nil {
+		return Job{ID: id, Events: evs}, err
+	}
+	j, err := foldJob(id, evs)
+	if err != nil {
+		return j, err
+	}
+	current, err := jobowner.Epoch(a.Jobs, id)
+	if err != nil {
+		return j, err
+	}
+	if current != epoch {
+		return j, errors.New("job owner changed while reading ledger")
+	}
+	j.OwnerEpoch = epoch
+	return j, nil
 }
 
 // foldJob builds the job from its events in ledger sequence order, never in

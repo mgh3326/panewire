@@ -1132,6 +1132,9 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	if reason := paneOwnershipProof(current, fresh); reason != "" {
 		return s.paneUnlistedHeld(ctx, a, current, swept, reason)
 	}
+	if !a.sameJobOwnerEpoch(current) {
+		return paneSweepKept("job_changed")
+	}
 	if err := a.must(ctx, "herdr", "pane", "close", j.Pane); err != nil {
 		return paneSweepKept("close_failed")
 	}
@@ -1214,6 +1217,9 @@ func (s *TaskPaneSweeper) paneUnlistedHeld(ctx context.Context, a *App, j Job, s
 			return paneSweepUnproven(reason)
 		}
 	}
+	if !a.sameJobOwnerEpoch(j) {
+		return paneSweepKept("job_changed")
+	}
 	s.reapSweptPaneHeld(ctx, a, j, j, "", paneSweepJobEnd(j, ""), jobSession{}, false, a.Now())
 	swept.Reason = SweepPaneGone
 	return paneSweepClose{swept: swept}
@@ -1225,9 +1231,10 @@ func (s *TaskPaneSweeper) reapSweptPaneHeld(ctx context.Context, a *App, latest,
 	key := paneSweepKey(j)
 	delete(s.idleSince, key)
 	delete(s.endedSince, key)
-	a.markSweptJob(ctx, latest, end.state)
-	if haveSession {
-		a.writeJobSession(ctx, latest, session)
+	ctx = withJobEpoch(ctx, j)
+	err := a.markSweptJob(ctx, latest, end.state)
+	if haveSession && !IsJobReassigned(err) {
+		_ = a.writeJobSession(ctx, latest, session)
 	}
 	if err := a.releaseQuota(ctx, j); err != nil {
 		a.warn("quota retained: %v", err)
@@ -1286,30 +1293,33 @@ func (a *App) savePaneScreen(ctx context.Context, j Job, task string) error {
 // hold, or whose job the hub reassigned (hubReassigned, checked just before
 // the write) is left alone; a failed read or write is a warning plus
 // job.record_failed, and the sweep goes on.
-func (a *App) markSweptJob(ctx context.Context, j Job, endState string) {
+func (a *App) markSweptJob(ctx context.Context, j Job, endState string) error {
+	ctx = withJobEpoch(ctx, j)
 	store, err := a.jobStore()
 	if err != nil {
 		a.jobRecordFailed(ctx, j.ID, endState, err)
-		return
+		return err
 	}
 	rec, err := store.Get(ctx, j.ID)
 	if errors.Is(err, errJobNotFound) {
-		return
+		return nil
 	}
 	if err != nil {
 		a.jobRecordFailed(ctx, j.ID, endState, err)
-		return
+		return err
 	}
 	if state := str(rec, "state"); state != "claimed" && state != "spawned" {
-		return
+		return nil
 	}
 	if a.hubReassigned(j) {
 		a.warn("job %s swept: the hub reassigned the job; its hk record is left to the new owner", j.ID)
-		return
+		return errJobReassigned
 	}
-	if err := a.putJobRecord(ctx, j.ID, map[string]any{"state": endState, "at": a.Now().UTC()}); err != nil {
+	err = a.putJobRecord(ctx, j.ID, map[string]any{"state": endState, "at": a.Now().UTC()})
+	if err != nil {
 		a.jobRecordFailed(ctx, j.ID, endState, err)
 	}
+	return err
 }
 
 // capturePaneScreen reads the pane's last screen from herdr.

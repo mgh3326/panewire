@@ -210,7 +210,9 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 		// revocation that lands meanwhile (written without this job's locks)
 		// stops the write, so ownership is read again after them, and
 		// strictCompletedPutUntil reads it before every PUT it makes.
-		a.recordJobUsage(ctx, j, false)
+		if err := a.recordJobUsage(ctx, j, false); IsJobReassigned(err) {
+			return fail(exitStateConflict, "job %s was reassigned by the hub", id)
+		}
 		if e := a.refuseReassigned(j); e != nil {
 			return e
 		}
@@ -398,6 +400,10 @@ type pinResult struct {
 // outcome. The error is a write hk did not answer, or a record it did not
 // read; the next done repeats the step.
 func (a *App) pinReport(ctx context.Context, id, doc, digest string) (pinResult, error) {
+	ctx, e := CaptureJobOwner(ctx, a.Jobs, id)
+	if e != nil {
+		return pinResult{}, e
+	}
 	store, e := a.jobStore()
 	if e != nil {
 		return pinResult{}, e
@@ -427,6 +433,8 @@ func (a *App) pinReport(ctx context.Context, id, doc, digest string) (pinResult,
 	switch e = a.putJobRecord(ctx, id, map[string]any{"report_doc": doc, "report_sha256": digest}); {
 	case e == nil:
 		return pinResult{outcome: pinPinned, document: doc, wrote: true}, nil
+	case IsJobOwnerMismatch(e) || errors.Is(e, errJobReassigned):
+		return pinResult{wrote: true}, &doneResultFailure{code: exitStateConflict, reason: "job_reassigned"}
 	case isJobStateConflict(e):
 		a.warn("report pin kept: job %s record already names another report", id)
 		return pinResult{outcome: pinHeld, document: doc, wrote: true}, nil
@@ -520,7 +528,9 @@ func (a *App) escalateReport(ctx context.Context, j Job, report, question string
 			a.warn("report upload failed; local report retained")
 		}
 	}
-	a.recordJobUsage(ctx, j, false)
+	if err := a.recordJobUsage(ctx, j, false); IsJobReassigned(err) {
+		return fail(exitStateConflict, "job %s was reassigned by the hub", id)
+	}
 	if e := a.refuseReassigned(j); e != nil {
 		return e
 	}
@@ -530,6 +540,9 @@ func (a *App) escalateReport(ctx context.Context, j Job, report, question string
 		rec["report_sha256"] = docSHA
 	}
 	if e := a.putJobRecord(ctx, id, rec); e != nil {
+		if IsJobOwnerMismatch(e) || errors.Is(e, errJobReassigned) {
+			return fail(exitStateConflict, "job %s was reassigned by the hub", id)
+		}
 		a.jobRecordFailed(ctx, id, "escalated", e)
 	}
 	p := map[string]any{"report": report, "report_sha256": digest, "question": question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}

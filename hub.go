@@ -322,6 +322,7 @@ type hubJobRecord struct {
 	LastSeen      time.Time
 	Orphaned      bool
 	Completed     bool
+	Reassigning   bool
 	FencedNodes   map[string]uint64
 	Reassignments []hubJobReassignment
 }
@@ -531,6 +532,7 @@ type HubServer struct {
 	// accountJobsLookupFails counts the current streak of failed account
 	// occupancy lookups: one warn per streak, reset on success (hk 5124).
 	accountJobsLookupFails int
+	jobFenceLegacy         bool
 	poolActionLocks        hubKeyedLocks
 	poolActionMu           sync.Mutex
 	// poolActionObserved avoids repeating inventory logs while an action is active.

@@ -26,6 +26,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/jobowner"
 	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
@@ -166,11 +167,13 @@ type HubClient struct {
 	now func() time.Time
 	// fleetEvents writes a fleet event. Tests substitute a recorder; production
 	// leaves it nil and events go to the state directory (emitFleetEvent).
-	fleetEvents  func(time.Time, fleetEvent) bool
-	assignedJobs map[string]uint64
-	assignmentMu sync.Mutex
-	panesAlive   panesAliveFunc
-	panesAliveMu sync.Mutex
+	fleetEvents    func(time.Time, fleetEvent) bool
+	assignedJobs   map[string]uint64
+	assignmentMu   sync.Mutex
+	jobFenceMu     sync.Mutex
+	jobFenceLegacy bool
+	panesAlive     panesAliveFunc
+	panesAliveMu   sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
 	paneIdleSince        map[string]time.Time
@@ -2526,6 +2529,12 @@ func (client *HubClient) handleHubInboundMessage(ctx context.Context, peer *hubC
 			return err
 		}
 	case "job.assigned":
+		if client.jobsInboxRoot == "" {
+			return errors.New("job assignment local root unavailable")
+		}
+		if err := jobowner.Assign(filepath.Join(client.jobsInboxRoot, "jobs"), message.JobID, message.Epoch); err != nil {
+			return fmt.Errorf("job assignment local write unavailable: %w", err)
+		}
 		// Monotonic: a superseded session's drain can still run while a newer
 		// session already recorded a later epoch for the same job, and the
 		// read side only ever raises a scanned epoch (heartbeatEvent,
@@ -2624,6 +2633,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	scanned := scanHubActiveJobsWithPanes(ctx, client.jobsInboxRoot, client.panesAliveHook())
 	client.assignmentMu.Lock()
 	for i := range scanned {
+		if epoch, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), scanned[i].JobID); err == nil && epoch > scanned[i].Epoch {
+			scanned[i].Epoch = epoch
+		}
 		if epoch := client.assignedJobs[scanned[i].JobID]; epoch > scanned[i].Epoch {
 			scanned[i].Epoch = epoch
 		}
@@ -2809,6 +2821,9 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	completed := scanHubRelayEventsWithin(client.jobsInboxRoot, relayOutboxMaxAge())
 	client.assignmentMu.Lock()
 	for index := range completed {
+		if epoch, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), completed[index].JobID); err == nil && epoch > completed[index].Epoch {
+			completed[index].Epoch = epoch
+		}
 		if assigned := client.assignedJobs[completed[index].JobID]; assigned > completed[index].Epoch {
 			completed[index].Epoch = assigned
 		}

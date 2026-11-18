@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 // hubCapabilityCloseOps names the close operations in hello. A node
@@ -213,6 +214,15 @@ func (client *HubClient) nodePaneCloseOp(ctx context.Context, args nodePaneClose
 	client.assignmentMu.Lock()
 	epoch := client.assignedJobs[args.Job]
 	client.assignmentMu.Unlock()
+	if client.jobsInboxRoot != "" {
+		stored, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+		if err != nil {
+			return nil, "epoch_mismatch"
+		}
+		if stored > epoch {
+			epoch = stored
+		}
+	}
 	if epoch > args.Epoch {
 		return nil, "epoch_mismatch"
 	}
@@ -649,7 +659,10 @@ func (l nodeFleetHubClose) Settle(ctx context.Context, job string) (fleet.HubClo
 	// The hk store is resolved only by a step that reads or writes hk: a
 	// close that closed nothing is cancelled locally even when the node has
 	// no handoffkeep_env.
-	return fleet.NewHubCloseSettlement(l.jobs, home, l.client.nodeJobStoreForCommand, l.client.nowUTC, listed, slogWarnWriter{}).Settle(ctx, job)
+	settlement := fleet.NewHubCloseSettlement(l.jobs, home, l.client.nodeJobStoreForCommand, l.client.nowUTC, listed, slogWarnWriter{})
+	settlement.App.JobOwnerNode = l.client.machineID
+	settlement.App.JobFenceCapability = l.client.noteJobFenceSupport
+	return settlement.Settle(ctx, job)
 }
 
 func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {

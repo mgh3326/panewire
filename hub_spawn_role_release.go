@@ -253,6 +253,9 @@ func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app hubLostJob
 // releases the role as the terminal path does; anything else keeps the hold.
 func (h *HubServer) writeJobLost(ctx context.Context, app hubLostJobApp, job, endReason string) (state, reason string) {
 	if err := app.MarkJobLostBecause(ctx, job, endReason); err != nil {
+		if fleet.IsJobReassigned(err) {
+			return "", "job_owner_changed"
+		}
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		record, exists, readErr := app.ExistingJob(readCtx, job)
 		cancel()

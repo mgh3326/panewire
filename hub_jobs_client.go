@@ -10,8 +10,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 const defaultHubJobActiveMaxAge = 72 * time.Hour
@@ -579,42 +580,8 @@ func hubEventSequence(name string) (uint64, bool) {
 }
 
 func writeHubRevocation(inboxRoot string, revoked hubJobRevokedEvent) error {
-	if inboxRoot == "" || !hubJobIDPattern.MatchString(revoked.JobID) || revoked.Epoch == 0 {
+	if inboxRoot == "" {
 		return fmt.Errorf("invalid job revocation")
 	}
-	jobDir := filepath.Join(inboxRoot, "jobs", revoked.JobID)
-	eventsDir := filepath.Join(jobDir, "events")
-	if err := os.MkdirAll(eventsDir, 0700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(filepath.Join(jobDir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0o666)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-
-	entries, err := os.ReadDir(eventsDir)
-	if err != nil {
-		return err
-	}
-	var highest uint64
-	for _, entry := range entries {
-		if seq, ok := hubEventSequence(entry.Name()); ok && seq > highest {
-			highest = seq
-		}
-	}
-	contents, err := json.Marshal(struct {
-		Type  string `json:"type"`
-		JobID string `json:"job_id"`
-		Epoch uint64 `json:"epoch"`
-	}{Type: "job.revoked", JobID: revoked.JobID, Epoch: revoked.Epoch})
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(eventsDir, fmt.Sprintf("%05d-job.revoked.json", highest+1))
-	return replaceFileAtomically(path, ".revocation-*", contents, 0600)
+	return jobowner.Revoke(filepath.Join(inboxRoot, "jobs"), revoked.JobID, revoked.Epoch)
 }

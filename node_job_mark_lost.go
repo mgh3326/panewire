@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -285,6 +286,13 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 // credential, after proving from herdr and the local ledger that the job is
 // still the one the hub means and never completed.
 func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLostArgs) (any, string) {
+	if client.jobsInboxRoot != "" {
+		var err error
+		ctx, err = fleet.CaptureJobOwner(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+		if err != nil {
+			return nil, "mark_lost_failed"
+		}
+	}
 	if args.EndReason == reviewerResultPosted {
 		return client.nodeJobMarkReviewerResultPosted(ctx, args)
 	}
@@ -340,7 +348,10 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	if args.EndReason != "" {
 		record["end_reason"] = args.EndReason
 	}
-	if err := store.Put(ctx, args.Job, record); err != nil {
+	if err := client.putOwnedNodeJob(ctx, store, args.Job, record); err != nil {
+		if fleet.IsJobReassigned(err) {
+			return nodeJobMarkLostResult{Outcome: nodeJobMarkLostNewerClaim}, ""
+		}
 		return nil, "mark_lost_failed"
 	}
 	return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLost}, ""
@@ -416,6 +427,23 @@ func jobAttemptLive(job string, rows []executingSpawn, active []HubActiveJob) bo
 		}
 	}
 	return false
+}
+
+func (client *HubClient) putOwnedNodeJob(ctx context.Context, store fleet.JobStore, id string, fields map[string]any) error {
+	return fleet.PutOwnedJob(ctx, store, filepath.Join(client.jobsInboxRoot, "jobs"), client.machineID, id, fields, client.noteJobFenceSupport)
+}
+
+func (client *HubClient) noteJobFenceSupport(supported bool) {
+	client.jobFenceMu.Lock()
+	defer client.jobFenceMu.Unlock()
+	if supported {
+		client.jobFenceLegacy = false
+	} else if !client.jobFenceLegacy {
+		client.jobFenceLegacy = true
+		if client.warn != nil {
+			client.warn("handoffkeep job owner fencing unavailable; using legacy job writes")
+		}
+	}
 }
 
 // nodeJobStoreForCommand is the node's own hk client: spawn.json
