@@ -28,9 +28,8 @@ import (
 // owner's fallback notice. A non-final handover row owns the old job
 // (poolActionOwns): no reassignment, quota replacement, sweep or role release
 // touches it, and its task role passes to the successor in the successor's
-// own claim. Just before the close, with the pane idle, the old node
-// marks the worktree kept and lists what origin lacks, and the stored note is
-// rewritten to name it (host:path).
+// own claim. The node checks that the worktree is clean and pushed both
+// before the row is created and inside the guarded close.
 
 const (
 	poolActionKindHandover = "handover"
@@ -66,12 +65,8 @@ type poolHandover struct {
 	// Task is the effective task the old job holds: the close is withdrawn
 	// once hk binds it to another job.
 	Task string `json:",omitempty"`
-	// Cwd and Branch bind the close to the worktree the successor continues;
-	// Brief is the old brief the continuation note is appended to.
-	Cwd, Branch, Brief string `json:",omitempty"`
-	// Keep is the old node's answer at the close: the kept worktree and the
-	// work origin lacks.
-	Keep *nodeHandoverKeepResult `json:",omitempty"`
+	// Cwd and Branch bind the close to the worktree the successor continues.
+	Cwd, Branch string `json:",omitempty"`
 }
 
 func (ho *poolHandover) exhaustion() poolExhaustion {
@@ -135,12 +130,12 @@ func (h *HubServer) readHandoverInputs(ctx context.Context, task string) handove
 
 // sweepImplementer decides for one implementer on a spent pool: wait (one
 // info line naming the reset) or hand over (a handover row). The caller has
-// checked the old node offers close ops and the patch command. Past the
+// checked the old node offers close ops and the eligibility check. Past the
 // replacement limit, or when no successor can be built, the owner gets
 // today's hand-over notice instead.
 func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, app *fleet.App, record map[string]any) poolJobResult {
 	const role = "implementer"
-	if h.spawnGrantDrain || h.spawnRollbackDrain {
+	if h.spawnGrantDrain || h.spawnRollbackDrain || h.inbox.store.spawnFrozen {
 		// No successor may be created while grant rows drain; a row opened
 		// now would close the job and then never place (hk 4661).
 		return poolJobSkip(role, "draining")
@@ -169,10 +164,10 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 		taskID = id
 	}
 	in := h.readHandoverInputs(ctx, taskID)
-	if in.bound != "" && in.bound != task.Job {
+	if in.bound != task.Job {
 		// Another job holds the task now; replacing this one would start a
-		// second implementer beside it.
-		return poolJobSkip(role, "task_rebound")
+		// second implementer beside it. An unreadable binding is not proof.
+		return h.notifyPoolExhausted(ctx, exhaustion, task, role, "task_rebound")
 	}
 	started := task.Created
 	h.mu.Lock()
@@ -212,7 +207,11 @@ func (h *HubServer) notifyPoolExhausted(ctx context.Context, exhaustion poolExha
 		owner = "mergewake"
 	}
 	eventID := "pool-exhausted:" + task.Job
-	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(owner, eventID), OwnerLane: owner, NotifyType: "info", Text: poolExhaustionText(exhaustion, task.Job), Host: "hub", Epoch: 1}, nil)
+	text := poolExhaustionText(exhaustion, task.Job)
+	if why != "" {
+		text += " (reason: " + why + ")"
+	}
+	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(owner, eventID), OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
 	if result.ID == 0 || result.PersistFailed {
 		return poolJobSkip(role, "owner_not_notified")
 	}
@@ -262,8 +261,7 @@ func (h *HubServer) notifyPoolWait(ctx context.Context, exhaustion poolExhaustio
 }
 
 // prepareHandover reads the old worktree's branch and start point through
-// its node and builds the successor submission. It changes nothing: the
-// worktree is marked kept only at the close (handoverBeforeClose).
+// its node and builds the successor submission without modifying the worktree.
 func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, record map[string]any, newJob, taskID string) (*poolHandover, string) {
 	if _, err := h.inbox.store.latestSpawnForJob(ctx, newJob); err == nil {
 		// A quota-stop replacement already placed this job's successor.
@@ -286,9 +284,7 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 		return nil, "end_reason_too_long"
 	}
 	checkout := old.Repository.Checkout
-	// A successor that started detached (a never-pushed branch) has no
-	// branch in its checkout; the node then reports the branch it made.
-	if checkout == nil || checkout.Origin == "" || checkout.Branch == "" && checkout.Mode != "detached" {
+	if checkout == nil || checkout.Origin == "" || checkout.Branch == "" {
 		return nil, "no_branch"
 	}
 	host, label := spawnHolderHost(task), heldAgentName(task, record)
@@ -296,11 +292,14 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 	if probe.state != heldPanePresent || !validNodeCommandPath(probe.row.Cwd) {
 		return nil, "pane_unavailable"
 	}
-	var read nodeHandoverKeepResult
-	if !h.nodeCall(ctx, host, nodeCommandHandoverKeep, nodeHandoverKeepArgs{Job: task.Job, Cwd: probe.row.Cwd, Branch: checkout.Branch}, hubNodeCommandWait, &read) {
+	var read nodeHandoverCheckResult
+	if !h.nodeCall(ctx, host, nodeCommandHandoverCheck, nodeHandoverCheckArgs{Job: task.Job, Cwd: probe.row.Cwd, Origin: checkout.Origin, Branch: checkout.Branch}, hubNodeCommandWait, &read) {
 		return nil, "worktree_unavailable"
 	}
-	if read.Outcome != nodeHandoverKeepOK {
+	if read.Outcome == handoverDirty || read.Outcome == handoverUnpushed {
+		return nil, read.Outcome
+	}
+	if read.Outcome != handoverCheckOK {
 		return nil, "worktree_" + read.Outcome
 	}
 	if base := filepath.Base(read.Top); base != checkout.Dir && base != old.Repository.Worktree {
@@ -322,7 +321,7 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 		reset = exhaustion.Reset.Unix()
 	}
 	return &poolHandover{Successor: request, Job: newJob, Pool: exhaustion.Pool, Cause: exhaustion.Cause, Reset: reset, Account: exhaustion.Account,
-		Task: taskID, Cwd: probe.row.Cwd, Branch: read.Branch, Brief: old.Brief}, ""
+		Task: taskID, Cwd: probe.row.Cwd, Branch: read.Branch}, ""
 }
 
 // handoverExclude is the pool the successor excludes: the band a quota
@@ -363,7 +362,7 @@ const herdrAgentNameMax = 32
 // excluded) as a spec checkout of the branch at its last pushed commit, with
 // --parent-job <old> in place of --task (the two are exclusive; the task is
 // inherited) and a continuation note.
-func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude string, exhaustion poolExhaustion, read nodeHandoverKeepResult) (fleet.Submission, error) {
+func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude string, exhaustion poolExhaustion, read nodeHandoverCheckResult) (fleet.Submission, error) {
 	next, err := quotaReplacementRequest(old, oldJob, newJob, exhaustion.Pool, exclude, "implementer")
 	if err != nil {
 		return fleet.Submission{}, err
@@ -398,57 +397,9 @@ func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude stri
 	next.StartConditions = nil
 	dir := fleet.CheckoutWorktreeName(newJob)
 	checkout := &fleet.HubCheckout{Origin: old.Repository.Checkout.Origin, Mode: fleet.HubCheckoutSuccessor, Branch: read.Branch, Sha: read.Pushed, Dir: dir}
-	if read.Pushed == "" {
-		// Nothing was pushed: start from the branch's base; the kept old
-		// worktree holds the whole work.
-		checkout = &fleet.HubCheckout{Origin: old.Repository.Checkout.Origin, Mode: "detached", Sha: read.Base, Fetch: read.BaseRef, Dir: dir}
-	}
 	next.Repository = fleet.Repository{Name: old.Repository.Name, Origin: checkout.Origin, Worktree: dir, Checkout: checkout}
-	next.Brief = handoverBrief(old.Brief, oldJob, "", exhaustion, read)
+	next.Brief = strings.TrimRight(old.Brief, "\n") + fmt.Sprintf("\n\n## Hand-over from %s\nThe hub handed over this job because pool %s ran out (%s). Continue branch %s from its pushed commit %s. Write the report to the --report path (relative to the node's jobs directory: %s).\n", oldJob, exhaustion.Pool, exhaustion.Cause, read.Branch, read.Pushed, hubSpawnArg(next.Args, "--report-relative"))
 	return next, nil
-}
-
-// handoverBrief is the old brief with the continuation note appended. host
-// is the old node; empty before the close, when nothing is kept yet.
-func handoverBrief(brief, oldJob, host string, exhaustion poolExhaustion, kept nodeHandoverKeepResult) string {
-	return strings.TrimRight(brief, "\n") + "\n\n" + handoverNote(oldJob, host, exhaustion, kept) + "\n"
-}
-
-// handoverNote is the continuation note appended to the successor's brief.
-// Before the close it says the old worktree will be named; the reconciler
-// rewrites it with the node's answer just before the close.
-func handoverNote(oldJob, host string, exhaustion poolExhaustion, keep nodeHandoverKeepResult) string {
-	var b strings.Builder
-	branch := keep.Branch
-	fmt.Fprintf(&b, "## Hand-over from %s\nThe hub handed job %s over to you: its pool %s ran out (%s). ", oldJob, oldJob, exhaustion.Pool, exhaustion.Cause)
-	start := keep.Pushed
-	if keep.Pushed != "" {
-		fmt.Fprintf(&b, "Continue branch %s from its last pushed commit %s; this worktree is that branch.", branch, keep.Pushed)
-	} else {
-		start = keep.Base
-		fmt.Fprintf(&b, "Branch %s was never pushed: this worktree is detached at its base %s (%s); create branch %s here and push it.", branch, keep.Base, strings.TrimPrefix(keep.BaseRef, "refs/heads/"), branch)
-	}
-	switch {
-	case host == "":
-		b.WriteString(" The hub keeps the old worktree when it closes the old pane and names it here.")
-		return b.String()
-	case !keep.Dirty:
-		// Never "no other work": git can hide edits (index flags, a
-		// submodule's own flags), so the kept worktree stays the check.
-		b.WriteString(" The node listed no other work in the old worktree; it is kept, so check it (submodules too) before you rely on origin alone.")
-	default:
-		b.WriteString(" The old worktree holds work origin does not have; nothing of it was pushed.")
-		if keep.Head != "" && keep.Head != start {
-			fmt.Fprintf(&b, " Its HEAD %s has commits that were never pushed.", keep.Head)
-		}
-		if len(keep.Uncommitted) > 0 || keep.UncommittedMore > 0 {
-			b.WriteString(" Uncommitted paths (git status): ")
-			b.WriteString(handoverPathList(keep.Uncommitted, keep.UncommittedMore))
-			b.WriteString(".")
-		}
-	}
-	fmt.Fprintf(&b, " The old worktree is kept at %s:%s and is never swept; copy from there what you need (ignored files are there too).", host, keep.Top)
-	return b.String()
 }
 
 // finishHandover is a settled handover row: the old pane is closed and its
@@ -465,10 +416,6 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 			// The old job ended another way (it completed, or a watcher wrote
 			// its own end): no successor may name it.
 			handover.Outcome, handover.Reason = handoverFailed, "old record ended "+state
-		case handover.Keep == nil:
-			// Closed without the kept worktree: its successor would not know where
-			// the old work is.
-			handover.Outcome, handover.Reason = handoverFailed, "no kept worktree"
 		case !handover.Submitted:
 			// The stored request id makes the claim idempotent: after a crash
 			// between the claim and the flag the replay finds the same row.
@@ -568,33 +515,42 @@ func handoverEndReason(record map[string]any, exhaustion poolExhaustion, newJob 
 	return fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", newJob)
 }
 
-// handoverBeforeClose runs under the job's pool-action lock just before the
-// first close command of a handover row, while the node has registered no
-// close. A drain holds the row. The stop must still hold (else the row ends
-// "recovered"), hk must still bind the task to the old job, and the pane must
-// be the captured one and idle. Then the old node marks the worktree kept, the
-// start point must be the stored successor's, and the successor's note is
-// rewritten to name it before anything closes.
+// handoverBeforeClose runs under the job's pool-action lock before the first
+// close. The node repeats the worktree check inside the guarded close itself.
 func (h *HubServer) handoverBeforeClose(ctx context.Context, action *poolAction) (bool, error) {
 	if h.spawnGrantDrain || h.spawnRollbackDrain || h.inbox.store.spawnFrozen {
 		return false, errors.New("hand-over held while spawn rows drain")
 	}
 	handover := action.Data.Handover
 	if handover == nil || handover.Successor.Repository.Checkout == nil {
-		return false, nil
+		return false, errors.New("hand-over successor unavailable")
 	}
 	withdraw := func(reason string) (bool, error) {
 		handover.Reason = reason
 		h.logger.Info("pool hand-over withdrawn before the close", "job", action.Job, "action", action.ID, "reason", reason)
-		return false, nil
+		return false, h.inbox.store.savePoolAction(ctx, *action)
 	}
 	exhaustion := handover.exhaustion()
 	if h.poolEventGone(exhaustion, h.now()) || exhaustion.poolWide() && !h.poolSweep.held(exhaustion.key()) {
-		// A pool-wide cause is held until the pool comes back (or a hub
-		// restart forgets it; the next sweep then decides afresh).
 		return withdraw("recovered")
 	}
-	if in := h.readHandoverInputs(ctx, handover.Task); in.bound != "" && in.bound != action.Job {
+	if exhaustion.Cause == poolCauseRetired {
+		// A catalog row may become live between the periodic trigger passes.
+		// Read it now; a missing or unavailable catalog cannot prove the
+		// pool is still retired.
+		rows, err := h.poolCatalogRows(ctx)
+		if err != nil {
+			return false, errors.New("retired pool catalog unavailable")
+		}
+		found, live := catalogPool(rows, exhaustion.Pool)
+		if !found {
+			return false, errors.New("retired pool absent from catalog")
+		}
+		if live {
+			return withdraw("recovered")
+		}
+	}
+	if in := h.readHandoverInputs(ctx, handover.Task); in.bound != action.Job {
 		return withdraw("task_rebound")
 	}
 	probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
@@ -604,65 +560,7 @@ func (h *HubServer) handoverBeforeClose(ctx context.Context, action *poolAction)
 	case probe.state != heldPanePresent:
 		return false, errors.New("pane unavailable")
 	case !nodePaneIdleStatus[probe.row.AgentStatus]:
-		// The kept worktree must hold the pane's final work: wait for it to idle.
 		return false, errors.New("hand-over held until the pane is idle")
 	}
-	var kept nodeHandoverKeepResult
-	if !h.nodeCall(ctx, action.Node, nodeCommandHandoverKeep, nodeHandoverKeepArgs{Job: action.Job, Cwd: handover.Cwd, Branch: handover.Branch, Keep: true}, hubNodeCommandWait, &kept) {
-		return false, errors.New("hand-over keep unavailable")
-	}
-	switch {
-	case kept.Outcome == nodeHandoverKeepGitError:
-		return false, errors.New("hand-over keep failed")
-	case kept.Outcome != nodeHandoverKeepOK:
-		return withdraw("worktree_" + kept.Outcome)
-	case handoverStartsAt(kept) != handover.Successor.Repository.Checkout.Sha:
-		return withdraw("branch_moved")
-	}
-	successor := handover.Successor
-	successor.Brief = handoverBrief(handover.Brief, action.Job, action.Node, exhaustion, kept)
-	if _, err := fleet.ValidateSubmission(successor); err != nil {
-		// The final note must still fit the submission (the brief cap):
-		// nothing closes for a successor that could never be claimed.
-		return withdraw("invalid_successor")
-	}
-	handover.Keep, handover.Successor = &kept, successor
-	if err := h.inbox.store.savePoolAction(ctx, *action); err != nil {
-		return false, err
-	}
 	return true, nil
-}
-
-// handoverStartsAt is the commit a successor starts from: the pushed commit,
-// or the base when nothing was pushed.
-func handoverStartsAt(kept nodeHandoverKeepResult) string {
-	if kept.Pushed != "" {
-		return kept.Pushed
-	}
-	return kept.Base
-}
-
-// handoverNoteListBytes bounds the untracked list in the note, so the brief
-// keeps its room under the submission cap.
-const handoverNoteListBytes = 2048
-
-// handoverPathList joins paths, quoted, up to handoverNoteListBytes and
-// counts the rest.
-func handoverPathList(paths []string, more int) string {
-	var b strings.Builder
-	for i, path := range paths {
-		item := strconv.Quote(path)
-		if b.Len()+len(item)+2 > handoverNoteListBytes {
-			more += len(paths) - i
-			break
-		}
-		if b.Len() > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(item)
-	}
-	if more > 0 {
-		fmt.Fprintf(&b, " and %d more", more)
-	}
-	return b.String()
 }

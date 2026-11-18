@@ -91,8 +91,7 @@ func (client *HubClient) nodeCheckoutSweep(ctx context.Context, args nodeCheckou
 		OrphanOwner: func(dir string) string {
 			return owners[nodeResolvedPath(dir)]
 		},
-		Info:      func(message string, attrs ...any) { slog.Info(message, attrs...) },
-		LockClone: client.nodeLockCloneGitOps,
+		Info: func(message string, attrs ...any) { slog.Info(message, attrs...) },
 	}).Pass(ctx, app)
 	if err != nil {
 		slog.Warn("checkout sweep failed", "reason", "pass-failed")

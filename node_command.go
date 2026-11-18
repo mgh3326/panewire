@@ -81,7 +81,7 @@ func knownNodeCommandOp(op string) bool {
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
 		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
-		nodeCommandCheckoutSweep, nodeCommandHandoverKeep:
+		nodeCommandCheckoutSweep, nodeCommandHandoverCheck:
 		return true
 	}
 	return false
@@ -251,7 +251,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneCloseOp:      {"request_id", "job", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed", "end_reason"},
 	nodeCommandPaneCloseStatus:  {"request_id", "job"},
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
-	nodeCommandHandoverKeep:     {"job", "cwd", "branch", "keep"},
+	nodeCommandHandoverCheck:    {"job", "cwd", "origin", "branch"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -370,7 +370,8 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
 	optionalAck := op == nodeCommandPaneCloseStatus && nodeCommandHasFields(raw, append(append([]string(nil), names...), "ack"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck) {
+	optionalHandover := op == nodeCommandPaneCloseOp && nodeCommandHasFields(raw, append(append([]string(nil), names...), "handover"))
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover) {
 		return nil, false
 	}
 	switch op {
@@ -484,9 +485,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandCheckoutSweep:
 		var args nodeCheckoutSweepArgs
 		return args, decodeNodeCommandStrict(raw, &args)
-	case nodeCommandHandoverKeep:
-		var args nodeHandoverKeepArgs
-		return args, decodeNodeCommandStrict(raw, &args) && validNodeHandoverKeepArgs(args)
+	case nodeCommandHandoverCheck:
+		var args nodeHandoverCheckArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeHandoverCheckArgs(args)
 	}
 	return nil, false
 }
@@ -580,7 +581,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		case nodeRemoveWorktreeGone, nodeRemoveWorktreeChanged, nodeRemoveUnregistered,
 			nodeRemoveLocked, nodeRemoveDetached, nodeRemoveNotDetached, nodeRemoveStatusCheckFailed,
 			nodeOutcomeDirty, nodeRemovePaneInUse, nodeRemovePaneScanFailed,
-			nodeRemoveUnmerged, nodeRemoveOutsideWorkRoot, nodeRemoveHandoverKept, nodeOutcomeGitFailed,
+			nodeRemoveUnmerged, nodeRemoveOutsideWorkRoot, nodeOutcomeGitFailed,
 			nodeOutcomeGitTooOld, nodeOutcomeCancelled:
 			valid = result.Worktree == nil && result.Files == nil && result.RetryAfterS == 0 && result.Disposable == nil
 		}
@@ -613,9 +614,9 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result nodeCheckoutSweepResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeCheckoutSweepResult(result)
 		target = result
-	case nodeCommandHandoverKeep:
-		var result nodeHandoverKeepResult
-		valid = decodeNodeCommandStrict(raw, &result) && validNodeHandoverKeepResult(result)
+	case nodeCommandHandoverCheck:
+		var result nodeHandoverCheckResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeHandoverCheckResult(result)
 		target = result
 	}
 	if !valid {
@@ -992,9 +993,8 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return result, ""
 	case nodeWorktreeListArgs:
 		return nodeWorktreeList(ctx, client.nodeGitRunner(), args)
-	case nodeHandoverKeepArgs:
-		// Read-only on the worktree; it writes only a commit object, the origin ref and, on a failed push, the job's keep mark.
-		return client.nodeHandoverKeep(ctx, args)
+	case nodeHandoverCheckArgs:
+		return client.nodeHandoverCheck(ctx, args)
 	case nodeWorktreePrepareArgs:
 		return client.nodeWorktreePrepare(ctx, args)
 	case nodeWorktreeRemoveArgs:

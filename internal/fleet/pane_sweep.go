@@ -374,9 +374,6 @@ type TaskPaneSweeper struct {
 	// sweep command counts its rows itself.
 	NoteWorktreeSeen    func(jobID string)
 	NoteWorktreeRemoved func(jobID string)
-	// LockClone takes the clone's git-op lock, the one a hand-over's keep
-	// mark is published under; nil outside the node.
-	LockClone func(ctx context.Context, clone string) (release func(), err error)
 
 	// staleOpen is the count the pass is reporting, for its log line.
 	staleOpen int

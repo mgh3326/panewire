@@ -225,6 +225,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	}
 	switch status.State {
 	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
+		if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil {
+			action.Data.Handover.Reason = status.Reason
+		}
 		return h.refuseCloseAction(ctx, action)
 	case nodeCloseOpSuperseded:
 		if action.Data.Args == nil || status.Attempt == action.Data.Args.Attempt {
@@ -258,6 +261,11 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		// An hk lost read is not settlement: the node may still retry the write.
 		return nil
 	case nodeCloseOpNone:
+		if action.Data.Kind == poolActionKindHandover && action.Data.Args != nil && status.Attempt == "" {
+			// A transiently unreadable attempt is not proof that the saved
+			// close may bypass the pre-close checks after a hub restart.
+			return errors.New("close attempt unavailable")
+		}
 		if action.Data.Kind == poolActionKindHandover && status.Attempt != "" {
 			// The node has registered no close yet, even when Args were saved
 			// before a restart: the last point the hand-over can still be
@@ -303,7 +311,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 				return errors.New("pane unavailable")
 			}
 			if handover := action.Data.Handover; action.Data.Kind == poolActionKindHandover && handover != nil && probe.row.Cwd != handover.Cwd {
-				// The close must act on the worktree that was snapshot.
+				// The close must act on the worktree that was checked.
 				return h.releasePoolAction(ctx, action)
 			}
 			if action.Data.Kind == poolActionKindSupersedeClose && !supersedeCloseStatus(probe.row.AgentStatus) {
@@ -314,6 +322,13 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			args := &nodePaneCloseOpArgs{RequestID: action.ID, Job: action.Job, Epoch: action.Epoch, Attempt: status.Attempt,
 				PaneID: action.Data.Pane, Name: action.Data.Label, AgentStatus: probe.row.AgentStatus, Cwd: probe.row.Cwd,
 				AllowUnnamed: probe.row.Name == "", EndReason: action.Data.EndReason}
+			if handover := action.Data.Handover; action.Data.Kind == poolActionKindHandover && handover != nil {
+				checkout := handover.Successor.Repository.Checkout
+				if checkout == nil {
+					return errors.New("handover checkout unavailable")
+				}
+				args.Handover = &nodeHandoverCloseGuard{Origin: checkout.Origin, Branch: handover.Branch, Commit: checkout.Sha}
+			}
 			if !validNodePaneCloseOpArgs(*args) {
 				return h.releasePoolAction(ctx, action)
 			}
@@ -333,11 +348,14 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	if args.RequestID != action.ID || args.Job != action.Job || args.Epoch != action.Epoch {
 		return errors.New("close arguments do not match ownership")
 	}
+	if action.Data.Kind == poolActionKindHandover && args.Handover == nil {
+		return errors.New("handover close guard unavailable")
+	}
 	// Once the action is stored, I1 prevents its ownership changing. An absent
 	// in-memory job after hub restart does not prevent replay of this binding.
 	allowed := func() bool {
 		job, node := h.jobs[action.Job], h.nodes[action.Node]
-		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps]
+		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps] && (action.Data.Kind != poolActionKindHandover || node.capabilities[hubCapabilityHandoverCheck])
 	}
 	var result nodePaneCloseOpResult
 	if !h.nodeCallWhere(ctx, action.Node, nodeCommandPaneCloseOp, *args, hubNodeCommandWait, &result, allowed) {
@@ -345,6 +363,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	}
 	switch result.Outcome {
 	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
+		if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil {
+			action.Data.Handover.Reason = result.Reason
+		}
 		return h.refuseCloseAction(ctx, action)
 	case fleet.CloseOpCancelled:
 		return h.refusePoolAction(ctx, action)
@@ -469,6 +490,30 @@ func (h *HubServer) releasePoolAction(ctx context.Context, action poolAction) er
 }
 
 func (h *HubServer) refusePoolAction(ctx context.Context, action poolAction) error {
+	if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil && action.Data.Handover.Reason != "recovered" {
+		handover := action.Data.Handover
+		if handover.Reason == "" {
+			handover.Reason = "close_refused"
+		}
+		handover.Outcome = handoverFailed
+		// Save the reason before publishing: a lost acknowledgement or a
+		// restart must replay the same notice without closing the old pane.
+		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+			return err
+		}
+		eventID := "pool-handover:" + action.Job
+		owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			text := fmt.Sprintf("[panewire] hand-over of %s failed (%s): %s", action.Job, handover.Reason, action.Data.Text)
+			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+			if result.ID == 0 || result.PersistFailed {
+				return errors.New("owner notice unavailable")
+			}
+		}
+	}
 	action.Phase = poolActionRefused
 	if err := h.saveFinalPoolAction(ctx, action, "refused"); err != nil {
 		return err

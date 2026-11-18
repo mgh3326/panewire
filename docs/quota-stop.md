@@ -40,7 +40,7 @@ hk 3334. The wait or hand-over rule is hk `policy/quota-stop`; this section is t
 
 A hub restarted between claiming a reviewer's successor and writing the old record is repaired by a periodic pass (`reconcileQuotaReplacements`, every 2 minutes, for successors older than the replacement budget): a successor that placed whose predecessor's record is still live gets the pane closed and the record written with `replaced_by`. A successor that never left `accepted` (no node) can never place a job and gets no pointer; one still reconciling or past its deadline with a node binding does.
 
-The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it keeps the old worktree, names it to the successor as host:path, and continues the pushed branch on another host. Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
+The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it continues a clean, fully pushed branch on another host; dirty or unpushed work is left with the old pane and reported to the owner. Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
 
 ## Job end on a quota stop
 
@@ -121,7 +121,7 @@ other accounts stay usable.
 
 **An implementer is handed over by the hub (hk 4633, operator decisions 358
 and A336; decision `evidence/2026-11-18/pw-handover-4633/decision-root-causes.md`).**
-On a node that advertises `close_ops_v1` and `handover_keep_v1`, the hub
+On a node that advertises `close_ops_v1` and `handover_check_v1`, the hub
 decides with the §Implementer rule (the job's start, the task's priority and
 `--expected`, `policy/quota-stop`) for every cause: window, free limit past
 `max_wait`, credit, retired and account credit.
@@ -141,65 +141,28 @@ decides with the §Implementer rule (the job's start, the task's priority and
   them. In reverse, an existing `<old>-q<n>` spawn means do nothing: whichever
   creates its row (or successor) first owns the job. The steps are, in this
   order:
-  1. **Saved successor.** The old node reads, read-only
-     (`worktree.handover_keep` without `keep`), the branch and its
-     last pushed commit (`git ls-remote origin refs/heads/<branch>`) or, when
-     nothing was pushed, the merge-base with origin's default branch. The row
-     then stores the complete successor submission with a fixed request id
-     before anything is closed: same role, owner and brief; job `<old>-q<n>`
-     (at most two replacements); `--parent-job <old>` in place of `--task`
-     (the two are exclusive; the task is inherited; an earlier
-     `--parent-job` is replaced); a pinned `-m` dropped (a pinned host is
-     refused); the label cut to herdr's 32 characters keeping `-q<n>`; the
-     spent band excluded (`devin-free` for a free limit, the paid band for a
-     window, the pool for a pool-wide cause, none for a Command Code account
-     credit stop, where the account mark does it); its own
-     `--report-relative`; no start conditions; and a spec checkout of the
-     branch at its last pushed commit (`successor` mode, hk 5118), so the
-     successor needs neither the old host nor a clean old worktree. A
-     never-pushed branch starts detached at its base. The end reason's length
-     is checked here, before anything closes.
-  2. **Checks and the kept worktree at the close.** Under the job's
-     pool-action lock, before its first close command, the reconciler:
-     - holds the row during a spawn rollback or grant drain;
-     - ends it `recovered` when the stop no longer holds (a retired pool that
-       came back too) and `task_rebound` when hk binds the task to another
-       job;
-     - releases it when the pane moved or changed directory, and holds it
-       until the pane is idle;
-     - then has the old node run `worktree.handover_keep` with `keep`: from
-       the top level (never the pane's subdirectory) it reads HEAD and the
-       paths `git status` names (untracked included) plus every path marked
-       assume-unchanged, and every present path marked skip-worktree, which
-       `git status` hides (at most 50 names and
-       8 KiB, the rest counted). Holding the clone's git-op lock, it writes
-       `jobs/<old>/handover-keep` and locks a linked worktree with
-       `git worktree lock` (reason `panewire handover-keep`).
-       **Nothing is committed or pushed**, so no file leaves the host; a ref
-       snapshot of the work is hk 5259. A pushed tip no longer in the
-       worktree's history (`diverged`) or a start point that moved releases
-       the row unclosed.
-     - **The kept worktree** is the only copy of what origin lacks:
-       uncommitted and untracked files, ignored files and unpushed commits.
-       Any job's `handover-keep` naming a worktree (or a directory inside
-       it, or one containing it) keeps it from the pane sweep and
-       `checkout.sweep` (`handover_kept`), from `worktree.remove`
-       (`handover-kept`), and the job directory holding the mark from the
-       job-directory TTL. `worktree.remove`, the pane sweep tail and
-       `checkout.sweep` check the mark again under the git-op lock
-       (`clone_busy_kept` when it is not free). An existing git lock counts
-       only when its reason is the hand-over's; another holder's lock fails
-       the keep and the hub retries. A note never says the old worktree held
-       no other work: git can hide edits (a submodule's own index flags), so
-       the successor checks the kept worktree. The git lock also holds after a rollback to a node
-       binary that predates the mark: its removals pass one `--force`, which
-       git refuses for a locked worktree. Clearing the mark and the lock is
-       hk 5246.
-     - The stored successor's continuation note is rewritten to name the
-       kept worktree as `host:path`, the unpushed HEAD when there is one, and
-       the uncommitted paths (quoted, up to 2 KiB, then a count); the
-       rewritten submission must still validate (the brief cap), and the row
-       is saved.
+  1. **Eligibility and saved successor.** The old node runs the read-only
+     `worktree.handover_check` from the worktree root. Tracked changes,
+     non-ignored untracked files, or any assume-unchanged or skip-worktree
+     entries (including in populated submodules) give `dirty_worktree`.
+     HEAD must equal the branch tip read with `git ls-remote origin`; an
+     unpushed or never-pushed branch gives `unpushed_commits`. In either case
+     there is no action row and no close; the owner receives the reason and
+     the hand-over-or-respawn notice. Snapshotting local work is hk 5259.
+     Otherwise the row stores the complete successor with a fixed request id:
+     the same role, owner and brief; job `<old>-q<n>` (at most two); exactly
+     one `--parent-job <old>`; the spent pool or band excluded; its own report
+     path; no start conditions; and a spec checkout at the pushed commit.
+     A pinned profile is dropped, a pinned host is refused, the label is
+     bounded, and the end reason and final submission are validated.
+  2. **Recheck.** Before the close, the hub holds a row during a spawn drain,
+     confirms the stop and task binding, and requires the same idle pane and
+     working directory. Inside `pane.close_op`, after checking the job's
+     attempt and pane, the node repeats the eligibility check against the
+     saved origin, branch and commit. A dirty or unpushed worktree refuses the
+     close; its journalled reason makes the row `handover_failed` and the
+     owner gets the fallback notice. No keep mark, worktree lock or patch is
+     created by this path.
   3. **Close.** The reconciler closes the old pane through `pane.close_op` to
      the job's node at its epoch, keeping `pane.close`'s open-question guard
      for an implementer. The node writes the old record `lost` with
@@ -218,8 +181,8 @@ decides with the §Implementer rule (the job's start, the task's priority and
      reason.
 
 The decision reads the task the job record names (a `--parent-job` successor
-inherits it) and the job's start; a task whose `refs.job_id` names another job
-is left alone. For an implementer on a node without those capabilities, past
+inherits it) and the job's start; a task whose `refs.job_id` is unavailable or names another job
+is left alone and reported to the owner. For an implementer on a node without those capabilities, past
 the replacement limit, or when no successor can be built (no branch, a pinned
 host, an end reason over its limit, an unreadable pane or a refused read),
 and for a reviewer or consult on a node that does not advertise

@@ -44,54 +44,7 @@ const (
 	sweepWorktreeFetchFailed  = "fetch_failed_kept"
 	sweepWorktreeUnmerged     = "unmerged_kept"
 	sweepWorktreeRemoveFailed = "remove_failed_kept"
-	// sweepWorktreeHandoverKept: a hub hand-over could not push the old
-	// worktree's snapshot (or a submodule held work it does not carry), so
-	// the successor's note names this worktree (hk 4633).
-	sweepWorktreeHandoverKept = "handover_kept"
-	// sweepWorktreeCloneBusy: the clone's git-op lock was not free.
-	sweepWorktreeCloneBusy = "clone_busy_kept"
 )
-
-// handoverKept reports whether a hand-over keeps cwd (HandoverKeeps over
-// the app's jobs directory, the candidate job's own mark first).
-func handoverKept(a *App, job, cwd string) bool {
-	if _, err := os.Lstat(filepath.Join(a.Jobs, job, HandoverKeepFile)); !errors.Is(err, os.ErrNotExist) {
-		return true
-	}
-	return HandoverKeeps(a.Jobs, cwd)
-}
-
-// HandoverKeeps reports whether any job's HandoverKeepFile under jobs names
-// path, a directory inside it, or one containing it (jobs may share a
-// worktree; a job's cwd may be an execution lane inside it). Entries that
-// are not directories (the jobs root holds lock and flag files) are skipped.
-// An unreadable jobs directory or mark keeps the worktree.
-func HandoverKeeps(jobs, path string) bool {
-	entries, err := os.ReadDir(jobs)
-	if err != nil {
-		return true
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join(jobs, entry.Name(), HandoverKeepFile))
-		top := strings.TrimSpace(string(body))
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-		case err != nil:
-			return true
-		case path == "" || sweepSamePath(top, path) || sweepWithin(top, path) || sweepWithin(path, top):
-			return true
-		}
-	}
-	return false
-}
-
-// HandoverKeepFile, in a job's directory, keeps that job's worktree from
-// every sweep: the hub hand-over's successor was told to copy work from it
-// (hk 4633, docs/quota-stop.md "An exhausted pool").
-const HandoverKeepFile = "handover-keep"
 
 // The reason on a sweep branch line of a non-merged end.
 const (
@@ -141,9 +94,6 @@ func (s *TaskPaneSweeper) worktreePlan(ctx context.Context, a *App, j Job, cwd s
 	if !boolean(a.Config.Sweep, "remove_worktrees", true) {
 		return "", "", false, sweepWorktreeDisabled
 	}
-	if handoverKept(a, j.ID, cwd) {
-		return "", "", false, sweepWorktreeHandoverKept
-	}
 	clone, branch, ok := s.nodeWorktree(ctx, a, cwd)
 	if !ok {
 		return "", "", false, sweepWorktreeNotNode
@@ -179,18 +129,6 @@ func (s *TaskPaneSweeper) worktreePlan(ctx context.Context, a *App, j Job, cwd s
 // through discardWorktree, which saves the work first; any other cleared end
 // is the merged path.
 func (s *TaskPaneSweeper) removeWorktree(ctx context.Context, a *App, j Job, end paneSweepEnd, clone, branch, cwd, base string, owned bool) string {
-	if s.LockClone != nil {
-		// A hand-over publishes its keep mark under the clone's git-op lock
-		// (hk 4633): hold it through the recheck and the removal.
-		release, err := s.LockClone(ctx, clone)
-		if err != nil {
-			return sweepWorktreeCloneBusy
-		}
-		defer release()
-		if handoverKept(a, j.ID, cwd) {
-			return sweepWorktreeHandoverKept
-		}
-	}
 	if owned || (end.discard && !end.merged) {
 		return s.discardWorktree(ctx, a, j, end, clone, branch, cwd, base)
 	}

@@ -66,7 +66,6 @@ const (
 	nodeRemovePaneScanFailed    = "pane-scan-failed"
 	nodeRemoveUnmerged          = "unmerged-or-unpushed"
 	nodeRemoveOutsideWorkRoot   = "outside-work-root"
-	nodeRemoveHandoverKept      = "handover-kept"
 
 	nodeQuotaRefreshed = "refreshed"
 )
@@ -213,15 +212,6 @@ func (client *HubClient) nodeWorkRoot() (string, error) {
 		return "", errors.New("work root unset")
 	}
 	return filepath.Clean(config.WorkRoot), nil
-}
-
-// nodeLockCloneGitOps takes clone's git-op lock for a sweep removal.
-func (client *HubClient) nodeLockCloneGitOps(ctx context.Context, clone string) (func(), error) {
-	path, err := nodeGitOpLockPath(clone)
-	if err != nil {
-		return nil, err
-	}
-	return acquireNodeGitOpLock(ctx, path, client.nodeGitOpWait())
 }
 
 func (client *HubClient) nodeGitOpWait() time.Duration {
@@ -1585,10 +1575,6 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if !nodeWorktreeWithinWorkRoot(workRoot, worktree) {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveOutsideWorkRoot}, ""
 	}
-	if client.jobsInboxRoot != "" && fleet.HandoverKeeps(filepath.Join(client.jobsInboxRoot, "jobs"), worktree.Path) {
-		// A hub hand-over keeps this worktree for its successor (hk 4633).
-		return nodeWorktreeRemoveResult{Outcome: nodeRemoveHandoverKept}, ""
-	}
 	if !strings.EqualFold(worktree.Head, args.ExpectHead) {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeChanged}, ""
 	}
@@ -1627,10 +1613,6 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeChanged}, ""
 	}
 	main = currentMain
-	if client.jobsInboxRoot != "" && fleet.HandoverKeeps(filepath.Join(client.jobsInboxRoot, "jobs"), worktree.Path) {
-		// Rechecked under the git-op lock a hand-over publishes its mark under.
-		return nodeWorktreeRemoveResult{Outcome: nodeRemoveHandoverKept}, ""
-	}
 	entries, err := nodeListWorktrees(ctx, git, main)
 	if err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""

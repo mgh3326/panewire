@@ -58,8 +58,6 @@ type CheckoutSweep struct {
 	DryRun      bool
 	OrphanOwner func(dir string) string
 	Info        func(message string, attrs ...any)
-	// LockClone is TaskPaneSweeper.LockClone for this sweep's removals.
-	LockClone func(ctx context.Context, clone string) (release func(), err error)
 }
 
 func (s *CheckoutSweep) info(message string, attrs ...any) {
@@ -85,7 +83,7 @@ func (s *CheckoutSweep) Pass(ctx context.Context, a *App) ([]CheckoutSweepRow, e
 	if err != nil {
 		return nil, err
 	}
-	ts := &TaskPaneSweeper{WorkRoot: s.WorkRoot, LockClone: s.LockClone}
+	ts := &TaskPaneSweeper{WorkRoot: s.WorkRoot}
 	// The end the removal paths read: a job-owned checkout is discarded
 	// whatever it holds, and the reason lands in the patch header.
 	end := paneSweepEnd{state: "lost", reason: "checkout_sweep"}

@@ -929,24 +929,21 @@ node without a jobs root or work root answers `jobs_root_unset` or
 `work_root_unset`; a failed pass answers `sweep_failed`. The CLI is
 `panewire node sweep-checkouts --host <machine> [--dry-run]`.
 
-### `worktree.handover_keep`
+### `worktree.handover_check`
 
-The old node's half of the hub's implementer hand-over (hk 4633,
-[quota-stop.md](quota-stop.md) "An exhausted pool"). Arguments
-`{"job","cwd","branch","keep"}`; offered as `handover_keep_v1` with
-`close_ops_v1`. From the top level of the worktree at `cwd` (which must be on
-`branch`) the node reads the branch's last pushed commit with
-`git ls-remote origin`, or the merge-base with origin's default branch when
-nothing was pushed. Without `keep` it only reads. With `keep` it reads HEAD
-and the paths `git status` names (untracked included) plus the paths marked
-assume-unchanged and the present paths marked skip-worktree. Under the clone's git-op lock it writes
-`jobs/<job>/handover-keep`, which keeps the worktree from every sweep,
-`worktree.remove` and both sweeps (each checks again under the same lock) and the job-directory
-TTL, and locks a linked worktree with `git worktree lock`, which also holds
-against an older node binary after a rollback. It never commits or pushes.
-Result: `outcome` (`ok`, `not-a-job`, `branch_mismatch`, `git_failed`,
-`diverged`), `branch`, `top`, `pushed`, `base`, `base_ref`, `head`, `dirty`,
-`uncommitted` (at most 50 names and 8 KiB), `uncommitted_more`, `kept`.
+The read-only eligibility check for an implementer pool hand-over (hk 4633;
+[quota-stop.md](quota-stop.md#an-exhausted-pool)). A node with close ops
+advertises `handover_check_v1`. Arguments are `job`, `cwd`, `origin` and
+`branch`. The node checks the worktree root and every populated submodule for
+tracked or non-ignored untracked changes and for any assume-unchanged or
+skip-worktree index entries. It verifies the root against the job's spawn
+receipt and requires HEAD to equal the branch tip on origin. The outcome is
+`ok`, `dirty_worktree`, `unpushed_commits`,
+`branch_mismatch`, `git_failed` or `not-a-job`; an `ok` result names the
+worktree root, branch and pushed commit. No worktree content is uploaded.
+The hub sends the saved branch, origin and commit with `pane.close_op`; the
+node repeats the check inside that operation before closing. A refusal and its
+reason are journalled, so status and replay retain them across restart.
 
 ### `worktree.inspect`
 
@@ -1228,7 +1225,6 @@ running a git op on the clone, then delete the lock file.
 | `worktree-gone` | `cwd` is not a linked worktree. |
 | `worktree-changed` | HEAD or common repository differs from the first inspection or `expect_head`. |
 | `outside-work-root` | The resolved path or common git dir is outside the work root, or a detached-mode directory fails the reviewer name or location guard. |
-| `handover-kept` | A hub hand-over keeps the worktree: some job's `handover-keep` names it (hk 4633). |
 | `unregistered` | Resolves as a worktree but is not in `git worktree list`. |
 | `locked` | `git worktree lock` holds it. |
 | `detached` | Detached HEAD in the default branch mode. |

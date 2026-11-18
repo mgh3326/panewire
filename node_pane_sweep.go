@@ -110,7 +110,6 @@ func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
 			NoteWorktreeRemoved: func(jobID string) {
 				client.nodeLoopNoteDone(nodeWorktreeFlow, jobID)
 			},
-			LockClone: client.nodeLockCloneGitOps,
 		}
 	})
 	return client.taskPaneSweeper
