@@ -44,7 +44,9 @@ func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) 
 	// checkout_sparse_v1: the request's checkout spec carries exclude[] and
 	// include[], which the hub forwards to a node whose hello advertises it
 	// and drops for every other node (hk 5098).
-	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1", "checkout_spec_v1", "checkout_sparse_v1"}})
+	// checkout_branch_v1: an implementer spec spawn may ask for a local branch
+	// at its pinned commit instead of a detached HEAD (hk 5118).
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1", "checkout_spec_v1", "checkout_sparse_v1", "checkout_branch_v1"}})
 }
 
 // hubCheckoutSparseRefusal names the sparse list entry a request refuses, or ""
@@ -1055,11 +1057,14 @@ var nextHostRefusals = map[string]bool{
 	"checkout_refused:dirty":            true,
 	"checkout_refused:sha-missing":      true,
 	"checkout_refused:branch-elsewhere": true,
-	"spawn_failed:hooks_review":         true,
-	"spawn_failed:trust_prompt":         true,
-	"spawn_failed:omp_setup_wizard":     true,
-	"spawn_failed:auth_unavailable":     true,
-	"launch_proof_failed":               true,
+	// A successor spec whose branch another worktree of this host's clone
+	// holds refuses here, and another host prepares the same branch (hk 5118).
+	"checkout_refused:branch_in_use": true,
+	"spawn_failed:hooks_review":      true,
+	"spawn_failed:trust_prompt":      true,
+	"spawn_failed:omp_setup_wizard":  true,
+	"spawn_failed:auth_unavailable":  true,
+	"launch_proof_failed":            true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement

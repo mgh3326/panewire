@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/harnessstate"
 	"github.com/mgh3326/panewire/internal/spawnargs"
 )
@@ -41,6 +42,11 @@ const (
 	nodePrepareBranchElsewhere = "branch-elsewhere"
 	nodePrepareShaMissing      = "sha-missing"
 	nodePrepareOriginMismatch  = "origin-mismatch"
+	// nodePrepareSuccessorStale and nodePrepareBranchInUse refuse a successor
+	// spec checkout (hk 5118): origin advanced past the brief's commit, or
+	// another worktree of the clone already holds the branch.
+	nodePrepareSuccessorStale = "successor_stale"
+	nodePrepareBranchInUse    = "branch_in_use"
 )
 
 // worktree.remove outcomes mirror the receipt reasons mergewake
@@ -108,8 +114,10 @@ type nodeWorktreePrepareResult struct {
 	FastForwarded bool          `json:"fast_forwarded,omitempty"`
 	Reason        string        `json:"reason,omitempty"`
 	// CheckoutMode is "sparse" when this prepare applied the request's pattern
-	// list, "full" when the whole tree is on disk. Empty for branch mode,
-	// which never asks for a sparse checkout (hk 5098).
+	// list, "full" when the whole tree is on disk, and "branch" for a
+	// successor checkout, whose local branch tracks origin/<branch> (hk 5098,
+	// hk 5118). Empty for the branch mode a -c spawn uses, which never asks
+	// for a sparse checkout.
 	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
@@ -794,6 +802,8 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 		outcome = client.nodePrepareBranch(ctx, tracker, clone, dir, args, &result)
 	case "detached":
 		outcome = client.nodePrepareDetached(ctx, tracker, clone, dir, args, &result)
+	case fleet.HubCheckoutSuccessor:
+		outcome = client.nodePrepareSuccessor(ctx, tracker, clone, dir, args, &result)
 	}
 	result.Outcome = outcome
 	if outcome == nodePreparePrepared || outcome == nodePrepareReused {
@@ -1127,6 +1137,147 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGit
 	return nodePreparePrepared
 }
 
+// nodePrepareSuccessor prepares a spec spawn's checkout as a local branch (hk
+// 5118): the ref is refs/heads/<branch> and sha is the last pushed commit, so a
+// successor continues the branch with a plain `git push` instead of a detached
+// HEAD.
+//
+// The freshly fetched origin/<branch> must still be that commit. Someone
+// pushed after the brief, and a successor must not start behind it:
+// `successor_stale want=<sha> origin=<sha>`. The branch is never forced or
+// stolen: a worktree of the clone that already holds it refuses with
+// `branch_in_use worktree=<dir>`. A worktree at dir is reused only on that
+// branch, clean, at the commit; a local branch behind it is fast-forwarded
+// and one ahead or diverged is someone else's work.
+func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
+	git := tracker.git
+	result.CheckoutMode = nodeCheckoutBranch
+	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
+		return nodeOutcomeGitFailed
+	}
+	want := strings.ToLower(args.Sha)
+	originTip := ""
+	if out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/remotes/origin/"+args.Branch+"^{commit}"); err == nil {
+		originTip = strings.ToLower(strings.TrimSpace(string(out)))
+	}
+	if originTip != want {
+		if originTip == "" {
+			originTip = "none"
+		}
+		result.Reason = "want=" + want + " origin=" + originTip
+		return nodePrepareSuccessorStale
+	}
+	entries, err := nodeListWorktrees(ctx, git, clone)
+	if err != nil {
+		return nodeOutcomeGitFailed
+	}
+	var atDir *nodeWorktreeEntry
+	for i := range entries {
+		switch {
+		case nodeSamePath(entries[i].Path, dir):
+			atDir = &entries[i]
+		case entries[i].Branch == args.Branch:
+			// Another worktree of this clone already holds the branch: the
+			// node never forces or steals it.
+			result.Reason = "worktree=" + entries[i].Path
+			return nodePrepareBranchInUse
+		}
+	}
+	intent := nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: want}
+	if atDir != nil && atDir.Locked {
+		if !nodeReclaimInterruptedAdd(ctx, git, clone, dir, entries, intent) {
+			return nodeRemoveLocked
+		}
+		atDir = nil
+	}
+	localTip := ""
+	if atDir == nil {
+		if out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/heads/"+args.Branch+"^{commit}"); err == nil {
+			localTip = strings.ToLower(strings.TrimSpace(string(out)))
+		}
+		// The branch is aligned to the commit before any worktree is added:
+		// one behind it is fast-forwarded, and one ahead or diverged is
+		// someone else's work.
+		if localTip != "" && localTip != want {
+			relation, err := nodeCommitRelation(ctx, git, clone, localTip, want)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if relation != "behind" {
+				result.Reason = nodeBranchRelationReason(localTip, want, relation)
+				return nodePrepareBranchElsewhere
+			}
+			if _, err := git(ctx, "-C", clone, "update-ref", "refs/heads/"+args.Branch, want, localTip); err != nil {
+				return nodeOutcomeGitFailed
+			}
+			result.FastForwarded = true
+		}
+	}
+	if atDir != nil {
+		if atDir.Branch != args.Branch {
+			return nodePrepareBranchElsewhere
+		}
+		clean, err := nodeWorktreeClean(ctx, git, dir)
+		if err != nil {
+			return nodeOutcomeGitFailed
+		}
+		if !clean {
+			return nodeOutcomeDirty
+		}
+		head, err := nodeGitHead(ctx, git, dir)
+		if err != nil {
+			return nodeOutcomeGitFailed
+		}
+		if !strings.EqualFold(head, want) {
+			relation, err := nodeCommitRelation(ctx, git, clone, head, want)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if relation != "behind" {
+				result.Reason = nodeBranchRelationReason(head, want, relation)
+				return nodePrepareBranchElsewhere
+			}
+			collision, err := nodeIgnoredCheckoutCollision(ctx, git, dir, head, want)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if collision {
+				return nodeOutcomeDirty
+			}
+			if _, err := git(ctx, "-C", dir, "merge", "--ff-only", "--no-overwrite-ignore", want); err != nil {
+				return nodeOutcomeGitFailed
+			}
+			result.FastForwarded = true
+		}
+		if err := nodeSetSuccessorUpstream(ctx, git, dir, args.Branch); err != nil {
+			return nodeOutcomeGitFailed
+		}
+		return nodePrepareReused
+	}
+	add := []string{"-C", clone, "worktree", "add", dir, args.Branch}
+	if localTip == "" {
+		add = []string{"-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/" + args.Branch}
+	}
+	if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, intent, add...); err != nil {
+		return nodeOutcomeGitFailed
+	}
+	if err := nodeSetSuccessorUpstream(ctx, git, dir, args.Branch); err != nil {
+		// The add itself succeeded, so the failed prepare leaves no worktree.
+		nodeDiscardPreparedWorktree(git, clone, dir)
+		return nodeOutcomeGitFailed
+	}
+	return nodePreparePrepared
+}
+
+// nodeSetSuccessorUpstream makes the successor's local branch track
+// origin/<branch>, so a plain `git push` in the worktree pushes the branch it
+// continues. `git worktree add -b` leaves no upstream, and a branch a failed
+// earlier prepare left behind may have none either.
+func nodeSetSuccessorUpstream(ctx context.Context, git relayCommandRunner, dir, branch string) error {
+	_, err := git(ctx, "-C", dir, "branch", "--set-upstream-to", "origin/"+branch, branch)
+	return err
+}
+
 func nodeIgnoredCheckoutCollision(ctx context.Context, git relayCommandRunner, dir, head, expected string) (bool, error) {
 	changed, err := git(ctx, "-C", dir, "diff", "--name-only", "-z", head, expected, "--")
 	if err != nil {
@@ -1301,11 +1452,13 @@ func nodeDisableSparseCheckout(ctx context.Context, tracker *nodeGitTracker, dir
 	return err
 }
 
-// nodeCheckoutSparse and nodeCheckoutFull are the checkout_mode values the
-// spawn answer and the job record carry (hk 5098).
+// nodeCheckoutSparse, nodeCheckoutFull and nodeCheckoutBranch are the
+// checkout_mode values the spawn answer and the job record carry (hk 5098, hk
+// 5118).
 const (
 	nodeCheckoutSparse = "sparse"
 	nodeCheckoutFull   = "full"
+	nodeCheckoutBranch = "branch"
 )
 
 // nodeApplySparseCheckout writes the node's own pattern list into dir and

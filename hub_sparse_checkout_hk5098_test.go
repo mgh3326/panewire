@@ -211,7 +211,7 @@ func TestSpawnAnswerCarriesCheckoutMode(t *testing.T) {
 	// A direct /v1/spawn never sets operator_authorized, so its answer uses the
 	// legacy receipt shape; the hub-feature gate, not that shape, decides
 	// whether checkout_mode travels (hk 5098 review).
-	legacy, err := json.Marshal(spawnResultWire(spawnResultForHub(hubSpawnResult{RequestID: t14RequestID(952), CheckoutMode: nodeCheckoutSparse}, true, true), false))
+	legacy, err := json.Marshal(spawnResultWire(spawnResultForHub(hubSpawnResult{RequestID: t14RequestID(952), CheckoutMode: nodeCheckoutSparse}, true, true, true), false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,13 +312,13 @@ func TestHubFeaturesFrameNamesTheSparseCheckout(t *testing.T) {
 // unknown key (hk 5098 review).
 func TestSpawnResultHidesCheckoutModeFromAnOldHub(t *testing.T) {
 	result := hubSpawnResult{RequestID: t14RequestID(955), CheckoutMode: nodeCheckoutSparse}
-	if got := spawnResultForHub(result, true, false); got.CheckoutMode != "" {
+	if got := spawnResultForHub(result, true, false, true); got.CheckoutMode != "" {
 		t.Fatalf("old hub result = %+v, want no checkout_mode", got)
 	}
-	if got := spawnResultForHub(result, true, true); got.CheckoutMode != nodeCheckoutSparse {
+	if got := spawnResultForHub(result, true, true, true); got.CheckoutMode != nodeCheckoutSparse {
 		t.Fatalf("new hub result = %+v, want checkout_mode sparse", got)
 	}
-	raw, err := json.Marshal(spawnResultWire(spawnResultForHub(result, true, false), true))
+	raw, err := json.Marshal(spawnResultWire(spawnResultForHub(result, true, false, true), true))
 	if err != nil {
 		t.Fatal(err)
 	}

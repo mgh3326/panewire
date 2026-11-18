@@ -119,9 +119,10 @@ type ExecutionReceipt struct {
 	// LaneUnregistered is true when the pane exists but hub lane registration
 	// failed after its retry (receipt field lane_unregistered).
 	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
-	// CheckoutMode is what the node prepared for a checkout spec — "sparse"
-	// or "full" (hk 5098) — so the job record says whether paths are absent
-	// on purpose. Empty for a spawn that names no spec.
+	// CheckoutMode is what the node prepared for a checkout spec — "sparse",
+	// "full" or "branch" (hk 5098, hk 5118) — so the job record says whether
+	// paths are absent on purpose or the checkout continues a branch. Empty
+	// for a spawn that names no spec.
 	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 

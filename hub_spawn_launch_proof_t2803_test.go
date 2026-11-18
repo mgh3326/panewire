@@ -60,10 +60,10 @@ func TestLaunchProofNodeWireReasonT2803(t *testing.T) {
 
 func TestLaunchProofOldHubCompatibilityT2803(t *testing.T) {
 	result := hubSpawnResult{RC: 70, Error: "launch_proof_failed", Retryable: true}
-	if got := spawnResultForHub(result, false, true); got.Error != "spawn_failed" || !got.Retryable {
+	if got := spawnResultForHub(result, false, true, true); got.Error != "spawn_failed" || !got.Retryable {
 		t.Fatalf("old hub result = %+v", got)
 	}
-	if got := spawnResultForHub(result, true, true); got.Error != "launch_proof_failed" {
+	if got := spawnResultForHub(result, true, true, true); got.Error != "launch_proof_failed" {
 		t.Fatalf("new hub result = %+v", got)
 	}
 }

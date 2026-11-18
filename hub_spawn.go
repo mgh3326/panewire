@@ -27,7 +27,16 @@ var (
 	hubSpawnRequestIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	hubSpawnMachinePattern   = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	hubSpawnCWDKeyPattern    = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+	// hubCheckoutRefusalPattern is the closed refusal-error shape: an outcome
+	// alone, or the bounded detail a successor refusal names for a hub that
+	// listed checkout_branch_v1 — the wanted and origin commits, or the
+	// worktree that holds the branch (hk 5118).
+	hubCheckoutRefusalPattern       = regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]{1,64}$`)
+	hubCheckoutRefusalDetailPattern = regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]{1,64}: (?:want=[0-9a-f]{40} origin=(?:[0-9a-f]{40}|none)|worktree=[^\x00-\x1f\x7f]{1,512})$`)
 )
+
+// hubCheckoutRefusalMaxBytes bounds a detailed checkout refusal the hub reads.
+const hubCheckoutRefusalMaxBytes = 640
 
 type hubSpawnBrief struct {
 	Inline    string `json:"inline,omitempty"`
@@ -109,7 +118,8 @@ type hubSpawnResult struct {
 	CompletedAt *time.Time              `json:"completed_at,omitempty"`
 	Error       string                  `json:"error,omitempty"`
 	// CheckoutMode is the node's answer for a checkout spec: "sparse" or
-	// "full" (hk 5098). Empty for a spawn that names no spec.
+	// "full" (hk 5098), or "branch" for a successor checkout (hk 5118).
+	// Empty for a spawn that names no spec.
 	CheckoutMode string `json:"checkout_mode,omitempty"`
 }
 
@@ -173,6 +183,11 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 		return validNodeRefName(checkout.Branch) && (checkout.Sha == "" || nodeShaPattern.MatchString(checkout.Sha)) && (!checkout.VerifyReuse || checkout.Sha != "") && checkout.Fetch == ""
 	case "detached":
 		return !checkout.VerifyReuse && checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch)
+	case fleet.HubCheckoutSuccessor:
+		// An implementer spec on refs/heads/<branch> (hk 5118): the node
+		// prepares a local branch at the pinned commit, so both are required
+		// and it fetches the whole remote itself.
+		return !checkout.VerifyReuse && validNodeRefName(checkout.Branch) && nodeShaPattern.MatchString(checkout.Sha) && checkout.Fetch == ""
 	default:
 		return false
 	}
@@ -271,9 +286,9 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 }
 
 // validSpawnCheckoutMode is the closed set a node may answer for a spec
-// checkout (hk 5098).
+// checkout (hk 5098, hk 5118).
 func validSpawnCheckoutMode(value string) bool {
-	return value == "" || value == nodeCheckoutSparse || value == nodeCheckoutFull
+	return value == "" || value == nodeCheckoutSparse || value == nodeCheckoutFull || value == nodeCheckoutBranch
 }
 
 func validHubSpawnResultError(value string) bool {
@@ -281,8 +296,28 @@ func validHubSpawnResultError(value string) bool {
 	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "launch_proof_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request":
 		return true
 	default:
-		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]+$`).MatchString(value)
+		if !strings.HasPrefix(value, "checkout_refused:") || len(value) > hubCheckoutRefusalMaxBytes {
+			return false
+		}
+		return hubCheckoutRefusalPattern.MatchString(value) || hubCheckoutRefusalDetailPattern.MatchString(value)
 	}
+}
+
+// hubCheckoutRefusalDetail returns the ": <reason>" a successor refusal may
+// append to its error, or "" when the reason cannot be carried inside the
+// bounded shape the hub parses. A node checks the same pattern before it puts
+// the detail on the wire, so a long worktree path or a control byte falls back
+// to the outcome alone instead of making the hub drop the whole answer (hk
+// 5118).
+func hubCheckoutRefusalDetail(outcome, reason string) string {
+	if reason == "" {
+		return ""
+	}
+	detail := ": " + reason
+	if !hubCheckoutRefusalDetailPattern.MatchString("checkout_refused:" + outcome + detail) {
+		return ""
+	}
+	return detail
 }
 
 func (h *HubServer) pruneSpawnRecordsLocked(now time.Time) {

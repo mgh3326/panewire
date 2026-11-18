@@ -713,6 +713,9 @@ type hubClientConnection struct {
 	// acceptsCheckoutSparse is the same for hubFeatureCheckoutSparse
 	// (checkout_sparse.go): the spawn result may carry checkout_mode.
 	acceptsCheckoutSparse atomic.Bool
+	// acceptsCheckoutBranch is the same for hubFeatureCheckoutBranch
+	// (checkout_branch.go): the spawn result may carry checkout_mode "branch".
+	acceptsCheckoutBranch atomic.Bool
 	connection            *websocket.Conn
 	writeMu               hubWriteMutex
 	// closed is closed when the session on this connection ends; a nil
@@ -721,39 +724,44 @@ type hubClientConnection struct {
 }
 
 type hubOutboundMessage struct {
-	Type               string
-	Features           []string
-	Machine            string
-	Phase              string
-	EmittedAt          time.Time
-	JobID              string
-	Epoch              uint64
-	Pane               string
-	Text               string
-	DeliverPolicy      string
-	Kind               string
-	ReportPath         string
-	Reason             string
-	EventID            int64
-	Lane               string
-	ProducerEventID    string
-	IdleWakeEventID    string
-	Eligible           bool
-	RequestID          string
-	CWDKey             string
-	BriefInline        string
-	BriefDoc           string
-	Checkout           *hubSpawnCheckout
-	Args               []string
-	DeadlineMS         int64
-	ExpiresMS          int64 // the request's absolute expiry; read by a spawn_expires_v1 node
-	StartByMS          int64 // grant-required attempt: the node starts only with a hub grant by then
-	Granted            bool  // job.spawn.grant answer
-	OperatorAuthorized bool
-	WaitSeconds        int
-	CommandOp          string
-	CommandArgs        json.RawMessage
-	RecvSeq            int64 // local read-loop order; never part of the wire shape.
+	// checkoutBranchReply is set on a node-delivered spawn whose hub listed
+	// checkout_branch_v1: that hub's result parser reads the detail a
+	// successor refusal names, which an older one would refuse (hk 5118).
+	// It never crosses the wire; the node adds no field for it.
+	checkoutBranchReply bool
+	Type                string
+	Features            []string
+	Machine             string
+	Phase               string
+	EmittedAt           time.Time
+	JobID               string
+	Epoch               uint64
+	Pane                string
+	Text                string
+	DeliverPolicy       string
+	Kind                string
+	ReportPath          string
+	Reason              string
+	EventID             int64
+	Lane                string
+	ProducerEventID     string
+	IdleWakeEventID     string
+	Eligible            bool
+	RequestID           string
+	CWDKey              string
+	BriefInline         string
+	BriefDoc            string
+	Checkout            *hubSpawnCheckout
+	Args                []string
+	DeadlineMS          int64
+	ExpiresMS           int64 // the request's absolute expiry; read by a spawn_expires_v1 node
+	StartByMS           int64 // grant-required attempt: the node starts only with a hub grant by then
+	Granted             bool  // job.spawn.grant answer
+	OperatorAuthorized  bool
+	WaitSeconds         int
+	CommandOp           string
+	CommandArgs         json.RawMessage
+	RecvSeq             int64 // local read-loop order; never part of the wire shape.
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
@@ -2210,6 +2218,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsEndedPanes.Store(slices.Contains(message.Features, hubFeatureEndedPanes))
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				peer.acceptsCheckoutSparse.Store(slices.Contains(message.Features, hubFeatureCheckoutSparse))
+				peer.acceptsCheckoutBranch.Store(slices.Contains(message.Features, hubFeatureCheckoutBranch))
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)

@@ -103,6 +103,12 @@ func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, err
 	if checkout := request.Repository.Checkout; checkout != nil && (len(checkout.Exclude) != 0 || len(checkout.Include) != 0) {
 		needs = append(needs, struct{ feature, flag string }{"checkout_sparse_v1", "--checkout-exclude"})
 	}
+	// A hub that predates checkout_branch_v1 refuses the successor mode, so
+	// the submitter states the cause instead of reading invalid_request
+	// (hk 5118).
+	if checkout := request.Repository.Checkout; checkout != nil && checkout.Mode == HubCheckoutSuccessor {
+		needs = append(needs, struct{ feature, flag string }{"checkout_branch_v1", "--checkout-ref refs/heads/<branch> for an implementer spawn"})
+	}
 	if len(needs) != 0 {
 		status, raw, err := c.doIdempotent(ctx, http.MethodGet, "/v1/spawns/features", nil, 5*time.Second)
 		if err != nil {

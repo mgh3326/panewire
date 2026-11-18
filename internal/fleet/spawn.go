@@ -51,7 +51,8 @@ type Spawn struct {
 	// none: the receipt then carries the role's default.
 	hubExpiresAt time.Time
 	// checkoutMode is what the node prepared for this spawn's checkout spec
-	// ("sparse" or "full", hk 5098). The job.spawned record carries it; it
+	// ("sparse", "full" or "branch", hk 5098, hk 5118). The job.spawned record
+	// carries it; it
 	// never parses out of the args, since the node's own prepare decided it.
 	checkoutMode string
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It

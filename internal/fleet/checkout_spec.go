@@ -18,6 +18,12 @@ import (
 // exact commit, exactly as it does for a -c spawn from a linked worktree.
 // -c keeps working, and the two are exclusive: one spawn names one worktree.
 //
+// An implementer spec on refs/heads/<branch> asks for mode "successor" (hk
+// 5118): the node prepares a local branch <branch> at the commit, tracking
+// origin/<branch>, so a successor seat continues the pushed branch with a
+// plain `git push`. Reviewers and consults keep the detached checkout, since a
+// reader never continues the branch.
+//
 // The values are the worktree.prepare grammar (spawnargs), so a spec the
 // submitter accepts is one the hub and the node accept, and a bad one is
 // refused in the caller's terminal with the flag named.
@@ -69,19 +75,44 @@ func (s Spawn) checkoutSpec() (*HubCheckout, string, error) {
 		return nil, "", fail(exitUsage, "--checkout-origin names repository %q, which is not a hub cwd key (lowercase letters, digits, dot, underscore or hyphen, at most 64)", name)
 	}
 	// The lists are refused here as at the hub and the node; the entry index
-	// names the bad one rather than repeating its text (hk 5098).
-	if reason := spawnargs.SparseRefusal(s.CheckoutExclude, s.CheckoutInclude); reason != "" {
+	// names the bad one rather than repeating its text (hk 5098). A branch
+	// checkout never takes them, so an implementer's branch ref and the
+	// sparse flags refuse each other here, before the mode is chosen.
+	if reason := spawnargs.SparseSpecRefusal(checkoutMode(s.Role, s.CheckoutRef), s.CheckoutExclude, s.CheckoutInclude); reason != "" {
 		return nil, "", fail(exitUsage, "%s", reason)
+	}
+	mode, branch := checkoutMode(s.Role, s.CheckoutRef), ""
+	fetch := s.CheckoutRef
+	if mode == HubCheckoutSuccessor {
+		// A successor continues the pushed branch, so the branch name travels
+		// on its own and the node fetches the whole remote (hk 5118).
+		branch, fetch = strings.TrimPrefix(s.CheckoutRef, "refs/heads/"), ""
 	}
 	return &HubCheckout{
 		Origin:  origin,
-		Mode:    "detached",
+		Mode:    mode,
+		Branch:  branch,
 		Sha:     s.CheckoutCommit,
-		Fetch:   s.CheckoutRef,
+		Fetch:   fetch,
 		Dir:     checkoutWorktreeName(s.Job),
 		Exclude: s.CheckoutExclude,
 		Include: s.CheckoutInclude,
 	}, name, nil
+}
+
+// HubCheckoutSuccessor is the checkout mode of an implementer spec spawn whose
+// ref is a branch: the node prepares a local branch at the commit instead of a
+// detached HEAD (hk 5118).
+const HubCheckoutSuccessor = "successor"
+
+// checkoutMode names the mode a spec spawn's checkout is prepared in. A
+// reviewer or consult reads the commit and never continues the branch, so only
+// an implementer seat gets the local branch (hk 5118).
+func checkoutMode(role, ref string) string {
+	if role == "implementer" && strings.HasPrefix(ref, "refs/heads/") {
+		return HubCheckoutSuccessor
+	}
+	return "detached"
 }
 
 // originRule is the sentence --checkout-origin refusals share.

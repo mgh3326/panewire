@@ -426,6 +426,12 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		case "detached":
 			valid := args.Branch == "" && nodeShaPattern.MatchString(args.Sha) && validNodeFetchRef(args.Fetch)
 			return args, valid
+		case fleet.HubCheckoutSuccessor:
+			// A successor checkout tracks origin/<branch> at the pinned
+			// commit, so both are required and it fetches the whole remote
+			// itself (hk 5118).
+			valid := validNodeRefName(args.Branch) && nodeShaPattern.MatchString(args.Sha) && args.Fetch == "" && !args.VerifyReuse
+			return args, valid
 		}
 		return nil, false
 	case nodeCommandWorktreeRemove:
@@ -522,6 +528,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		case nodeOutcomeBusy:
 			valid = result.RetryAfterS > 0 && result.Worktree == nil
 		case nodePrepareBranchElsewhere, nodePrepareShaMissing, nodePrepareOriginMismatch,
+			nodePrepareSuccessorStale, nodePrepareBranchInUse,
 			nodeOutcomeDirty, nodeRemoveLocked, nodeOutcomeGitFailed, nodeOutcomeGitTooOld,
 			nodeOutcomeCancelled:
 			valid = result.Worktree == nil && result.RetryAfterS == 0
