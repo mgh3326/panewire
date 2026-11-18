@@ -476,6 +476,10 @@ type HubServer struct {
 	poolActionOnce       sync.Once
 	poolStoreWarningOnce sync.Once
 	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
+	// spawnNoticeRelayFilter, when set, holds an outbox row unrouted for a pass
+	// while it returns true, as a failed relay does. Tests use it to fail one
+	// notice's relay; it is nil in production.
+	spawnNoticeRelayFilter func(eventID string) bool
 	// consultPlan resolves a consult seat and its spawn submission. Nil uses
 	// the hub's own fleet App (fleet.App.PlanConsult); tests inject one.
 	consultPlan func(context.Context, fleet.ConsultPlanInput) (fleet.ConsultPlan, error)

@@ -142,8 +142,9 @@ func TestReconcilingThenFailedNotifiesOwnerAndSubmitterOnce(t *testing.T) {
 	}
 }
 
-// Deadlines keep their one SPAWN_FAILED, both when reached directly and when a
-// reconciling request runs out its deadline.
+// A bound deadline is not final (hk 5267): reaching it, directly or after a
+// reconciling step, notifies nothing. The one SPAWN_FAILED comes with the final
+// outcome; TestBoundDeadlineHoldsUntilFinal_5267 covers the rest.
 func TestDeadlineNotifiesOwnerOnceWithOrWithoutReconciling(t *testing.T) {
 	for _, reconcileFirst := range []bool{false, true} {
 		t.Run(map[bool]string{false: "direct", true: "after reconciling"}[reconcileFirst], func(t *testing.T) {
@@ -159,10 +160,27 @@ func TestDeadlineNotifiesOwnerOnceWithOrWithoutReconciling(t *testing.T) {
 			if got := reconcilingStatus(t, h, task); got != "deadline_exceeded" {
 				t.Fatalf("status %q, want deadline_exceeded", got)
 			}
+			if injected := deliveredSpawnTexts(t, h, destination); len(injected) != 0 {
+				t.Fatalf("a bound deadline notified a lane before it was final: %+v", injected)
+			}
+			failed := hubSpawnOutcome{RC: 1, Stage: "landing", Reason: "spawn_failed", Host: "machine-a"}
+			if changed, err := h.inbox.store.completeSpawn(t.Context(), task, failed, time.Now()); err != nil || !changed {
+				t.Fatalf("final failure changed=%v err=%v", changed, err)
+			}
 			injected := deliveredSpawnTexts(t, h, destination)
-			assertOneSpawnNotice(t, injected, "SPAWN_FAILED", "w1:p1")
-			if !strings.Contains(injected[0].Text, "reason=timeout") {
-				t.Fatalf("deadline notice omits its reason: %q", injected[0].Text)
+			// The owner and the submitting lane each get the failure once.
+			if len(injected) != 2 {
+				t.Fatalf("final failure reached %d lanes, want owner and submitter: %+v", len(injected), injected)
+			}
+			panes := map[string]int{}
+			for _, event := range injected {
+				if strings.Count(event.Text, "SPAWN_FAILED") != 1 || !strings.Contains(event.Text, "reason=spawn_failed") {
+					t.Fatalf("final notice %q, want one SPAWN_FAILED with its reason", event.Text)
+				}
+				panes[event.Pane]++
+			}
+			if panes["w1:p1"] != 1 || panes["w1:p2"] != 1 {
+				t.Fatalf("panes %v, want owner w1:p1 and submitter w1:p2 once each", panes)
 			}
 		})
 	}
@@ -225,7 +243,9 @@ func TestReconcilingLogsWithoutSentryAndLeavesTheTerminalTrace(t *testing.T) {
 			failures++
 		}
 	}
-	if transactions != 1 || failures != 1 || len(transport.events) != 2 {
-		t.Fatalf("terminal outcome traffic: transactions=%d failures=%d total=%d", transactions, failures, len(transport.events))
+	// A bound timeout is not final, so it emits no failure event: the
+	// unresolved notice does (hk 5267). The trace transaction is unchanged.
+	if transactions != 1 || failures != 0 || len(transport.events) != 1 {
+		t.Fatalf("held timeout traffic: transactions=%d failures=%d total=%d", transactions, failures, len(transport.events))
 	}
 }
