@@ -51,6 +51,9 @@ type jobCLI struct {
 	socket         string
 	now            func() time.Time
 	ownerEpoch     uint64
+	// explicitEpoch is --epoch, the attempt an operator or parent call names
+	// when its environment carries no launch binding (0: none).
+	explicitEpoch uint64
 }
 
 func jobRecordEpoch(jobsRoot, job string) (uint64, error) {
@@ -61,13 +64,33 @@ func jobRecordEpoch(jobsRoot, job string) (uint64, error) {
 	return jobowner.Epoch(jobsRoot, job)
 }
 
+// captureOwnerEpoch fixes the epoch this command records before it writes
+// anything. The attempt the caller was launched as (or --epoch) must be the
+// node's current grant; a refusal names the reason and writes nothing
+// (docs/producer-attempt-grant.md).
 func (c *jobCLI) captureOwnerEpoch(jobsRoot, job string) error {
-	epoch, err := jobRecordEpoch(jobsRoot, job)
+	epoch, err := producerEpoch(jobsRoot, job, c.explicitEpoch)
+	if producerRefusal(err) {
+		return jobDie("refused: %v", err)
+	}
 	if err != nil {
 		return fmt.Errorf("job assignment unavailable: %w", err)
 	}
 	c.ownerEpoch = epoch
 	return nil
+}
+
+// epochFlag parses the value of --epoch for done, escalate and joined.
+func (c *jobCLI) epochFlag(args []string) ([]string, error) {
+	if len(args) < 2 {
+		return nil, jobDie("--epoch requires a grant epoch")
+	}
+	epoch, err := strconv.ParseUint(args[1], 10, 64)
+	if err != nil || epoch == 0 {
+		return nil, jobDie("--epoch requires a grant epoch of 1 or more")
+	}
+	c.explicitEpoch = epoch
+	return args[2:], nil
 }
 
 func (c *jobCLI) recordEpoch() uint64 {
@@ -215,6 +238,11 @@ func (c *jobCLI) done(args []string) int {
 				return c.exit(jobDie("--report requires a path"))
 			}
 			report, args = args[1], args[2:]
+		case "--epoch":
+			var err error
+			if args, err = c.epochFlag(args); err != nil {
+				return c.exit(err)
+			}
 		default:
 			return c.exit(jobDie("unknown done option '%s'", args[0]))
 		}
@@ -305,6 +333,11 @@ func (c *jobCLI) escalate(args []string) int {
 				return c.exit(jobDie("--report requires a path"))
 			}
 			report, args = args[1], args[2:]
+		case "--epoch":
+			var err error
+			if args, err = c.epochFlag(args); err != nil {
+				return c.exit(err)
+			}
 		default:
 			return c.exit(jobDie("unknown escalate option '%s'", args[0]))
 		}
@@ -373,6 +406,11 @@ func (c *jobCLI) joined(args []string) int {
 				return c.exit(jobDie("--report requires a path"))
 			}
 			report, args = args[1], args[2:]
+		case "--epoch":
+			var err error
+			if args, err = c.epochFlag(args); err != nil {
+				return c.exit(err)
+			}
 		default:
 			return c.exit(jobDie("unknown joined option '%s'", args[0]))
 		}

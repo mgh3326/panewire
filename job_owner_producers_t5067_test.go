@@ -34,6 +34,9 @@ func TestJobOwnerFenceJobDoneKeepsProducingGrant_t5067(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", "")
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
 	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(root, "no-service-credential"))
+	// The worker was launched under grant 2 (hk 5310), so its call records 2.
+	t.Setenv("ARBITER_JOB", "fenced-job")
+	t.Setenv("ARBITER_JOB_EPOCH", "2")
 	pushes := &r20t4Pushes{}
 	socket := r20t4Socket(t, pushes.add)
 	var out, stderr bytes.Buffer
@@ -64,20 +67,25 @@ func TestJobOwnerFenceJobDoneKeepsProducingGrant_t5067(t *testing.T) {
 	}
 }
 
-func TestJobOwnerFenceEmitDefaultsToProducingGrant_t5067(t *testing.T) {
+// emit records the attempt it presents: the epoch bound at launch or --epoch,
+// which must be the current grant (hk 5310).
+func TestJobOwnerFenceEmitRecordsPresentedGrant_t5067(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
+		bound string
 		epoch []string
 		want  uint64
 	}{
-		{name: "implicit", want: 2},
-		{name: "explicit", epoch: []string{"--epoch", "1"}, want: 1},
+		{name: "bound", bound: "2", want: 2},
+		{name: "explicit", epoch: []string{"--epoch", "2"}, want: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			if err := jobowner.Assign(filepath.Join(root, "jobs"), "job-a", 2); err != nil {
 				t.Fatal(err)
 			}
+			t.Setenv("ARBITER_JOB", "job-a")
+			t.Setenv("ARBITER_JOB_EPOCH", tc.bound)
 			pushes := &r20t4Pushes{}
 			socket := r20t4Socket(t, pushes.add)
 			args := []string{"--kind", "job.completed", "--job", "job-a", "--owner-lane", "lane-a", "--report", "/tmp/report.md", "--inbox-root", root}

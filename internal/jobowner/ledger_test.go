@@ -1,8 +1,10 @@
 package jobowner
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +44,40 @@ func TestDelayedRevocationDoesNotRevokeNewGrant(t *testing.T) {
 	files, err = filepath.Glob(filepath.Join(jobs, "job-a", "events", "*-job.revoked.json"))
 	if err != nil || len(files) != 1 {
 		t.Fatalf("newer revocation missing: files=%v err=%v", files, err)
+	}
+}
+
+func TestProducerEpoch(t *testing.T) {
+	jobs := filepath.Join(t.TempDir(), "jobs")
+	for _, tc := range []struct {
+		name            string
+		grant           uint64
+		bound, explicit uint64
+		want            uint64
+		err             error
+	}{
+		{name: "no identity at the initial grant", grant: 1, want: 1},
+		{name: "no identity above the initial grant", grant: 3, err: ErrIdentityRequired},
+		{name: "bound current", grant: 3, bound: 3, want: 3},
+		{name: "bound superseded", grant: 3, bound: 1, err: ErrStaleAttempt},
+		{name: "bound ahead", grant: 3, bound: 4, err: ErrAttemptAhead},
+		{name: "explicit current", grant: 3, explicit: 3, want: 3},
+		{name: "explicit superseded", grant: 3, explicit: 1, err: ErrStaleAttempt},
+		{name: "explicit equals bound", grant: 3, bound: 3, explicit: 3, want: 3},
+		{name: "explicit overrides bound", grant: 3, bound: 1, explicit: 3, err: ErrEpochConflict},
+		{name: "bound at the initial grant", grant: 1, bound: 1, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "job-" + strings.ReplaceAll(tc.name, " ", "-")
+			if tc.grant > 1 {
+				if err := Assign(jobs, id, tc.grant); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := ProducerEpoch(jobs, id, tc.bound, tc.explicit)
+			if !errors.Is(err, tc.err) || got != tc.want {
+				t.Fatalf("ProducerEpoch = %d, %v; want %d, %v", got, err, tc.want, tc.err)
+			}
+		})
 	}
 }

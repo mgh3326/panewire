@@ -138,3 +138,61 @@ func withLock(jobs, id string, fn func(string) error) error {
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	return fn(dir)
 }
+
+// JobEnv and EpochEnv name the launch environment that binds a worker process
+// tree to one attempt: the job it was launched for and that job's grant epoch
+// on this node at launch. The node sets them once; nothing rewrites them, so a
+// producer call from the tree presents the attempt that launched it even after
+// the hub regrants the job (docs/producer-attempt-grant.md).
+const (
+	JobEnv   = "ARBITER_JOB"
+	EpochEnv = "ARBITER_JOB_EPOCH"
+)
+
+// ValidID reports whether id can carry a hub grant at all. Legacy-only ids
+// cannot, and are always epoch 1.
+func ValidID(id string) bool {
+	return validID.MatchString(id) && id != "." && id != ".."
+}
+
+// Producer refusals. Each is wrapped with the epochs it compared.
+var (
+	ErrStaleAttempt     = errors.New("stale attempt")
+	ErrAttemptAhead     = errors.New("attempt epoch ahead of the node's grant")
+	ErrIdentityRequired = errors.New("attempt identity required")
+	ErrEpochConflict    = errors.New("--epoch conflicts with the epoch bound at launch")
+)
+
+// ProducerEpoch resolves the epoch a producer call (job done|escalate|joined,
+// emit) may record for job id, from the epoch bound into the caller's launch
+// environment (0 when absent) and an explicit --epoch (0 when absent).
+//
+// A presented epoch must equal the node's current grant: an older one is a
+// worker from a superseded attempt (A1→B2→A3 leaves the A/1 worker alive), a
+// newer one names a grant this node has not persisted. With no identity at
+// all the call is accepted only while the grant is still the initial epoch 1,
+// so a regrant never lets an unidentified caller pick up the new epoch.
+func ProducerEpoch(jobs, id string, bound, explicit uint64) (uint64, error) {
+	if bound != 0 && explicit != 0 && bound != explicit {
+		return 0, fmt.Errorf("%w: bound %d, --epoch %d", ErrEpochConflict, bound, explicit)
+	}
+	presented := bound
+	if presented == 0 {
+		presented = explicit
+	}
+	current, err := Epoch(jobs, id)
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case presented == 0 && current == 1:
+		return 1, nil
+	case presented == 0:
+		return 0, fmt.Errorf("%w: job %s is at grant epoch %d; pass --epoch %d from an operator or parent call", ErrIdentityRequired, id, current, current)
+	case presented < current:
+		return 0, fmt.Errorf("%w: attempt epoch %d, current grant %d", ErrStaleAttempt, presented, current)
+	case presented > current:
+		return 0, fmt.Errorf("%w: attempt epoch %d, current grant %d", ErrAttemptAhead, presented, current)
+	}
+	return presented, nil
+}

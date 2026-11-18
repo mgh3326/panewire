@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/daemonop"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 const (
@@ -954,6 +955,18 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	epoch := req.Epoch
 	if epoch == 0 {
 		epoch = 1
+	}
+	if req.Kind != "lane.event" {
+		// The CLI refuses a superseded attempt before it writes anything; this
+		// is the node's own fence for a client that talks to the socket
+		// directly (docs/producer-attempt-grant.md).
+		current, err := jobowner.Epoch(filepath.Join(d.emitNamespaceRoot(), "jobs"), req.JobID)
+		if err != nil {
+			return &codedError{ExitInternal, fmt.Errorf("job assignment unavailable")}
+		}
+		if epoch < current {
+			return &codedError{ExitUsage, fmt.Errorf("%w: attempt epoch %d, current grant %d", jobowner.ErrStaleAttempt, epoch, current)}
+		}
 	}
 	if d.cfg.Hub.Client == nil {
 		return &codedError{ExitDaemonUnavailable, fmt.Errorf("hub client unavailable")}
