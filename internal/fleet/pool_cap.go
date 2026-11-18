@@ -27,11 +27,13 @@ const (
 	// devinFreeCapKey is the reserved pool_max_concurrent key for the SWE-2
 	// free rungs.
 	devinFreeCapKey = "devin-free"
-	// freeBandPerAccountLimit is the concurrent free-band launches one account
-	// holds: one. A burst of submissions onto the same account's free band
-	// trips the free limit, so the second concurrent launch already moves to
-	// another pool (hk 4765).
-	freeBandPerAccountLimit = 1
+	// freeBandPerAccountDefault is the concurrent free-band launches one account
+	// holds when [quota].free_band_per_account is absent: one. A burst of
+	// submissions onto the same account's free band trips the free limit, so
+	// the second concurrent launch already moves to another pool (hk 4765).
+	// The key raises it, up to freeBandPerAccountMax (decision 427).
+	freeBandPerAccountDefault = 1
+	freeBandPerAccountMax     = 8
 	// degradedPoolCapCount marks a selection that could not read the live
 	// count: the cap did not apply to it (fail-open).
 	degradedPoolCapCount = "pool_cap_count_unavailable"
@@ -68,6 +70,28 @@ func poolMaxConcurrent(quota map[string]any) map[string]int {
 		}
 	}
 	return caps
+}
+
+// validateFreeBandPerAccount checks `[quota].free_band_per_account`: an integer
+// from 1 to freeBandPerAccountMax. An absent key keeps the default.
+func validateFreeBandPerAccount(quota map[string]any) error {
+	value, ok := quota["free_band_per_account"]
+	if !ok {
+		return nil
+	}
+	if n, isInt := value.(int64); !isInt || n < 1 || n > freeBandPerAccountMax {
+		return fail(exitConfig, "quota.free_band_per_account must be an integer from 1 to %d", freeBandPerAccountMax)
+	}
+	return nil
+}
+
+// freeBandPerAccount reads the per-account free-band limit. The config was
+// validated at load; an absent or invalid entry reads as the default.
+func freeBandPerAccount(quota map[string]any) int {
+	if n, ok := quota["free_band_per_account"].(int64); ok && n >= 1 && n <= freeBandPerAccountMax {
+		return int(n)
+	}
+	return freeBandPerAccountDefault
 }
 
 // liveSpawnsReply is the body of the hub's GET /v1/spawns/live: live spawns by
@@ -110,6 +134,7 @@ func (a *App) liveSpawnProfiles(ctx context.Context) (map[string]int, error) {
 type poolCapGate struct {
 	a           *App
 	caps        map[string]int
+	freeLimit   int // [quota].free_band_per_account, read per selection
 	rows        []CatalogRow
 	loaded      bool
 	live        map[string]int // by pool
@@ -123,7 +148,7 @@ type poolCapGate struct {
 }
 
 func (a *App) newPoolCapGate(rows []CatalogRow) *poolCapGate {
-	return &poolCapGate{a: a, caps: poolMaxConcurrent(a.Config.Quota), rows: rows}
+	return &poolCapGate{a: a, caps: poolMaxConcurrent(a.Config.Quota), freeLimit: freeBandPerAccount(a.Config.Quota), rows: rows}
 }
 
 // full names the cap this candidate is over: its pool's cap, then the reserved
@@ -171,10 +196,11 @@ func (g *poolCapGate) load(ctx context.Context) {
 	g.freeLive = g.freeRungSpawns(profiles)
 }
 
-// freeAccountFull reports whether account already holds a concurrent free-band
-// launch: the second one moves to another pool (hk 4765). A selection without
-// the fleet-wide launch record (no hook) or with an unreadable one skips the
-// check, so the operator cap stays the only gate there.
+// freeAccountFull reports whether account already holds its configured number
+// of concurrent free-band launches: the next one moves to another pool (hk
+// 4765, [quota].free_band_per_account). A selection without the fleet-wide
+// launch record (no hook) or with an unreadable one skips the check, so the
+// operator cap stays the only gate there.
 func (g *poolCapGate) freeAccountFull(ctx context.Context, account string) (string, int) {
 	if account == "" {
 		return "", 0
@@ -185,7 +211,7 @@ func (g *poolCapGate) freeAccountFull(ctx context.Context, account string) (stri
 	if g.freeAccountsUnavailable {
 		return "", 0
 	}
-	if live := g.freeByAccount[account]; live >= freeBandPerAccountLimit {
+	if live := g.freeByAccount[account]; live >= g.freeLimit {
 		return devinFreeCapKey, live
 	}
 	return "", 0

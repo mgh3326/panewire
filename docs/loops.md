@@ -78,6 +78,25 @@ writer uses):
    "last_tick":"2026-11-18T00:00:00Z","oldest_pending_s":0}]}
 ```
 
+### Selection drops group
+
+The document also carries a `selection_drops` group after `rows`: one entry
+per drop reason and Devin account, counting the SWE-2 candidates that a
+placed selection on the hub dropped that UTC day (decision 427):
+
+```json
+"selection_drops":[{"machine":"hub","reason":"pool_at_cap","account":"devin:<16 hex>","dropped":2}]
+```
+
+Reasons are `pool_at_cap` (the per-account free-band cap, `[quota].free_band_per_account`,
+or `[quota].pool_max_concurrent`), `free_limit` and `pool_cooling`. Only a
+placed spawn counts: a dry run, a refusal and a plan query count nothing, and
+an admitted launch is never a drop. A direct `panewire spawn` on a node runs
+its own selection and counts nothing here. The group does not change the
+closed `rows` list above; an unreadable account reads as `unknown`.
+Code: `internal/fleet/selection_drops.go`, `hub_loop_ledger.go`
+(`selectionDropRowsLocked`).
+
 One document per date: already written is never rewritten (an existing
 document counts as written), and each date's bucket is dropped after its
 row is written. A failed write or an unreadable row counts against
