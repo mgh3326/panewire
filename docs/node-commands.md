@@ -652,6 +652,9 @@ notice: the attempt makes no further job-record writes and the existing pane
 sweep closes the local pane. A delayed refusal or hub revocation cannot revoke a
 newer local grant. The hub checks the durable hk owner before finishing an old
 pool action, including after restart.
+Local quota cleanup releases a pool only while the captured grant is still
+current. If the grant has advanced, it logs and retains the ambiguous row;
+hk 5294 tracks recording the acquisition epoch needed to reclaim it safely.
 
 An older hk omits both owner fields from a job read. Panewire sends no fence
 fields to that server and logs once per streak while retaining legacy behavior.

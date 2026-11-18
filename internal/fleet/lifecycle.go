@@ -292,25 +292,9 @@ func canonicalJSON(v any) (string, bool) {
 	return string(b), true
 }
 
+// releaseQuota releases the captured attempt's quota, but never quota acquired
+// after this node received a newer assignment for the same job.
 func (a *App) releaseQuota(ctx context.Context, j Job) error {
-	pools, e := a.ledger().QuotaPools(ctx, j.ID)
-	if e != nil {
-		return ledgerFail(e, "status")
-	}
-	for _, pool := range pools {
-		if pool == "" {
-			return fail(exitStateConflict, "invalid quota record")
-		}
-		if e := a.ledger().ReleaseQuotaPool(ctx, j.ID, pool, false); e != nil {
-			return ledgerFail(e, "release")
-		}
-	}
-	return nil
-}
-
-// releaseReassignedQuota releases the old local attempt's quota, but never
-// quota acquired after this node received a newer assignment for the same job.
-func (a *App) releaseReassignedQuota(ctx context.Context, j Job) error {
 	pools, err := a.ledger().QuotaPools(ctx, j.ID)
 	if err != nil {
 		return ledgerFail(err, "status")

@@ -103,6 +103,33 @@ func TestJobOwnerFenceWatcherReleasesOnlyOldGrantQuota_t5067(t *testing.T) {
 	}
 }
 
+// CI exercises the local quota database and the shared release transaction.
+func TestJobOwnerFenceSharedQuotaReleaseUsesCapturedGrant_t5067(t *testing.T) {
+	for _, regrant := range []bool{false, true} {
+		t.Run(strconv.FormatBool(regrant), func(t *testing.T) {
+			a := testApp(t)
+			ledgerRunner(t, a)
+			seedLedger(t, a, "j")
+			j := Job{ID: "j", OwnerEpoch: 1}
+			if regrant {
+				if err := jobowner.Assign(a.Jobs, "j", 3); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := a.releaseQuota(t.Context(), j); err != nil {
+				t.Fatal(err)
+			}
+			_, pools := ledgerState(t, a, "j")
+			if !regrant && len(pools) != 0 || regrant && (len(pools) != 1 || pools[0] != "example") {
+				t.Fatalf("regrant=%v quota pools=%v", regrant, pools)
+			}
+			if regrant && !strings.Contains(a.Err.(*bytes.Buffer).String(), "job j pool example: captured epoch 1, current epoch 3") {
+				t.Fatalf("retained quota warning=%q", a.Err.(*bytes.Buffer).String())
+			}
+		})
+	}
+}
+
 // fenceJobStore models hk's conditional update: an omitted condition remains
 // an unfenced legacy update, while a stale condition changes nothing.
 type fenceJobStore struct {
