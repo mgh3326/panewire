@@ -14,12 +14,11 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
-	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
-// taskFailHub is a hub whose handoffkeep points at the fake, with the hk
-// post backoff disabled so each sweep makes exactly one hk attempt. Tests
-// that need the per-row retry delay set spawnTaskFailBackoffBase explicitly.
+// taskFailHub is a hub whose handoffkeep points at the fake. Each sweep makes
+// exactly one hk attempt per due row; tests that need the per-row retry
+// delay set spawnTaskFailBackoffBase explicitly.
 func taskFailHub(t *testing.T, storePath string, client *handoffkeepRelayClient, logs *bytes.Buffer) *HubServer {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
@@ -38,7 +37,6 @@ func taskFailHub(t *testing.T, storePath string, client *handoffkeepRelayClient,
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { h.Close() })
-	h.spawnTaskFailRetry = hubretry.Policy{Budget: -1}
 	return h
 }
 
@@ -584,5 +582,69 @@ func TestSpawnTaskFail5137BackedOffRowsDoNotStarveNewer(t *testing.T) {
 	h.flushSpawnTaskFailNotices(t.Context())
 	if n := taskFailCommentCalls(t, fake); n != 33 {
 		t.Fatalf("hk comment attempts = %d, want 33 (the newer failure is tried despite 32 backed-off rows)", n)
+	}
+}
+
+// Bookkeeping writes run detached from the sweep budget: a mark or deferral
+// lands even when the caller's context is already spent.
+func TestSpawnTaskFail5137BookkeepingSurvivesCancel(t *testing.T) {
+	_, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	h := taskFailHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), client, nil)
+	task := taskFailClaimTask(t, h, 1, "4601")
+	if _, err := h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if marked, err := h.inbox.store.markSpawnTaskFailNotice(canceled, task.Request.RequestID, time.Now()); err != nil || !marked {
+		t.Fatalf("mark under canceled context = %v, %v; want it landed", marked, err)
+	}
+	fresh := taskFailClaimTask(t, h, 2, "4602")
+	if _, err := h.inbox.store.completeSpawn(t.Context(), fresh, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	next := time.Now().Add(time.Hour)
+	if deferred, err := h.inbox.store.deferSpawnTaskFailNotice(canceled, fresh.Request.RequestID, next); err != nil || !deferred {
+		t.Fatalf("defer under canceled context = %v, %v; want it landed", deferred, err)
+	}
+	if pending := taskFailPending(t, h); len(pending) != 0 {
+		t.Fatalf("pending notices = %v, want none (one marked, one deferred past now)", pending)
+	}
+}
+
+// Without an hk client the sweep judges only failures older than the hub's
+// start: enabling hk later posts nothing for a backlog whose tasks moved on,
+// while this lifetime's failures stay owed.
+func TestSpawnTaskFail5137NoHKJudgesOnlyBacklog(t *testing.T) {
+	t.Setenv(crashReportDSNEnv, "")
+	config := HubServerConfig{
+		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"},
+		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	h, err := NewHubServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	backlog := taskFailClaim(t, h, 1)
+	if _, err := h.inbox.store.completeSpawn(t.Context(), backlog, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET created_ms=1 WHERE request_id=?`, backlog.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	fresh := taskFailClaimTask(t, h, 2, "4602")
+	if _, err := h.inbox.store.completeSpawn(t.Context(), fresh, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.flushSpawnTaskFailNotices(t.Context())
+	if n := taskFailUnjudged(t, h); n != 1 {
+		t.Fatalf("unjudged failures = %d, want only this lifetime's row", n)
+	}
+	if pending := taskFailPending(t, h); len(pending) != 1 {
+		t.Fatalf("pending notices = %v, want only this lifetime's row", pending)
 	}
 }

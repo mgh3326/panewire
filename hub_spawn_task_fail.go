@@ -28,9 +28,15 @@
 // final under this hub always post: rows that were already terminal when the
 // mark column landed are stamped judged once at migration time and never
 // post. A failed post keeps its mark unset and retries on a later sweep with
-// the hub's backoff (hubretry, bounded per row, then a per-row growing delay
-// so an hk outage cannot hold the coordinator loop); one warn is logged per
-// failure streak, so an outage does not fill the log and is never silent.
+// a growing per-row delay persisted on the operation (30s doubling to 10m):
+// each due row costs one hk attempt per sweep, and not-due rows are skipped
+// without an hk call, so an hk outage costs one bounded sweep and cheap skips
+// instead of stalling scheduling. The mark and the retry delay are written
+// detached from the sweep budget, so a spent budget or a shutting-down
+// coordinator cannot lose bookkeeping for a post that already succeeded. One
+// warn is logged per failure streak, so an outage does not fill the log and
+// is never silent. Without an hk client the sweep judges only failures older
+// than the hub's start, so enabling hk later never floods old tasks.
 package panewire
 
 import (
@@ -38,22 +44,17 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/mgh3326/panewire/internal/hubretry"
 )
 
 // spawnTaskFailNoticeLimit bounds one sweep's hk comments, so a backlog of
 // unposted failures cannot hold the coordinator tick.
 const spawnTaskFailNoticeLimit = 32
 
-// spawnTaskFailSweepBudget bounds one sweep's hk posts. A row hk will not
-// take is re-attempted under hubretry only within this budget; the per-row
-// next-attempt delay spaces sweeps after that, so an hk outage costs one
-// bounded sweep and cheap skips afterwards instead of stalling scheduling.
+// spawnTaskFailSweepBudget bounds one sweep's hk posts. A sweep that reaches
+// it stops and leaves the rest pending; the per-row next-attempt delay spaces
+// retries after that, so an hk outage costs one bounded sweep and cheap skips
+// afterwards instead of stalling scheduling.
 const spawnTaskFailSweepBudget = 30 * time.Second
-
-// spawnTaskFailPostBudget bounds one row's hk backoff inside a sweep.
-const spawnTaskFailPostBudget = 10 * time.Second
 
 // spawnTaskFailBackoffDefault is the first retry delay for a row hk did not
 // take. It doubles per consecutive failure to spawnTaskFailBackoffMax.
@@ -95,12 +96,14 @@ func (s *laneInboxStore) pendingSpawnTaskFailNoticeIDs(parent context.Context, n
 	return ids, rows.Err()
 }
 
-// markSpawnTaskFailNotice records that the sweep judged a terminal failure:
+// markSpawnTaskFailNotice records that the sweep judged a final failure:
 // posted its hk task comment, or found nothing owed. It answers whether this
 // call set the mark, so a concurrent sweep cannot post the same failure
-// twice.
+// twice. The write runs under context.WithoutCancel: a mark whose post
+// already succeeded must still land when the sweep budget is spent or the
+// coordinator is shutting down; the store's own op timeout still bounds it.
 func (s *laneInboxStore) markSpawnTaskFailNotice(parent context.Context, requestID string, now time.Time) (bool, error) {
-	ctx, done := s.op(parent)
+	ctx, done := s.op(context.WithoutCancel(parent))
 	defer done()
 	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE request_id=? AND task_fail_notice_ms=0`), now.UnixMilli(), requestID)
 	if err != nil {
@@ -112,9 +115,10 @@ func (s *laneInboxStore) markSpawnTaskFailNotice(parent context.Context, request
 
 // deferSpawnTaskFailNotice records a row's next attempt after hk did not take
 // its comment. The sweep's due filter keeps the row out of later pages until
-// then, so backed-off rows never starve newer failures.
+// then, so backed-off rows never starve newer failures. Like the mark, it
+// runs under context.WithoutCancel so a spent sweep budget cannot lose it.
 func (s *laneInboxStore) deferSpawnTaskFailNotice(parent context.Context, requestID string, next time.Time) (bool, error) {
-	ctx, done := s.op(parent)
+	ctx, done := s.op(context.WithoutCancel(parent))
 	defer done()
 	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_retry_ms=? WHERE request_id=? AND task_fail_notice_ms=0`), next.UnixMilli(), requestID)
 	if err != nil {
@@ -122,6 +126,21 @@ func (s *laneInboxStore) deferSpawnTaskFailNotice(parent context.Context, reques
 	}
 	n, err := result.RowsAffected()
 	return n == 1, err
+}
+
+// judgeSpawnTaskFailNoticesBefore marks unjudged final failures created
+// before cutover as judged without posting, and answers how many it judged.
+// The no-hk sweep calls it with the hub's start time, so enabling hk later
+// posts only failures from the configured lifetime, never a backlog whose
+// tasks have moved on.
+func (s *laneInboxStore) judgeSpawnTaskFailNoticesBefore(parent context.Context, cutover time.Time) (int64, error) {
+	ctx, done := s.op(context.WithoutCancel(parent))
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused') AND created_ms<?`), cutover.UnixMilli(), cutover.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // backfillSpawnTaskFailNotices stamps failed and refused rows that predate
@@ -173,7 +192,19 @@ func spawnTaskFailNoticePermanent(status int) bool {
 // the page and starve newer failures, and an hk outage cannot hold the
 // coordinator loop past one bounded sweep.
 func (h *HubServer) flushSpawnTaskFailNotices(ctx context.Context) {
-	if h.inbox == nil || h.handoffkeep == nil {
+	if h.inbox == nil {
+		return
+	}
+	if h.handoffkeep == nil {
+		// No hk client to post through: failures from before this hub
+		// started are judged without posting, so enabling hk later does not
+		// flood old tasks. Failures from this hub's own lifetime stay owed
+		// and post once a client exists.
+		if judged, err := h.inbox.store.judgeSpawnTaskFailNoticesBefore(ctx, h.startedAt); err != nil {
+			h.logger.Warn("hub spawn task comment backlog not judged", "error", err)
+		} else if judged > 0 {
+			h.logger.Info("hub spawn task comment backlog judged without posting: no hk client", "rows", judged)
+		}
 		return
 	}
 	ids, err := h.inbox.store.pendingSpawnTaskFailNoticeIDs(ctx, h.now().UTC(), spawnTaskFailNoticeLimit)
@@ -254,20 +285,19 @@ func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID strin
 		return
 	}
 	body := spawnTaskFailText(requestID, task.Outcome)
-	// The comments route takes no idempotency key: an hk answer lost after hk
-	// stored the write retries into a second comment within this bounded
-	// budget, and a hub that stops between the post and the mark reposts on
-	// the next sweep. Both windows are at-least-once by necessity; the mark
-	// suppresses every repost the hub can observe.
-	status, _, _ := hubretry.Do(ctx, h.spawnTaskFailRetry.Within(spawnTaskFailPostBudget), func(ctx context.Context) (int, int, error) {
-		got, postErr := h.handoffkeep.postTaskComment(ctx, target, body)
-		if postErr != nil {
-			// The attempt never got an answer. Surface it as 503 so the
-			// hub's backoff retries it exactly like a 502/503.
-			return 0, http.StatusServiceUnavailable, nil
-		}
-		return got, got, nil
-	}, nil)
+	// One hk attempt per sweep: the sweep's own cadence plus the persisted
+	// per-row delay is the retry backoff, so a due row costs one attempt, not
+	// a 10s hubretry budget of the coordinator loop. The comments route takes
+	// no idempotency key: an hk answer lost after hk stored the write can
+	// still duplicate on the next sweep, and a hub that stops between the
+	// post and the mark reposts as well. Both windows are at-least-once by
+	// necessity; the mark suppresses every repost the hub can observe.
+	status, postErr := h.handoffkeep.postTaskComment(ctx, target, body)
+	if postErr != nil {
+		// The attempt never got an answer. Treat it like a 502/503: the row
+		// stays pending and the per-row delay spaces the next sweep's retry.
+		status = http.StatusServiceUnavailable
+	}
 	switch {
 	case status == http.StatusOK || status == http.StatusCreated:
 		if _, err := h.inbox.store.markSpawnTaskFailNotice(ctx, requestID, h.now().UTC()); err != nil {

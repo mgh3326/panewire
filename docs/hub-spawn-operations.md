@@ -1310,15 +1310,22 @@ operation carries a posted-at mark (`task_fail_notice_ms`, migration
 `0023_spawn_task_fail_notice.sql`) that survives a hub restart, and failed
 and refused rows that predate the mark are stamped judged at migration time
 and never post. A post hk refuses for good is dropped loudly, while any other
-failure stays pending and retries with the hub's backoff (bounded per sweep,
-then a growing per-row delay so an outage cannot stall scheduling; one warn
-per failure streak). If the hub stops between the hk post and the mark — or
-an hk answer is lost after hk stored the write — the next sweep reposts once:
-at-least-once across that window, exactly-once everywhere else. Succeeded
-spawns, spawns without `--task`, and retryable outcomes (which a later
-attempt may still land) post nothing. `deadline_exceeded` is not final — a
-late node result can still land it as succeeded — so it posts nothing; if the
-row is later finished as failed, the failed post fires then, once.
+failure stays pending and retries on later sweeps: one hk attempt per due
+row per sweep, then a growing per-row delay persisted on the operation
+(`task_fail_retry_ms`, migration `0024_spawn_task_fail_retry.sql`; 30s
+doubling to 10m), so an outage costs one bounded sweep and cheap skips
+instead of stalling scheduling (one warn per failure streak). The mark and
+the retry delay are written detached from the sweep budget, so a spent
+budget cannot lose bookkeeping for a post that already succeeded. If the hub
+stops between the hk post and the mark — or an hk answer is lost after hk
+stored the write — the next sweep reposts once: at-least-once across that
+window, exactly-once everywhere else. Without an hk client the sweep judges
+only failures older than the hub's start, so enabling hk later never floods
+old tasks. Succeeded spawns, spawns without `--task`, and retryable outcomes
+(which a later attempt may still land) post nothing. `deadline_exceeded` is
+not final — a late node result can still land it as succeeded — so it posts
+nothing; if the row is later finished as failed, the failed post fires then,
+once.
 
 **Reviewer jobs a daemon started** (`--role reviewer`, job id starting `mwr-`;
 [how the hub recognises them](quiet-delivery.md#records-kept-in-hk-only)) are
