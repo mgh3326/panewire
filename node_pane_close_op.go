@@ -687,8 +687,15 @@ func (client *HubClient) admitHubCloseWatcher(ctx context.Context, job, jobDir s
 	switch {
 	case err != nil:
 		return "journal_failed", false
-	case watcher == fleet.HubCloseWatcherIncompatible, watcher == fleet.HubCloseWatcherDegraded:
+	case watcher == fleet.HubCloseWatcherIncompatible:
 		return "watcher_incompatible", false
+	case watcher == fleet.HubCloseWatcherDegraded:
+		// A degraded watcher holds the job watch lock and cannot lend it.
+		// It defers by exiting once an intent is recorded in the ledger.
+		// We admit the close without taking the fence here (took: false);
+		// once RecordIntent lands, the degraded watcher exits, and
+		// reconcileWatcherFence takes the fence when ProbeHubCloseWatcher reads None.
+		return "", false
 	case watcher == fleet.HubCloseWatcherAware:
 		// The node holds the watcher's own lock description for the close,
 		// so the watcher exiting cannot free the lock (#662 consult NCxM).

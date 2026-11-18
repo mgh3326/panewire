@@ -36,6 +36,17 @@ func watchLockSocket(jobDir string) (string, error) {
 	return filepath.Join(dir, "watch.sock"), nil
 }
 
+// watchLockBaseDirHook, when non-nil, overrides the base directory for
+// long-path lending sockets in tests.
+var watchLockBaseDirHook func() string
+
+func watchLockBaseDir() string {
+	if watchLockBaseDirHook != nil {
+		return watchLockBaseDirHook()
+	}
+	return filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+}
+
 // watchLockSocketDir is `<job>/.panewire-watch-sock`, or, when that path is
 // too long for a sockaddr_un (104 bytes on macOS),
 // `/tmp/panewire-<uid>/<hash of the job dir>`. Each is created 0700 and must
@@ -44,7 +55,7 @@ func watchLockSocketDir(jobDir string) (string, error) {
 	dir := filepath.Join(jobDir, ".panewire-watch-sock")
 	if len(dir)+len("/watch.sock") >= 100 {
 		sum := sha256.Sum256([]byte(filepath.Clean(jobDir)))
-		base := filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+		base := watchLockBaseDir()
 		if err := privateDir(base); err != nil {
 			return "", err
 		}

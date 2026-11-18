@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +13,7 @@ import (
 // not private), the watcher continues to watch the job without lock-lending
 // or hub-close awareness rather than aborting.
 func TestWatcherRunsWhenLockLendingSocketFails_t5063(t *testing.T) {
-	base := filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+	base := filepath.Join(t.TempDir(), "base")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +21,9 @@ func TestWatcherRunsWhenLockLendingSocketFails_t5063(t *testing.T) {
 	if err := os.Chmod(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
+	prev := watchLockBaseDirHook
+	watchLockBaseDirHook = func() string { return base }
+	t.Cleanup(func() { watchLockBaseDirHook = prev })
 
 	a, _ := hubCloseFixture(t)
 	// Create a long job path to force the /tmp/panewire-<uid>/<hash> path.
@@ -52,13 +53,13 @@ func TestWatcherRunsWhenLockLendingSocketFails_t5063(t *testing.T) {
 
 // F3 (hk 5063): serveWatchLock cleans up its socket directory on stop.
 func TestServeWatchLockCleansUpSocketDir_t5063(t *testing.T) {
-	base := filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+	base := filepath.Join(t.TempDir(), "base")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(base, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	prev := watchLockBaseDirHook
+	watchLockBaseDirHook = func() string { return base }
+	t.Cleanup(func() { watchLockBaseDirHook = prev })
 
 	// Temp job dir with long path.
 	tempJobs := t.TempDir()
@@ -114,19 +115,21 @@ func TestPrivateDirOwnerAndPrivacyGuards_t5063(t *testing.T) {
 		t.Fatal("verifyPrivateDir accepted mismatched uid")
 	}
 
-	// M4c: watchLockSocketDir must fail when /tmp/panewire-<uid> is group/other accessible.
-	base := filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+	// M4c: watchLockSocketDir must fail when base dir is group/other accessible.
+	base := filepath.Join(t.TempDir(), "base")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
+	prev := watchLockBaseDirHook
+	watchLockBaseDirHook = func() string { return base }
+	t.Cleanup(func() { watchLockBaseDirHook = prev })
 
 	longPath := filepath.Join(temp, strings.Repeat("z", 100))
 	if _, err := watchLockSocketDir(longPath); err == nil {
-		t.Fatal("watchLockSocketDir succeeded with non-private /tmp/panewire-<uid>")
+		t.Fatal("watchLockSocketDir succeeded with non-private base dir")
 	}
 }
 
@@ -134,14 +137,16 @@ func TestPrivateDirOwnerAndPrivacyGuards_t5063(t *testing.T) {
 // must not spin on an open hub-close intent; it exits immediately so the node
 // can take the fence without stalling.
 func TestWatcherExitsOnOpenIntentWhenLendingDisabled_t5063(t *testing.T) {
-	base := filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+	base := filepath.Join(t.TempDir(), "base")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
+	prev := watchLockBaseDirHook
+	watchLockBaseDirHook = func() string { return base }
+	t.Cleanup(func() { watchLockBaseDirHook = prev })
 
 	a, _ := hubCloseFixture(t)
 	longID := "j-" + strings.Repeat("x", 100)

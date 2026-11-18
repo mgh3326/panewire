@@ -836,6 +836,25 @@ func TestCloseOpFencesTheWatcherAndSettles_t4652(t *testing.T) {
 	}
 }
 
+// Review findings 4613769157 & 4613769159 (hk 5063): a degraded watcher is
+// admitted so the node records the hub-close intent; the degraded watcher then
+// exits upon seeing the intent, and reconcileWatcherFence takes the fence to settle.
+func TestCloseOpAdmitsDegradedWatcherAndRecordsIntent_t5063(t *testing.T) {
+	inbox := t.TempDir()
+	fake := idlePaneHerdr()
+	client := closeOpNode(t, inbox, fake)
+	ledger := &fakeHubClose{watcher: fleet.HubCloseWatcherDegraded}
+	client.nodeHubClose = ledger
+	wantCloseOp(t, client, "op-1", fleet.CloseOpClosed, false)
+	if len(ledger.intents) != 1 {
+		t.Fatalf("intents=%d, want 1 recorded for degraded watcher", len(ledger.intents))
+	}
+	want := fleet.HubCloseIntent{RequestID: "op-1", Attempt: closeOpAttempt, Epoch: 1, Pane: "w1:p1", Label: "job-a", EndReason: "quota_stop pool=devin-free replaced_by=job-c"}
+	if ledger.intents[0] != want {
+		t.Fatalf("intent %+v, want %+v", ledger.intents[0], want)
+	}
+}
+
 // A second request id while one is still registered for the attempt is
 // refused: one open close per attempt.
 func TestCloseOpRefusesAnOverlappingRequest_t4652(t *testing.T) {
