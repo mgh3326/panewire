@@ -16,12 +16,11 @@ import (
 // With Snapshot set — at the close, after the hub saw the pane idle — it also
 // commits the whole worktree, untracked files included, through a temporary
 // index (the user's index, stash and branch stay untouched) on top of HEAD and
-// pushes that commit to refs/panewire/handover/<job> on origin. The commit
-// carries every byte, so nothing is diffed, filtered or cut. When the push
-// fails, or a submodule holds work the commit cannot carry, the node writes
-// fleet.HandoverKeepFile into the job's directory: every sweep then keeps the
-// worktree, and the successor's note names host:path. A dirty worktree never
-// blocks the hand-over.
+// pushes that commit to refs/panewire/handover/<job> on origin (no tags, no
+// submodules, read back after the push). A snapshot always writes
+// fleet.HandoverKeepFile into the job's directory as well: every sweep then
+// keeps the worktree, and the successor's note names host:path for what the
+// commit cannot carry. A dirty worktree never blocks the hand-over.
 const nodeCommandHandoverSnapshot = "worktree.handover_snapshot"
 
 // hubCapabilityHandoverSnapshot: the node answers worktree.handover_snapshot.
@@ -208,21 +207,25 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 		return refuse(nodeHandoverSnapshotGitError)
 	}
 	result.Dirty = tree != headTree || head != from
-	pushed := false
 	if result.Dirty {
 		ref := handoverSnapshotRefPrefix + args.Job
-		if _, err := gitWithEnv(ctx, nil, "-C", top, "push", "--no-verify", "origin", "+"+commit+":"+ref); err == nil {
-			result.Commit, result.Ref, pushed = commit, ref, true
+		// Only the snapshot ref: no tags followed (a v* tag would start a
+		// release), no submodule pushes. Then the ref must read back on
+		// origin as the commit, or the push did not happen.
+		_, err := gitWithEnv(ctx, nil, "-C", top, "-c", "push.recurseSubmodules=no", "push", "--no-verify", "--no-follow-tags", "--recurse-submodules=no", "origin", "+"+commit+":"+ref)
+		if out, lsErr := gitWithEnv(ctx, nil, "-C", top, "ls-remote", "origin", ref); err == nil && lsErr == nil && strings.HasPrefix(strings.TrimSpace(out), commit+"\t") {
+			result.Commit, result.Ref = commit, ref
 		}
 	}
-	if result.Dirty && !pushed || result.Submodule {
-		// Losing nothing matters more than starting clean: the worktree
-		// stays until an operator clears the mark.
-		if err := replaceFileAtomicallyInRoot(job, fleet.HandoverKeepFile, []byte(top+"\n"), 0600); err != nil {
-			return nil, "capture_failed"
-		}
-		result.Kept = true
+	// Losing nothing matters more than starting clean: the commit is
+	// what git add stores (LFS pointers, clean-filtered files, nested
+	// repositories as gitlinks), and the pane's processes may write
+	// after it. The worktree stays until an operator clears the mark
+	// (hk 5246).
+	if err := replaceFileAtomicallyInRoot(job, fleet.HandoverKeepFile, []byte(top+"\n"), 0600); err != nil {
+		return nil, "capture_failed"
 	}
+	result.Kept = true
 	return result, ""
 }
 

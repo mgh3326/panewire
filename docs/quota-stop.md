@@ -176,15 +176,22 @@ decides with the §Implementer rule (the job's start, the task's priority and
        with no diff, filter or size limit. A pushed tip no longer in the
        worktree's history (`diverged`) or a start point that moved releases
        the row unclosed.
-     - **When the snapshot cannot be pushed, or a submodule holds changes the
-       commit does not carry**, the node writes `jobs/<old>/handover-keep`.
-       Both the pane sweep and `checkout.sweep` then keep that worktree
-       (`handover_kept`), the note names it as `host:path`, and the
-       hand-over still proceeds: losing nothing matters more than starting
-       clean. Clearing the mark (and deleting the snapshot ref once the
-       successor's PR merges) is follow-up work.
+     - The push sends only that ref (`--no-follow-tags`, no submodule
+       recursion, no hooks) and the ref must read back on origin as the
+       commit.
+     - **Every snapshot also keeps the old worktree**: the node writes
+       `jobs/<old>/handover-keep`, both the pane sweep and `checkout.sweep`
+       keep that worktree (`handover_kept`), and the note names it as
+       `host:path`. The commit is what `git add` stores, so Git LFS objects,
+       clean-filtered files, nested repositories and anything written after
+       the snapshot are only in the old worktree; a push that failed leaves
+       it as the only copy. The hand-over still proceeds: losing nothing
+       matters more than starting clean. Clearing the mark and deleting the
+       snapshot ref is hk 5246.
      - The stored successor's continuation note is rewritten to name the
-       snapshot, then the row is saved.
+       snapshot (branch and ref shell-quoted in the restore command), the
+       rewritten submission must still validate (the brief cap), and the row
+       is saved.
   3. **Close.** The reconciler closes the old pane through `pane.close_op` to
      the job's node at its epoch, keeping `pane.close`'s open-question guard
      for an implementer. The node writes the old record `lost` with

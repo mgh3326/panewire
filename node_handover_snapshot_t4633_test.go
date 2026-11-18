@@ -146,7 +146,7 @@ func TestNodeHandoverSnapshotRestoresTheWorktreeByteForByte(t *testing.T) {
 
 			result, _ := handoverSnapshotRun(t, filepath.Join(work, "live"), true)
 			ref := handoverSnapshotRefPrefix + "job-a"
-			if result["outcome"] != nodeHandoverSnapshotSaved || result["dirty"] != true || result["ref"] != ref || result["kept"] != false || result["top"] != work {
+			if result["outcome"] != nodeHandoverSnapshotSaved || result["dirty"] != true || result["ref"] != ref || result["kept"] != true || result["top"] != work {
 				t.Fatalf("result=%v", result)
 			}
 			if got := handoverGit(t, work, "diff", "--cached", "--name-status"); got != indexBefore {
@@ -277,5 +277,31 @@ func TestCloseOpKeepsTheQuestionGuardForAnImplementer(t *testing.T) {
 				t.Fatalf("closes=%d for %s", closes, tc.role)
 			}
 		})
+	}
+}
+
+// Round 4 (PR #687 head 22178c8d).
+
+// The snapshot push sends only its ref: no annotated tag follows it (a v* tag
+// starts a release), the ref reads back on origin, and the worktree is kept
+// whatever the push did, since the commit cannot carry LFS objects, clean
+// filters or late writes.
+func TestNodeHandoverSnapshotPushesOnlyItsRefAndKeepsTheWorktree(t *testing.T) {
+	work, _ := handoverRepo(t, true)
+	handoverGit(t, work, "tag", "-a", "v9.9.9", "-m", "unpublished")
+	handoverGit(t, work, "config", "push.followTags", "true")
+	handoverGit(t, work, "config", "push.recurseSubmodules", "only")
+	result, jobDir := handoverSnapshotRun(t, work, true)
+	if result["ref"] != handoverSnapshotRefPrefix+"job-a" || result["kept"] != true {
+		t.Fatalf("result=%v", result)
+	}
+	if tags := handoverGit(t, work, "ls-remote", "--tags", "origin"); tags != "" {
+		t.Fatalf("the snapshot push published tags: %q", tags)
+	}
+	if got := handoverGit(t, work, "ls-remote", "origin", handoverSnapshotRefPrefix+"job-a"); !strings.HasPrefix(got, result["commit"].(string)) {
+		t.Fatalf("origin ref=%q, want %v", got, result["commit"])
+	}
+	if _, err := os.Stat(filepath.Join(jobDir, fleet.HandoverKeepFile)); err != nil {
+		t.Fatalf("a pushed snapshot left the worktree unkept: %v", err)
 	}
 }

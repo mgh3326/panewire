@@ -427,7 +427,7 @@ func handoverNote(oldJob, host string, exhaustion poolExhaustion, snap nodeHando
 	case host == "":
 		b.WriteString(" The hub snapshots the old worktree when it closes the old pane and names the snapshot here.")
 	case snap.Ref != "":
-		fmt.Fprintf(&b, " The old worktree's unpushed commits and uncommitted work, untracked files included, are commit %s at %s on origin. Restore them first: git fetch origin %s && git checkout -B %s FETCH_HEAD && git reset --mixed HEAD~1 (the branch keeps the old commits, the work comes back uncommitted, and history stays linear).", snap.Commit, snap.Ref, snap.Ref, branch)
+		fmt.Fprintf(&b, " The old worktree's unpushed commits and uncommitted work, untracked files included, are commit %s at %s on origin. Restore them first: git fetch origin %s && git checkout -B %s FETCH_HEAD && git reset --mixed HEAD~1 (the branch keeps the old commits, the work comes back uncommitted, and history stays linear).", snap.Commit, snap.Ref, shellWord(snap.Ref), shellWord(branch))
 	case !snap.Dirty:
 		b.WriteString(" The old worktree held no other work.")
 	}
@@ -438,7 +438,7 @@ func handoverNote(oldJob, host string, exhaustion poolExhaustion, snap nodeHando
 		if snap.Submodule {
 			b.WriteString(" A submodule held changes the snapshot does not carry.")
 		}
-		fmt.Fprintf(&b, " The old worktree is kept at %s:%s; copy what is missing from there.", host, snap.Top)
+		fmt.Fprintf(&b, " The old worktree is kept at %s:%s; copy from there what the snapshot lacks (ignored files, Git LFS objects, clean-filtered files, nested repositories, anything written after the snapshot).", host, snap.Top)
 	}
 	return b.String()
 }
@@ -467,11 +467,20 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 			// The old job's task role passes to the successor in the same
 			// transaction, so no other spawn takes the task between them.
 			if _, _, err := h.inbox.store.claimHandoverSuccessor(ctx, handover.Successor, handover.Job, action.Data.Owner, action.Data.SpawnRequest, h.now().UTC()); err != nil {
+				if _, invalid := fleet.ValidateSubmission(handover.Successor); invalid != nil {
+					handover.Outcome, handover.Reason = handoverFailed, "invalid_successor"
+					break
+				}
 				if !errors.Is(err, errSpawnClaimed) {
 					return err
 				}
-				handover.Outcome, handover.Reason = handoverFailed, "claim_refused"
-				break
+				// A sibling row (a close retry copies the row and its request
+				// id) may have claimed the same successor first: that is this
+				// hand-over's successor, tracked to its own outcome.
+				if _, known := h.inbox.store.spawnTask(ctx, handover.Successor.RequestID); known != nil {
+					handover.Outcome, handover.Reason = handoverFailed, "claim_refused"
+					break
+				}
 			}
 			handover.Submitted = true
 			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
@@ -504,8 +513,13 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 	}
 	if handover.Outcome == handoverFailed {
 		// No successor holds the task: free the role wherever it sits, the
-		// old job's (never transferred) or a failed successor's.
-		for _, id := range []string{action.Data.SpawnRequest, handover.Successor.RequestID} {
+		// old job's (never transferred) or a successor's that failed. A
+		// successor that succeeded (a sibling row placed it) keeps its role.
+		ids := []string{action.Data.SpawnRequest}
+		if task, err := h.inbox.store.spawnTask(ctx, handover.Successor.RequestID); err == nil && task.Status != "succeeded" {
+			ids = append(ids, handover.Successor.RequestID)
+		}
+		for _, id := range ids {
 			if err := h.inbox.store.releaseCompletedSpawnRoleOf(ctx, id); err != nil {
 				return err
 			}
@@ -597,8 +611,14 @@ func (h *HubServer) handoverBeforeClose(ctx context.Context, action *poolAction)
 	case handoverStartsAt(snap) != handover.Successor.Repository.Checkout.Sha:
 		return withdraw("branch_moved")
 	}
-	handover.Snapshot = &snap
-	handover.Successor.Brief = handoverBrief(handover.Brief, action.Job, action.Node, exhaustion, snap)
+	successor := handover.Successor
+	successor.Brief = handoverBrief(handover.Brief, action.Job, action.Node, exhaustion, snap)
+	if _, err := fleet.ValidateSubmission(successor); err != nil {
+		// The final note must still fit the submission (the brief cap):
+		// nothing closes for a successor that could never be claimed.
+		return withdraw("invalid_successor")
+	}
+	handover.Snapshot, handover.Successor = &snap, successor
 	if err := h.inbox.store.savePoolAction(ctx, *action); err != nil {
 		return false, err
 	}
@@ -612,4 +632,10 @@ func handoverStartsAt(snap nodeHandoverSnapshotResult) string {
 		return snap.Pushed
 	}
 	return snap.Base
+}
+
+// shellWord quotes s as one POSIX shell word: a branch name may hold shell
+// metacharacters the successor must not run.
+func shellWord(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

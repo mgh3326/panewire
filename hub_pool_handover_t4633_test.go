@@ -305,7 +305,7 @@ func TestPoolHandoverDirtyWorktreeNamesTheSnapshot(t *testing.T) {
 		snap  map[string]any
 		wants []string
 	}{
-		{"pushed snapshot", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", true), []string{"refs/panewire/handover/dirty-job", "git fetch origin refs/panewire/handover/dirty-job"}},
+		{"pushed snapshot", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", true), []string{"refs/panewire/handover/dirty-job", "git fetch origin 'refs/panewire/handover/dirty-job'"}},
 		{"clean", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", false), []string{"held no other work"}},
 		{"push failed", handoverReadReply("dirty-job"), kept, []string{"could not be pushed", "kept at machine-a:/work/dirty-job-checkout"}},
 		{"dirty submodule", handoverReadReply("dirty-job"), submodule, []string{"refs/panewire/handover/dirty-job", "submodule", "kept at machine-a:/work/dirty-job-checkout"}},
@@ -1040,5 +1040,74 @@ func TestPoolHandoverDropsAPinnedProfileAndBoundsTheLabel(t *testing.T) {
 	}
 	if label := hubSpawnArg(args, "-l"); len(label) != 32 || !strings.HasSuffix(label, "-q1") || !fleet.ValidAgentName(label) {
 		t.Fatalf("label=%q", label)
+	}
+}
+
+// Round 4 (PR #687 head 22178c8d).
+
+// The restore command quotes the branch: a valid ref name may hold shell
+// metacharacters.
+func TestPoolHandoverNoteQuotesTheBranch(t *testing.T) {
+	snap := nodeHandoverSnapshotResult{Branch: "work/$(id)", Pushed: handoverPushed, Dirty: true, Commit: handoverSnapCommit, Ref: handoverSnapshotRefPrefix + "j"}
+	note := handoverNote("j", "machine-a", window5h(), snap)
+	if !strings.Contains(note, "git checkout -B 'work/$(id)' FETCH_HEAD") || strings.Contains(note, "-B work/$(id)") {
+		t.Fatalf("note=%q", note)
+	}
+	if got := shellWord("a'b"); got != `'a'\''b'` {
+		t.Fatalf("quote=%s", got)
+	}
+}
+
+// A final note that pushes the brief past its cap withdraws the row before
+// the close: no pane closes for a successor that could never be claimed.
+func TestPoolHandoverValidatesTheFinalSuccessorBeforeTheClose(t *testing.T) {
+	const job = "big-brief"
+	f := handoverFixture(t, job, 1, 0)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	action := readOnlyPoolAction(t, f.hub)
+	pad := 64<<10 - len(action.Data.Handover.Successor.Brief) - 10
+	action.Data.Handover.Brief += strings.Repeat("x", pad)
+	action.Data.Handover.Successor.Brief += strings.Repeat("x", pad)
+	if _, err := fleet.ValidateSubmission(action.Data.Handover.Successor); err != nil {
+		t.Fatalf("fixture: the provisional successor must be valid: %v", err)
+	}
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPoolActionStep(t, f.hub, f.node, action,
+		poolStatus(nodeCloseOpNone, false, false),
+		idlePane(job, "/work/project.checkout", "idle"),
+		poolActionReply{op: nodeCommandHandoverSnapshot, result: handoverSnapReply(job, true)},
+		releasedReply,
+	); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if len(rows) != 1 || rows[0].Phase != poolActionRefused || rows[0].Data.Handover.Reason != "invalid_successor" {
+		t.Fatalf("rows=%+v", rows)
+	}
+}
+
+// A sibling row (a close retry) claimed the same successor request with
+// another brief: this row tracks that successor and never frees its role.
+func TestPoolHandoverSiblingClaimIsTheSameSuccessor(t *testing.T) {
+	const job, next = "sibling-job", "sibling-job-q1"
+	f := handoverFixture(t, job, 1, 0)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	closeHandover(t, f, readOnlyPoolAction(t, f.hub))
+	action := readOnlyPoolAction(t, f.hub)
+	sibling := action.Data.Handover.Successor
+	sibling.Brief += "\nanother snapshot\n"
+	if _, _, err := f.hub.inbox.store.claimHandoverSuccessor(t.Context(), sibling, next, action.Data.Owner, action.Data.SpawnRequest, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	placeSuccessor(t, f, next)
+	finishSettled(t, f)
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if len(rows) != 1 || rows[0].Data.Handover.Outcome != handoverPlaced {
+		t.Fatalf("rows=%+v, want the sibling's successor tracked as placed", rows)
+	}
+	if role := taskRoleOf(t, f.hub, sibling.RequestID); role == "" {
+		t.Fatal("the live successor's task role was released")
 	}
 }
