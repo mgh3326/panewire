@@ -141,6 +141,27 @@ type hubSpawnExclusion struct {
 	Profile string `json:"profile,omitempty"`
 	Reason  string `json:"reason"`
 	RC      int    `json:"rc"`
+	// ExpiresMS is when a host-local refusal (nextHostRefusals) stops ruling its
+	// host out, in Unix milliseconds. Zero rules it out for the request's life.
+	// It is stored with the row, so the expiry survives a hub restart (hk 5214).
+	ExpiresMS int64 `json:"expires_ms,omitempty"`
+}
+
+// liveAt reports whether the exclusion still rules its host (or profile) out
+// at now. An exclusion with no expiry always does.
+func (e hubSpawnExclusion) liveAt(now time.Time) bool {
+	return e.ExpiresMS == 0 || now.UnixMilli() < e.ExpiresMS
+}
+
+// liveExclusions returns the exclusions that still rule a host out at now.
+func liveExclusions(exclusions []hubSpawnExclusion, now time.Time) []hubSpawnExclusion {
+	live := make([]hubSpawnExclusion, 0, len(exclusions))
+	for _, excluded := range exclusions {
+		if excluded.liveAt(now) {
+			live = append(live, excluded)
+		}
+	}
+	return live
 }
 
 func (s *laneInboxStore) ensureSpawnTasks() error {
@@ -529,9 +550,11 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 		if _, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
 			return false, err
 		}
-	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "failed" && task.Status == "bound" && code == spawnAbandonedReason {
+	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "failed" && (task.Status == "bound" || task.Node == nil) && code == spawnAbandonedReason {
 		// Release the unsent role in the same transaction as its outcome and
-		// outbox notification. Any prior hk claim was handled before completion.
+		// outbox notification, for a bound request and for an unbound one that
+		// its owner withdrew (hk 5214). Any prior hk claim was handled before
+		// completion.
 		if _, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=?`), task.Request.RequestID); err != nil {
 			return false, err
 		}

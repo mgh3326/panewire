@@ -319,6 +319,22 @@ the long-park owner notice are separate keys (`spawn_backoff_seconds`,
 `spawn_park_notice_seconds`); see
 [hub-spawn-operations.md](hub-spawn-operations.md#parked-notice).
 
+### Host-local refusals expire
+
+A refusal that moves an `--host auto` request to the next host (the codes
+`cwd_unmapped`, `checkout_refused:dirty`, `checkout_refused:sha-missing`,
+`checkout_refused:branch-elsewhere`, `checkout_refused:branch_in_use`, the
+first-run `spawn_failed:hooks_review`, `spawn_failed:trust_prompt`,
+`spawn_failed:omp_setup_wizard` and `spawn_failed:auth_unavailable`, and
+`launch_proof_failed`) rules its host out only for the launch backoff above
+(`launch_backoff_minutes`, 30 by default). Its expiry is stored with the
+request, so a hub restart keeps it. After the backoff the next placement check
+asks that host again, and a repeat refusal rules it out for another backoff. A
+refusal the hub does not class as host-local (for example `deadline_not_started`)
+rules out its host for the request's life, as before. The placement trace shows
+a live refusal as skipped with its remaining time, `hub_<reason>_retry_in_<n>s`,
+and drops a refusal once it has expired. (hk 5214.)
+
 ### First-run refusals and the desk notice
 
 A first-run dialog or a missing login rules out its harness on the host. When

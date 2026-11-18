@@ -205,9 +205,13 @@ func (h *HubServer) probeLabelledPane(ctx context.Context, machine, label string
 
 // handleSpawnAbandon is POST /v1/spawns/{request_id}/abandon: the operator
 // finishes a pending request as failed and frees its reservation, once its
-// node lists no pane bearing the job label.
+// node lists no pane bearing the job label. An unbound request needs no probe,
+// and its owner lane may withdraw it too (abandonUnboundSpawn, hk 5214).
 func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
-	if h.authenticate(r).kind != hubCallerOperator {
+	// A node may call this only to withdraw an unbound request its own lane
+	// owns (abandonUnboundSpawn). Every other abandon is the operator's.
+	caller := h.authenticate(r)
+	if caller.kind != hubCallerOperator && caller.kind != hubCallerNode {
 		hubUnauthorized(w)
 		return
 	}
@@ -242,7 +246,11 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if task.Node == nil {
-		writeJSON(w, 409, map[string]string{"error": "spawn_not_bound", "status": task.Status, "fix": "an unbound request releases itself at its deadline"})
+		h.abandonUnboundSpawn(w, r, caller, task, body.Reason)
+		return
+	}
+	if caller.kind != hubCallerOperator {
+		hubUnauthorized(w)
 		return
 	}
 	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOutcomeReason(spawnAbandonedReason, spawnRefusalLine(body.Reason)), Host: task.Node.Machine, Fix: "the operator abandoned this request; submit the work again under a new job id"}
@@ -253,6 +261,43 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"request_id": id, "job_id": task.Job, "status": "failed", "reason": outcome.Reason})
+}
+
+// abandonUnboundSpawn withdraws a pending request no node has bound (hk 5214).
+// It never reached a node, so there is no pane to probe and nothing to stop:
+// the request ends failed with the abandoned reason, its role is released in
+// the same transaction as the outcome, and its owner lane gets one SPAWN_FAILED
+// notice. A node may withdraw only a request whose owner lane it routes. A
+// request that holds an hk job claim stays with its claimed host.
+func (h *HubServer) abandonUnboundSpawn(w http.ResponseWriter, r *http.Request, caller hubCaller, task hubSpawnTask, reason string) {
+	if caller.kind == hubCallerNode {
+		if route, exists := loadReportRelayRoutes(h.reportRelayPath)[task.Owner]; !exists || route.Machine != caller.id {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "lane_not_routed_to_caller"})
+			return
+		}
+	}
+	if task.Status != "accepted" {
+		writeJSON(w, 409, map[string]string{"error": "spawn_not_bound", "status": task.Status, "fix": "an unbound request releases itself at its deadline"})
+		return
+	}
+	if spawnHoldsClaim(task) {
+		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "claimed_host", "request_id": task.Request.RequestID, "job": task.Job, "host": spawnPinnedHost(task)})
+		return
+	}
+	outcome := hubSpawnOutcome{RC: 75, Stage: "placement", Reason: spawnOutcomeReason(spawnAbandonedReason, spawnRefusalLine(reason)), Fix: "the request was withdrawn before any node took it; submit the work again under a new job id"}
+	changed, err := h.completeSpawn(r.Context(), task, outcome)
+	if err != nil || !changed {
+		why := "not_pending"
+		if err != nil {
+			why = "store_unavailable"
+		}
+		h.logger.Info("hub kept an unbound spawn", "request_id", task.Request.RequestID, "job", task.Job, "owner", task.Owner, "reason", why)
+		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": why, "request_id": task.Request.RequestID, "job": task.Job})
+		return
+	}
+	h.recordSpawnTrace(task, outcome)
+	h.logger.Warn("hub spawn abandon", "request_id", task.Request.RequestID, "job", task.Job, "owner", task.Owner, "status", task.Status, "released", true, "reason", spawnRefusalLine(reason))
+	writeJSON(w, 200, map[string]string{"request_id": task.Request.RequestID, "job_id": task.Job, "status": "failed", "reason": outcome.Reason})
 }
 
 // validSpawnAbandonReason is one non-empty printable line within the limit.

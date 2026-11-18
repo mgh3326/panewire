@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -71,7 +72,7 @@ func (s *laneInboxStore) spawnPlacementSnapshot(parent context.Context, requestI
 // continueSpawnPlacementTrace carries the original decision and its candidates
 // into a later placement pass. A claimed-host retry is forced internally, but
 // the request's original auto decision must not become a forced placement in hk.
-func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusions []hubSpawnExclusion) fleet.PlacementTrace {
+func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusions []hubSpawnExclusion, now time.Time) fleet.PlacementTrace {
 	if previous.Source == "" {
 		return current
 	}
@@ -93,7 +94,26 @@ func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusi
 			candidates = append(candidates, candidate)
 		}
 	}
+	// An earlier pass's hub skip of a host whose refusals have all expired is no
+	// longer a skip: the host is placed again, so its row goes (hk 5214). A row
+	// no exclusion of this request explains is kept as it was.
+	live := liveExclusions(exclusions, now)
+	liveHosts := make(map[string]bool, len(live))
+	for _, excluded := range live {
+		liveHosts[excluded.Machine] = true
+	}
+	refused := make(map[string]bool, len(exclusions))
 	for _, excluded := range exclusions {
+		refused[excluded.Machine] = true
+	}
+	candidates = slices.DeleteFunc(candidates, func(candidate fleet.PlacementCandidateRecord) bool {
+		return candidate.Outcome == "skipped" && strings.HasPrefix(candidate.Reason, "hub_") && refused[candidate.Host] && !liveHosts[candidate.Host]
+	})
+	positions = make(map[string]int, len(candidates))
+	for i, candidate := range candidates {
+		positions[candidate.Host] = i
+	}
+	for _, excluded := range live {
 		if excluded.Machine == current.Chosen {
 			continue
 		}
@@ -104,6 +124,11 @@ func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusi
 			candidates = append(candidates, fleet.PlacementCandidateRecord{Host: excluded.Machine})
 		}
 		reason := "hub_" + strings.TrimPrefix(excluded.Reason, "spawn_failed:")
+		if excluded.ExpiresMS != 0 {
+			// A bounded refusal shows how long it still holds (hk 5214).
+			seconds := max(0, (excluded.ExpiresMS-now.UnixMilli()+999)/1000)
+			reason += "_retry_in_" + strconv.FormatInt(seconds, 10) + "s"
+		}
 		candidates[i].Outcome = "skipped"
 		candidates[i].Reason = fleetevent.Code(fleetevent.Redact(reason))
 	}
