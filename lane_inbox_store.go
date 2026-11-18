@@ -1001,7 +1001,9 @@ func (s *laneInboxStore) makeBatchesDue(now time.Time) (int64, error) {
 			items := groups[lane]
 			if !escalation {
 				if items[0].DigestAt > now.UnixMilli() {
-					due = earliestDue(due, minDigestAt(items))
+					// The lane makes progress only when its first item's
+					// window ends, whatever later items carry.
+					due = earliestDue(due, items[0].DigestAt)
 					continue
 				}
 				// A late flush must not widen the configured arrival window.
@@ -1010,8 +1012,11 @@ func (s *laneInboxStore) makeBatchesDue(now time.Time) (int64, error) {
 				for end < len(items) && items[end].CreatedAt <= cutoff {
 					end++
 				}
-				// Items past the cutoff stay unclaimed for a later window.
-				due = earliestDue(due, minDigestAt(items[end:]))
+				// Items past the cutoff stay unclaimed; the first of them is
+				// the lane's next progress.
+				if end < len(items) {
+					due = earliestDue(due, items[end].DigestAt)
+				}
 				items = items[:end]
 			}
 			id := quietDigestBatchPrefix + uuid.NewString()
@@ -1062,14 +1067,6 @@ func earliestDue(a, b int64) int64 {
 		return b
 	}
 	return a
-}
-
-func minDigestAt(items []laneInboxItem) int64 {
-	var due int64
-	for _, i := range items {
-		due = earliestDue(due, i.DigestAt)
-	}
-	return due
 }
 
 // laneInboxPendingBatchesQuery is the batch page without its order (SQLite's

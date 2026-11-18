@@ -139,6 +139,36 @@ func TestInboxWorkGate(t *testing.T) {
 		}
 	})
 
+	t.Run("a later item's earlier deadline does not keep the gate open", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+		now := time.Now().UTC()
+		h, _ := quietHub(t, path, "default", nil, &now)
+		h.flushInbox()
+		// A long window queued first, then a short one (a policy change between
+		// them): the lane makes progress only at the first item's deadline, so
+		// the second's expired deadline must not be what the gate waits for.
+		putDigestItem(t, h, "long", now, 30*time.Second)
+		putDigestItem(t, h, "short", now, time.Second)
+		h.flushInbox()
+		now = now.Add(2 * time.Second)
+		h.flushInbox() // the short deadline passed: one pass, which finds nothing to build
+		if n := batchRows(t, h); n != 0 {
+			t.Fatalf("batch built before the first item's window ended: %d", n)
+		}
+		calls := countStoreCalls(t, h, path)
+		for range 50 {
+			h.flushInbox()
+		}
+		if got := calls.Load(); got != 0 {
+			t.Fatalf("ticks before the lane's first deadline sent %d store calls, want 0", got)
+		}
+		now = now.Add(29 * time.Second)
+		h.flushInbox()
+		if n := batchRows(t, h); n != 1 {
+			t.Fatalf("batches at the first item's deadline = %d, want 1", n)
+		}
+	})
+
 	t.Run("an escalation due in 3 s is built at 3 s", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 		now := time.Now().UTC()
