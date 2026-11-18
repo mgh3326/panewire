@@ -263,6 +263,22 @@ dropped when rechecked under that lock (see the stale-decision rule below).
 `intent_cancelled` proves under the same lock and sync that this request's
 intent was cancelled. The operation journal remains unchanged. A cancelled
 intent alone does not prove that its pane or watcher has stopped writing hk.
+
+**The hub's acknowledgement** (hk 5073). `pane.close_status` also takes
+`ack:true` (`{"request_id","job","ack":true}`; `pane.close_release` refuses
+it). The hub sends it only for an action it has already stored `guarded`, so
+the ack means "the hub durably stored your `intent_cancelled`": the node
+records a synced `job.hub_close_acked` event for the request, once, and
+answers the same status. An ack for a request that is not `intent_cancelled`
+records nothing. The hub repeats it on every 10 s pass over the guarded action,
+including the pass that finishes the action, until it gets an answer.
+A node that cancels a close in a rollback drain because the pane is still
+present (`job.hub_close_cancelled`, reason `rollback_unproven`) marks the
+event `hub_ack:true`: that is the one cancel the hub learns from this answer
+alone, and the drain below waits for its ack. A cancel without the mark, such
+as a ledger written before hk 5073, owes nothing. A settled close ends the
+debt too: status then answers `settled`. A node of this build needs a hub of
+this build, since an older hub never sends the ack.
 `pane.close_release` takes the
 same arguments, marks a final operation released (a `registered` one becomes
 `cancelled`) and answers the same shape; an operation left `closing` stays
@@ -369,11 +385,22 @@ while any close is open: its process-held watcher fence must remain held.
    jobs` and exits 0. Exit 5 lists pending jobs; the running node's settlement
    pass retries them. An unreadable ledger is pending, so repair storage and
    retry rather than treating an incomplete scan as an empty drain.
+   Exit 5 also covers a cancelled close the hub has not acknowledged: it
+   prints `waiting for the hub to acknowledge cancelled closes of jobs: [...]`.
+   The hub acknowledges on its next 10 s pass (see "The hub's acknowledgement"
+   above), so repeat the command; it succeeds once every acknowledgement is
+   durable on the node. If a job stays listed, the hub is down, disconnected
+   from this node, or its action for the request is gone: fix that, or
+   keep the new binary running and use the manual check in step 3.
 3. Keep the new node binary running for at least 30 seconds. If the inbox kill
    switch (`--delivery-policy off`) is active with a configured store, the
    hub does not open that store or emit inventory logs. Restore a non-off
    delivery policy using the same store and complete the checks below before
    rollback; missing inventory is not evidence that the store is empty.
+
+   The drain's acknowledgement covers the `intent_cancelled` answer only.
+   Every other close outcome the hub reads from the node (a refused, released
+   or settled close) still needs the hub's own inventory check below.
 
    A hub configured with neither an inbox store nor a database URL creates no
    pool actions and emits no inventory; this assumes no store was removed with
@@ -391,9 +418,7 @@ while any close is open: its process-held watcher fence must remain held.
    or `pool close action retry` line for this node after the scan began; retry
    lines include `retry_of`. An `outcome` of `guarded` means the close action
    is done but reassignment remains fenced. If any action or inventory entry
-   cannot be accounted for, keep the new binary running: local drain alone
-   does not prove the hub stored the answer. A durable hub acknowledgement
-   is tracked by hk 5073.
+   cannot be accounted for, keep the new binary running.
 4. Only then stop the node and replace the binary.
 
 After withdrawal has quiesced admissions, settlement durably cancels an
@@ -583,8 +608,9 @@ run `panewire node close-ops enable` on each node, then run
 `panewire node close-ops drain` on every node and wait for it to report no
 pending jobs; drain removes the advertisement and barrier markers. Keep the
 new binary running during the drain and for at least 30 seconds afterwards;
-match the hub's action inventory and `pool close action finalized` logs for
-that node, as in the rollback steps above. Remove any remaining barrier marker
+check the hub's action inventory and `pool close action finalized` logs for
+that node, as in the rollback steps above; the drain itself also waits for the
+hub's acknowledgement of a cancelled close. Remove any remaining barrier marker
 before rolling back. Do not advertise on a hub without the guard.
 
 ### `pane.capture`

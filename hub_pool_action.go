@@ -300,6 +300,17 @@ func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolActio
 // Keep I1 until the record is terminal; no close, notice or role release is
 // issued while this guard remains.
 func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolAction) error {
+	// The action is stored guarded, so the node may now be told it can stop
+	// owing the intent_cancelled answer (hk 5073): its rollback drain waits
+	// for this ack, and it is repeated every pass until it lands. A withdrawn
+	// or rolled-back node may not answer; never block the sweep on it.
+	askNode := func() (nodeCloseOpStatusResult, bool) {
+		nodeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		var status nodeCloseOpStatusResult
+		ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job, Ack: true}
+		return status, h.nodeCall(nodeCtx, action.Node, nodeCommandPaneCloseStatus, ref, time.Second, &status)
+	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	exists := false
 	if err == nil {
@@ -309,16 +320,13 @@ func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolA
 		cancel()
 		state, _ := record["state"].(string)
 		if err == nil && exists && hkTerminalState(state) {
+			// Finishing the action ends the passes that would repeat the ack.
+			askNode()
 			return h.refusePoolAction(ctx, action)
 		}
 	}
-	// A node may also prove the old request's final job.lost was synced. A
-	// withdrawn or rolled-back node may not answer; never block the sweep on it.
-	nodeCtx, cancel := context.WithTimeout(ctx, time.Second)
-	var status nodeCloseOpStatusResult
-	answered := h.nodeCall(nodeCtx, action.Node, nodeCommandPaneCloseStatus, nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}, time.Second, &status)
-	cancel()
-	if answered && status.Settled {
+	// A node may also prove the old request's final job.lost was synced.
+	if status, answered := askNode(); answered && status.Settled {
 		return h.refusePoolAction(ctx, action)
 	}
 	if err != nil || !exists {
