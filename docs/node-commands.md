@@ -1103,7 +1103,7 @@ cancelled never takes the lock. A node with no configured work root answers
 
 ### `worktree.remove`
 
-`args: {cwd, expect_head, base, regenerable, detached?}` — `cwd` inside the linked
+`args: {cwd, expect_head, base, regenerable, detached?, disposable?}` — `cwd` inside the linked
 worktree, `expect_head` the 40-hex commit it must still be on, `base` the
 merged-into branch (a `regenerable` pattern must contain a literal
 character: wildcard-only patterns such as `*` are invalid_args; a glob with a
@@ -1119,6 +1119,15 @@ merged into `origin/<base>` or fully pushed to `origin/<branch>` (both judged af
 `base` equal to the branch never counts), and — re-read immediately before
 removal — no pane is live in it (the ignored-file scan and the pane check are the last reads; a non-pane process writing an ignored file between them and the removal is a residual window this op cannot fence). It then runs `git worktree remove` and
 `git branch -d`; never `--force` or `-D`.
+
+`disposable` is an optional list of exact basenames at the worktree root (at
+most 16 entries; each entry must be a non-empty exact basename with no `/`, no
+glob characters `*?[`, not `.` or `..`, at most 255 bytes). Any invalid entry
+rejects the command with 400 `invalid_request` naming the entry index.
+Untracked files (porcelain `?? `) whose path is exactly one of those basenames
+at the worktree root do not count as dirty, and are deleted before `git worktree
+remove` runs. Tracked changes, other untracked files, disposable names in
+subdirectories, and untracked directories still cause `dirty`.
 
 `detached` is an optional boolean, defaulting to false. When true, the
 worktree must be detached and its resolved directory must be a direct child
@@ -1137,7 +1146,7 @@ running a git op on the clone, then delete the lock file.
 
 | `outcome` | Meaning |
 | --- | --- |
-| `removed` | Worktree removed and, in branch mode, `git branch -d` attempted; `worktree` describes what was removed. |
+| `removed` | Worktree removed and, in branch mode, `git branch -d` attempted; `worktree` describes what was removed, and `disposable` names any deleted disposable files. |
 | `worktree-gone` | `cwd` is not a linked worktree. |
 | `worktree-changed` | HEAD or common repository differs from the first inspection or `expect_head`. |
 | `outside-work-root` | The resolved path or common git dir is outside the work root, or a detached-mode directory fails the reviewer name or location guard. |

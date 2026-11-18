@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -99,6 +100,7 @@ type nodeWorktreeRemoveArgs struct {
 	Detached    bool     `json:"detached"`
 	Base        string   `json:"base"`
 	Regenerable []string `json:"regenerable"`
+	Disposable  []string `json:"disposable,omitempty"`
 }
 
 type nodeQuotaRefreshArgs struct {
@@ -125,6 +127,7 @@ type nodeWorktreeRemoveResult struct {
 	Outcome     string        `json:"outcome"`
 	Worktree    *nodeWorktree `json:"worktree"`
 	Files       []string      `json:"files,omitempty"`
+	Disposable  []string      `json:"disposable,omitempty"`
 	RetryAfterS int           `json:"retry_after_s,omitempty"`
 }
 
@@ -149,6 +152,28 @@ func validNodeGlob(glob string) bool {
 	// ignored file for deletion; it must name something literal.
 	// Character classes ("[a-z]/") are wildcards too.
 	return strings.Trim(nodeGlobClass.ReplaceAllString(glob, ""), "*?/") != ""
+}
+
+func validNodeDisposableEntry(entry string) bool {
+	if entry == "" || len(entry) > 255 || hasControlByte(entry) {
+		return false
+	}
+	if strings.Contains(entry, "/") || strings.ContainsAny(entry, "*?[") || entry == "." || entry == ".." {
+		return false
+	}
+	return true
+}
+
+func validNodeDisposableList(entries []string) bool {
+	if len(entries) > 16 {
+		return false
+	}
+	for _, entry := range entries {
+		if !validNodeDisposableEntry(entry) {
+			return false
+		}
+	}
+	return true
 }
 
 // nodeOriginRepo normalizes a caller-supplied origin to "owner/repo" for the
@@ -566,6 +591,53 @@ func nodeWorktreeClean(ctx context.Context, git relayCommandRunner, path string)
 		return false, err
 	}
 	return strings.TrimSpace(string(out)) == "", nil
+}
+
+// nodeWorktreeRemovalCleanliness checks worktree cleanliness allowing disposable files.
+// An untracked file (porcelain "?? ") whose path is exactly one of those
+// basenames at the worktree root does not count as dirty. Tracked changes,
+// other untracked files, a disposable name in a subdirectory, and an untracked
+// directory keep the worktree dirty. Returns whether the worktree is clean,
+// and the list of present disposable root files to delete before removal.
+func nodeWorktreeRemovalCleanliness(ctx context.Context, git relayCommandRunner, dir string, disposable []string) (bool, []string, error) {
+	out, err := git(ctx, "-C", dir, "status", "--porcelain", "-z")
+	if err != nil {
+		return false, nil, err
+	}
+	if len(out) == 0 {
+		return true, nil, nil
+	}
+	var disposableFound []string
+	entries := strings.Split(string(out), "\x00")
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		if !strings.HasPrefix(entry, "?? ") {
+			return false, nil, nil
+		}
+		name := strings.TrimPrefix(entry, "?? ")
+		if strings.Contains(name, "/") {
+			return false, nil, nil
+		}
+		matched := false
+		for _, d := range disposable {
+			if name == d {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false, nil, nil
+		}
+		fi, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil || fi.IsDir() {
+			return false, nil, nil
+		}
+		disposableFound = append(disposableFound, name)
+	}
+	slices.Sort(disposableFound)
+	return true, disposableFound, nil
 }
 
 func nodeEnsureHarnessStateExcludes(ctx context.Context, git relayCommandRunner, clone string) error {
@@ -1563,7 +1635,7 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	case args.Detached && (!nodeSamePath(filepath.Dir(worktree.Path), workRoot) || !nodeReviewerDirPattern.MatchString(filepath.Base(worktree.Path))):
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveOutsideWorkRoot}, ""
 	}
-	clean, err := nodeWorktreeClean(ctx, git, worktree.Path)
+	clean, toDelete, err := nodeWorktreeRemovalCleanliness(ctx, git, worktree.Path, args.Disposable)
 	if err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveStatusCheckFailed}, ""
 	}
@@ -1612,6 +1684,11 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if inUse {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneInUse}, ""
 	}
+	for _, name := range toDelete {
+		if err := os.Remove(filepath.Join(worktree.Path, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
+		}
+	}
 	if _, err := git(ctx, "-C", main, "worktree", "remove", worktree.Path); err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
@@ -1623,7 +1700,7 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 			slog.Warn("worktree.remove: branch delete failed", "branch", entry.Branch)
 		}
 	}
-	return nodeWorktreeRemoveResult{Outcome: nodeRemoveRemoved, Worktree: worktree}, ""
+	return nodeWorktreeRemoveResult{Outcome: nodeRemoveRemoved, Worktree: worktree, Disposable: toDelete}, ""
 }
 
 // nodePaneInUse reports whether any live pane — agent or plain shell — sits
