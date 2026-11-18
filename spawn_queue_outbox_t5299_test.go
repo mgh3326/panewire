@@ -434,35 +434,98 @@ func checkBackfilled(t *testing.T, s *laneInboxStore, queued []string, owed map[
 	}
 }
 
-// The SQLite store copies the operations that predate the tables, once, and
-// does not put a judged failure back.
-func TestSpawnQueueBackfillOnSQLite_t5299(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
-	s := openSpawnStore(t, path)
-	now := expiryNow()
-	queued, owed, judged := seedBackfillWorld(t, s, now)
-	checkBackfilled(t, s, queued, owed, judged)
-	// A store from before the tables: empty them and forget the guard.
-	for _, statement := range []string{`DELETE FROM spawn_queue`, `DELETE FROM task_fail_notice_outbox`, `DELETE FROM spawn_queue_backfill`} {
-		if _, err := s.db.Exec(statement); err != nil {
+// Every start makes the queue and the outbox equal the operations: it copies
+// the operations that predate the tables (SQLite; Postgres by migration), and
+// it does not put a judged failure back.
+func TestSpawnQueueReconcileCopiesExistingRows_t5299(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := queueTestStore(t, open)
+		now := expiryNow()
+		queued, owed, judged := seedBackfillWorld(t, s, now)
+		checkBackfilled(t, s, queued, owed, judged)
+		// A store from before the tables: empty them, then start again.
+		for _, statement := range []string{`DELETE FROM spawn_queue`, `DELETE FROM task_fail_notice_outbox`} {
+			if _, err := s.db.Exec(statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.ensureSpawnTasks(); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := s.ensureSpawnTasks(); err != nil {
-		t.Fatal(err)
-	}
-	checkBackfilled(t, s, queued, owed, judged)
-	// Once per store: rows the hub since removed stay removed, and a second
-	// start copies nothing.
-	if _, err := s.db.Exec(`DELETE FROM spawn_queue`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.ensureSpawnTasks(); err != nil {
-		t.Fatal(err)
-	}
-	if got := queueRows(t, s); len(got) != 0 {
-		t.Fatalf("a finished backfill ran again: %v", got)
-	}
+		checkBackfilled(t, s, queued, owed, judged)
+		// A second start changes nothing.
+		if err := s.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		checkBackfilled(t, s, queued, owed, judged)
+	})
+}
+
+// A hub binary from before the tables (a rollback) accepts, moves and ends
+// operations without touching them. The first start after returning makes
+// both tables equal the operations again: it queues what the old binary left
+// running, refreshes the wake time it changed, drops what it ended, owes the
+// comment of a failure it created, and drops the outbox row of a comment it
+// already posted and marked, so nothing posts twice.
+func TestSpawnQueueReconcileAfterARollback_t5299(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := queueTestStore(t, open)
+		now := expiryNow()
+		// State this release left: a running operation, a parked one, a
+		// running one the old binary will end, and a failure owing its comment.
+		running := queueTestClaim(t, s, 1, now)
+		parked := queueTestClaim(t, s, 2, now)
+		if ok, err := s.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkLaunchBackoff, now.Add(time.Hour), now); err != nil || !ok {
+			t.Fatalf("park: %v %v", ok, err)
+		}
+		ended := queueTestClaim(t, s, 3, now)
+		posted := queueTestClaim(t, s, 4, now)
+		if ok, err := s.completeSpawn(t.Context(), posted, hubSpawnOutcome{RC: 1, Stage: "placement", Reason: "spawn_failed: boom", Host: "machine-a"}, now); err != nil || !ok {
+			t.Fatalf("complete: %v %v", ok, err)
+		}
+		// The old binary: accepts a spawn (no queue row), wakes the parked one
+		// (new next_check_ms, queue row stale), ends one operation as succeeded
+		// (queue row left), fails another (no outbox row), and posts and marks
+		// the earlier failure (outbox row left).
+		created := queueTestRequest(5, "queue-job-5")
+		if _, err := s.db.Exec(s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms) VALUES(?,?,?,?,?,?,?,?)`), created.RequestID, "queue-job-5", "parent", "fp", "{}", "accepted", now.UnixMilli(), now.Add(time.Hour).UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		woke := now.Add(time.Minute).UnixMilli()
+		failedByOld := queueTestClaim(t, s, 6, now)
+		for _, statement := range []struct {
+			query string
+			args  []any
+		}{
+			{`UPDATE spawn_operations SET next_check_ms=? WHERE request_id=?`, []any{woke, parked.Request.RequestID}},
+			{`UPDATE spawn_operations SET status='succeeded' WHERE request_id=?`, []any{ended.Request.RequestID}},
+			{`UPDATE spawn_operations SET status='failed' WHERE request_id=?`, []any{failedByOld.Request.RequestID}},
+			{`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE request_id=?`, []any{now.UnixMilli(), posted.Request.RequestID}},
+		} {
+			if _, err := s.db.Exec(s.q(statement.query), statement.args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		assertQueueMatchesOperations(t, s)
+		queue := queueRows(t, s)
+		for _, id := range []string{running.Request.RequestID, parked.Request.RequestID, created.RequestID} {
+			if _, ok := queue[id]; !ok {
+				t.Fatalf("spawn_queue lacks the running %s: %v", id, queue)
+			}
+		}
+		if queue[parked.Request.RequestID] != woke {
+			t.Fatalf("queue wake time = %d, want the old binary's %d", queue[parked.Request.RequestID], woke)
+		}
+		if _, left := queue[ended.Request.RequestID]; left {
+			t.Fatalf("spawn_queue kept the operation the old binary ended: %v", queue)
+		}
+		if got, want := outboxRows(t, s), map[string]int64{failedByOld.Request.RequestID: 0}; !mapsEqual(got, want) {
+			t.Fatalf("outbox = %v, want only the failure the old binary created %v", got, want)
+		}
+	})
 }
 
 // The migration's own SQL does the same on either dialect: Postgres re-runs

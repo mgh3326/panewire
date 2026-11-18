@@ -174,6 +174,9 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		// at every start (hk 5298).
 		ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 		defer done()
+		if err := s.reconcileSpawnQueue(ctx); err != nil {
+			return err
+		}
 		return s.reconcileSpawnOutboxes(ctx)
 	}
 	ctx, done := s.op(s.life)
@@ -275,9 +278,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		return err
 	}
 	// spawn_queue and task_fail_notice_outbox are hk 5299's (postgres: 0030).
-	// This copy must follow the stamp above: a failure that backfill judged
-	// has its mark set and is not owed again.
-	if err := s.backfillSpawnQueue(ctx); err != nil {
+	// They reconcile with the operations at every start, after the stamp
+	// above: a failure that backfill judged has its mark set and is not owed
+	// again. Like the outboxes below, the reconcile takes the startup deadline
+	// from the store's life.
+	if err := s.reconcileSpawnQueueWithin(s.life); err != nil {
 		return err
 	}
 	// The placement-record and notice outboxes (hk 5298; postgres: 0028). They

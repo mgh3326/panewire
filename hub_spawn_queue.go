@@ -96,34 +96,38 @@ func (s *laneInboxStore) syncSpawnQueueNextCheck(ctx context.Context, ex spawnQu
 	return err
 }
 
-// backfillSpawnQueue copies the operations that predate the two tables, once
-// per SQLite store (Postgres does it in migration 0030): every non-terminal
-// operation into the queue, and every failed or refused operation whose
-// comment is still owed into the outbox. It runs after
-// backfillSpawnTaskFailNotices, so a failure that backfill stamped judged
-// (its mark is set) is never put back in the outbox. The guard row and the
-// copies commit together, so a hub that stops half way redoes it and a
-// finished one never rescans; each copy is also idempotent.
-func (s *laneInboxStore) backfillSpawnQueue(parent context.Context) error {
-	ctx, done := s.op(parent)
-	defer done()
+// reconcileSpawnQueue makes the queue and the notice outbox equal what the
+// operations say is still owed, in one transaction:
+//
+//   - every non-terminal operation has a queue row carrying its next_check_ms,
+//     and a queue row whose operation is terminal (or gone) is dropped;
+//   - every failed or refused operation whose task comment is unjudged
+//     (task_fail_notice_ms=0) has an outbox row, and an outbox row whose
+//     operation is judged (or gone) is dropped.
+//
+// It runs at every start, on both dialects, not once at the upgrade: a hub
+// binary from before these tables (a rollback) accepts, moves and ends
+// operations without touching them, so the first start after returning to
+// this release must queue what that binary left running, refresh the wake
+// times it changed, drop what it ended, and drop the outbox rows it already
+// posted and marked. The same pass is the copy of operations that predate the
+// tables (Postgres also does it once in migration 0030). It must follow
+// backfillSpawnTaskFailNotices on SQLite: a failure that stamp judged has its
+// mark set and is not owed again. The caller gives it the startup deadline.
+func (s *laneInboxStore) reconcileSpawnQueue(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS spawn_queue_backfill (singleton INTEGER PRIMARY KEY CHECK(singleton=1))`); err != nil {
-		return err
-	}
-	marked, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO spawn_queue_backfill(singleton) VALUES(1)`)
-	if err != nil {
-		return err
-	}
-	if n, _ := marked.RowsAffected(); n == 1 {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO spawn_queue(request_id,next_check_ms) SELECT request_id,next_check_ms FROM spawn_operations WHERE status NOT IN (`+spawnTerminalStatuses+`) ON CONFLICT DO NOTHING`); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO task_fail_notice_outbox(request_id,retry_ms) SELECT request_id,task_fail_retry_ms FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0 ON CONFLICT DO NOTHING`); err != nil {
+	for _, statement := range []string{
+		`INSERT INTO spawn_queue(request_id,next_check_ms) SELECT request_id,next_check_ms FROM spawn_operations WHERE status NOT IN (` + spawnTerminalStatuses + `) ON CONFLICT(request_id) DO NOTHING`,
+		`UPDATE spawn_queue SET next_check_ms=(SELECT next_check_ms FROM spawn_operations WHERE spawn_operations.request_id=spawn_queue.request_id) WHERE next_check_ms<>(SELECT next_check_ms FROM spawn_operations WHERE spawn_operations.request_id=spawn_queue.request_id)`,
+		`DELETE FROM spawn_queue WHERE NOT EXISTS (SELECT 1 FROM spawn_operations o WHERE o.request_id=spawn_queue.request_id AND o.status NOT IN (` + spawnTerminalStatuses + `))`,
+		`INSERT INTO task_fail_notice_outbox(request_id,retry_ms) SELECT request_id,task_fail_retry_ms FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0 ON CONFLICT(request_id) DO NOTHING`,
+		`DELETE FROM task_fail_notice_outbox WHERE NOT EXISTS (SELECT 1 FROM spawn_operations o WHERE o.request_id=task_fail_notice_outbox.request_id AND o.status IN ('failed','refused') AND o.task_fail_notice_ms=0)`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return err
 		}
 	}
@@ -136,4 +140,12 @@ func (s *laneInboxStore) backfillSpawnQueue(parent context.Context) error {
 func (s *laneInboxStore) syncSpawnQueueNextChecks(ctx context.Context, ex spawnQueueExecer) error {
 	_, err := ex.ExecContext(ctx, `UPDATE spawn_queue SET next_check_ms=(SELECT next_check_ms FROM spawn_operations WHERE spawn_operations.request_id=spawn_queue.request_id) WHERE next_check_ms<>(SELECT next_check_ms FROM spawn_operations WHERE spawn_operations.request_id=spawn_queue.request_id)`)
 	return err
+}
+
+// reconcileSpawnQueueWithin runs reconcileSpawnQueue under the startup
+// deadline.
+func (s *laneInboxStore) reconcileSpawnQueueWithin(parent context.Context) error {
+	ctx, done := s.opWithin(parent, laneInboxStartupTimeout)
+	defer done()
+	return s.reconcileSpawnQueue(ctx)
 }

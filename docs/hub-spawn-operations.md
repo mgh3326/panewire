@@ -1458,8 +1458,14 @@ read the work still to do and not the whole of `spawn_operations`. The row is
 inserted in the transaction that inserts the operation and deleted in the
 transaction that ends it; `next_check_ms` mirrors the operation's parked wake
 time and every writer of that column copies it across in the same
-transaction. Migration `0030_spawn_queue_outbox.sql` (SQLite: the one-shot
-`backfillSpawnQueue`) copies the operations that predate the tables.
+transaction. Migration `0030_spawn_queue_outbox.sql` copies the operations that
+predate the tables on Postgres. On both dialects, every start also runs
+`reconcileSpawnQueue`: it queues each non-terminal operation, refreshes the
+queued `next_check_ms`, drops queue rows of terminal or removed operations, adds
+an outbox row for each unjudged failed or refused operation, and drops outbox
+rows whose operation is judged. That is what takes in a rollback: an older hub
+binary writes operations without touching these tables, and the first start
+after returning to this release makes them equal the operations again.
 
 Terminal statuses are `succeeded`, `failed`, `refused`, `given_up` and
 `cancelled`; `retryable`, `deadline_exceeded` and the `*_grant` refinements
