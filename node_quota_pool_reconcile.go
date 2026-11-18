@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -209,9 +208,8 @@ func (client *HubClient) nodeJobsBoundToPane(jobs []string, pane string) ([]stri
 		}
 		events, err := readNodeJobLedgerEvents(root)
 		root.Close()
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
+		// A missing events/ is an error here, not an empty ledger: the job may
+		// still own the pane, so no owner can be ruled out.
 		if err != nil {
 			return nil, err
 		}
