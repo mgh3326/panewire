@@ -607,12 +607,15 @@ type HubServer struct {
 	// account (hk 5138). accountCreditLoadMu guards the one-time (retrying)
 	// load from the hub store, accountCreditLoaded marks a successful read,
 	// and accountCreditRead is a test seam for that read.
-	accountCreditMarks               map[string]accountCreditMark
-	accountCreditLoadMu              sync.Mutex
-	accountCreditLoaded              bool
-	accountCreditLoadFailed          bool
-	accountCreditRead                func(context.Context) (map[string]accountCreditMark, error)
-	accountCreditDelete              func(context.Context, string, time.Time) error
+	accountCreditMarks      map[string]accountCreditMark
+	accountCreditLoadMu     sync.Mutex
+	accountCreditLoaded     bool
+	accountCreditLoadFailed bool
+	accountCreditRead       func(context.Context) (map[string]accountCreditMark, error)
+	accountCreditDelete     func(context.Context, string, time.Time) error
+	// accountCreditPending holds lifted marks whose durable delete failed; it
+	// is retried without making the mark active again (hk 5138 review).
+	accountCreditPending             []accountCreditMark
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int

@@ -305,8 +305,18 @@ func TestAccountCreditMarkDeleteRetries_t5138(t *testing.T) {
 	if rows, err := f.hub.inbox.store.accountCreditMarks(t.Context()); err != nil || len(rows) != 1 {
 		t.Fatalf("rows after failed delete = %+v, %v; want the row kept", rows, err)
 	}
-	if marks := marksAt(f.hub, at.Add(2*time.Minute)); len(marks) != 0 {
-		t.Fatalf("retry served a lifted mark: %+v", marks)
+	// A later reading with no balance must not revive the lift: the pending
+	// delete is tracked apart from the active marks.
+	f.hub.stateStore().publish(FleetStateMessage{
+		Host: "mac-personal", Kind: fleetStateKindQuota, Key: ccMarkAccountA,
+		MeasuredAt: at.Add(3 * time.Minute), ReceivedAt: at.Add(3 * time.Minute),
+		Quota: &FleetStateQuota{AccountKey: ccMarkAccountA, Pool: "commandcode"},
+	}, 0)
+	if f.hub.accountCreditMarkHeld(ccMarkAccountA, at.Add(4*time.Minute)) {
+		t.Fatal("a balance-less reading revived a lifted mark")
+	}
+	if marks := marksAt(f.hub, at.Add(4*time.Minute)); len(marks) != 0 {
+		t.Fatalf("a balance-less reading served a lifted mark: %+v", marks)
 	}
 	if rows, err := f.hub.inbox.store.accountCreditMarks(t.Context()); err != nil || len(rows) != 0 {
 		t.Fatalf("rows after retried delete = %+v, %v; want none", rows, err)

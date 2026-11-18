@@ -174,7 +174,8 @@ func (h *HubServer) snapshotAccountCreditMarks(now time.Time) (map[string]time.T
 	loadErr := h.ensureAccountCreditMarks()
 	h.mu.Lock()
 	var active map[string]time.Time
-	var lifted []accountCreditMark
+	lifted := h.accountCreditPending
+	h.accountCreditPending = nil
 	for account, mark := range h.accountCreditMarks {
 		if h.accountCreditMarkActive(account, mark, now) {
 			if active == nil {
@@ -196,17 +197,20 @@ func (h *HubServer) snapshotAccountCreditMarks(now time.Time) (map[string]time.T
 	if del == nil {
 		del = h.inbox.store.deleteAccountCreditMark
 	}
+	var failed []accountCreditMark
 	for _, mark := range lifted {
 		if err := del(ctx, mark.Account, mark.Marked); err != nil {
 			h.logger.Warn("lifted account credit mark could not be deleted; retrying", "account", mark.Account, "error", err)
-			// Keep the (inactive) mark in memory so the next snapshot retries
-			// the delete; it never drops an account because it is inactive.
-			h.mu.Lock()
-			if _, held := h.accountCreditMarks[mark.Account]; !held {
-				h.accountCreditMarks[mark.Account] = mark
-			}
-			h.mu.Unlock()
+			failed = append(failed, mark)
 		}
+	}
+	if len(failed) > 0 {
+		// A pending delete is not an active mark: it is never served and never
+		// holds an account, so a later balance-less reading cannot revive the
+		// lift. Only the conditional delete is retried.
+		h.mu.Lock()
+		h.accountCreditPending = append(h.accountCreditPending, failed...)
+		h.mu.Unlock()
 	}
 	return active, loadErr
 }
