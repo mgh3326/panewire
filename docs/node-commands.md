@@ -978,6 +978,26 @@ node without a jobs root or work root answers `jobs_root_unset` or
 `work_root_unset`; a failed pass answers `sweep_failed`. The CLI is
 `panewire node sweep-checkouts --host <machine> [--dry-run]`.
 
+### `worktree.handover_check`
+
+The read-only eligibility check for an implementer pool hand-over (hk 4633;
+[quota-stop.md](quota-stop.md#an-exhausted-pool)). A node with close ops
+advertises `handover_check_v1`. Arguments are `job`, `cwd`, `origin` and
+`branch`. The node checks the worktree root and every populated submodule for
+tracked or non-ignored untracked changes and for any assume-unchanged or
+skip-worktree index entries. It verifies the root against the job's spawn
+receipt and requires HEAD to equal the branch tip on origin. The outcome is
+`ok`, `dirty_worktree`, `unpushed_commits`,
+`branch_mismatch`, `git_failed` or `not-a-job`; an `ok` result names the
+worktree root, branch and pushed commit. No worktree content is uploaded.
+The hub sends the saved branch, origin and commit with `pane.close_op`. The
+node reads the remote tip before the final pane and open-question checks,
+then repeats the local worktree check against that tip with a two-second
+deadline immediately before closing. A timeout refuses the close. A refusal
+and its reason are journalled, so status and replay retain them across
+restart. A writer racing the close itself is handled by the ordinary
+worktree and abandoned-worktree patch lifecycle.
+
 ### `worktree.inspect`
 
 `args: {cwd, expected_dir?, verify_branch?}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git

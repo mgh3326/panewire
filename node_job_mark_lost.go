@@ -112,9 +112,9 @@ type nodeJobLedger struct {
 // job.reap, which must prove the job's own identity before it closes a pane;
 // the mark-lost path ignores them.
 type nodeJobLedgerEvent struct {
-	kind, pane, label, role, task, session string
-	owner                                  string
-	keep                                   bool
+	kind, pane, label, role, task, session, cwd string
+	owner                                       string
+	keep                                        bool
 	// name is the event's file name (its place in the ledger); reason and
 	// final are a job.lost payload's.
 	name, reason string
@@ -229,6 +229,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				AgentLabel string `json:"agent_label"`
 				Role       string `json:"role"`
 				OwnerLane  string `json:"owner_lane"`
+				Cwd        string `json:"cwd"`
 				Keep       bool   `json:"keep"`
 				// TaskID is a string or a number in the ledger.
 				TaskID       any             `json:"task_id"`
@@ -276,7 +277,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				return nil, errors.New("unreadable job event")
 			}
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession,
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession, cwd: event.Payload.Cwd,
 			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID, attempt: event.Payload.Attempt, hubRevokedEpoch: revokedEpoch, closeIntentEpoch: intentEpoch})
 	}
 	return events, nil
