@@ -29,7 +29,7 @@ the first tick of the next date, then the bucket is dropped.
 | Mechanism | Kind | Item (one per) | Entry edge (made) | Exit edge (done) |
 |---|---|---|---|---|
 | `spawn_coordinator` | flow | pending `spawn_operations` row (request id) | first sighting in the scan or the start-condition check that day | handed to a worker or a node dispatch; or a start-condition release, give-up, refusal or cancellation |
-| `consult_coordinator` | flow | active consult (consult id) | first sighting in the reconcile pass that day | answered, timed out, failed, respawned or settled |
+| `consult_coordinator` | flow | active consult (consult id) | first sighting in the reconcile pass that day | answered and notified, timed out, or failed (recoveries, respawns and live-job settles are not exits) |
 | `lane_stall_drain_wake` | flow | owed drain line (lane) | the sweep edge into owed (`pending` false → true) | the line sent (`last_sent` moves) or cleared (`pending` true → false) |
 | `inbox` | flow | batch (batch id), inbox wake (lane) | batch listed for flush; wake lane due at a window end | batch marked sent; wake line sent |
 | `quota_ladder` | flow | quota successor (job), expired ladder stage (request id) | successor or expired stage seen | hk record written with `replaced_by`; stage activated, discarded or cancelled |

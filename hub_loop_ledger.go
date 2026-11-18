@@ -155,6 +155,11 @@ type loopLedgerState struct {
 	silentStreak  map[string]bool
 	noticeSent    map[string]string
 	rowRetryAfter time.Time
+	// lastTick is each mechanism's most recent tick across process
+	// lifetime. Liveness is not a daily counter: a date roll must not
+	// reset it, or the first sweep of the day would report every slow
+	// loop as stalled and burn its daily notice.
+	lastTick map[loopMechanism]time.Time
 }
 
 func newLoopLedgerState() *loopLedgerState {
@@ -162,6 +167,7 @@ func newLoopLedgerState() *loopLedgerState {
 		days:         make(map[string]map[loopMechanism]*loopDayBucket),
 		silentStreak: make(map[string]bool),
 		noticeSent:   make(map[string]string),
+		lastTick:     make(map[loopMechanism]time.Time),
 	}
 }
 
@@ -175,6 +181,16 @@ func (h *HubServer) loopLedger() *loopLedgerState {
 		h.loops = newLoopLedgerState()
 	}
 	return h.loops
+}
+
+// loopNow reports the hub clock. A ledger call on a hub without one (a
+// lightweight test fixture with no time source) reports false, and the
+// caller skips the ledger rather than panicking.
+func (h *HubServer) loopNow() (time.Time, bool) {
+	if h == nil || h.now == nil {
+		return time.Time{}, false
+	}
+	return h.now().UTC(), true
 }
 
 func (s *loopLedgerState) bucketFor(date string, m loopMechanism) *loopDayBucket {
@@ -204,26 +220,30 @@ func (s *loopLedgerState) bucketAt(date string, m loopMechanism) loopStat {
 // ticks at its top, including passes that find nothing to do: the tick is
 // the liveness signal.
 func (h *HubServer) loopTick(m loopMechanism) {
-	if h == nil {
+	now, ok := h.loopNow()
+	if !ok {
 		return
 	}
-	now := h.now().UTC()
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	b := st.bucketFor(loopDateOf(now), m)
 	b.Ticks++
 	b.LastTick = now
+	st.lastTick[m] = now
 }
 
 // loopNoteMade records a flow item's entry edge once per UTC date, deduped
 // by id within the day. A steady population observed on every pass counts
 // once no matter how many passes observe it.
 func (h *HubServer) loopNoteMade(m loopMechanism, id string) {
-	if h == nil || id == "" {
+	if id == "" {
 		return
 	}
-	now := h.now().UTC()
+	now, ok := h.loopNow()
+	if !ok {
+		return
+	}
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -239,10 +259,13 @@ func (h *HubServer) loopNoteMade(m loopMechanism, id string) {
 // loopNoteDone records a flow item's exit transition once per UTC date,
 // deduped by id within the day.
 func (h *HubServer) loopNoteDone(m loopMechanism, id string) {
-	if h == nil || id == "" {
+	if id == "" {
 		return
 	}
-	now := h.now().UTC()
+	now, ok := h.loopNow()
+	if !ok {
+		return
+	}
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -257,10 +280,13 @@ func (h *HubServer) loopNoteDone(m loopMechanism, id string) {
 
 // loopSetOldestPending records the oldest pending age a pass observed.
 func (h *HubServer) loopSetOldestPending(m loopMechanism, age time.Duration) {
-	if h == nil || age < 0 {
+	if age < 0 {
 		return
 	}
-	now := h.now().UTC()
+	now, ok := h.loopNow()
+	if !ok {
+		return
+	}
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -269,10 +295,10 @@ func (h *HubServer) loopSetOldestPending(m loopMechanism, age time.Duration) {
 
 // loopNoteError counts a visible error for a mechanism in today's bucket.
 func (h *HubServer) loopNoteError(m loopMechanism) {
-	if h == nil {
+	now, ok := h.loopNow()
+	if !ok {
 		return
 	}
-	now := h.now().UTC()
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -284,10 +310,10 @@ func (h *HubServer) loopNoteError(m loopMechanism) {
 // same key counts and logs nothing until loopClearSilent retires the streak
 // with a success, so a latched outage cannot flood the ledger's counters.
 func (h *HubServer) loopNoteSilentError(m loopMechanism, key string, err error) {
-	if h == nil {
+	now, ok := h.loopNow()
+	if !ok {
 		return
 	}
-	now := h.now().UTC()
 	st := h.loopLedger()
 	st.mu.Lock()
 	streak := st.silentStreak[key]
@@ -323,8 +349,11 @@ func (h *HubServer) loopClearSilent(key string) {
 // loopSnapshot copies today's bucket for the row writer and the notice
 // check. Tests assert on it.
 func (h *HubServer) loopSnapshot() map[loopMechanism]loopStat {
-	now := h.now().UTC()
-	date := loopDateOf(now)
+	now, ok := h.loopNow()
+	date := ""
+	if ok {
+		date = loopDateOf(now)
+	}
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -482,10 +511,10 @@ const loopsRowRetryAfter = time.Minute
 // (against fleet_status, the hub's other hk writer) and backs off for a
 // minute before the next attempt.
 func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
-	if h == nil {
+	now, ok := h.loopNow()
+	if !ok {
 		return
 	}
-	now := h.now().UTC()
 	today := loopDateOf(now)
 	st := h.loopLedger()
 	st.mu.Lock()
@@ -538,26 +567,29 @@ func (h *HubServer) loopBackoffRowRetry(now time.Time) {
 	st.rowRetryAfter = now.Add(loopsRowRetryAfter)
 }
 
-// loopsStaleHits returns the mechanisms whose last_tick is older than three
-// intervals at now. A mechanism that never ticked is stale once the hub has
-// been up longer than three intervals. A disabled interval (<= 0) is never
-// stale.
+// loopsStaleHits returns the mechanisms whose last tick is older than three
+// intervals at now. Liveness is process-lifetime, not bucketed: a mechanism
+// that ticked yesterday is alive today until three intervals pass without a
+// tick. A mechanism that never ticked is stale once the hub has been up
+// longer than three intervals. A disabled interval (<= 0) is never stale.
 func (h *HubServer) loopsStaleHits(now time.Time) []loopMechanism {
-	snap := h.loopSnapshot()
+	st := h.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
 	var hits []loopMechanism
 	for _, m := range loopMechanisms {
-		s := snap[m]
 		interval := h.loopInterval(m)
 		if interval <= 0 {
 			continue
 		}
-		if s.LastTick.IsZero() {
+		lastTick := st.lastTick[m]
+		if lastTick.IsZero() {
 			if !h.startedAt.IsZero() && now.Sub(h.startedAt) > loopStaleIntervals*interval {
 				hits = append(hits, m)
 			}
 			continue
 		}
-		if now.Sub(s.LastTick) > loopStaleIntervals*interval {
+		if now.Sub(lastTick) > loopStaleIntervals*interval {
 			hits = append(hits, m)
 		}
 	}
@@ -591,7 +623,10 @@ func (h *HubServer) loopsProgressHits() []loopMechanism {
 // loopsSilentHits returns the mechanisms with at least one previously
 // silent error counted today.
 func (h *HubServer) loopsSilentHits() []loopMechanism {
-	now := h.now().UTC()
+	now, ok := h.loopNow()
+	if !ok {
+		return nil
+	}
 	date := loopDateOf(now)
 	st := h.loopLedger()
 	st.mu.Lock()
@@ -645,10 +680,10 @@ func (h *HubServer) loopsNoticeLane() string {
 // its one line. A failed persist is not marked sent, so the next sweep
 // retries it.
 func (h *HubServer) maybeSendLoopsNotice(ctx context.Context) {
-	if h == nil {
+	now, ok := h.loopNow()
+	if !ok {
 		return
 	}
-	now := h.now().UTC()
 	date := loopDateOf(now)
 	byMechanism := map[loopMechanism][]string{}
 	for _, hit := range h.loopNoticeHits(now) {

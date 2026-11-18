@@ -629,3 +629,153 @@ func TestLoopLedgerFailedPublishBacksOff(t *testing.T) {
 		t.Fatalf("publishes=%d after the backoff, want 2", publishes)
 	}
 }
+
+// Liveness is process-lifetime, not bucketed: ticks just before UTC
+// midnight keep every mechanism fresh on the first sweep of the new date,
+// so no false stall notice fires and no daily notice is consumed.
+func TestLoopLedgerMidnightRolloverKeepsLiveness(t *testing.T) {
+	now := time.Date(2026, 11, 18, 23, 59, 50, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+
+	for _, m := range loopMechanisms {
+		h.loopTick(m)
+	}
+	now = time.Date(2026, 11, 19, 0, 0, 5, 0, time.UTC)
+	slow := map[loopMechanism]bool{
+		loopPaneSweep: true, loopPoolTriggers: true, loopFleetStatus: true,
+		loopReviewerEnd: true, loopQuotaLadder: true,
+	}
+	for _, m := range h.loopsStaleHits(now) {
+		if slow[m] {
+			t.Fatalf("slow loop %s flagged stale right after midnight: %v", m, h.loopsStaleHits(now))
+		}
+	}
+	for _, hit := range h.loopNoticeHits(now) {
+		if slow[hit.Mechanism] && strings.Contains(hit.Reason, "intervals") {
+			t.Fatalf("post-midnight stall notice for slow loop %s: %+v", hit.Mechanism, h.loopNoticeHits(now))
+		}
+	}
+	h.maybeSendLoopsNotice(ctx)
+	st := h.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for key := range st.noticeSent {
+		for m := range slow {
+			if strings.HasPrefix(key, string(m)+"|") {
+				t.Fatalf("slow loop notice sent right after midnight: %s", key)
+			}
+		}
+	}
+}
+
+// A hub without a clock (a lightweight test fixture with no time source)
+// must not panic in the ledger: every call becomes a no-op.
+func TestLoopLedgerNilClockIsNoOp(t *testing.T) {
+	h := &HubServer{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx := context.Background()
+	now := time.Now()
+	h.loopTick(loopSpawnCoordinator)
+	h.loopNoteMade(loopSpawnCoordinator, "r-1")
+	h.loopNoteDone(loopSpawnCoordinator, "r-1")
+	h.loopSetOldestPending(loopSpawnCoordinator, time.Second)
+	h.loopNoteError(loopSpawnCoordinator)
+	h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:pendingSpawnPage", errors.New("boom"))
+	h.loopClearSilent("hub_spawn_async.go:pendingSpawnPage")
+	_ = h.loopSnapshot()
+	_ = h.loopsSilentHits()
+	_ = h.loopsStaleHits(now)
+	_ = h.loopsProgressHits()
+	_ = h.loopNoticeHits(now)
+	h.maybeWriteLoopsRow(ctx)
+	h.maybeSendLoopsNotice(ctx)
+	if got := h.loopSnapshot()[loopSpawnCoordinator].Ticks; got != 0 {
+		t.Fatalf("clockless ledger ticks=%d, want 0", got)
+	}
+}
+
+// A settle that finds a live job is not an exit: the consult stays open and
+// counts no done, no matter how many passes observe it.
+func TestLoopLedgerLiveSettleCountsNoDone(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: spawnJobsFixture{record: map[string]any{"state": "claimed"}}, Out: out, Err: errout}, nil
+	}
+	req := durableSpawnRequest()
+	if _, _, err := h.inbox.store.claimSpawn(ctx, req, "consult-live-job", "parent", now); err != nil {
+		t.Fatalf("claim spawn: %v", err)
+	}
+	if _, err := h.storeConsult(ctx, hubConsult{ID: "c-live", IdemKey: "i-live", State: consultQueued, RequestID: req.RequestID, Job: "consult-live-job", Deadline: now.Add(2 * time.Hour), Created: now}, false); err != nil {
+		t.Fatalf("store consult: %v", err)
+	}
+	h.reconcileConsults(ctx)
+	h.reconcileConsults(ctx)
+	snap := h.loopSnapshot()[loopConsultCoordinator]
+	if snap.Made != 1 || snap.Done != 0 {
+		t.Fatalf("live consult made=%d done=%d, want 1 and 0", snap.Made, snap.Done)
+	}
+	if hits := h.loopsProgressHits(); len(hits) != 0 {
+		t.Fatalf("live consult trips the progress rule: %+v", snap)
+	}
+}
+
+// A respawned consult is still queued work, not a completion: a successful
+// respawn counts no done.
+func TestLoopLedgerRespawnCountsNoDone(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	ctx := context.Background()
+	h.consultPlan = func(_ context.Context, _ fleet.ConsultPlanInput) (fleet.ConsultPlan, error) {
+		return consultPlanFixture("consult-respawn-job"), nil
+	}
+	if _, _, err := h.inbox.store.claimSpawn(ctx, consultAuthorRequest(), "author-job", "parent", now); err != nil {
+		t.Fatalf("claim author spawn: %v", err)
+	}
+	if _, err := h.storeConsult(ctx, hubConsult{ID: "c-respawn", IdemKey: "i-respawn", State: consultRunning, RequestID: "missing-op", Job: "consult-respawn-job", AuthorJob: "author-job", Respawns: 0, Deadline: now.Add(2 * time.Hour), Created: now}, false); err != nil {
+		t.Fatalf("store consult: %v", err)
+	}
+	h.reconcileConsults(ctx)
+	snap := h.loopSnapshot()[loopConsultCoordinator]
+	if snap.Made != 1 || snap.Done != 0 {
+		t.Fatalf("respawned consult made=%d done=%d, want 1 and 0", snap.Made, snap.Done)
+	}
+}
+
+// A pool action whose node reports CloseOpClosed without Settled is still
+// pending: no done until a durable terminal transition lands it.
+func TestLoopLedgerPoolActionPendingCountsNoDone(t *testing.T) {
+	f, _ := poolActionFixture(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.hub.reconcilePoolActions(t.Context())
+	}()
+	command := nodeCommandRead(t, f.node)
+	var op string
+	if json.Unmarshal(command["op"], &op) != nil || op != nodeCommandPaneCloseStatus {
+		t.Fatalf("command=%s, want %s", command["op"], nodeCommandPaneCloseStatus)
+	}
+	reply := poolStatus(fleet.CloseOpClosed, false, false)
+	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": reply.result})
+	<-done
+	snap := f.hub.loopSnapshot()[loopPoolActions]
+	if snap.Made != 1 || snap.Done != 0 {
+		t.Fatalf("pending pool action made=%d done=%d, want 1 and 0", snap.Made, snap.Done)
+	}
+}
+
+// endWaitingSpawn reports whether the row actually left waiting, so a
+// refusal or cancellation that fails to land counts no done.
+func TestLoopLedgerEndWaitingReportsTransition(t *testing.T) {
+	h := asyncSpawnHub(t)
+	ctx := context.Background()
+	task := waitingSpawnFixture(t, h, 7, []fleet.StartCondition{{Kind: "task", TaskID: "42", State: "merged"}})
+	if !h.endWaitingSpawn(ctx, task, "refused", "nope", 78) {
+		t.Fatalf("first endWaitingSpawn did not report a transition")
+	}
+	if h.endWaitingSpawn(ctx, task, "refused", "nope", 78) {
+		t.Fatalf("repeated endWaitingSpawn reported a transition")
+	}
+}

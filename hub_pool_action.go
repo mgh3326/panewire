@@ -141,8 +141,6 @@ func (h *HubServer) reconcilePoolActions(ctx context.Context) {
 		h.logObservedPoolAction(action)
 		if err := h.reconcilePoolAction(ctx, action); err != nil {
 			h.logger.Warn("pool action pending", "job", action.Job, "action", action.ID, "error", h.inbox.store.loggable("pool action", err))
-		} else {
-			h.loopNoteDone(loopPoolActions, action.ID)
 		}
 	}
 }
@@ -359,6 +357,9 @@ func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, 
 	if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
 		return err
 	}
+	// The durable terminal transition is the action's exit: settled,
+	// guarded or refused outcomes all land here.
+	h.loopNoteDone(loopPoolActions, action.ID)
 	h.poolActionObserved.Store(action.ID, struct{}{})
 	h.logger.Info("pool close action finalized", "node", action.Node, "job", action.Job, "action", action.ID, "outcome", outcome)
 	return nil
@@ -382,6 +383,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 			return err
 		}
 		h.poolActionObserved.Delete(action.ID)
+		h.loopNoteDone(loopPoolActions, action.ID)
 		return nil
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
@@ -417,5 +419,6 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 		return err
 	}
 	h.poolActionObserved.Delete(action.ID)
+	h.loopNoteDone(loopPoolActions, action.ID)
 	return nil
 }

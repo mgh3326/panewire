@@ -478,12 +478,10 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 		if c.State == consultAnswered {
 			// The answer is saved; only its one lane event may still be owed.
 			h.notifyConsultAnswered(ctx, c)
-			h.loopNoteDone(loopConsultCoordinator, c.ID)
 			continue
 		}
 		if !h.now().Before(c.Deadline) {
 			h.failConsult(ctx, c, "timeout: the consult passed its time limit")
-			h.loopNoteDone(loopConsultCoordinator, c.ID)
 			continue
 		}
 		task, err := h.inbox.store.spawnTask(ctx, c.RequestID)
@@ -497,14 +495,12 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 					continue
 				}
 				h.recoverConsult(ctx, c)
-				h.loopNoteDone(loopConsultCoordinator, c.ID)
 			case consultRunning:
 				if c.Respawns == 0 {
 					h.respawnConsult(ctx, c, "spawn_operation_missing")
 				} else {
 					h.failConsult(ctx, c, "spawn_operation_missing")
 				}
-				h.loopNoteDone(loopConsultCoordinator, c.ID)
 			}
 			continue
 		}
@@ -519,19 +515,16 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 			app, _ = h.newSpawnApp(io.Discard, io.Discard)
 		}
 		if h.settleConsult(ctx, app, c) {
-			h.loopNoteDone(loopConsultCoordinator, c.ID)
 			continue
 		}
 		switch task.Status {
 		case "failed", "retryable":
 			h.consultJobFailed(ctx, c, firstNonEmptyString(task.Outcome.Reason, task.Status))
-			h.loopNoteDone(loopConsultCoordinator, c.ID)
 		case "reconciling", "deadline_exceeded", "accepted", "bound", "dispatching", "succeeded", "waiting":
 			// Ownership or the job itself is still live; the row's deadline
 			// ends the wait.
 		default:
 			h.consultJobFailed(ctx, c, firstNonEmptyString(task.Outcome.Reason, task.Status))
-			h.loopNoteDone(loopConsultCoordinator, c.ID)
 		}
 	}
 }
@@ -699,7 +692,9 @@ func (h *HubServer) failConsult(ctx context.Context, c hubConsult, reason string
 	c.State = consultFailed
 	c.Reason = utf8PrefixWithin(reason, consultReasonLimit)
 	_ = h.saveConsult(ctx, c)
-	// A failed or timed-out consult must not leave its agent pane burning
+	// The failed state is the consult's terminal outcome. A later pass that
+	// re-fails the same row counts nothing more: done dedupes by consult.
+	h.loopNoteDone(loopConsultCoordinator, c.ID)
 	// quota. Close the pane and mark the job lost when the node still lists
 	// it; a pane that changed or a node that cannot answer is left alone.
 	h.cancelConsultJob(ctx, c)
@@ -746,6 +741,7 @@ func (h *HubServer) notifyConsultAnswered(ctx context.Context, c hubConsult) {
 		// A tool requester polls; no event is owed, so the row is done.
 		c.Notified = true
 		_ = h.saveConsult(ctx, c)
+		h.loopNoteDone(loopConsultCoordinator, c.ID)
 		return
 	}
 	text := fmt.Sprintf("consult %s answered for task %s: apply %s", c.ID, c.Task, c.AnswerDoc)
@@ -760,4 +756,5 @@ func (h *HubServer) notifyConsultAnswered(ctx context.Context, c hubConsult) {
 	}
 	c.Notified = true
 	_ = h.saveConsult(ctx, c)
+	h.loopNoteDone(loopConsultCoordinator, c.ID)
 }
