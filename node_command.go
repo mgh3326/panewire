@@ -81,7 +81,7 @@ func knownNodeCommandOp(op string) bool {
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
 		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
-		nodeCommandCheckoutSweep:
+		nodeCommandCheckoutSweep, nodeCommandHandoverPatch:
 		return true
 	}
 	return false
@@ -251,6 +251,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneCloseOp:      {"request_id", "job", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed", "end_reason"},
 	nodeCommandPaneCloseStatus:  {"request_id", "job"},
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
+	nodeCommandHandoverPatch:    {"job", "cwd", "branch"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -457,6 +458,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandCheckoutSweep:
 		var args nodeCheckoutSweepArgs
 		return args, decodeNodeCommandStrict(raw, &args)
+	case nodeCommandHandoverPatch:
+		var args nodeHandoverPatchArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeHandoverPatchArgs(args)
 	}
 	return nil, false
 }
@@ -582,6 +586,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandCheckoutSweep:
 		var result nodeCheckoutSweepResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeCheckoutSweepResult(result)
+		target = result
+	case nodeCommandHandoverPatch:
+		var result nodeHandoverPatchResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeHandoverPatchResult(result)
 		target = result
 	}
 	if !valid {
@@ -950,6 +958,9 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return result, ""
 	case nodeWorktreeListArgs:
 		return nodeWorktreeList(ctx, client.nodeGitRunner(), args)
+	case nodeHandoverPatchArgs:
+		// Read-only on the worktree; it writes only the job's own patch file.
+		return client.nodeHandoverPatch(ctx, args)
 	case nodeWorktreePrepareArgs:
 		return client.nodeWorktreePrepare(ctx, args)
 	case nodeWorktreeRemoveArgs:

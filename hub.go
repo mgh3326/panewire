@@ -482,6 +482,9 @@ type HubServer struct {
 	// quotaWait overrides how long a replacement waits for its successor; zero
 	// uses quotaReplaceWait.
 	quotaWait time.Duration
+	// handoverInputs, when set, replaces the hk reads of the quota policy and
+	// the task a pool hand-over decides by (tests).
+	handoverInputs func(context.Context, string) handoverInputs
 	// quotaReplaceBudget overrides the hard bound on one replacement; zero uses
 	// quotaReplaceBudget.
 	quotaReplaceBudget time.Duration

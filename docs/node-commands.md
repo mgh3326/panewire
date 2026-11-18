@@ -870,6 +870,21 @@ node without a jobs root or work root answers `jobs_root_unset` or
 `work_root_unset`; a failed pass answers `sweep_failed`. The CLI is
 `panewire node sweep-checkouts --host <machine> [--dry-run]`.
 
+### `worktree.handover_patch`
+
+The old node's half of the hub's implementer hand-over (hk 4633,
+[quota-stop.md](quota-stop.md) "An exhausted pool"). Arguments
+`{"job","cwd","branch"}`; offered as `handover_patch_v1` with `close_ops_v1`.
+The node checks the worktree at `cwd` is on `branch`, reads the branch's last
+pushed commit with `git ls-remote origin`, and saves `git status --porcelain`,
+the untracked file list and `git diff --binary` against that commit (or the
+merge-base with origin's default branch when nothing was pushed) into
+`jobs/<job>/handover-patch.txt`, uploading it to hk as evidence
+`handover/<job>/handover-patch.txt` when the worktree holds work the commit
+lacks. It never changes the worktree. Result: `outcome` (`saved`,
+`not-a-job`, `branch_mismatch`, `git_failed`), `pushed`, `base`, `base_ref`,
+`dirty`, `saved`, `doc` (empty when the upload failed).
+
 ### `worktree.inspect`
 
 `args: {cwd, expected_dir?, verify_branch?}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git

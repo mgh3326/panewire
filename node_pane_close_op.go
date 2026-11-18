@@ -47,7 +47,9 @@ func (client *HubClient) spawnHelloCapabilities(ctx context.Context) []string {
 	client.closeOpsAdvertised.Store(ready)
 	capabilities := slices.Clone(hubSpawnCapabilities)
 	if ready {
-		capabilities = append(capabilities, hubCapabilityCloseOps)
+		// A hand-over closes the old pane through close ops, so the patch
+		// command is offered with them (hk 4633).
+		capabilities = append(capabilities, hubCapabilityCloseOps, hubCapabilityHandoverPatch)
 	}
 	if client.checkoutSparseReady(ctx) {
 		capabilities = append(capabilities, hubCapabilityCheckoutSparse)

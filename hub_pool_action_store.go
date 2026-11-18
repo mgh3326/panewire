@@ -41,6 +41,10 @@ type poolActionData struct {
 	RetryID                   string
 	RetryAfter                int64
 	RetryCount                uint8
+	// Kind is "" for a close (reviewer, consult), poolActionKindHandover for
+	// an implementer hand-over and poolActionKindWait for a waited stop.
+	Kind     string        `json:",omitempty"`
+	Handover *poolHandover `json:",omitempty"`
 }
 
 // retryPoolAction atomically keeps the uncertain request fenced and records
@@ -238,4 +242,70 @@ func (h *HubServer) lockWithoutPoolAction(ctx context.Context, job string) (func
 		return nil, false
 	}
 	return unlock, true
+}
+
+// activePoolActionFor reports a non-final row of any kind for job: one row
+// per job (hk 4633).
+func (s *laneInboxStore) activePoolActionFor(parent context.Context, job string) (bool, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	var id string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM pool_actions WHERE job=? AND phase IN (?,?,?) LIMIT 1`), job, poolActionPending, poolActionGuarded, poolActionSettled).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// activeHandover reports a non-final handover row for job: the fence that
+// keeps the quota-stop replacement off a job the hub is handing over.
+func (s *laneInboxStore) activeHandover(parent context.Context, job string) (bool, error) {
+	rows, err := s.poolActionsOf(parent, job)
+	if err != nil {
+		return false, err
+	}
+	for _, action := range rows {
+		if action.Data.Kind == poolActionKindHandover && action.Phase != poolActionDone && action.Phase != poolActionRefused {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// poolWaitResets lists the resets of the stops already waited out for job.
+func (s *laneInboxStore) poolWaitResets(parent context.Context, job string) ([]int64, error) {
+	rows, err := s.poolActionsOf(parent, job)
+	if err != nil {
+		return nil, err
+	}
+	var resets []int64
+	for _, action := range rows {
+		if action.Data.Kind == poolActionKindWait && action.Data.Handover != nil {
+			resets = append(resets, action.Data.Handover.Reset)
+		}
+	}
+	return resets, nil
+}
+
+func (s *laneInboxStore) poolActionsOf(parent context.Context, job string) ([]poolAction, error) {
+	ctx, cancel := s.op(parent)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,job,node,epoch,phase,data FROM pool_actions WHERE job=? ORDER BY id`), job)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var actions []poolAction
+	for rows.Next() {
+		var action poolAction
+		var data string
+		if err := rows.Scan(&action.ID, &action.Job, &action.Node, &action.Epoch, &action.Phase, &data); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(data), &action.Data); err != nil {
+			return nil, err
+		}
+		actions = append(actions, action)
+	}
+	return actions, rows.Err()
 }

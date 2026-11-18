@@ -195,6 +195,11 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	}
 	defer unlock()
 	store := h.inbox.store
+	// A hub hand-over row owns the job from its creation to its end, also
+	// while it submits the successor after the close (hk 4633).
+	if handing, err := store.activeHandover(ctx, event.JobID); err != nil || handing {
+		return skip("handover_pending")
+	}
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
 	if err != nil {
 		return skip("unknown_job")
@@ -491,6 +496,9 @@ func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.Ap
 		return false
 	}
 	defer unlock()
+	if handing, err := h.inbox.store.activeHandover(ctx, old); err != nil || handing {
+		return false
+	}
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
 	if err != nil || holder.Status != "succeeded" {
 		return false

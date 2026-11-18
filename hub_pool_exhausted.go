@@ -332,7 +332,9 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 					"action", results[i].action, "reason", results[i].why)
 				// A legacy node receives the existing hand-over notice. Revisit
 				// its job when close operations are later enabled.
-				if results[i].action == poolJobNotified && (results[i].role == "reviewer" || results[i].role == "consult") {
+				// A waited stop is released too: its wait row answers a repeat,
+				// and a later stop with another reset must reach the job (hk 4633).
+				if results[i].action == poolJobNotified && (results[i].role == "reviewer" || results[i].role == "consult" || results[i].why == poolWaitReason) {
 					h.poolSweep.release(task.Job)
 				}
 			} else {
@@ -429,9 +431,13 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 		if h.poolEventGone(exhaustion, h.now()) {
 			return poolJobSkip(role, "superseded")
 		}
+		if role == "implementer" && h.nodeHasCapability(spawnHolderHost(task), hubCapabilityCloseOps) && h.nodeHasCapability(spawnHolderHost(task), hubCapabilityHandoverPatch) {
+			// The hub hands the implementer over itself (hk 4633).
+			return h.sweepImplementer(ctx, exhaustion, task, prior, app, record)
+		}
 		if role == "reviewer" || role == "consult" {
 			if h.nodeHasCapability(spawnHolderHost(task), hubCapabilityCloseOps) {
-				if err := h.createPoolAction(ctx, exhaustion, task, app); err != nil {
+				if err := h.createPoolAction(ctx, exhaustion, task, app, nil); err != nil {
 					return poolJobSkip(role, "close_not_queued")
 				}
 				return poolJobResult{action: poolJobQueued, role: role}

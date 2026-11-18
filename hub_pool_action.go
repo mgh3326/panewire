@@ -13,7 +13,10 @@ import (
 
 // Pool actions hold reassignment from durable intent through the node's
 // settled proof. See docs/node-commands.md, "Hub close protocol".
-func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, app *fleet.App) error {
+// A non-nil handover makes the row an implementer hand-over (hk 4633,
+// hub_pool_handover.go): its close writes the old record with the successor
+// pointer, and settlement submits the stored successor.
+func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, app *fleet.App, handover *poolHandover) error {
 	unlock, err := h.poolActionLocks.lock(ctx, task.Job)
 	if err != nil {
 		return err
@@ -38,6 +41,9 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 		owner = "mergewake"
 	}
 	endReason := fleet.QuotaStopEndReason(exhaustion.Pool, time.Time{}, "", "")
+	if handover != nil {
+		endReason = handoverEndReason(record, exhaustion, handover.Job)
+	}
 	label := heldAgentName(task, record)
 	if !validNodeEndReason(endReason) || !validNodePaneName(label) || !nodeCommandPaneIDPattern.MatchString(task.Outcome.Pane) || !validLaneReference(owner) {
 		return errors.New("invalid close target")
@@ -52,6 +58,10 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 		Owner: owner, Text: text,
 		SpawnRequest: task.Request.RequestID, Pane: task.Outcome.Pane, Label: label, EndReason: endReason,
 	}}
+	if handover != nil {
+		action.Data.Kind, action.Data.Handover = poolActionKindHandover, handover
+		action.Data.Text = poolExhaustionText(exhaustion, task.Job)
+	}
 	// The per-job lock also guards reassignment; mu is needed only to take the
 	// ownership snapshot, not while waiting for the durable store.
 	h.mu.Lock()
@@ -69,6 +79,15 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 	h.mu.Unlock()
 	if pending, err := h.inbox.store.pendingPoolAction(ctx, task.Job); err != nil || pending != "" {
 		return errors.New("job already has a pending close action")
+	}
+	if handover != nil {
+		// One row per job: a settled row still owes its successor.
+		if active, err := h.inbox.store.activePoolActionFor(ctx, task.Job); err != nil || active {
+			return errors.New("job already has a pool action")
+		}
+		if _, err := h.inbox.store.latestSpawnForJob(ctx, handover.Job); err == nil {
+			return errors.New("successor already exists")
+		}
 	}
 	if err := h.inbox.store.insertPoolAction(ctx, action); err != nil {
 		return err
@@ -406,6 +425,9 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	}
 	if err := h.inbox.store.releaseCompletedSpawnRoleOf(ctx, action.Data.SpawnRequest); err != nil {
 		return err
+	}
+	if action.Data.Kind == poolActionKindHandover {
+		return h.finishHandover(ctx, action, state, reason)
 	}
 	if state == "lost" && reason == action.Data.EndReason {
 		eventID := "pool-closed:" + action.Job

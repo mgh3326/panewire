@@ -92,3 +92,26 @@ func paneScreenDocBody(screen []byte) string {
 	header := fmt.Sprintf("[panewire: pane screen cut to its last bytes; the full %d-byte screen stays in the job directory]\n", len(screen))
 	return header + textbound.SuffixWithin(string(screen), PaneScreenDocMaxBytes-len(header))
 }
+
+// HandoverPatchFile is the file in a job's directory that holds the work a
+// hub hand-over found uncommitted or unpushed in the old worktree (hk 4633,
+// docs/quota-stop.md "An exhausted pool").
+const HandoverPatchFile = "handover-patch.txt"
+
+// HandoverPatchDocKey is the hk evidence document the hand-over patch of job
+// is uploaded as; the successor's brief names it.
+func HandoverPatchDocKey(job string) string { return "handover/" + job + "/" + HandoverPatchFile }
+
+// UploadHandoverPatch writes the hand-over patch to hk as evidence, cut to
+// hk's cap like a screen, and returns its key once hk stored it.
+func UploadHandoverPatch(ctx context.Context, job, task string, patch []byte) (string, error) {
+	key := HandoverPatchDocKey(job)
+	doc := client.Document{Key: key, Kind: "evidence", Job: job, Body: paneScreenDocBody(patch), OriginClass: "job"}
+	if id, err := hkTaskID(task); err == nil {
+		doc.TaskID = &id
+	}
+	if err := hkPutDocument(ctx, doc); err != nil {
+		return "", paneScreenUploadError(err)
+	}
+	return key, nil
+}
