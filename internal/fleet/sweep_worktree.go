@@ -44,7 +44,16 @@ const (
 	sweepWorktreeFetchFailed  = "fetch_failed_kept"
 	sweepWorktreeUnmerged     = "unmerged_kept"
 	sweepWorktreeRemoveFailed = "remove_failed_kept"
+	// sweepWorktreeHandoverKept: a hub hand-over could not push the old
+	// worktree's snapshot (or a submodule held work it does not carry), so
+	// the successor's note names this worktree (hk 4633).
+	sweepWorktreeHandoverKept = "handover_kept"
 )
+
+// HandoverKeepFile, in a job's directory, keeps that job's worktree from
+// every sweep: the hub hand-over's successor was told to copy work from it
+// (hk 4633, docs/quota-stop.md "An exhausted pool").
+const HandoverKeepFile = "handover-keep"
 
 // The reason on a sweep branch line of a non-merged end.
 const (
@@ -83,6 +92,10 @@ func (s *TaskPaneSweeper) sweepWorktree(ctx context.Context, a *App, j Job, end 
 func (s *TaskPaneSweeper) worktreePlan(ctx context.Context, a *App, j Job, cwd string, end paneSweepEnd) (clone, branch string, owned bool, reason string) {
 	if !boolean(a.Config.Sweep, "remove_worktrees", true) {
 		return "", "", false, sweepWorktreeDisabled
+	}
+	if _, err := os.Lstat(filepath.Join(a.Jobs, j.ID, HandoverKeepFile)); !errors.Is(err, os.ErrNotExist) {
+		// An unreadable marker keeps the worktree too.
+		return "", "", false, sweepWorktreeHandoverKept
 	}
 	clone, branch, ok := s.nodeWorktree(ctx, a, cwd)
 	if !ok {

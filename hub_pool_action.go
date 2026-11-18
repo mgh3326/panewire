@@ -78,14 +78,11 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 	}
 	action.Node, action.Epoch = job.Node, job.Epoch
 	h.mu.Unlock()
-	if pending, err := h.inbox.store.pendingPoolAction(ctx, task.Job); err != nil || pending != "" {
+	// One row per job: a settled hand-over still owns it.
+	if owner, err := h.inbox.store.poolActionOwns(ctx, task.Job); err != nil || owner != "" {
 		return errors.New("job already has a pending close action")
 	}
 	if handover != nil {
-		// One row per job: a settled row still owes its successor.
-		if active, err := h.inbox.store.activePoolActionFor(ctx, task.Job); err != nil || active {
-			return errors.New("job already has a pool action")
-		}
 		if _, err := h.inbox.store.latestSpawnForJob(ctx, handover.Job); !errors.Is(err, sql.ErrNoRows) {
 			// Only a definite absence admits the row; an unreadable store
 			// is not one.
@@ -225,8 +222,14 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		if action.Data.Kind == poolActionKindHandover && status.Attempt != "" {
 			// The node has registered no close yet, even when Args were saved
 			// before a restart: the last point the hand-over can still be
-			// withdrawn without a trace (hk 4633).
-			due, err := h.handoverStillDue(ctx, action)
+			// withdrawn without a trace. The job's lock is held through the
+			// close command, so the checks bind the close (hk 4633).
+			unlock, err := h.poolActionLocks.lock(ctx, action.Job)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			due, err := h.handoverBeforeClose(ctx, &action)
 			if err != nil {
 				return err
 			}
@@ -251,7 +254,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 				return errors.New("pane unavailable")
 			}
 			if handover := action.Data.Handover; action.Data.Kind == poolActionKindHandover && handover != nil && probe.row.Cwd != handover.Cwd {
-				// The close must act on the worktree whose patch was checked.
+				// The close must act on the worktree that was snapshot.
 				return h.releasePoolAction(ctx, action)
 			}
 			args := &nodePaneCloseOpArgs{RequestID: action.ID, Job: action.Job, Epoch: action.Epoch, Attempt: status.Attempt,
@@ -438,11 +441,14 @@ func (h *HubServer) saveFinalPoolAction(ctx context.Context, action poolAction, 
 }
 
 func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) error {
-	unlock, free := h.lockWithoutPoolAction(ctx, action.Job)
-	if !free {
-		return errors.New("another close action is pending")
+	unlock, err := h.poolActionLocks.lock(ctx, action.Job)
+	if err != nil {
+		return err
 	}
 	defer unlock()
+	if owner, err := h.inbox.store.poolActionOwns(ctx, action.Job); err != nil || owner != "" && owner != action.ID {
+		return errors.New("another close action is pending")
+	}
 	h.mu.Lock()
 	job := h.jobs[action.Job]
 	moved := job != nil && (job.Node != action.Node || job.Epoch != action.Epoch)
@@ -491,11 +497,13 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	if err != nil || !exists || !hkTerminalState(state) {
 		return errors.New("terminal job record unavailable")
 	}
+	if action.Data.Kind == poolActionKindHandover {
+		// The old job's task role passes to the successor in its claim, or
+		// is released when the hand-over fails (finishHandover).
+		return h.finishHandover(ctx, action, state, reason)
+	}
 	if err := h.inbox.store.releaseCompletedSpawnRoleOf(ctx, action.Data.SpawnRequest); err != nil {
 		return err
-	}
-	if action.Data.Kind == poolActionKindHandover {
-		return h.finishHandover(ctx, action, state, reason)
 	}
 	if state == "lost" && reason == action.Data.EndReason {
 		eventID := "pool-closed:" + action.Job

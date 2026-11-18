@@ -40,7 +40,7 @@ hk 3334. The wait or hand-over rule is hk `policy/quota-stop`; this section is t
 
 A hub restarted between claiming a reviewer's successor and writing the old record is repaired by a periodic pass (`reconcileQuotaReplacements`, every 2 minutes, for successors older than the replacement budget): a successor that placed whose predecessor's record is still live gets the pane closed and the record written with `replaced_by`. A successor that never left `accepted` (no node) can never place a job and gets no pointer; one still reconciling or past its deadline with a node binding does.
 
-The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it saves the old worktree's patch and continues the pushed branch on another host. Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
+The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it snapshots the old worktree to `refs/panewire/handover/<old>` and continues the pushed branch on another host. Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
 
 ## Job end on a quota stop
 
@@ -120,87 +120,102 @@ successor excludes no pool: the mark keeps it off the spent account while the
 other accounts stay usable.
 
 **An implementer is handed over by the hub (hk 4633, operator decisions 358
-and A336).** On a node that advertises `close_ops_v1` and
-`handover_patch_v1`, the hub decides with the §Implementer rule (the job's
-start, the task's priority and `--expected`, `policy/quota-stop`) for every
-cause: window, free limit past `max_wait`, credit, retired and account credit.
+and A336; decision `evidence/2026-11-18/pw-handover-4633/decision-root-causes.md`).**
+On a node that advertises `close_ops_v1` and `handover_snapshot_v1`, the hub
+decides with the §Implementer rule (the job's start, the task's priority and
+`--expected`, `policy/quota-stop`) for every cause: window, free limit past
+`max_wait`, credit, retired and account credit.
 
 - **Wait:** no action; the owner gets one info line naming the reset, and the
   hub stores a final `wait` row with that reset. The same stop seen again says
-  nothing more; a stop with another reset is the second stop and hands over.
+  nothing more (a notice lost in a crash is replayed); a stop with another
+  reset is the second stop and hands over.
 - **Hand over:** a pool action row of kind `handover` (`pool_actions`, the
-  #669 store). One row per job: any non-final row for the job, or an existing
-  `<old>-q<n>` spawn, means do nothing. The steps are, in this order:
-  1. **Patch.** The old node runs `worktree.handover_patch` from the top
-     level of the pane's worktree, which must be the job's own checkout: `git ls-remote origin refs/heads/<branch>` for the last pushed
-     commit, then `git status --porcelain`, the untracked file list and
-     `git diff --binary` against that commit (against the merge-base with
-     origin's default branch when nothing was pushed), plus a new-file diff
-     with the contents of every untracked file — no color, textconv or
-     external driver, standard `a/` `b/` prefixes, inherited `GIT_DIR`-style
-     variables ignored — into
-     `jobs/<old>/handover-patch.txt` (mode 0600) and, whole and byte for
-     byte, to hk as evidence `handover/<old>/handover-patch.txt`. The
-     worktree is only read, so a dirty worktree never blocks the hand-over.
-     The pane must be idle. The node refuses, and the owner gets the
-     fallback notice, when the pushed tip is not in the worktree's history
-     (`diverged`), the patch is over hk's document cap or has more than 500
-     untracked files (`too_large`, enforced while git output is read), it is
-     not UTF-8 (`unportable`), a submodule has changes (`submodule_changed`),
-     or hk did not store it (`upload_failed`): no hand-over rests on a cut,
-     rewritten or host-local copy. The document is uploaded even for a clean
-     worktree, so the note always names it.
-  2. **Saved successor.** The row stores the complete successor submission
-     with a fixed request id before anything is closed: same role, owner and
-     brief; job `<old>-q<n>` (at most two replacements); `--parent-job <old>`
-     in place of `--task` (the two are exclusive; the task is inherited); the
+  #669 store). **A non-final handover row owns the old job** — settled
+  included, while it still owes its successor. One store predicate,
+  `poolActionOwns`, answers that, and reassignment, task-role release, the
+  quota-stop replacement (`replaceQuotaStopped`, also hk 5138's credit path,
+  and `reconcileQuotaReplacements`) and the pool sweep all check it. The old
+  job's task role stays reserved until the successor's claim takes it over in
+  the same transaction, so no other spawn for the task is admitted between
+  them. In reverse, an existing `<old>-q<n>` spawn means do nothing: whichever
+  creates its row (or successor) first owns the job. The steps are, in this
+  order:
+  1. **Saved successor.** The old node reads, read-only
+     (`worktree.handover_snapshot` without `snapshot`), the branch and its
+     last pushed commit (`git ls-remote origin refs/heads/<branch>`) or, when
+     nothing was pushed, the merge-base with origin's default branch. The row
+     then stores the complete successor submission with a fixed request id
+     before anything is closed: same role, owner and brief; job `<old>-q<n>`
+     (at most two replacements); `--parent-job <old>` in place of `--task`
+     (the two are exclusive; the task is inherited; an earlier
+     `--parent-job` is replaced); a pinned `-m` dropped (a pinned host is
+     refused); the label cut to herdr's 32 characters keeping `-q<n>`; the
      spent band excluded (`devin-free` for a free limit, the paid band for a
      window, the pool for a pool-wide cause, none for a Command Code account
      credit stop, where the account mark does it); its own
-     `--report-relative`; no start conditions; and a spec checkout of the branch at its last
-     pushed commit (`successor` mode, hk 5118), so the successor needs neither
-     the old host nor a clean old worktree. A never-pushed branch starts
-     detached at its base and the note says the patch is the whole work. The
-     brief ends with a continuation note: what happened, the branch and commit
-     to continue from, and where the patch is.
-  3. **Close.** Before its first close command the reconciler checks the stop
-     still holds and captures the patch again; a changed digest or a cleared
-     stop releases the row unclosed, and a later pass prepares a fresh one.
-     A retired pool that came back also releases it. The close must act on
-     the directory whose patch was checked. During a spawn rollback or grant
-     drain it neither opens a row nor closes. The close keeps `pane.close`'s open-question guard for an
-     implementer. The reconciler then closes the old pane through `pane.close_op` to
-     the job's node at its epoch. The node writes the old record `lost` with
+     `--report-relative`; no start conditions; and a spec checkout of the
+     branch at its last pushed commit (`successor` mode, hk 5118), so the
+     successor needs neither the old host nor a clean old worktree. A
+     never-pushed branch starts detached at its base. The end reason's length
+     is checked here, before anything closes.
+  2. **Checks and snapshot at the close.** Under the job's pool-action lock,
+     before its first close command, the reconciler:
+     - holds the row during a spawn rollback or grant drain;
+     - ends it `recovered` when the stop no longer holds (a retired pool that
+       came back too) and `task_rebound` when hk binds the task to another
+       job;
+     - releases it when the pane moved or changed directory, and holds it
+       until the pane is idle;
+     - then has the old node snapshot the worktree: from the top level
+       (never the pane's subdirectory), a temporary index
+       (`GIT_INDEX_FILE`, `read-tree HEAD`, `add -A`, `write-tree`) and
+       `commit-tree -p HEAD`, pushed to `refs/panewire/handover/<old>` on
+       origin. Untracked files are included and ignored ones are not; the
+       user's index, stash and branch are untouched; every byte is carried,
+       with no diff, filter or size limit. A pushed tip no longer in the
+       worktree's history (`diverged`) or a start point that moved releases
+       the row unclosed.
+     - **When the snapshot cannot be pushed, or a submodule holds changes the
+       commit does not carry**, the node writes `jobs/<old>/handover-keep`.
+       Both the pane sweep and `checkout.sweep` then keep that worktree
+       (`handover_kept`), the note names it as `host:path`, and the
+       hand-over still proceeds: losing nothing matters more than starting
+       clean. Clearing the mark (and deleting the snapshot ref once the
+       successor's PR merges) is follow-up work.
+     - The stored successor's continuation note is rewritten to name the
+       snapshot, then the row is saved.
+  3. **Close.** The reconciler closes the old pane through `pane.close_op` to
+     the job's node at its epoch, keeping `pane.close`'s open-question guard
+     for an implementer. The node writes the old record `lost` with
      `end_reason="quota_stop pool=<pool> replaced_by=<new job>"`, the pinned
-     format (`TestQuotaStopEndReasonFormatIsPinned`). It is written with the
-     close, before the submit, because the spawn refuses a task still bound to
-     a job that is not lost.
-  4. **Submit.** Once the close is settled the node captures the patch once
-     more, so the document holds the worktree's final state; a capture that
-     no longer starts at the stored successor's commit ends the row
-     `handover_failed`. Then, and the record reads `lost` with
+     format (`TestQuotaStopEndReasonFormatIsPinned`), before the submit,
+     because the spawn refuses a task still bound to a job that is not lost.
+  4. **Submit.** Once the close is settled and the record reads `lost` with
      that reason, the stored successor is claimed with the same request id on
-     every retry (a replay of the same id is the same operation).
+     every retry. A crash between the claim and saving that fact replays the
+     same operation; nothing is captured or claimed twice.
   5. **Final.** The row stays non-final (I2) until the successor settles.
      Placed: the owner gets one info line, `[panewire] handed <old> over to
      <new> on <host>/<profile> (<pool> <cause>)`. Failed for good, or the old
-     record ended another way: the row ends `handover_failed` and the owner
-     gets the hand-over-or-respawn notice with the reason.
+     record ended another way: the row ends `handover_failed`, the task role
+     is released, and the owner gets the hand-over-or-respawn notice with the
+     reason.
 
-  Until the row is final the job cannot be reassigned. A hub restart at any
-  step resumes from the row and never places a second
-  successor. The row also fences the screen-triggered quota-stop replacement
-  (`replaceQuotaStopped`, also the account-credit path of hk 5138) and
-  `reconcileQuotaReplacements` for the job until it is final; in reverse, a
-  quota-stop successor already placed makes the sweep do nothing. Whichever
-  creates its row (or successor) first owns the job.
+  **The successor's restore.** The note gives the commands:
+  `git fetch origin refs/panewire/handover/<old> && git checkout -B <branch> FETCH_HEAD && git reset --mixed HEAD~1`.
+  The snapshot commit sits on the old HEAD, which descends from the start
+  point, so this fast-forwards the branch over the old job's unpushed
+  commits and undoes only the snapshot commit into the worktree: history
+  stays linear (no merge commit, no cherry-pick) and the work comes back
+  uncommitted, untracked files untracked again.
 
 The decision reads the task the job record names (a `--parent-job` successor
 inherits it) and the job's start; a task whose `refs.job_id` names another job
 is left alone. For an implementer on a node without those capabilities, past
 the replacement limit, or when no successor can be built (no branch, a pinned
-profile or host, an end reason or label over its limit, a pane not idle or
-unreadable, a refused patch), and for a reviewer or consult on a node that does not advertise
+host, an end reason over its limit, an unreadable pane or a refused read),
+and for a reviewer or consult on a node that does not advertise
 close operations, the hub records a `lane.event` asking the owner to hand the
 job over or end it and respawn it on another pool. On a capable node, the hub
 instead stores a close intent for a reviewer or consult, closes and settles it

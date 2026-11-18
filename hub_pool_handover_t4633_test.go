@@ -2,7 +2,9 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -18,7 +20,7 @@ import (
 
 var handoverPushed = strings.Repeat("b", 40)
 
-var handoverDigest = strings.Repeat("d", 64)
+var handoverSnapCommit = strings.Repeat("5", 40)
 
 func handoverPolicy() quotaPolicy {
 	return quotaPolicy{Expected: time.Hour, Urgent: map[int]bool{1: true, 2: true}, MaxWaits: 1, ResumeText: "continue"}
@@ -29,7 +31,7 @@ func handoverFixture(t *testing.T, job string, priority int, expected time.Durat
 	f := newQuotaReplaceFixture(t, "implementer", job)
 	f.hub.mu.Lock()
 	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
-	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverPatch] = true
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
 	f.hub.jobs[job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: job, Epoch: 1}, Node: "machine-a"}
 	f.hub.mu.Unlock()
 	f.hub.handoverInputs = func(context.Context, string) handoverInputs {
@@ -43,26 +45,26 @@ func window5h() poolExhaustion {
 	return poolExhaustion{Pool: "claude", Account: "acct", Cause: "window:5h", Reset: time.Now().Add(95 * time.Minute).UTC().Truncate(time.Second)}
 }
 
-func handoverPatchReply(job string, dirty bool) map[string]any {
-	return map[string]any{"outcome": nodeHandoverPatchSaved, "branch": "wk/task", "top": "/work/" + job + "-checkout", "pushed": handoverPushed, "dirty": dirty,
-		"saved": "/jobs/" + job + "/" + fleet.HandoverPatchFile, "digest": handoverDigest, "doc": fleet.HandoverPatchDocKey(job)}
+// handoverReadReply is the node's read before the row: branch and start.
+func handoverReadReply(job string) map[string]any {
+	return map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/" + job + "-checkout", "pushed": handoverPushed, "dirty": false, "submodule": false, "kept": false}
 }
 
-// finishSettledCapture reconciles the settled row, answering the final
-// capture the hub takes after the close and before the submit.
-func finishSettledCapture(t *testing.T, f *quotaReplaceFixture, reply map[string]any) {
-	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- f.hub.reconcilePoolAction(t.Context(), readOnlyPoolAction(t, f.hub)) }()
-	command := nodeCommandRead(t, f.node)
-	if string(command["op"]) != `"`+nodeCommandHandoverPatch+`"` {
-		t.Fatalf("command=%s, want the final capture", command["op"])
+// handoverSnapReply is the node's snapshot at the close.
+func handoverSnapReply(job string, dirty bool) map[string]any {
+	reply := handoverReadReply(job)
+	reply["dirty"] = dirty
+	if dirty {
+		reply["commit"], reply["ref"] = handoverSnapCommit, handoverSnapshotRefPrefix+job
 	}
-	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": reply})
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
+	return reply
 }
+
+func idlePane(job, cwd, status string) poolActionReply {
+	return poolActionReply{op: nodeCommandAgentsList, result: map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{{PaneID: roleHeldPane, Name: job, AgentStatus: status, Cwd: cwd}}, "panes_ok": true}}
+}
+
+var releasedReply = poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": ""}}
 
 // sweepHandover runs the sweep for f's job, answering the probe and the patch.
 func sweepHandover(t *testing.T, f *quotaReplaceFixture, exhaustion poolExhaustion, patch map[string]any) poolJobResult {
@@ -80,15 +82,15 @@ func sweepHandover(t *testing.T, f *quotaReplaceFixture, exhaustion poolExhausti
 		switch string(command["op"]) {
 		case `"agents.list"`:
 			roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
-		case `"worktree.handover_patch"`:
-			var args nodeHandoverPatchArgs
-			if err := json.Unmarshal(command["args"], &args); err != nil || args.Job != f.job || args.Branch != f.holder.Request.Repository.Checkout.Branch || args.Cwd != "/work/project.checkout" {
+		case `"worktree.handover_snapshot"`:
+			var args nodeHandoverSnapshotArgs
+			if err := json.Unmarshal(command["args"], &args); err != nil || args.Snapshot || args.Job != f.job || args.Branch != f.holder.Request.Repository.Checkout.Branch || args.Cwd != "/work/project.checkout" {
 				t.Fatalf("patch args=%s", command["args"])
 			}
 			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": patch})
 			patch = nil
 		default:
-			// Nothing may close before the successor is stored.
+			// Nothing may close or snapshot before the successor is stored.
 			t.Fatalf("unexpected node command during the sweep: %s", command["op"])
 		}
 	}
@@ -101,14 +103,21 @@ func sweepHandover(t *testing.T, f *quotaReplaceFixture, exhaustion poolExhausti
 	return poolJobResult{}
 }
 
-// closeHandover plays the close-op path to settlement: the node closes the
-// pane and writes the old record lost with the row's end_reason.
+// closeHandover plays the close-op path to settlement: the idle pane, the
+// node's snapshot, the close, and the old record lost with the row's
+// end_reason.
 func closeHandover(t *testing.T, f *quotaReplaceFixture, action poolAction) poolAction {
+	t.Helper()
+	return closeHandoverWith(t, f, action, handoverSnapReply(f.job, true))
+}
+
+func closeHandoverWith(t *testing.T, f *quotaReplaceFixture, action poolAction, snap map[string]any) poolAction {
 	t.Helper()
 	if err := runPoolActionStep(t, f.hub, f.node, action,
 		poolStatus(nodeCloseOpNone, false, false),
-		poolActionReply{op: nodeCommandHandoverPatch, result: handoverPatchReply(f.job, false)},
-		poolActionReply{op: nodeCommandAgentsList, result: map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, "panes_ok": true}},
+		idlePane(f.job, "/work/project.checkout", "idle"),
+		poolActionReply{op: nodeCommandHandoverSnapshot, result: snap},
+		idlePane(f.job, "/work/project.checkout", "idle"),
 		poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpClosed, "replayed": false}},
 	); err != nil {
 		t.Fatal(err)
@@ -207,7 +216,7 @@ func TestPoolHandoverUrgentImplementerIsHandedOverByTheHub(t *testing.T) {
 	const job, next = "pa-device-stutter-5145", "pa-device-stutter-5145-q1"
 	f := handoverFixture(t, job, 1, 3*time.Hour)
 	exhaustion := window5h()
-	result := sweepHandover(t, f, exhaustion, handoverPatchReply(job, true))
+	result := sweepHandover(t, f, exhaustion, handoverReadReply(job))
 	if result.action != poolJobQueued || result.why != "urgent" {
 		t.Fatalf("sweep=%+v", result)
 	}
@@ -220,9 +229,6 @@ func TestPoolHandoverUrgentImplementerIsHandedOverByTheHub(t *testing.T) {
 		t.Fatalf("end_reason=%q", action.Data.EndReason)
 	}
 	assertHandoverSuccessor(t, handover.Successor, job, next)
-	if !strings.Contains(handover.Successor.Brief, "hk evidence "+fleet.HandoverPatchDocKey(job)) {
-		t.Fatalf("note does not name the patch: %q", handover.Successor.Brief)
-	}
 	if ids := spawnOperations(t, f.hub, next); len(ids) != 0 {
 		t.Fatalf("successor submitted before the close: %v", ids)
 	}
@@ -230,7 +236,10 @@ func TestPoolHandoverUrgentImplementerIsHandedOverByTheHub(t *testing.T) {
 		t.Fatalf("owner told before the hand-over finished: %v", lines)
 	}
 	action = closeHandover(t, f, action)
-	finishSettledCapture(t, f, handoverPatchReply(f.job, false))
+	if brief := action.Data.Handover.Successor.Brief; !strings.Contains(brief, "commit "+handoverSnapCommit+" at refs/panewire/handover/"+job+" on origin") || !strings.Contains(brief, "git reset --mixed HEAD~1") {
+		t.Fatalf("note does not name the snapshot: %q", brief)
+	}
+	finishSettled(t, f)
 	if ids := spawnOperations(t, f.hub, next); len(ids) != 1 || ids[0] != handover.Successor.RequestID {
 		t.Fatalf("successor operations=%v, want the stored request %s", ids, handover.Successor.RequestID)
 	}
@@ -278,37 +287,52 @@ func TestPoolHandoverWaitsWhenTheResetIsWithinExpected(t *testing.T) {
 	// A second stop (another reset) hands over.
 	second := exhaustion
 	second.Reset = second.Reset.Add(10 * time.Minute)
-	if result := sweepHandover(t, f, second, handoverPatchReply(job, false)); result.action != poolJobQueued || result.why != "resume_limit" {
+	if result := sweepHandover(t, f, second, handoverReadReply(job)); result.action != poolJobQueued || result.why != "resume_limit" {
 		t.Fatalf("second stop=%+v", result)
 	}
 }
 
-func TestPoolHandoverDirtyWorktreeNamesTheSavedPatch(t *testing.T) {
+func TestPoolHandoverDirtyWorktreeNamesTheSnapshot(t *testing.T) {
+	kept := handoverSnapReply("dirty-job", true)
+	delete(kept, "commit")
+	delete(kept, "ref")
+	kept["kept"] = true
+	submodule := handoverSnapReply("dirty-job", true)
+	submodule["submodule"], submodule["kept"] = true, true
 	for _, tc := range []struct {
 		name  string
-		patch map[string]any
-		want  string
+		read  map[string]any
+		snap  map[string]any
+		wants []string
 	}{
-		{"uploaded", handoverPatchReply("dirty-job", true), "hk evidence " + fleet.HandoverPatchDocKey("dirty-job")},
-		{"never pushed", map[string]any{"outcome": nodeHandoverPatchSaved, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": true, "saved": "/jobs/dirty-job/" + fleet.HandoverPatchFile, "doc": fleet.HandoverPatchDocKey("dirty-job"), "digest": handoverDigest}, "was never pushed"},
+		{"pushed snapshot", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", true), []string{"refs/panewire/handover/dirty-job", "git fetch origin refs/panewire/handover/dirty-job"}},
+		{"clean", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", false), []string{"held no other work"}},
+		{"push failed", handoverReadReply("dirty-job"), kept, []string{"could not be pushed", "kept at machine-a:/work/dirty-job-checkout"}},
+		{"dirty submodule", handoverReadReply("dirty-job"), submodule, []string{"refs/panewire/handover/dirty-job", "submodule", "kept at machine-a:/work/dirty-job-checkout"}},
+		{"never pushed", map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": false, "submodule": false, "kept": false},
+			map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": true, "submodule": false, "kept": false, "commit": handoverSnapCommit, "ref": handoverSnapshotRefPrefix + "dirty-job"},
+			[]string{"was never pushed", "refs/panewire/handover/dirty-job"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := handoverFixture(t, "dirty-job", 1, 0)
-			if result := sweepHandover(t, f, window5h(), tc.patch); result.action != poolJobQueued {
-				t.Fatalf("a dirty worktree blocked the hand-over: %+v", result)
+			if result := sweepHandover(t, f, window5h(), tc.read); result.action != poolJobQueued {
+				t.Fatalf("sweep=%+v", result)
 			}
-			successor := readOnlyPoolAction(t, f.hub).Data.Handover.Successor
-			if !strings.Contains(successor.Brief, tc.want) {
-				t.Fatalf("note=%q, want %q", successor.Brief, tc.want)
+			action := closeHandoverWith(t, f, readOnlyPoolAction(t, f.hub), tc.snap)
+			successor := action.Data.Handover.Successor
+			for _, want := range tc.wants {
+				if !strings.Contains(successor.Brief, want) {
+					t.Fatalf("note=%q, want %q", successor.Brief, want)
+				}
 			}
 			if tc.name == "never pushed" {
 				checkout := successor.Repository.Checkout
 				if checkout.Mode != "detached" || checkout.Sha != strings.Repeat("c", 40) || checkout.Fetch != "refs/heads/main" {
 					t.Fatalf("never-pushed successor must start from the base: %+v", checkout)
 				}
-				if _, err := fleet.ValidateSubmission(successor); err != nil {
-					t.Fatal(err)
-				}
+			}
+			if _, err := fleet.ValidateSubmission(successor); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
@@ -319,14 +343,14 @@ func TestPoolHandoverDirtyWorktreeNamesTheSavedPatch(t *testing.T) {
 func TestPoolHandoverSurvivesHubRestartAtEveryStep(t *testing.T) {
 	const job, next = "restart-job", "restart-job-q1"
 	f := handoverFixture(t, job, 1, 0)
-	if result := sweepHandover(t, f, window5h(), handoverPatchReply(job, false)); result.action != poolJobQueued {
+	if result := sweepHandover(t, f, window5h(), handoverReadReply(job)); result.action != poolJobQueued {
 		t.Fatalf("sweep=%+v", result)
 	}
 	stored := readOnlyPoolAction(t, f.hub).Data.Handover.Successor.RequestID
 	restartPoolActionHub(t, f) // after the stored successor
 	action := closeHandover(t, f, readOnlyPoolAction(t, f.hub))
 	restartPoolActionHub(t, f) // after the close
-	finishSettledCapture(t, f, handoverPatchReply(f.job, false))
+	finishSettled(t, f)
 	// A crash after the claim but before Submitted was saved: the replay
 	// claims the same request again, which is the same operation.
 	action = readOnlyPoolAction(t, f.hub)
@@ -335,7 +359,7 @@ func TestPoolHandoverSurvivesHubRestartAtEveryStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	restartPoolActionHub(t, f) // after the submit
-	finishSettledCapture(t, f, handoverPatchReply(f.job, false))
+	finishSettled(t, f)
 	finishSettled(t, f)
 	placeSuccessor(t, f, next)
 	restartPoolActionHub(t, f)
@@ -354,9 +378,9 @@ func TestPoolHandoverSurvivesHubRestartAtEveryStep(t *testing.T) {
 func TestPoolHandoverFailedSuccessorEndsTheRowWithTheFallbackNotice(t *testing.T) {
 	const job, next = "fail-job", "fail-job-q1"
 	f := handoverFixture(t, job, 1, 0)
-	sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
 	closeHandover(t, f, readOnlyPoolAction(t, f.hub))
-	finishSettledCapture(t, f, handoverPatchReply(f.job, false))
+	finishSettled(t, f)
 	task, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), next)
 	if err != nil {
 		t.Fatal(err)
@@ -381,7 +405,7 @@ func TestPoolHandoverAndQuotaReplacementFenceEachOther(t *testing.T) {
 	t.Run("handover first", func(t *testing.T) {
 		const job = "fence-job"
 		f := handoverFixture(t, job, 1, 0)
-		sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+		sweepHandover(t, f, window5h(), handoverReadReply(job))
 		action := closeHandover(t, f, readOnlyPoolAction(t, f.hub))
 		// The record is lost now, yet the settled row still owns the job.
 		f.jobs.mu.Lock()
@@ -425,7 +449,7 @@ func TestPoolHandoverAndQuotaReplacementFenceEachOther(t *testing.T) {
 	t.Run("one row per job", func(t *testing.T) {
 		const job = "fence-job"
 		f := handoverFixture(t, job, 1, 0)
-		sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+		sweepHandover(t, f, window5h(), handoverReadReply(job))
 		closeHandover(t, f, readOnlyPoolAction(t, f.hub))
 		f.jobs.mu.Lock()
 		f.jobs.records[job]["state"] = "spawned"
@@ -466,22 +490,17 @@ func TestPoolHandoverFallsBackBeforeTheClose(t *testing.T) {
 		patch  bool
 		why    string
 	}{
-		{"pinned profile", "pin-job", func(s *fleet.Submission) {
-			s.Args[slices.Index(s.Args, "-m")+1] = "opus"
-			s.Args = append(s.Args, "--override-reason", "pinned by the owner", "--containment", "hk:42")
-		}, false, "pinned"},
 		{"pinned host", "host-job", func(s *fleet.Submission) {
 			s.Args[slices.Index(s.Args, "--host")+1] = "machine-a"
 			s.Args = append(s.Args, "--override-reason", "pinned by the owner", "--containment", "hk:42")
 		}, false, "pinned"},
 		{"end_reason over hk's limit", strings.Repeat("e", 100), nil, false, "end_reason_too_long"},
-		{"label over herdr's limit", "label-job", func(s *fleet.Submission) { s.Args[slices.Index(s.Args, "-l")+1] = strings.Repeat("l", 31) }, true, "label_too_long"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newQuotaReplaceFixtureWith(t, "implementer", tc.job, tc.mutate)
 			f.hub.mu.Lock()
 			f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
-			f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverPatch] = true
+			f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
 			f.hub.jobs[tc.job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: tc.job, Epoch: 1}, Node: "machine-a"}
 			f.hub.mu.Unlock()
 			f.hub.handoverInputs = func(context.Context, string) handoverInputs {
@@ -489,7 +508,7 @@ func TestPoolHandoverFallsBackBeforeTheClose(t *testing.T) {
 			}
 			var patch map[string]any
 			if tc.patch {
-				patch = handoverPatchReply(tc.job, false)
+				patch = handoverReadReply(tc.job)
 			}
 			if tc.mutate == nil || !tc.patch {
 				// Refused before the probe: no node command at all.
@@ -516,7 +535,7 @@ func TestPoolHandoverSuccessorArguments(t *testing.T) {
 	j := slices.Index(old.Args, "--report-relative")
 	old.Args = slices.Delete(old.Args, j, j+2)
 	old.StartConditions = []fleet.StartCondition{{}}
-	next, err := handoverSuccessorRequest(old, "chain-q1", "chain-q1-q2", "claude", window5h(), nodeHandoverPatchResult{Pushed: handoverPushed, Digest: handoverDigest})
+	next, err := handoverSuccessorRequest(old, "chain-q1", "chain-q1-q2", "claude", window5h(), nodeHandoverSnapshotResult{Branch: "wk/task", Pushed: handoverPushed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,14 +644,15 @@ func TestPoolHandoverWithdrawsBeforeTheClose(t *testing.T) {
 		replies []poolActionReply
 		gone    bool
 	}{
-		{"worktree changed", []poolActionReply{
+		{"branch moved", []poolActionReply{
 			poolStatus(nodeCloseOpNone, false, false),
-			{op: nodeCommandHandoverPatch, result: func() map[string]any {
-				p := handoverPatchReply("withdraw-job", false)
-				p["digest"] = strings.Repeat("e", 64)
+			idlePane("withdraw-job", "/work/project.checkout", "idle"),
+			{op: nodeCommandHandoverSnapshot, result: func() map[string]any {
+				p := handoverSnapReply("withdraw-job", true)
+				p["pushed"] = strings.Repeat("e", 40)
 				return p
 			}()},
-			{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": ""}},
+			releasedReply,
 		}, false},
 		{"stop cleared", []poolActionReply{
 			poolStatus(nodeCloseOpNone, false, false),
@@ -642,7 +662,7 @@ func TestPoolHandoverWithdrawsBeforeTheClose(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			const job = "withdraw-job"
 			f := handoverFixture(t, job, 1, 0)
-			sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+			sweepHandover(t, f, window5h(), handoverReadReply(job))
 			action := readOnlyPoolAction(t, f.hub)
 			if tc.gone {
 				action.Data.Handover.Reset = time.Now().Add(-time.Minute).Unix()
@@ -661,15 +681,21 @@ func TestPoolHandoverWithdrawsBeforeTheClose(t *testing.T) {
 	}
 }
 
-func TestPoolHandoverCapturesOnlyAnIdlePane(t *testing.T) {
+// The snapshot is the pane's final work: a working pane holds the close, and
+// nothing is snapshot or closed until it idles.
+func TestPoolHandoverSnapshotsOnlyAnIdlePane(t *testing.T) {
 	const job = "busy-job"
 	f := handoverFixture(t, job, 1, 0)
-	done := make(chan poolJobResult, 1)
-	go func() { done <- f.hub.sweepPoolJob(t.Context(), window5h(), f.holder) }()
-	command := nodeCommandRead(t, f.node)
-	roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: job, AgentStatus: "working", Cwd: "/work/project.checkout"}}, true)
-	if result := <-done; result.why != "pane_not_idle" {
-		t.Fatalf("sweep=%+v", result)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	err := runPoolActionStep(t, f.hub, f.node, readOnlyPoolAction(t, f.hub),
+		poolStatus(nodeCloseOpNone, false, false),
+		idlePane(job, "/work/project.checkout", "working"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "idle") {
+		t.Fatalf("err=%v, want the close held until the pane idles", err)
+	}
+	if action := readOnlyPoolAction(t, f.hub); action.Phase != poolActionPending || action.Data.Handover.Snapshot != nil || action.Data.Args != nil {
+		t.Fatalf("row=%+v", action)
 	}
 }
 
@@ -678,7 +704,7 @@ func TestPoolHandoverCapturesOnlyAnIdlePane(t *testing.T) {
 func TestPoolHandoverSettledRowSurvivesAnOwnershipMove(t *testing.T) {
 	const job = "moved-job"
 	f := handoverFixture(t, job, 1, 0)
-	sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
 	closeHandover(t, f, readOnlyPoolAction(t, f.hub))
 	f.hub.mu.Lock()
 	f.hub.jobs[job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: job, Epoch: 2}, Node: "machine-b"}
@@ -701,7 +727,7 @@ func TestPoolHandoverSettledRowSurvivesAnOwnershipMove(t *testing.T) {
 func TestPoolHandoverSettledRowFencesReassignment(t *testing.T) {
 	const job = "fence-settled"
 	f := handoverFixture(t, job, 1, 0)
-	sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
 	action := closeHandover(t, f, readOnlyPoolAction(t, f.hub))
 	f.hub.mu.Lock()
 	f.hub.jobs[job].Orphaned = true
@@ -714,9 +740,9 @@ func TestPoolHandoverSettledRowFencesReassignment(t *testing.T) {
 func TestPoolHandoverMovedJobKeepsAClaimedSuccessor(t *testing.T) {
 	const job, next = "moved-claimed", "moved-claimed-q1"
 	f := handoverFixture(t, job, 1, 0)
-	sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
 	closeHandover(t, f, readOnlyPoolAction(t, f.hub))
-	finishSettledCapture(t, f, handoverPatchReply(job, false))
+	finishSettled(t, f)
 	// The claim committed; a crash lost the Submitted flag; then the job moved.
 	action := readOnlyPoolAction(t, f.hub)
 	action.Data.Handover.Submitted = false
@@ -742,7 +768,7 @@ func TestPoolHandoverRewritesAnInheritedReport(t *testing.T) {
 	i := slices.Index(old.Args, "--task")
 	old.Args[i], old.Args[i+1] = "--parent-job", "a-job"
 	old.Args[slices.Index(old.Args, "--report-relative")+1] = "a-job/report.md"
-	next, err := handoverSuccessorRequest(old, "b-job", "b-job-q1", "claude", window5h(), nodeHandoverPatchResult{Branch: "wk/task", Pushed: handoverPushed})
+	next, err := handoverSuccessorRequest(old, "b-job", "b-job-q1", "claude", window5h(), nodeHandoverSnapshotResult{Branch: "wk/task", Pushed: handoverPushed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -754,19 +780,20 @@ func TestPoolHandoverRewritesAnInheritedReport(t *testing.T) {
 func TestPoolHandoverRechecksBeforeAnyCloseIsRegistered(t *testing.T) {
 	const job = "args-saved"
 	f := handoverFixture(t, job, 1, 0)
-	sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
 	action := readOnlyPoolAction(t, f.hub)
 	// Args were saved, then the hub restarted before sending the close.
 	action.Data.Args = &nodePaneCloseOpArgs{RequestID: action.ID, Job: job, Epoch: 1, Attempt: "00002-job.spawned.json", PaneID: roleHeldPane, Name: job, AgentStatus: "idle", Cwd: "/work/project.checkout", EndReason: action.Data.EndReason}
 	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
 		t.Fatal(err)
 	}
-	changed := handoverPatchReply(job, false)
-	changed["digest"] = strings.Repeat("e", 64)
+	changed := handoverSnapReply(job, true)
+	changed["pushed"] = strings.Repeat("e", 40)
 	if err := runPoolActionStep(t, f.hub, f.node, action,
 		poolStatus(nodeCloseOpNone, false, false),
-		poolActionReply{op: nodeCommandHandoverPatch, result: changed},
-		poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": ""}},
+		idlePane(job, "/work/project.checkout", "idle"),
+		poolActionReply{op: nodeCommandHandoverSnapshot, result: changed},
+		releasedReply,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +811,7 @@ func TestPoolHandoverAppliesMaxWaitToAFreeLimit(t *testing.T) {
 		return handoverInputs{policy: p, policyOK: true, priority: 3, expected: 3 * time.Hour}
 	}
 	free := poolExhaustion{Pool: "claude", Account: "acct", Cause: poolCauseFreeLimit, Reset: time.Now().Add(45 * time.Minute).UTC().Truncate(time.Second)}
-	if result := sweepHandover(t, f, free, handoverPatchReply(job, false)); result.action != poolJobQueued || result.why != "reset_beyond_max_wait" {
+	if result := sweepHandover(t, f, free, handoverReadReply(job)); result.action != poolJobQueued || result.why != "reset_beyond_max_wait" {
 		t.Fatalf("sweep=%+v, want a hand-over past max_wait", result)
 	}
 }
@@ -796,13 +823,13 @@ func TestPoolHandoverContinuesADetachedSuccessor(t *testing.T) {
 	})
 	f.hub.mu.Lock()
 	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
-	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverPatch] = true
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
 	f.hub.jobs[job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: job, Epoch: 1}, Node: "machine-a"}
 	f.hub.mu.Unlock()
 	f.hub.handoverInputs = func(context.Context, string) handoverInputs {
 		return handoverInputs{policy: handoverPolicy(), policyOK: true, priority: 1}
 	}
-	patch := handoverPatchReply(job, false)
+	patch := handoverReadReply(job)
 	patch["branch"] = "wk/made-later"
 	if result := sweepHandover(t, f, window5h(), patch); result.action != poolJobQueued {
 		t.Fatalf("sweep=%+v", result)
@@ -816,7 +843,7 @@ func TestPoolHandoverWithdrawsWhenARetiredPoolReturns(t *testing.T) {
 	const job = "retired-job"
 	f := handoverFixture(t, job, 1, 0)
 	retired := poolExhaustion{Pool: "claude", Cause: poolCauseRetired}
-	sweepHandover(t, f, retired, handoverPatchReply(job, false))
+	sweepHandover(t, f, retired, handoverReadReply(job))
 	action := readOnlyPoolAction(t, f.hub)
 	f.hub.poolSweep.forget(retired.key()) // the pool came back
 	if err := runPoolActionStep(t, f.hub, f.node, action,
@@ -834,12 +861,11 @@ func TestPoolHandoverBindsTheCloseToTheCapturedWorktree(t *testing.T) {
 	t.Run("pane moved to another directory", func(t *testing.T) {
 		const job = "cwd-job"
 		f := handoverFixture(t, job, 1, 0)
-		sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
+		sweepHandover(t, f, window5h(), handoverReadReply(job))
 		if err := runPoolActionStep(t, f.hub, f.node, readOnlyPoolAction(t, f.hub),
 			poolStatus(nodeCloseOpNone, false, false),
-			poolActionReply{op: nodeCommandHandoverPatch, result: handoverPatchReply(job, false)},
-			poolActionReply{op: nodeCommandAgentsList, result: map[string]any{"agents": []nodeAgentRow{}, "panes": []nodeAgentRow{{PaneID: roleHeldPane, Name: job, AgentStatus: "idle", Cwd: "/work/other"}}, "panes_ok": true}},
-			poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpCancelled, "released": true, "settled": false, "attempt": ""}},
+			idlePane(job, "/work/other", "idle"),
+			releasedReply,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -850,27 +876,13 @@ func TestPoolHandoverBindsTheCloseToTheCapturedWorktree(t *testing.T) {
 	t.Run("pane in another checkout", func(t *testing.T) {
 		const job = "top-job"
 		f := handoverFixture(t, job, 1, 0)
-		patch := handoverPatchReply(job, false)
+		patch := handoverReadReply(job)
 		patch["top"] = "/work/someone-elses-clone"
 		if result := sweepHandover(t, f, window5h(), patch); result.action != poolJobNotified || result.why != "worktree_mismatch" {
 			t.Fatalf("sweep=%+v", result)
 		}
 	})
-	t.Run("final capture after the close moved", func(t *testing.T) {
-		const job, next = "final-job", "final-job-q1"
-		f := handoverFixture(t, job, 1, 0)
-		sweepHandover(t, f, window5h(), handoverPatchReply(job, false))
-		closeHandover(t, f, readOnlyPoolAction(t, f.hub))
-		moved := handoverPatchReply(job, true)
-		moved["pushed"] = strings.Repeat("f", 40)
-		finishSettledCapture(t, f, moved)
-		if ids := spawnOperations(t, f.hub, next); len(ids) != 0 {
-			t.Fatalf("successor claimed on a stale capture: %v", ids)
-		}
-		if lines := ownerLines(t, f.hub, "pool-handover:"); len(lines) != 1 || !strings.Contains(lines[0], "failed") {
-			t.Fatalf("owner lines=%q", lines)
-		}
-	})
+
 }
 
 func TestPoolHandoverWaitReplayReleasesTheSweepClaim(t *testing.T) {
@@ -884,5 +896,149 @@ func TestPoolHandoverWaitReplayReleasesTheSweepClaim(t *testing.T) {
 	// sweepExhaustedPool releases a notified implementer only for this reason.
 	if result := sweepHandover(t, f, exhaustion, nil); result.action != poolJobNotified || result.why != poolWaitReason {
 		t.Fatalf("replay=%+v, want the wait reason so the claim is released", result)
+	}
+}
+
+// Decision for PR #687 (evidence/2026-11-18/pw-handover-4633/decision-root-causes.md).
+
+func taskRoleOf(t *testing.T, h *HubServer, request string) string {
+	t.Helper()
+	var role sql.NullString
+	if err := h.inbox.store.db.QueryRowContext(t.Context(), h.inbox.store.q(`SELECT task_role FROM spawn_reservations WHERE request_id=?`), request).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	return role.String
+}
+
+// A: a non-final handover row owns the job. Reassignment, role release and
+// a rival spawn for the task are refused while it is settled and owes its
+// successor, and admitted once the row is final.
+func TestPoolHandoverRowOwnsTheJobUntilFinal(t *testing.T) {
+	const job, next = "own-job", "own-job-q1"
+	f := handoverFixture(t, job, 1, 0)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	action := closeHandover(t, f, readOnlyPoolAction(t, f.hub))
+	if owner, err := f.hub.inbox.store.poolActionOwns(t.Context(), job); err != nil || owner != action.ID {
+		t.Fatalf("owner=%q err=%v, want the settled row", owner, err)
+	}
+	if role := taskRoleOf(t, f.hub, f.holder.Request.RequestID); role == "" {
+		t.Fatal("the settle released the old job's task role before a successor holds it")
+	}
+	rival := f.holder.Request
+	rival.RequestID = "d676220b-e763-4af1-aefd-0000000000aa"
+	rival.Args = slices.Clone(rival.Args)
+	rival.Args[slices.Index(rival.Args, "--job")+1] = "rival-job"
+	rival.Args[slices.Index(rival.Args, "-l")+1] = "rival-job"
+	rival.Args[slices.Index(rival.Args, "--report-relative")+1] = "rival-job/report.md"
+	if _, _, err := f.hub.inbox.store.claimSpawn(t.Context(), rival, "rival-job", "parent", time.Now()); !errors.Is(err, errSpawnClaimed) {
+		t.Fatalf("a rival spawn for the task was admitted while the row owns the job: %v", err)
+	}
+	if unlock, free := f.hub.lockWithoutPoolAction(t.Context(), job); free {
+		unlock()
+		t.Fatal("role release ran while the hand-over owns the job")
+	}
+	// The successor's claim takes the role over in one transaction.
+	finishSettled(t, f)
+	successor := readOnlyPoolAction(t, f.hub).Data.Handover.Successor.RequestID
+	if old, got := taskRoleOf(t, f.hub, f.holder.Request.RequestID), taskRoleOf(t, f.hub, successor); old != "" || got == "" {
+		t.Fatalf("task role old=%q successor=%q, want it moved to the successor", old, got)
+	}
+	// The successor fails for good: the row is final and frees the task.
+	task, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 3, Stage: "placement", Reason: "no_pool"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	finishSettled(t, f)
+	if owner, err := f.hub.inbox.store.poolActionOwns(t.Context(), job); err != nil || owner != "" {
+		t.Fatalf("owner=%q err=%v after the row ended", owner, err)
+	}
+	if _, _, err := f.hub.inbox.store.claimSpawn(t.Context(), rival, "rival-job", "parent", time.Now()); err != nil {
+		t.Fatalf("the task stayed fenced after the row ended: %v", err)
+	}
+}
+
+// A crash after the successor's claim and before Submitted was saved: the
+// replay claims the same request again, which answers the same operation.
+func TestPoolHandoverClaimReplaysAfterACrash(t *testing.T) {
+	const job, next = "crash-job", "crash-job-q1"
+	f := handoverFixture(t, job, 1, 0)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	closeHandover(t, f, readOnlyPoolAction(t, f.hub))
+	finishSettled(t, f)
+	action := readOnlyPoolAction(t, f.hub)
+	action.Data.Handover.Submitted = false
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	finishSettled(t, f)
+	if action = readOnlyPoolAction(t, f.hub); !action.Data.Handover.Submitted || action.Data.Handover.Outcome != "" {
+		t.Fatalf("handover=%+v, want the replayed claim recorded", action.Data.Handover)
+	}
+	if ids := spawnOperations(t, f.hub, next); len(ids) != 1 || ids[0] != action.Data.Handover.Successor.RequestID {
+		t.Fatalf("operations=%v", ids)
+	}
+}
+
+// A rollback drain holds the close of a stored hand-over: nothing is
+// snapshot or closed while no successor could be claimed.
+func TestPoolHandoverDrainHoldsTheClose(t *testing.T) {
+	const job = "drain-close"
+	f := handoverFixture(t, job, 1, 0)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	f.hub.inbox.store.spawnFrozen = true
+	defer func() { f.hub.inbox.store.spawnFrozen = false }()
+	if err := runPoolActionStep(t, f.hub, f.node, readOnlyPoolAction(t, f.hub), poolStatus(nodeCloseOpNone, false, false)); err == nil || !strings.Contains(err.Error(), "drain") {
+		t.Fatalf("err=%v, want the close held", err)
+	}
+	if action := readOnlyPoolAction(t, f.hub); action.Phase != poolActionPending || action.Data.Handover.Snapshot != nil {
+		t.Fatalf("row=%+v", action)
+	}
+}
+
+// hk binds the task to another job after the row was stored: the close is
+// withdrawn, nothing is snapshot.
+func TestPoolHandoverRebindingWithdrawsTheClose(t *testing.T) {
+	const job = "rebind-close"
+	f := handoverFixture(t, job, 1, 0)
+	sweepHandover(t, f, window5h(), handoverReadReply(job))
+	f.hub.handoverInputs = func(context.Context, string) handoverInputs { return handoverInputs{bound: "someone-else"} }
+	if err := runPoolActionStep(t, f.hub, f.node, readOnlyPoolAction(t, f.hub), poolStatus(nodeCloseOpNone, false, false), releasedReply); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if len(rows) != 1 || rows[0].Phase != poolActionRefused || rows[0].Data.Handover.Reason != "task_rebound" {
+		t.Fatalf("rows=%+v", rows)
+	}
+}
+
+// Smaller items: a pinned profile is dropped, not refused; an inherited label
+// is cut to herdr's 32 characters and keeps its -q<n>.
+func TestPoolHandoverDropsAPinnedProfileAndBoundsTheLabel(t *testing.T) {
+	const job = "pin-job"
+	f := newQuotaReplaceFixtureWith(t, "implementer", job, func(s *fleet.Submission) {
+		s.Args[slices.Index(s.Args, "-m")+1] = "opus"
+		s.Args[slices.Index(s.Args, "-l")+1] = strings.Repeat("l", 31)
+		s.Args = append(s.Args, "--override-reason", "pinned by the owner", "--containment", "hk:42")
+	})
+	f.hub.mu.Lock()
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
+	f.hub.jobs[job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: job, Epoch: 1}, Node: "machine-a"}
+	f.hub.mu.Unlock()
+	f.hub.handoverInputs = func(context.Context, string) handoverInputs {
+		return handoverInputs{policy: handoverPolicy(), policyOK: true, priority: 1}
+	}
+	if result := sweepHandover(t, f, window5h(), handoverReadReply(job)); result.action != poolJobQueued {
+		t.Fatalf("sweep=%+v", result)
+	}
+	args := readOnlyPoolAction(t, f.hub).Data.Handover.Successor.Args
+	if slices.Contains(args, "-m") {
+		t.Fatalf("pinned profile kept: %v", args)
+	}
+	if label := hubSpawnArg(args, "-l"); len(label) != 32 || !strings.HasSuffix(label, "-q1") || !fleet.ValidAgentName(label) {
+		t.Fatalf("label=%q", label)
 	}
 }

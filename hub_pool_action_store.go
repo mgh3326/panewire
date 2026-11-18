@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // poolActionSchema is also installed by Postgres migration 0021.
@@ -239,7 +241,7 @@ func (h *HubServer) lockWithoutPoolAction(ctx context.Context, job string) (func
 		unlock()
 		return nil, false
 	}
-	id, err := h.inbox.store.pendingPoolAction(ctx, job)
+	id, err := h.inbox.store.poolActionOwns(ctx, job)
 	if err != nil || id != "" {
 		unlock()
 		return nil, false
@@ -247,32 +249,24 @@ func (h *HubServer) lockWithoutPoolAction(ctx context.Context, job string) (func
 	return unlock, true
 }
 
-// activePoolActionFor reports a non-final row of any kind for job: one row
-// per job (hk 4633).
-func (s *laneInboxStore) activePoolActionFor(parent context.Context, job string) (bool, error) {
-	ctx, cancel := s.op(parent)
-	defer cancel()
-	var id string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM pool_actions WHERE job=? AND phase IN (?,?,?) LIMIT 1`), job, poolActionPending, poolActionGuarded, poolActionSettled).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+// poolActionOwns names the pool action that owns job, or "": a close not
+// yet settled (pending or guarded), or a handover row that is not final —
+// settled included, while it still owes its successor (hk 4633). It is the
+// one fence reassignment, role release, quota replacement and the sweep check.
+func (s *laneInboxStore) poolActionOwns(parent context.Context, job string) (string, error) {
+	if id, err := s.pendingPoolAction(parent, job); err != nil || id != "" {
+		return id, err
 	}
-	return err == nil, err
-}
-
-// activeHandover reports a non-final handover row for job: the fence that
-// keeps the quota-stop replacement off a job the hub is handing over.
-func (s *laneInboxStore) activeHandover(parent context.Context, job string) (bool, error) {
 	rows, err := s.poolActionsOf(parent, job)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	for _, action := range rows {
 		if action.Data.Kind == poolActionKindHandover && action.Phase != poolActionDone && action.Phase != poolActionRefused {
-			return true, nil
+			return action.ID, nil
 		}
 	}
-	return false, nil
+	return "", nil
 }
 
 // poolWaitResets lists the resets of the stops already waited out for job.
@@ -311,4 +305,23 @@ func (s *laneInboxStore) poolActionsOf(parent context.Context, job string) ([]po
 		actions = append(actions, action)
 	}
 	return actions, rows.Err()
+}
+
+// claimHandoverSuccessor claims a hand-over's stored successor. A replay
+// with the same request id answers the existing row (claimSpawn). On the
+// first claim the old job's task role, still reserved for it while its row
+// owns the job, passes to the successor in the same transaction, so no other
+// spawn for the task is admitted between the two (hk 4633).
+func (s *laneInboxStore) claimHandoverSuccessor(parent context.Context, request fleet.Submission, job, owner, oldRequest string, now time.Time) (hubSpawnTask, bool, error) {
+	ctx, cancel := s.op(parent)
+	var role sql.NullString
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT task_role FROM spawn_reservations WHERE request_id=?`), oldRequest).Scan(&role)
+	cancel()
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return hubSpawnTask{}, false, err
+	}
+	if !role.Valid || role.String == "" {
+		return s.claimSpawn(parent, request, job, owner, now)
+	}
+	return s.claimSpawnReplacing(parent, request, job, owner, now, oldRequest, role.String, "accepted")
 }

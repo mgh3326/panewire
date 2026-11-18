@@ -576,17 +576,12 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, error) {
 	if h.inbox == nil {
 		h.poolStoreWarningOnce.Do(func() { h.logger.Warn("close action finality unchecked without inbox store") })
 	} else {
-		id, err := h.inbox.store.pendingPoolAction(ctx, jobID)
+		id, err := h.inbox.store.poolActionOwns(ctx, jobID)
 		if err != nil {
 			return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action store unavailable", jobID)
 		}
 		if id != "" {
-			return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action %s is pending or awaiting terminal job state or pane release", jobID, id)
-		}
-		// A settled hand-over still owes its successor: the job stays fenced
-		// until the row is final (hk 4633).
-		if handing, err := h.inbox.store.activeHandover(ctx, jobID); err != nil || handing {
-			return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: a pool hand-over is in progress or its store is unavailable", jobID)
+			return hubJobEventPayload{}, fmt.Errorf("job %s cannot be reassigned: close action %s is pending or awaiting terminal job state, pane release or its hand-over successor", jobID, id)
 		}
 	}
 	h.mu.Lock()

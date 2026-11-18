@@ -900,20 +900,23 @@ node without a jobs root or work root answers `jobs_root_unset` or
 `work_root_unset`; a failed pass answers `sweep_failed`. The CLI is
 `panewire node sweep-checkouts --host <machine> [--dry-run]`.
 
-### `worktree.handover_patch`
+### `worktree.handover_snapshot`
 
 The old node's half of the hub's implementer hand-over (hk 4633,
 [quota-stop.md](quota-stop.md) "An exhausted pool"). Arguments
-`{"job","cwd","branch"}`; offered as `handover_patch_v1` with `close_ops_v1`.
-The node checks the worktree at `cwd` is on `branch`, reads the branch's last
-pushed commit with `git ls-remote origin`, and saves `git status --porcelain`,
-the untracked file list and `git diff --binary` against that commit (or the
-merge-base with origin's default branch when nothing was pushed) into
-`jobs/<job>/handover-patch.txt`, uploading it to hk as evidence
-`handover/<job>/handover-patch.txt` when the worktree holds work the commit
-lacks. It never changes the worktree. Result: `outcome` (`saved`,
-`not-a-job`, `branch_mismatch`, `git_failed`), `pushed`, `base`, `base_ref`,
-`dirty`, `saved`, `doc` (empty when the upload failed).
+`{"job","cwd","branch","snapshot"}`; offered as `handover_snapshot_v1` with
+`close_ops_v1`. From the top level of the worktree at `cwd` (which must be on
+`branch`) the node reads the branch's last pushed commit with
+`git ls-remote origin`, or the merge-base with origin's default branch when
+nothing was pushed. Without `snapshot` it only reads. With `snapshot` it
+commits the whole worktree, untracked files included, through a temporary
+index on top of HEAD (the user's index is untouched) and pushes it to
+`refs/panewire/handover/<job>` on origin. When that push fails, or a
+submodule holds changes, it writes `jobs/<job>/handover-keep`, which keeps
+the worktree from every sweep. Result: `outcome` (`saved`, `not-a-job`,
+`branch_mismatch`, `git_failed`, `diverged`), `branch`, `top`, `pushed`,
+`base`, `base_ref`, `dirty`, `commit` and `ref` (when a snapshot was pushed),
+`submodule`, `kept`.
 
 ### `worktree.inspect`
 
