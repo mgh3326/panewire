@@ -88,7 +88,7 @@ func TestCloseStatusBareAbsenceIsNotProof_t5296(t *testing.T) {
 			if err := os.WriteFile(path, []byte("not an id"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, missingStatusArgs("op-1", 1), "journal_failed"},
+		}, missingStatusArgs("op-1", 1), ""},
 		{"job entry is not a directory", func(t *testing.T, inbox string) {
 			recordJobIdentity(t, inbox, closeOpJob)
 			if err := os.WriteFile(filepath.Join(inbox, "jobs", closeOpJob), []byte("x"), 0o600); err != nil {

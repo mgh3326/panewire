@@ -302,7 +302,7 @@ other pool close sends one `pool-action-missing:<row>` info line), and nothing
 is closed. Everything else keeps today's behaviour: a node without the
 capability, a bare `none` (no proof), a proof below the row's epoch, an
 unreadable job ledger (the directory is there, so the node never answers it as
-missing) and an unreadable identity record or jobs root all leave the row
+missing) and an unreadable identity record or jobs root (answered as plain `none`, never an error) all leave the row
 pending, the job fenced, and the 30-minute owner notice (`pool-action-stuck:`).
 `supersede_close` rows are unchanged. `pane.close_release` takes no `epoch`
 and answers a missing job as before.

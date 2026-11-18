@@ -2,6 +2,8 @@ package panewire
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -217,4 +219,50 @@ func TestPoolHandoverUnreadableAttemptStaysHeldOnAProvingNode_t5296(t *testing.T
 		t.Fatalf("row=%+v", row)
 	}
 	assertJobFence(t, f, action.Job, action.ID)
+}
+
+// A node that cannot read the job's identity record answers plain none, not an
+// error, so the row still runs the 30-minute owner notice (#716 r4622250359):
+// a failed status call would never start that timer.
+func TestPoolActionUnreadableProofStillNotifiesAfter30Minutes_t5296(t *testing.T) {
+	f, action := poolActionFixture(t)
+	grantCloseMissing(f)
+	inbox := t.TempDir()
+	node := missingJobNode(t, inbox, idlePaneHerdr())
+	recordJobIdentity(t, inbox, action.Job)
+	if err := os.WriteFile(filepath.Join(inbox, "jobs", ".job-ids", action.Job), []byte("not an id"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, code := node.runCloseOpRef(nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job, Epoch: action.Epoch}, false)
+	if code != "" {
+		t.Fatalf("status code=%q, want a plain none answer", code)
+	}
+	data, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusMap map[string]any
+	if err := json.Unmarshal(data, &statusMap); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	now := start
+	f.hub.now = func() time.Time { return now }
+	step := func() {
+		t.Helper()
+		err := runPoolActionStep(t, f.hub, f.node, readOnlyPoolAction(t, f.hub),
+			poolActionReply{op: nodeCommandPaneCloseStatus, result: statusMap},
+			poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": nodeCaptureNotAJob}},
+			poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": nodeCloseOpNone, "released": false}})
+		if err == nil || !strings.Contains(err.Error(), "release not proved") {
+			t.Fatalf("reconcile error=%v", err)
+		}
+		assertPoolActionFence(t, f, action, false)
+	}
+	step()
+	now = start.Add(30 * time.Minute)
+	step()
+	if lines := ownerLines(t, f.hub, "pool-action-stuck:"); len(lines) != 1 {
+		t.Fatalf("notices after 30 minutes=%q, want one", lines)
+	}
 }

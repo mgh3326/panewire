@@ -1275,23 +1275,28 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 // missingJobAnswer answers a pane.close_status that carries the hub's epoch
 // for a job whose directory is not there (hk 5296). Only a proved absence is
 // answered as missing: the node fences the request with a durable tombstone
-// outside every job directory first, then reports the epoch it holds. A
-// directory it cannot prove gone (an unreadable or missing jobs root, an
-// entry that is not a directory, no identity record, a failed write) is the
-// plain none answer, or journal_failed when a read or write failed, and the
-// hub keeps its hold. The caller holds nodeCommandMu.
+// outside every job directory first, then reports the epoch it holds. Any
+// failure to prove it (an unreadable or missing jobs root, an entry that is
+// not a directory, no or an unreadable identity record, a failed tombstone
+// write) is the plain none answer, never an error: the hub then keeps its
+// hold on the paths that run the 30-minute owner notice, where a failed
+// status call would clear that timer (#716 r4622250359). The caller holds
+// nodeCommandMu.
 func (client *HubClient) missingJobAnswer(args nodeCloseOpRefArgs) (any, string) {
+	none := nodeCloseOpStatusResult{State: nodeCloseOpNone}
 	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
 	missing, err := fleet.JobDirMissingProof(jobsRoot, args.Job)
 	if err != nil {
-		return nil, "journal_failed"
+		client.warnMessage("missing-job proof unreadable")
+		return none, ""
 	}
 	if !missing {
-		return nodeCloseOpStatusResult{State: nodeCloseOpNone}, ""
+		return none, ""
 	}
 	tombstone, err := fleet.WriteMissingJobTombstone(jobsRoot, fleet.MissingJobTombstone{RequestID: args.RequestID, Job: args.Job, Epoch: args.Epoch, Created: client.nowUTC()})
 	if err != nil {
-		return nil, "journal_failed"
+		client.warnMessage("missing-job tombstone unavailable")
+		return none, ""
 	}
 	return nodeCloseOpStatusResult{State: nodeCloseOpNone, MissingEpoch: tombstone.Epoch}, ""
 }
