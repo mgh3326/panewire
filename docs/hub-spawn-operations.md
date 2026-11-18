@@ -1192,7 +1192,8 @@ that answer and keeps the request pending, as before).
 
 A completed hk job also settles a request past its deadline (hk 5267): when the
 job record reads `completed` with a pane, the request's node host, and the
-request's `--task` id, the hub settles the request `succeeded` at the next probe
+request's task identity (its `--task`, or the parent job's task for a
+`--parent-job` request), the hub settles the request `succeeded` at the next probe
 (`settleCompletedSpawn`), without a node connection. A landing receipt that
 never reached the hub is therefore not required. Then a correcting `SPAWNED`
 follows any unresolved notice already sent.
@@ -1318,7 +1319,8 @@ it is not final (hk 5267). Its outcome is decided by one of three things, and
 then the owner hears it once:
 
 - a late node result, or a completed hk job whose record carries the request's
-  host, a pane and the request's `--task` id, settles it: `SPAWNED`
+  host, a pane and the request's task identity (its `--task`, or for a
+  `--parent-job` request the parent job's task) settles it: `SPAWNED`
   (`<request_id>:<attempt>:succeeded`); a late failure settles it `SPAWN_FAILED`
   with that failure;
 - the stale probe's horizon, 30 minutes past the deadline

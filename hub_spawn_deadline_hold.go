@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // spawnUnresolvedStatus is the event-id status of the unresolved notice. It is
@@ -106,9 +108,10 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	if pane == "" || spawnRecordString(record, "host") != task.Node.Machine {
 		return false
 	}
-	// The task identity is required: a request without --task has no proof
-	// that this completed job is its own (hk 5267 review).
-	if want := hubSpawnArg(task.Request.Args, "--task"); want == "" || spawnRecordTaskID(record) != want {
+	// The completed job must carry the request's task identity, or it is not
+	// this request's landing (hk 5267 review).
+	want, known := spawnExpectedTaskID(parent, app, task)
+	if !known || spawnRecordTaskID(record) != want {
 		return false
 	}
 	outcome := hubSpawnOutcome{RC: 0, Stage: "landing", Host: task.Node.Machine, Pane: pane, Profile: spawnRecordString(record, "profile"), Model: spawnRecordString(record, "model"), E6Arm: task.Request.E6Arm}
@@ -119,6 +122,29 @@ func (h *HubServer) settleCompletedSpawn(parent context.Context, task hubSpawnTa
 	h.recordSpawnTrace(task, outcome)
 	h.logger.Info("hub settled a spawn from its completed job", "request_id", task.Request.RequestID, "job", task.Job, "host", task.Node.Machine, "pane", pane)
 	return true
+}
+
+// spawnExpectedTaskID is the task identity a completed job must carry for task:
+// the request's --task, or for a --parent-job request the parent job's task.
+// The node claims a parent-job child under the parent's task (internal/fleet/
+// spawn.go), so the parent record is the identity. It reports false when
+// neither is known.
+func spawnExpectedTaskID(parent context.Context, app *fleet.App, task hubSpawnTask) (string, bool) {
+	if want := hubSpawnArg(task.Request.Args, "--task"); want != "" {
+		return want, true
+	}
+	parentJob := hubSpawnFlagArg(task.Request.Args, "--parent-job")
+	if parentJob == "" {
+		return "", false
+	}
+	readCtx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	record, exists, err := app.ExistingJob(readCtx, parentJob)
+	if err != nil || !exists {
+		return "", false
+	}
+	id := spawnRecordTaskID(record)
+	return id, id != ""
 }
 
 // spawnRecordTaskID renders a job record's task id as a plain decimal. Job

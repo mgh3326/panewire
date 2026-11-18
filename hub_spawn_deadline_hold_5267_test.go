@@ -321,10 +321,14 @@ func TestStrandedSpawnHorizonNoticesOnceThenCorrected_5267(t *testing.T) {
 // proof needs the host, pane and task id.
 type completedJobStore struct {
 	*roleJobs
-	full map[string]any
+	full    map[string]any
+	parents map[string]map[string]any
 }
 
 func (c *completedJobStore) Get(ctx context.Context, id string) (map[string]any, error) {
+	if record, ok := c.parents[id]; ok {
+		return record, nil
+	}
 	if id == "test-job" && c.full != nil {
 		return c.full, nil
 	}
@@ -496,4 +500,43 @@ func TestStrandedCompletedJobWithoutTaskArgRefuses_5267(t *testing.T) {
 	if got := s.status(t); got.Status != "deadline_exceeded" {
 		t.Fatalf("a request without --task settled from a job: status=%s", got.Status)
 	}
+}
+
+// A --parent-job child settles from its parent's task identity: the completed
+// job carries the parent's task, so the landing is this request's (hk 5267
+// review). A different parent task does not settle it.
+func TestStrandedCompletedJobParentJobIdentity_5267(t *testing.T) {
+	childArgs := func(s *strandedSpawn) []string {
+		var args []string
+		for i := 0; i < len(s.task.Request.Args); i++ {
+			if s.task.Request.Args[i] == "--task" {
+				i++
+				continue
+			}
+			args = append(args, s.task.Request.Args[i])
+		}
+		return append(args, "--parent-job", "parent-1")
+	}
+	t.Run("parent task matches", func(t *testing.T) {
+		s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
+		s.task.Request.Args = childArgs(s)
+		parent := map[string]any{"task_id": float64(1000000)}
+		record := completedJobRecord("machine-a")
+		record["task_id"] = float64(1000000)
+		useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: record, parents: map[string]map[string]any{"parent-1": parent}})
+		s.run(t)()
+		if got := s.status(t); got.Status != "succeeded" {
+			t.Fatalf("parent-job child did not settle from its parent's task: status=%s", got.Status)
+		}
+	})
+	t.Run("parent task differs", func(t *testing.T) {
+		s := newStrandedSpawnClaimedAgo(t, 11*time.Minute)
+		s.task.Request.Args = childArgs(s)
+		parent := map[string]any{"task_id": float64(43)}
+		useJobStore(s, &completedJobStore{roleJobs: s.jobs, full: completedJobRecord("machine-a"), parents: map[string]map[string]any{"parent-1": parent}})
+		s.run(t)()
+		if got := s.status(t); got.Status != "deadline_exceeded" {
+			t.Fatalf("a foreign parent task settled the child: status=%s", got.Status)
+		}
+	})
 }
