@@ -344,10 +344,10 @@ func TestSubmitUnconfirmedAtTheLoginScreenMarksLoginMissingAtOnce(t *testing.T) 
 			copied.CheckedAt = at
 			h.noteReadinessActions("mac-dev", &copied, at)
 		}
-		if notices := oneTimeMessages(transport); len(notices) != 1 || notices[0] != "ACTION NEEDED: mac-dev agy — log in" {
+		if notices := oneTimeMessages(t, h, transport); len(notices) != 1 || notices[0] != "ACTION NEEDED: mac-dev agy — log in" {
 			t.Fatalf("notices = %q", notices)
 		}
-		if more := oneTimeMessages(transport); len(more) != 1 {
+		if more := oneTimeMessages(t, h, transport); len(more) != 1 {
 			t.Fatalf("an uncleared need was told again: %q", more)
 		}
 
