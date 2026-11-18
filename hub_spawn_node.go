@@ -472,6 +472,15 @@ func spawnResultForHub(result hubSpawnResult, acceptsLaunchProof, acceptsCheckou
 	if (result.CheckoutMode == nodeCheckoutBranch && !acceptsCheckoutBranch) || (result.CheckoutMode != nodeCheckoutBranch && !acceptsCheckoutSparse) {
 		result.CheckoutMode = ""
 	}
+	// The refusal detail is baked in at execution time and journaled with the
+	// result, so a replay or a reconnect after the hub lost the feature would
+	// otherwise send a detail that hub refuses; the answer is the outcome
+	// alone for it (hk 5118).
+	if !acceptsCheckoutBranch {
+		if code, _, detail := strings.Cut(result.Error, ": "); detail && strings.HasPrefix(code, "checkout_refused:") {
+			result.Error = code
+		}
+	}
 	return result
 }
 func spawnResultWire(result hubSpawnResult, extended bool) any {
@@ -631,7 +640,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 				// origin commits, or the worktree that holds the branch — in
 				// the answer the submitter reads (hk 5118).
 				if message.checkoutBranchReply && (outcome.Outcome == nodePrepareSuccessorStale || outcome.Outcome == nodePrepareBranchInUse) {
-					name += ": " + outcome.Reason
+					name += hubCheckoutRefusalDetail(outcome.Outcome, outcome.Reason)
 				}
 			}
 			result.RC, result.Error = 81, "checkout_refused:"+name

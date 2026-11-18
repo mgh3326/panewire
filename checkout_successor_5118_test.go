@@ -128,6 +128,48 @@ func TestSuccessorRefusalCarriesTheNodeReason5118(t *testing.T) {
 	}
 }
 
+// A detail the hub's bounded shape cannot carry is left out: the answer is the
+// outcome alone, never a frame the hub would drop.
+func TestSuccessorRefusalDropsADetailItCannotCarry5118(t *testing.T) {
+	config := t3482SpawnConfig(t, filepath.Join(t.TempDir(), "work"))
+	long := "worktree=/work/" + strings.Repeat("a", 512)
+	for _, test := range []struct{ name, reason, want string }{
+		{"a long worktree path", long, "checkout_refused:" + nodePrepareBranchInUse},
+		{"a control byte", "worktree=/work/a\x00b", "checkout_refused:" + nodePrepareBranchInUse},
+		{"a shape the hub does not know", "local=x expected=y relation=ahead", "checkout_refused:" + nodePrepareBranchInUse},
+		{"a detail that fits", "worktree=/work/repo.parent", "checkout_refused:" + nodePrepareBranchInUse + ": worktree=/work/repo.parent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
+				return nodeWorktreePrepareResult{Outcome: nodePrepareBranchInUse, Reason: test.reason}, ""
+			}}
+			result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(122), CWDKey: "repo-a", BriefInline: "brief", Checkout: t3482Checkout(), WaitSeconds: 1, checkoutBranchReply: true})
+			if result.RC != 81 || result.Error != test.want {
+				t.Fatalf("rc=%d error=%q, want %q", result.RC, result.Error, test.want)
+			}
+			// Whatever the node built, the hub must still read the answer.
+			if _, ok := parseHubSpawnResult(hubSpawnResultWire(t, result)); !ok {
+				t.Fatalf("the hub dropped the answer: %q", result.Error)
+			}
+		})
+	}
+}
+
+// A journaled result is replayed unchanged, so the detail is stripped at send
+// time for a hub that did not list checkout_branch_v1.
+func TestSuccessorRefusalDetailDoesNotReachAnOlderHub5118(t *testing.T) {
+	stale := hubSpawnResult{RequestID: t14RequestID(123), RC: 81, Error: "checkout_refused:" + nodePrepareSuccessorStale + ": want=" + strings.Repeat("a", 40) + " origin=" + strings.Repeat("b", 40)}
+	if got := spawnResultForHub(stale, true, true, false); got.Error != "checkout_refused:"+nodePrepareSuccessorStale {
+		t.Fatalf("older hub result=%q, want the outcome alone", got.Error)
+	}
+	if got := spawnResultForHub(stale, true, true, true); got.Error != stale.Error {
+		t.Fatalf("capable hub result=%q, want the detail", got.Error)
+	}
+	if got := spawnResultForHub(hubSpawnResult{Error: "spawn_failed: hooks_review"}, true, true, false); got.Error != "spawn_failed: hooks_review" {
+		t.Fatalf("an unrelated error was rewritten to %q", got.Error)
+	}
+}
+
 // The hub's result parser reads the detailed refusal from a branch-capable
 // node and still refuses anything outside the bounded shape, so a frame it
 // cannot trust is dropped whole.
@@ -141,6 +183,7 @@ func TestHubParsesTheSuccessorRefusalDetail5118(t *testing.T) {
 		{"stale detail", "checkout_refused:successor_stale: want=" + strings.Repeat("a", 40) + " origin=" + strings.Repeat("b", 40), true},
 		{"stale with no origin branch", "checkout_refused:successor_stale: want=" + strings.Repeat("a", 40) + " origin=none", true},
 		{"in-use detail", "checkout_refused:branch_in_use: worktree=/work/repo.parent", true},
+		{"a long worktree path", "checkout_refused:branch_in_use: worktree=/work/" + strings.Repeat("a", 480), true},
 		{"a short commit", "checkout_refused:successor_stale: want=abc origin=" + strings.Repeat("b", 40), false},
 		{"an unknown detail", "checkout_refused:successor_stale: local=x expected=y relation=ahead", false},
 		{"a control byte", "checkout_refused:branch_in_use: worktree=/work/a\x00b", false},

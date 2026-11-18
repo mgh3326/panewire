@@ -32,11 +32,11 @@ var (
 	// listed checkout_branch_v1 — the wanted and origin commits, or the
 	// worktree that holds the branch (hk 5118).
 	hubCheckoutRefusalPattern       = regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]{1,64}$`)
-	hubCheckoutRefusalDetailPattern = regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]{1,64}: (?:want=[0-9a-f]{40} origin=(?:[0-9a-f]{40}|none)|worktree=[^\x00-\x1f\x7f]{1,200})$`)
+	hubCheckoutRefusalDetailPattern = regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]{1,64}: (?:want=[0-9a-f]{40} origin=(?:[0-9a-f]{40}|none)|worktree=[^\x00-\x1f\x7f]{1,512})$`)
 )
 
 // hubCheckoutRefusalMaxBytes bounds a detailed checkout refusal the hub reads.
-const hubCheckoutRefusalMaxBytes = 320
+const hubCheckoutRefusalMaxBytes = 640
 
 type hubSpawnBrief struct {
 	Inline    string `json:"inline,omitempty"`
@@ -301,6 +301,23 @@ func validHubSpawnResultError(value string) bool {
 		}
 		return hubCheckoutRefusalPattern.MatchString(value) || hubCheckoutRefusalDetailPattern.MatchString(value)
 	}
+}
+
+// hubCheckoutRefusalDetail returns the ": <reason>" a successor refusal may
+// append to its error, or "" when the reason cannot be carried inside the
+// bounded shape the hub parses. A node checks the same pattern before it puts
+// the detail on the wire, so a long worktree path or a control byte falls back
+// to the outcome alone instead of making the hub drop the whole answer (hk
+// 5118).
+func hubCheckoutRefusalDetail(outcome, reason string) string {
+	if reason == "" {
+		return ""
+	}
+	detail := ": " + reason
+	if !hubCheckoutRefusalDetailPattern.MatchString("checkout_refused:" + outcome + detail) {
+		return ""
+	}
+	return detail
 }
 
 func (h *HubServer) pruneSpawnRecordsLocked(now time.Time) {
