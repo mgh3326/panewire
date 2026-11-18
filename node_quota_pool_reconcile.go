@@ -66,48 +66,85 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 	if readAgents == nil {
 		readAgents = client.readNodeAgentsInSession
 	}
-	result, err := app.ReconcileLedgerForJobs(passCtx, func(ctx context.Context, jobs []string) ([]arbiter.Agent, error) {
-		sessionJobs := make(map[string]int)
+	result, err := app.ReconcileLedgerForJobs(passCtx, func(ctx context.Context, jobs []string) (arbiter.AgentSnapshot, error) {
+		sessionJobIDs := make(map[string][]string)
+		heldJobs := make(map[string]bool)
 		for _, job := range jobs {
 			session, err := client.nodeJobHerdrSession(job)
 			if err != nil {
-				return nil, err
+				return arbiter.AgentSnapshot{}, err
 			}
-			sessionJobs[firstNonempty(session, app.HerdrSession)]++
+			s := firstNonempty(session, app.HerdrSession)
+			sessionJobIDs[s] = append(sessionJobIDs[s], job)
+			heldJobs[job] = true
 		}
-		names := make([]string, 0, len(sessionJobs))
-		for session := range sessionJobs {
+		names := make([]string, 0, len(sessionJobIDs))
+		for session := range sessionJobIDs {
 			names = append(names, session)
 		}
 		if len(names) == 0 {
 			names = append(names, app.HerdrSession)
 		}
 		sort.Strings(names)
+
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
+		if client.quotaEmptySince == nil {
+			client.quotaEmptySince = make(map[string]time.Time)
+		}
+
+		now := client.nowUTC()
 		agents := make([]arbiter.Agent, 0)
+		unverified := make(map[string]string)
+
 		for _, session := range names {
 			rows, err := readAgents(ctx, session)
 			if err != nil {
-				return nil, err
+				delete(client.quotaEmptySince, session)
+				return arbiter.AgentSnapshot{}, err
 			}
+			if len(rows) == 0 {
+				if len(sessionJobIDs[session]) > 0 {
+					since, ok := client.quotaEmptySince[session]
+					if !ok {
+						client.quotaEmptySince[session] = now
+						since = now
+					}
+					if now.Sub(since) < arbiter.OrphanStartupGrace {
+						for _, j := range sessionJobIDs[session] {
+							unverified[j] = "herdr session " + session + " listed no agents"
+						}
+					}
+				}
+				continue
+			}
+
+			delete(client.quotaEmptySince, session)
 			for _, row := range rows {
 				if row.AgentStatus == "" {
-					return nil, errors.New("herdr agent snapshot has incomplete identity")
+					return arbiter.AgentSnapshot{}, errors.New("herdr agent snapshot has incomplete identity")
 				}
 				if row.Name == "" {
-					slog.Warn("herdr agent snapshot has row without a name", "session", session, "status", row.AgentStatus)
-					if sessionJobs[session] > 0 {
-						return nil, errors.New("herdr agent snapshot has incomplete identity for session holding jobs")
+					slog.Info("herdr agent snapshot row without a name", "session", session, "status", row.AgentStatus, "pane", row.PaneID)
+					if row.PaneID != "" {
+						binding, ok := nodeJobHerdrBindingByPaneFromRoot(client.jobsInboxRoot, row.PaneID)
+						if ok && heldJobs[binding.jobID] {
+							unverified[binding.jobID] = "unnamed herdr row on the job's pane"
+						}
+					} else {
+						for _, j := range sessionJobIDs[session] {
+							unverified[j] = "unnamed herdr row without pane id in session"
+						}
 					}
+					continue
 				}
 				agents = append(agents, arbiter.Agent{Status: row.AgentStatus, Name: row.Name})
 			}
 		}
-		if len(jobs) > 0 && len(agents) == 0 {
-			return nil, errors.New("herdr agent snapshot is empty while jobs are held")
-		}
-		return agents, nil
+		return arbiter.AgentSnapshot{
+			Agents:     agents,
+			Unverified: unverified,
+		}, nil
 	})
 	if err != nil {
 		slog.Warn("quota_pool reconciliation failed", "error", err)

@@ -30,10 +30,17 @@ var agentStatuses = map[string]bool{"idle": true, "working": true, "blocked": tr
 // external read cannot be released on stale Herdr evidence.
 type AgentSource func(context.Context) ([]Agent, error)
 
+// AgentSnapshot is an authoritative snapshot of live Herdr agents together
+// with any jobs whose identity could not be verified in this pass.
+type AgentSnapshot struct {
+	Agents     []Agent
+	Unverified map[string]string // job -> reason
+}
+
 // AgentSourceForJobs reads snapshots for every local job that may be
 // reconciled. The ids are collected after the GC state snapshot, so jobs
 // claimed during the external reads are still fenced by the write pass.
-type AgentSourceForJobs func(context.Context, []string) ([]Agent, error)
+type AgentSourceForJobs func(context.Context, []string) (AgentSnapshot, error)
 
 type snapshot struct {
 	state string
@@ -268,17 +275,19 @@ type GCResult struct {
 //
 // An agent in status unknown, or a claim without an exact agent_label, is not
 // stale evidence: gc then changes nothing and fails closed (ExitStorage). A
-// job reclaimed after the Herdr snapshot, or still inside the startup grace,
-// is skipped.
+// job reclaimed after the Herdr snapshot, still inside the startup grace,
+// or marked unverified in the agent snapshot, is skipped.
 func (s *Store) GC(ctx context.Context, agents AgentSource) (GCResult, error) {
-	return s.GCWithJobs(ctx, func(ctx context.Context, _ []string) ([]Agent, error) {
-		return agents(ctx)
+	return s.GCWithJobs(ctx, func(ctx context.Context, _ []string) (AgentSnapshot, error) {
+		list, err := agents(ctx)
+		return AgentSnapshot{Agents: list}, err
 	})
 }
 
 // GCWithJobs is GC with the set of currently leased or quota-held jobs passed
 // to its external agent source. A source can use each job's recorded Herdr
-// session and must return an error if any required session cannot be read.
+// session, mark individual jobs unverified with a reason, and must return an
+// error if any required session cannot be read.
 func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCResult, error) {
 	var res GCResult
 	snaps, e := s.snapshots(ctx, "")
@@ -289,11 +298,11 @@ func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCRe
 	if e != nil {
 		return res, e
 	}
-	list, e := agents(ctx, jobIDs)
+	snap, e := agents(ctx, jobIDs)
 	if e != nil {
 		return res, e
 	}
-	if e = checkAgents(list); e != nil {
+	if e = checkAgents(snap.Agents); e != nil {
 		return res, e
 	}
 	c, e := s.rw(ctx, false)
@@ -301,8 +310,8 @@ func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCRe
 		return res, e
 	}
 	defer c.Close()
-	res.HerdrAgents = len(list)
-	for _, a := range list {
+	res.HerdrAgents = len(snap.Agents)
+	for _, a := range snap.Agents {
 		if a.Status == "working" {
 			res.LiveAgents++
 		}
@@ -401,6 +410,10 @@ func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCRe
 		var stale, rowlessDec []decision
 		var unmapped, unknown []string
 		for _, ck := range checks {
+			if reason, unverified := snap.Unverified[ck.job]; unverified {
+				res.Skipped = append(res.Skipped, Skip{Job: ck.job, Reason: reason})
+				continue
+			}
 			label, lerr := claimAgentLabel(c, ck.job)
 			if lerr != nil {
 				return lerr
@@ -409,7 +422,7 @@ func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCRe
 				unmapped = append(unmapped, ck.job)
 				continue
 			}
-			statuses, matched := matchedStatuses(list, ck.job, label)
+			statuses, matched := matchedStatuses(snap.Agents, ck.job, label)
 			if hasStatus(statuses, "unknown") {
 				unknown = append(unknown, ck.job)
 				continue

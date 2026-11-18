@@ -216,6 +216,7 @@ type HubClient struct {
 	jobDirTTLPass      func(context.Context) // fixture seam; nil runs the real pass.
 	quotaPoolReconcile bool
 	quotaReconcile     quotaPoolReconcileHooks
+	quotaEmptySince    map[string]time.Time
 	nodeTaskState      fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
 	nodePR             fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
 
@@ -399,6 +400,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	client := &HubClient{
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnConfigDefault: config.SpawnConfigPath == "", spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
 		quotaPoolReconcile: config.QuotaPoolReconcile,
+		quotaEmptySince:    make(map[string]time.Time),
 		failoverWakeOn:     config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		helloAckTimeout: config.helloAckTimeout,
 		relayControl:    newClientRelayControlState(config),
