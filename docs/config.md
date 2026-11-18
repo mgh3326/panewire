@@ -1097,7 +1097,8 @@ Only implementer spawns take over; reviewer and consult children do not.
 Spawns with `--task`, or neither flag and
 no `ARBITER_JOB`, claim as before.
 
-Once that implementer successor lands, the hub also ends the parent's pane
+With the hub flag `--supersede-close` (off by default), once that implementer
+successor lands, the hub also ends the parent's pane
 itself through the jobs-close reap path (`hub_spawn_supersede.go`): a parent
 whose pane is `idle`, `done` or `blocked` closes at landing (a blocked pane
 is proven blocked first, then closed carrying that proof, which the node
@@ -1109,6 +1110,11 @@ the first sweep where it is no longer working. A parent spawned with
 `--keep` is never closed, the worktree is never removed (the successor may
 be using it), and the parent's hk task is untouched: the successor carries
 it. The owner lane hears one `info` lane.event when the pane closes.
+
+The flag stays off until the close is a durable action that only an
+explicitly requested replacement creates, with a conditional pane close: today
+a parent ref also arrives implicitly from `ARBITER_JOB`, and the close intent
+lives in hub memory (consult-5140-d43fccd5, hk 5173).
 
 The earlier `job.task_link` event records `status: inherited` and
 `takeover: pending`. After landing, `job.task_rebind` records the outcome:
