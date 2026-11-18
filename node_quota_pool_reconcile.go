@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -49,6 +50,12 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 	if !client.quotaPoolReconcile {
 		return
 	}
+	// A session's empty-read window (quotaEmptySince) carries over only from a
+	// pass that read that session empty. However this pass ends, a window it did
+	// not confirm is dropped, so an aborted pass or an unread session breaks the
+	// continuity the 10-minute confirmation needs.
+	confirmedEmpty := make(map[string]bool)
+	defer client.endQuotaEmptyWindows(confirmedEmpty)
 	// The ledger ticks at the top of every pass, including passes that find
 	// nothing to release: the tick is the liveness signal.
 	client.nodeLoopTick(nodeQuotaPoolReconcile)
@@ -72,7 +79,6 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 	}
 	result, err := app.ReconcileLedgerForJobs(passCtx, func(ctx context.Context, jobs []string) (arbiter.AgentSnapshot, error) {
 		sessionJobIDs := make(map[string][]string)
-		heldJobs := make(map[string]bool)
 		for _, job := range jobs {
 			session, err := client.nodeJobHerdrSession(job)
 			if err != nil {
@@ -80,7 +86,6 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 			}
 			s := firstNonempty(session, app.HerdrSession)
 			sessionJobIDs[s] = append(sessionJobIDs[s], job)
-			heldJobs[job] = true
 		}
 		names := make([]string, 0, len(sessionJobIDs))
 		for session := range sessionJobIDs {
@@ -96,14 +101,6 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 		if client.quotaEmptySince == nil {
 			client.quotaEmptySince = make(map[string]time.Time)
 		}
-		// A session that holds no job this pass ends its window. Otherwise a job
-		// that joins it later would inherit the old start and skip its own
-		// 10-minute confirmation.
-		for session := range client.quotaEmptySince {
-			if len(sessionJobIDs[session]) == 0 {
-				delete(client.quotaEmptySince, session)
-			}
-		}
 
 		now := client.nowUTC()
 		agents := make([]arbiter.Agent, 0)
@@ -112,16 +109,16 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 		for _, session := range names {
 			rows, err := readAgents(ctx, session)
 			if err != nil {
-				delete(client.quotaEmptySince, session)
 				return arbiter.AgentSnapshot{}, err
 			}
 			if len(rows) == 0 {
 				if len(sessionJobIDs[session]) > 0 {
 					since, ok := client.quotaEmptySince[session]
 					if !ok {
-						client.quotaEmptySince[session] = now
 						since = now
+						client.quotaEmptySince[session] = now
 					}
+					confirmedEmpty[session] = true
 					if now.Sub(since) < arbiter.OrphanStartupGrace {
 						for _, j := range sessionJobIDs[session] {
 							unverified[j] = "herdr session " + session + " listed no agents"
@@ -131,22 +128,28 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 				continue
 			}
 
-			delete(client.quotaEmptySince, session)
 			for _, row := range rows {
 				if row.AgentStatus == "" {
 					return arbiter.AgentSnapshot{}, errors.New("herdr agent snapshot has incomplete identity")
 				}
 				if row.Name == "" {
 					slog.Info("herdr agent snapshot row without a name", "session", session, "status", row.AgentStatus, "pane", row.PaneID)
-					if row.PaneID != "" {
-						binding, ok := nodeJobHerdrBindingByPaneFromRoot(client.jobsInboxRoot, row.PaneID)
-						if ok && heldJobs[binding.jobID] {
-							unverified[binding.jobID] = "unnamed herdr row on the job's pane"
-						}
-					} else {
+					if row.PaneID == "" {
 						for _, j := range sessionJobIDs[session] {
 							unverified[j] = "unnamed herdr row without pane id in session"
 						}
+						continue
+					}
+					owners, err := client.nodeJobsBoundToPane(jobs, row.PaneID)
+					if err != nil {
+						return arbiter.AgentSnapshot{}, err
+					}
+					if len(owners) == 0 {
+						slog.Info("herdr unnamed row is bound to no held job; ignored", "session", session)
+						continue
+					}
+					for _, j := range owners {
+						unverified[j] = "unnamed herdr row on the job's pane"
 					}
 					continue
 				}
@@ -176,4 +179,48 @@ func (client *HubClient) reconcileNodeQuotaPools(ctx context.Context) {
 	if len(result.StaleQuota) != 0 || len(result.OrphanReleased) != 0 {
 		slog.Info("quota_pool reconciliation completed", "stale_records", len(result.StaleQuota), "orphan_jobs", len(result.OrphanReleased))
 	}
+}
+
+// endQuotaEmptyWindows drops every empty-read window that the pass did not
+// confirm. It runs when the pass ends, on success and on every early return.
+func (client *HubClient) endQuotaEmptyWindows(confirmed map[string]bool) {
+	client.nodeCommandMu.Lock()
+	defer client.nodeCommandMu.Unlock()
+	for session := range client.quotaEmptySince {
+		if !confirmed[session] {
+			delete(client.quotaEmptySince, session)
+		}
+	}
+}
+
+// nodeJobsBoundToPane returns the jobs whose own ledger binds pane. The pane
+// index skips a job it cannot load, so it cannot show that no job owns the
+// pane. The ledger reader fails on an unreadable entry, and that error fails
+// the pass rather than reading as "no owner".
+func (client *HubClient) nodeJobsBoundToPane(jobs []string, pane string) ([]string, error) {
+	var owners []string
+	for _, job := range jobs {
+		root, _, found, err := client.openNodeJobDir(job)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, errors.New("job ledger is unavailable")
+		}
+		events, err := readNodeJobLedgerEvents(root)
+		root.Close()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, event := range events {
+			if event.pane == pane && (nodeJobClaimKind(event.kind) || event.kind == "job.spawned") {
+				owners = append(owners, job)
+				break
+			}
+		}
+	}
+	return owners, nil
 }
