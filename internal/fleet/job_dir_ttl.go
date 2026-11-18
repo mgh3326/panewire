@@ -203,6 +203,12 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	}
 	shape, err := jobDirShapeOf(path)
 	v := jobDirVerdict{shape: shape}
+	if _, err := os.Lstat(filepath.Join(path, HandoverKeepFile)); !errors.Is(err, fs.ErrNotExist) {
+		// The directory holds the only mark keeping a handed-over worktree
+		// (hk 4633): it never expires while the mark is there.
+		v.reason = "handover-kept"
+		return v
+	}
 	keep := func(reason string) jobDirVerdict {
 		v.reason = reason
 		return v

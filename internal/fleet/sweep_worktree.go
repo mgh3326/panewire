@@ -50,27 +50,36 @@ const (
 	sweepWorktreeHandoverKept = "handover_kept"
 )
 
-// handoverKept reports whether a hand-over keeps cwd: the job's own mark, or
-// any job's mark naming the same resolved worktree (jobs may share one). An
-// unreadable mark or jobs directory keeps the worktree too.
+// handoverKept reports whether a hand-over keeps cwd (HandoverKeeps over
+// the app's jobs directory, the candidate job's own mark first).
 func handoverKept(a *App, job, cwd string) bool {
 	if _, err := os.Lstat(filepath.Join(a.Jobs, job, HandoverKeepFile)); !errors.Is(err, os.ErrNotExist) {
 		return true
 	}
-	entries, err := os.ReadDir(a.Jobs)
+	return HandoverKeeps(a.Jobs, cwd)
+}
+
+// HandoverKeeps reports whether any job's HandoverKeepFile under jobs names
+// path, a directory inside it, or one containing it (jobs may share a
+// worktree; a job's cwd may be an execution lane inside it). Entries that
+// are not directories (the jobs root holds lock and flag files) are skipped.
+// An unreadable jobs directory or mark keeps the worktree.
+func HandoverKeeps(jobs, path string) bool {
+	entries, err := os.ReadDir(jobs)
 	if err != nil {
 		return true
 	}
 	for _, entry := range entries {
-		body, err := os.ReadFile(filepath.Join(a.Jobs, entry.Name(), HandoverKeepFile))
+		if !entry.IsDir() {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(jobs, entry.Name(), HandoverKeepFile))
 		top := strings.TrimSpace(string(body))
 		switch {
 		case errors.Is(err, os.ErrNotExist):
 		case err != nil:
 			return true
-		case cwd == "" || sweepSamePath(top, cwd) || sweepWithin(top, cwd) || sweepWithin(cwd, top):
-			// The mark names the worktree's top level; a job's cwd may be
-			// inside it (an execution lane) or contain it.
+		case path == "" || sweepSamePath(top, path) || sweepWithin(top, path) || sweepWithin(path, top):
 			return true
 		}
 	}

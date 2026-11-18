@@ -907,26 +907,21 @@ node without a jobs root or work root answers `jobs_root_unset` or
 `work_root_unset`; a failed pass answers `sweep_failed`. The CLI is
 `panewire node sweep-checkouts --host <machine> [--dry-run]`.
 
-### `worktree.handover_snapshot`
+### `worktree.handover_keep`
 
 The old node's half of the hub's implementer hand-over (hk 4633,
 [quota-stop.md](quota-stop.md) "An exhausted pool"). Arguments
-`{"job","cwd","branch","snapshot"}`; offered as `handover_snapshot_v1` with
+`{"job","cwd","branch","keep"}`; offered as `handover_keep_v1` with
 `close_ops_v1`. From the top level of the worktree at `cwd` (which must be on
 `branch`) the node reads the branch's last pushed commit with
 `git ls-remote origin`, or the merge-base with origin's default branch when
-nothing was pushed. Without `snapshot` it only reads. With `snapshot` it
-commits the worktree's tracked changes (staged new files included; untracked
-and intent-to-add files never) through a temporary index read from HEAD, on
-top of HEAD (the user's index is untouched), lists the local-only files
-(`untracked`, at most 50 names and 8 KiB, `untracked_more` counts the rest)
-and pushes the commit, unforced, to `refs/panewire/handover/<job>/<commit>`
-on origin (no tags, no submodules, read back
-with ls-remote), and writes `jobs/<job>/handover-keep`, which keeps the
-worktree from every sweep. Result: `outcome` (`saved`, `not-a-job`,
-`branch_mismatch`, `git_failed`, `diverged`), `branch`, `top`, `pushed`,
-`base`, `base_ref`, `dirty`, `commit` and `ref` (when a snapshot was pushed),
-`submodule`, `untracked`, `untracked_more`, `kept`.
+nothing was pushed. Without `keep` it only reads. With `keep` it reads HEAD
+and the paths `git status` names (untracked included) and writes
+`jobs/<job>/handover-keep`, which keeps the worktree from every sweep,
+`worktree.remove` and the job-directory TTL. It never commits or pushes.
+Result: `outcome` (`ok`, `not-a-job`, `branch_mismatch`, `git_failed`,
+`diverged`), `branch`, `top`, `pushed`, `base`, `base_ref`, `head`, `dirty`,
+`uncommitted` (at most 50 names and 8 KiB), `uncommitted_more`, `kept`.
 
 ### `worktree.inspect`
 
@@ -1208,6 +1203,7 @@ running a git op on the clone, then delete the lock file.
 | `worktree-gone` | `cwd` is not a linked worktree. |
 | `worktree-changed` | HEAD or common repository differs from the first inspection or `expect_head`. |
 | `outside-work-root` | The resolved path or common git dir is outside the work root, or a detached-mode directory fails the reviewer name or location guard. |
+| `handover-kept` | A hub hand-over keeps the worktree: some job's `handover-keep` names it (hk 4633). |
 | `unregistered` | Resolves as a worktree but is not in `git worktree list`. |
 | `locked` | `git worktree lock` holds it. |
 | `detached` | Detached HEAD in the default branch mode. |

@@ -40,7 +40,7 @@ hk 3334. The wait or hand-over rule is hk `policy/quota-stop`; this section is t
 
 A hub restarted between claiming a reviewer's successor and writing the old record is repaired by a periodic pass (`reconcileQuotaReplacements`, every 2 minutes, for successors older than the replacement budget): a successor that placed whose predecessor's record is still live gets the pane closed and the record written with `replaced_by`. A successor that never left `accepted` (no node) can never place a job and gets no pointer; one still reconciling or past its deadline with a node binding does.
 
-The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it snapshots the old worktree to `refs/panewire/handover/<old>` and continues the pushed branch on another host. Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
+The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it keeps the old worktree, names it to the successor as host:path, and continues the pushed branch on another host. Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
 
 ## Job end on a quota stop
 
@@ -121,7 +121,7 @@ other accounts stay usable.
 
 **An implementer is handed over by the hub (hk 4633, operator decisions 358
 and A336; decision `evidence/2026-11-18/pw-handover-4633/decision-root-causes.md`).**
-On a node that advertises `close_ops_v1` and `handover_snapshot_v1`, the hub
+On a node that advertises `close_ops_v1` and `handover_keep_v1`, the hub
 decides with the §Implementer rule (the job's start, the task's priority and
 `--expected`, `policy/quota-stop`) for every cause: window, free limit past
 `max_wait`, credit, retired and account credit.
@@ -142,7 +142,7 @@ decides with the §Implementer rule (the job's start, the task's priority and
   creates its row (or successor) first owns the job. The steps are, in this
   order:
   1. **Saved successor.** The old node reads, read-only
-     (`worktree.handover_snapshot` without `snapshot`), the branch and its
+     (`worktree.handover_keep` without `keep`), the branch and its
      last pushed commit (`git ls-remote origin refs/heads/<branch>`) or, when
      nothing was pushed, the merge-base with origin's default branch. The row
      then stores the complete successor submission with a fixed request id
@@ -159,51 +159,32 @@ decides with the §Implementer rule (the job's start, the task's priority and
      successor needs neither the old host nor a clean old worktree. A
      never-pushed branch starts detached at its base. The end reason's length
      is checked here, before anything closes.
-  2. **Checks and snapshot at the close.** Under the job's pool-action lock,
-     before its first close command, the reconciler:
+  2. **Checks and the kept worktree at the close.** Under the job's
+     pool-action lock, before its first close command, the reconciler:
      - holds the row during a spawn rollback or grant drain;
      - ends it `recovered` when the stop no longer holds (a retired pool that
        came back too) and `task_rebound` when hk binds the task to another
        job;
      - releases it when the pane moved or changed directory, and holds it
        until the pane is idle;
-     - then has the old node snapshot the worktree: from the top level
-       (never the pane's subdirectory), a temporary index (`GIT_INDEX_FILE`)
-       read from HEAD's tree, so no flag of the user's index
-       (assume-unchanged, skip-worktree, intent-to-add) carries over; then
-       `add -u`, the files the user staged as new added by name,
-       `write-tree` and `commit-tree -p HEAD`. The commit is pushed, never
-       forced, to its own immutable ref `refs/panewire/handover/<old>/<commit>`
-       on origin, and the note restores by that commit. The user's index, stash and branch are untouched. A pushed
-       tip no longer in the worktree's history (`diverged`) or a start point
-       that moved releases the row unclosed.
-     - **What the ref holds:** the old job's unpushed commits (the snapshot's
-       parent is the old HEAD) and one commit on top with every tracked
-       path's worktree state — modified, deleted, and new files the user had
-       staged — as `git add` stores it.
-     - **What stays only on the old host:** every untracked or intent-to-add file (never
-       added or pushed, whatever its name: it may hold a credential, and the
-       ref is readable by anyone who can read origin; operator decision on
-       r4613533212), ignored files, Git LFS objects, clean-filtered contents,
-       nested repositories and dirty submodules, and anything written after
-       the snapshot. The note lists those paths (quoted, up to 2 KiB, then a
-       count; the node's result lists at most 50 names and 8 KiB) and names
-       the kept worktree. Any job's `handover-keep` naming a worktree (or a
-       directory inside it) keeps it, whichever job a sweep is handling.
-     - The push sends only that ref (`--no-follow-tags`, no submodule
-       recursion, no hooks) and the ref must read back on origin as the
-       commit.
-     - **Every snapshot also keeps the old worktree**: the node writes
-       `jobs/<old>/handover-keep`, both the pane sweep and `checkout.sweep`
-       keep that worktree (`handover_kept`), and the note names it as
-       `host:path`. The commit is what `git add` stores, so Git LFS objects,
-       clean-filtered files, nested repositories and anything written after
-       the snapshot are only in the old worktree; a push that failed leaves
-       it as the only copy. The hand-over still proceeds: losing nothing
-       matters more than starting clean. Clearing the mark and deleting the
-       snapshot ref is hk 5246.
+     - then has the old node run `worktree.handover_keep` with `keep`: from
+       the top level (never the pane's subdirectory) it reads HEAD and the
+       paths `git status` names (untracked included; at most 50 names and
+       8 KiB, the rest counted) and writes `jobs/<old>/handover-keep`.
+       **Nothing is committed or pushed**, so no file leaves the host; a ref
+       snapshot of the work is hk 5259. A pushed tip no longer in the
+       worktree's history (`diverged`) or a start point that moved releases
+       the row unclosed.
+     - **The kept worktree** is the only copy of what origin lacks:
+       uncommitted and untracked files, ignored files and unpushed commits.
+       Any job's `handover-keep` naming a worktree (or a directory inside
+       it, or one containing it) keeps it from the pane sweep and
+       `checkout.sweep` (`handover_kept`), from `worktree.remove`
+       (`handover-kept`), and the job directory holding the mark from the
+       job-directory TTL. Clearing the mark is hk 5246.
      - The stored successor's continuation note is rewritten to name the
-       snapshot (branch and ref shell-quoted in the restore command), the
+       kept worktree as `host:path`, the unpushed HEAD when there is one, and
+       the uncommitted paths (quoted, up to 2 KiB, then a count); the
        rewritten submission must still validate (the brief cap), and the row
        is saved.
   3. **Close.** The reconciler closes the old pane through `pane.close_op` to
@@ -222,14 +203,6 @@ decides with the §Implementer rule (the job's start, the task's priority and
      record ended another way: the row ends `handover_failed`, the task role
      is released, and the owner gets the hand-over-or-respawn notice with the
      reason.
-
-  **The successor's restore.** The note gives the commands:
-  `git fetch origin refs/panewire/handover/<old> && git checkout -B <branch> FETCH_HEAD && git reset --mixed HEAD~1`.
-  The snapshot commit sits on the old HEAD, which descends from the start
-  point, so this fast-forwards the branch over the old job's unpushed
-  commits and undoes only the snapshot commit into the worktree: history
-  stays linear (no merge commit, no cherry-pick) and the work comes back
-  uncommitted, untracked files untracked again.
 
 The decision reads the task the job record names (a `--parent-job` successor
 inherits it) and the job's start; a task whose `refs.job_id` names another job

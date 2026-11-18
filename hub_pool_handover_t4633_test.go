@@ -20,7 +20,7 @@ import (
 
 var handoverPushed = strings.Repeat("b", 40)
 
-var handoverSnapCommit = strings.Repeat("5", 40)
+var handoverHead = strings.Repeat("5", 40)
 
 func handoverPolicy() quotaPolicy {
 	return quotaPolicy{Expected: time.Hour, Urgent: map[int]bool{1: true, 2: true}, MaxWaits: 1, ResumeText: "continue"}
@@ -31,7 +31,7 @@ func handoverFixture(t *testing.T, job string, priority int, expected time.Durat
 	f := newQuotaReplaceFixture(t, "implementer", job)
 	f.hub.mu.Lock()
 	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
-	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverKeep] = true
 	f.hub.jobs[job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: job, Epoch: 1}, Node: "machine-a"}
 	f.hub.mu.Unlock()
 	f.hub.handoverInputs = func(context.Context, string) handoverInputs {
@@ -47,15 +47,15 @@ func window5h() poolExhaustion {
 
 // handoverReadReply is the node's read before the row: branch and start.
 func handoverReadReply(job string) map[string]any {
-	return map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/" + job + "-checkout", "pushed": handoverPushed, "dirty": false, "submodule": false, "kept": false}
+	return map[string]any{"outcome": nodeHandoverKeepOK, "branch": "wk/task", "top": "/work/" + job + "-checkout", "pushed": handoverPushed, "dirty": false, "kept": false}
 }
 
 // handoverSnapReply is the node's snapshot at the close.
-func handoverSnapReply(job string, dirty bool) map[string]any {
+func handoverKeepReply(job string, dirty bool) map[string]any {
 	reply := handoverReadReply(job)
-	reply["dirty"] = dirty
+	reply["dirty"], reply["kept"] = dirty, true
 	if dirty {
-		reply["commit"], reply["ref"] = handoverSnapCommit, handoverSnapshotRef(job, handoverSnapCommit)
+		reply["head"], reply["uncommitted"] = handoverHead, []string{"a.txt", "runtime.env"}
 	}
 	return reply
 }
@@ -82,9 +82,9 @@ func sweepHandover(t *testing.T, f *quotaReplaceFixture, exhaustion poolExhausti
 		switch string(command["op"]) {
 		case `"agents.list"`:
 			roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
-		case `"worktree.handover_snapshot"`:
-			var args nodeHandoverSnapshotArgs
-			if err := json.Unmarshal(command["args"], &args); err != nil || args.Snapshot || args.Job != f.job || args.Branch != f.holder.Request.Repository.Checkout.Branch || args.Cwd != "/work/project.checkout" {
+		case `"worktree.handover_keep"`:
+			var args nodeHandoverKeepArgs
+			if err := json.Unmarshal(command["args"], &args); err != nil || args.Keep || args.Job != f.job || args.Branch != f.holder.Request.Repository.Checkout.Branch || args.Cwd != "/work/project.checkout" {
 				t.Fatalf("patch args=%s", command["args"])
 			}
 			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": patch})
@@ -108,7 +108,7 @@ func sweepHandover(t *testing.T, f *quotaReplaceFixture, exhaustion poolExhausti
 // end_reason.
 func closeHandover(t *testing.T, f *quotaReplaceFixture, action poolAction) poolAction {
 	t.Helper()
-	return closeHandoverWith(t, f, action, handoverSnapReply(f.job, true))
+	return closeHandoverWith(t, f, action, handoverKeepReply(f.job, true))
 }
 
 func closeHandoverWith(t *testing.T, f *quotaReplaceFixture, action poolAction, snap map[string]any) poolAction {
@@ -116,7 +116,7 @@ func closeHandoverWith(t *testing.T, f *quotaReplaceFixture, action poolAction, 
 	if err := runPoolActionStep(t, f.hub, f.node, action,
 		poolStatus(nodeCloseOpNone, false, false),
 		idlePane(f.job, "/work/project.checkout", "idle"),
-		poolActionReply{op: nodeCommandHandoverSnapshot, result: snap},
+		poolActionReply{op: nodeCommandHandoverKeep, result: snap},
 		idlePane(f.job, "/work/project.checkout", "idle"),
 		poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpClosed, "replayed": false}},
 	); err != nil {
@@ -236,7 +236,7 @@ func TestPoolHandoverUrgentImplementerIsHandedOverByTheHub(t *testing.T) {
 		t.Fatalf("owner told before the hand-over finished: %v", lines)
 	}
 	action = closeHandover(t, f, action)
-	if brief := action.Data.Handover.Successor.Brief; !strings.Contains(brief, "commit "+handoverSnapCommit+" at refs/panewire/handover/"+job+"/"+handoverSnapCommit+" on origin") || !strings.Contains(brief, "git reset --mixed HEAD~1") {
+	if brief := action.Data.Handover.Successor.Brief; !strings.Contains(brief, "kept at machine-a:/work/"+job+"-checkout") || !strings.Contains(brief, `"runtime.env"`) || !strings.Contains(brief, "HEAD "+handoverHead) {
 		t.Fatalf("note does not name the snapshot: %q", brief)
 	}
 	finishSettled(t, f)
@@ -292,33 +292,25 @@ func TestPoolHandoverWaitsWhenTheResetIsWithinExpected(t *testing.T) {
 	}
 }
 
-func TestPoolHandoverDirtyWorktreeNamesTheSnapshot(t *testing.T) {
-	kept := handoverSnapReply("dirty-job", true)
-	delete(kept, "commit")
-	delete(kept, "ref")
-	kept["kept"] = true
-	submodule := handoverSnapReply("dirty-job", true)
-	submodule["submodule"], submodule["kept"] = true, true
+func TestPoolHandoverNoteNamesTheKeptWorktree(t *testing.T) {
+	never := map[string]any{"outcome": nodeHandoverKeepOK, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": false, "kept": false}
+	neverKept := map[string]any{"outcome": nodeHandoverKeepOK, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "head": handoverHead, "dirty": true, "kept": true}
 	for _, tc := range []struct {
 		name  string
 		read  map[string]any
-		snap  map[string]any
+		keep  map[string]any
 		wants []string
 	}{
-		{"pushed snapshot", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", true), []string{"refs/panewire/handover/dirty-job", "git fetch origin 'refs/panewire/handover/dirty-job/" + handoverSnapCommit + "'"}},
-		{"clean", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", false), []string{"held no other work"}},
-		{"push failed", handoverReadReply("dirty-job"), kept, []string{"could not be pushed", "kept at machine-a:/work/dirty-job-checkout"}},
-		{"dirty submodule", handoverReadReply("dirty-job"), submodule, []string{"refs/panewire/handover/dirty-job", "submodule", "kept at machine-a:/work/dirty-job-checkout"}},
-		{"never pushed", map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": false, "submodule": false, "kept": false},
-			map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": true, "submodule": false, "kept": false, "commit": handoverSnapCommit, "ref": handoverSnapshotRef("dirty-job", handoverSnapCommit)},
-			[]string{"was never pushed", "refs/panewire/handover/dirty-job"}},
+		{"dirty", handoverReadReply("dirty-job"), handoverKeepReply("dirty-job", true), []string{`"a.txt", "runtime.env"`, "nothing of it was pushed", "kept at machine-a:/work/dirty-job-checkout"}},
+		{"clean", handoverReadReply("dirty-job"), handoverKeepReply("dirty-job", false), []string{"held no other work", "kept at machine-a:/work/dirty-job-checkout"}},
+		{"never pushed", never, neverKept, []string{"was never pushed", "HEAD " + handoverHead, "kept at machine-a:"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := handoverFixture(t, "dirty-job", 1, 0)
 			if result := sweepHandover(t, f, window5h(), tc.read); result.action != poolJobQueued {
 				t.Fatalf("sweep=%+v", result)
 			}
-			action := closeHandoverWith(t, f, readOnlyPoolAction(t, f.hub), tc.snap)
+			action := closeHandoverWith(t, f, readOnlyPoolAction(t, f.hub), tc.keep)
 			successor := action.Data.Handover.Successor
 			for _, want := range tc.wants {
 				if !strings.Contains(successor.Brief, want) {
@@ -500,7 +492,7 @@ func TestPoolHandoverFallsBackBeforeTheClose(t *testing.T) {
 			f := newQuotaReplaceFixtureWith(t, "implementer", tc.job, tc.mutate)
 			f.hub.mu.Lock()
 			f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
-			f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
+			f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverKeep] = true
 			f.hub.jobs[tc.job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: tc.job, Epoch: 1}, Node: "machine-a"}
 			f.hub.mu.Unlock()
 			f.hub.handoverInputs = func(context.Context, string) handoverInputs {
@@ -535,7 +527,7 @@ func TestPoolHandoverSuccessorArguments(t *testing.T) {
 	j := slices.Index(old.Args, "--report-relative")
 	old.Args = slices.Delete(old.Args, j, j+2)
 	old.StartConditions = []fleet.StartCondition{{}}
-	next, err := handoverSuccessorRequest(old, "chain-q1", "chain-q1-q2", "claude", window5h(), nodeHandoverSnapshotResult{Branch: "wk/task", Pushed: handoverPushed})
+	next, err := handoverSuccessorRequest(old, "chain-q1", "chain-q1-q2", "claude", window5h(), nodeHandoverKeepResult{Branch: "wk/task", Pushed: handoverPushed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,8 +639,8 @@ func TestPoolHandoverWithdrawsBeforeTheClose(t *testing.T) {
 		{"branch moved", []poolActionReply{
 			poolStatus(nodeCloseOpNone, false, false),
 			idlePane("withdraw-job", "/work/project.checkout", "idle"),
-			{op: nodeCommandHandoverSnapshot, result: func() map[string]any {
-				p := handoverSnapReply("withdraw-job", true)
+			{op: nodeCommandHandoverKeep, result: func() map[string]any {
+				p := handoverKeepReply("withdraw-job", true)
 				p["pushed"] = strings.Repeat("e", 40)
 				return p
 			}()},
@@ -694,7 +686,7 @@ func TestPoolHandoverSnapshotsOnlyAnIdlePane(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "idle") {
 		t.Fatalf("err=%v, want the close held until the pane idles", err)
 	}
-	if action := readOnlyPoolAction(t, f.hub); action.Phase != poolActionPending || action.Data.Handover.Snapshot != nil || action.Data.Args != nil {
+	if action := readOnlyPoolAction(t, f.hub); action.Phase != poolActionPending || action.Data.Handover.Keep != nil || action.Data.Args != nil {
 		t.Fatalf("row=%+v", action)
 	}
 }
@@ -768,7 +760,7 @@ func TestPoolHandoverRewritesAnInheritedReport(t *testing.T) {
 	i := slices.Index(old.Args, "--task")
 	old.Args[i], old.Args[i+1] = "--parent-job", "a-job"
 	old.Args[slices.Index(old.Args, "--report-relative")+1] = "a-job/report.md"
-	next, err := handoverSuccessorRequest(old, "b-job", "b-job-q1", "claude", window5h(), nodeHandoverSnapshotResult{Branch: "wk/task", Pushed: handoverPushed})
+	next, err := handoverSuccessorRequest(old, "b-job", "b-job-q1", "claude", window5h(), nodeHandoverKeepResult{Branch: "wk/task", Pushed: handoverPushed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -787,12 +779,12 @@ func TestPoolHandoverRechecksBeforeAnyCloseIsRegistered(t *testing.T) {
 	if err := f.hub.inbox.store.savePoolAction(t.Context(), action); err != nil {
 		t.Fatal(err)
 	}
-	changed := handoverSnapReply(job, true)
+	changed := handoverKeepReply(job, true)
 	changed["pushed"] = strings.Repeat("e", 40)
 	if err := runPoolActionStep(t, f.hub, f.node, action,
 		poolStatus(nodeCloseOpNone, false, false),
 		idlePane(job, "/work/project.checkout", "idle"),
-		poolActionReply{op: nodeCommandHandoverSnapshot, result: changed},
+		poolActionReply{op: nodeCommandHandoverKeep, result: changed},
 		releasedReply,
 	); err != nil {
 		t.Fatal(err)
@@ -823,7 +815,7 @@ func TestPoolHandoverContinuesADetachedSuccessor(t *testing.T) {
 	})
 	f.hub.mu.Lock()
 	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
-	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverKeep] = true
 	f.hub.jobs[job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: job, Epoch: 1}, Node: "machine-a"}
 	f.hub.mu.Unlock()
 	f.hub.handoverInputs = func(context.Context, string) handoverInputs {
@@ -993,7 +985,7 @@ func TestPoolHandoverDrainHoldsTheClose(t *testing.T) {
 	if err := runPoolActionStep(t, f.hub, f.node, readOnlyPoolAction(t, f.hub), poolStatus(nodeCloseOpNone, false, false)); err == nil || !strings.Contains(err.Error(), "drain") {
 		t.Fatalf("err=%v, want the close held", err)
 	}
-	if action := readOnlyPoolAction(t, f.hub); action.Phase != poolActionPending || action.Data.Handover.Snapshot != nil {
+	if action := readOnlyPoolAction(t, f.hub); action.Phase != poolActionPending || action.Data.Handover.Keep != nil {
 		t.Fatalf("row=%+v", action)
 	}
 }
@@ -1025,7 +1017,7 @@ func TestPoolHandoverDropsAPinnedProfileAndBoundsTheLabel(t *testing.T) {
 	})
 	f.hub.mu.Lock()
 	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOps] = true
-	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverKeep] = true
 	f.hub.jobs[job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: job, Epoch: 1}, Node: "machine-a"}
 	f.hub.mu.Unlock()
 	f.hub.handoverInputs = func(context.Context, string) handoverInputs {
@@ -1044,19 +1036,6 @@ func TestPoolHandoverDropsAPinnedProfileAndBoundsTheLabel(t *testing.T) {
 }
 
 // Round 4 (PR #687 head 22178c8d).
-
-// The restore command quotes the branch: a valid ref name may hold shell
-// metacharacters.
-func TestPoolHandoverNoteQuotesTheBranch(t *testing.T) {
-	snap := nodeHandoverSnapshotResult{Branch: "work/$(id)", Pushed: handoverPushed, Dirty: true, Commit: handoverSnapCommit, Ref: handoverSnapshotRef("j", handoverSnapCommit)}
-	note := handoverNote("j", "machine-a", window5h(), snap)
-	if !strings.Contains(note, "git checkout -B 'work/$(id)' "+handoverSnapCommit) || strings.Contains(note, "-B work/$(id)") {
-		t.Fatalf("note=%q", note)
-	}
-	if got := shellWord("a'b"); got != `'a'\''b'` {
-		t.Fatalf("quote=%s", got)
-	}
-}
 
 // A final note that pushes the brief past its cap withdraws the row before
 // the close: no pane closes for a successor that could never be claimed.
@@ -1077,7 +1056,7 @@ func TestPoolHandoverValidatesTheFinalSuccessorBeforeTheClose(t *testing.T) {
 	if err := runPoolActionStep(t, f.hub, f.node, action,
 		poolStatus(nodeCloseOpNone, false, false),
 		idlePane(job, "/work/project.checkout", "idle"),
-		poolActionReply{op: nodeCommandHandoverSnapshot, result: handoverSnapReply(job, true)},
+		poolActionReply{op: nodeCommandHandoverKeep, result: handoverKeepReply(job, true)},
 		releasedReply,
 	); err != nil {
 		t.Fatal(err)
