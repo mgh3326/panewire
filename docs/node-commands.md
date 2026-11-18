@@ -916,11 +916,12 @@ The old node's half of the hub's implementer hand-over (hk 4633,
 `branch`) the node reads the branch's last pushed commit with
 `git ls-remote origin`, or the merge-base with origin's default branch when
 nothing was pushed. Without `snapshot` it only reads. With `snapshot` it
-commits the worktree's tracked changes (staged new files included, untracked
-files never) through a temporary index copied from the user's, on top of
-HEAD (the user's index is untouched), lists the untracked files (`untracked`,
-at most 50, `untracked_more` counts the rest) and pushes the commit to
-`refs/panewire/handover/<job>` on origin (no tags, no submodules, read back
+commits the worktree's tracked changes (staged new files included; untracked
+and intent-to-add files never) through a temporary index read from HEAD, on
+top of HEAD (the user's index is untouched), lists the local-only files
+(`untracked`, at most 50 names and 8 KiB, `untracked_more` counts the rest)
+and pushes the commit, unforced, to `refs/panewire/handover/<job>/<commit>`
+on origin (no tags, no submodules, read back
 with ls-remote), and writes `jobs/<job>/handover-keep`, which keeps the
 worktree from every sweep. Result: `outcome` (`saved`, `not-a-job`,
 `branch_mismatch`, `git_failed`, `diverged`), `branch`, `top`, `pushed`,

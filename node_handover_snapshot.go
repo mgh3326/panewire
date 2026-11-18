@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -91,6 +93,10 @@ type nodeHandoverSnapshotResult struct {
 // nodeHandoverSnapshotMaxListed bounds the untracked paths a result names.
 const nodeHandoverSnapshotMaxListed = 50
 
+// nodeHandoverSnapshotListBytes bounds the listed names' bytes, so the result
+// stays well inside nodeCommandMaxResultBytes.
+const nodeHandoverSnapshotListBytes = 8 << 10
+
 // validHandoverUntrackedPath is one printable relative path for the note.
 func validHandoverUntrackedPath(path string) bool {
 	if path == "" || len(path) > 1024 || !utf8.ValidString(path) || strings.HasPrefix(path, "/") {
@@ -114,14 +120,17 @@ func validNodeHandoverSnapshotResult(result nodeHandoverSnapshotResult) bool {
 		if result.Pushed == "" && (!nodeShaPattern.MatchString(result.Base) || !validNodeFetchRef(result.BaseRef)) {
 			return false
 		}
-		if (result.Commit == "") != (result.Ref == "") || result.Commit != "" && (!nodeShaPattern.MatchString(result.Commit) || !strings.HasPrefix(result.Ref, handoverSnapshotRefPrefix) || !validNodeJobName(strings.TrimPrefix(result.Ref, handoverSnapshotRefPrefix))) {
+		job, _ := strings.CutPrefix(strings.TrimSuffix(result.Ref, "/"+result.Commit), handoverSnapshotRefPrefix)
+		if (result.Commit == "") != (result.Ref == "") || result.Commit != "" && (!nodeShaPattern.MatchString(result.Commit) || !validNodeJobName(job) || result.Ref != handoverSnapshotRef(job, result.Commit)) {
 			return false
 		}
 		if len(result.Untracked) > nodeHandoverSnapshotMaxListed || result.UntrackedMore < 0 {
 			return false
 		}
+		listed := 0
 		for _, path := range result.Untracked {
-			if !validHandoverUntrackedPath(path) {
+			listed += len(path)
+			if !validHandoverUntrackedPath(path) || listed > nodeHandoverSnapshotListBytes {
 				return false
 			}
 		}
@@ -226,16 +235,28 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 	head, ok3 := read("rev-parse", "HEAD")
 	headTree, ok4 := read("rev-parse", "HEAD^{tree}")
 	untracked, ok5 := read("ls-files", "-z", "--others", "--exclude-standard")
-	index, ok6 := read("rev-parse", "--path-format=absolute", "--git-path", "index")
-	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
+	// Staged new files: added to the user's index with their contents.
+	// Intent-to-add entries (git add -N) are not staged contents and stay
+	// local-only, like untracked files.
+	added, ok6 := read("diff", "--cached", "-z", "--name-only", "--no-renames", "--diff-filter=A")
+	withIntent, ok7 := read("diff", "--cached", "-z", "--name-only", "--no-renames", "--diff-filter=A", "--ita-visible-in-index")
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 {
 		return refuse(nodeHandoverSnapshotGitError)
 	}
-	for _, path := range strings.Split(untracked, "\x00") {
-		switch {
-		case path == "":
-		case len(result.Untracked) < nodeHandoverSnapshotMaxListed && validHandoverUntrackedPath(path):
+	stagedNew := handoverPaths(added)
+	localOnly := handoverPaths(untracked)
+	for _, path := range handoverPaths(withIntent) {
+		if !slices.Contains(stagedNew, path) {
+			localOnly = append(localOnly, path)
+		}
+	}
+	listed := 0
+	for _, path := range localOnly {
+		// The list must fit the node's result budget whatever the names.
+		if len(result.Untracked) < nodeHandoverSnapshotMaxListed && validHandoverUntrackedPath(path) && listed+len(path) <= nodeHandoverSnapshotListBytes {
 			result.Untracked = append(result.Untracked, path)
-		default:
+			listed += len(path)
+		} else {
 			result.UntrackedMore++
 		}
 	}
@@ -248,17 +269,19 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 			}
 		}
 	}
-	tree, commit, err := handoverSnapshotCommit(ctx, top, dir, strings.TrimSpace(index), args.Job)
+	tree, commit, err := handoverSnapshotCommit(ctx, top, dir, stagedNew, args.Job)
 	if err != nil {
 		return refuse(nodeHandoverSnapshotGitError)
 	}
 	result.Dirty = tree != headTree || head != from
 	if result.Dirty {
-		ref := handoverSnapshotRefPrefix + args.Job
+		// One immutable ref per capture, named by its commit: a late push
+		// of an older capture can never move the ref a successor restores.
+		ref := handoverSnapshotRef(args.Job, commit)
 		// Only the snapshot ref: no tags followed (a v* tag would start a
-		// release), no submodule pushes. Then the ref must read back on
-		// origin as the commit, or the push did not happen.
-		_, err := gitWithEnv(ctx, nil, "-C", top, "-c", "push.recurseSubmodules=no", "push", "--no-verify", "--no-follow-tags", "--recurse-submodules=no", "origin", "+"+commit+":"+ref)
+		// release), no submodule pushes, no force. Then the ref must read
+		// back on origin as the commit, or the push did not happen.
+		_, err := gitWithEnv(ctx, nil, "-C", top, "-c", "push.recurseSubmodules=no", "push", "--no-verify", "--no-follow-tags", "--recurse-submodules=no", "origin", commit+":"+ref)
 		if out, lsErr := gitWithEnv(ctx, nil, "-C", top, "ls-remote", "origin", ref); err == nil && lsErr == nil && strings.HasPrefix(strings.TrimSpace(out), commit+"\t") {
 			result.Commit, result.Ref = commit, ref
 		}
@@ -276,12 +299,13 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 }
 
 // handoverSnapshotCommit writes the worktree's tracked changes at top as a
-// commit on top of HEAD: a temporary index in the job's directory starts as a
-// copy of the user's index (so staged new files count as tracked), then
-// git add -u takes every tracked path's worktree state. Untracked files are
-// never added: they may hold credentials, and the ref is readable by
-// everyone who can read origin.
-func handoverSnapshotCommit(ctx context.Context, top, jobDir, userIndex, job string) (tree, commit string, err error) {
+// commit on top of HEAD: a temporary index in the job's directory starts
+// from HEAD's tree (no flag of the user's index — assume-unchanged,
+// skip-worktree, intent-to-add — carries over), git add -u takes every
+// HEAD path's worktree state, and the files the user staged as new are
+// added by name. Untracked files are never added: they may hold
+// credentials, and the ref is readable by everyone who can read origin.
+func handoverSnapshotCommit(ctx context.Context, top, jobDir string, stagedNew []string, job string) (tree, commit string, err error) {
 	index, err := os.CreateTemp(jobDir, ".handover-index-*")
 	if err != nil {
 		return "", "", err
@@ -290,23 +314,27 @@ func handoverSnapshotCommit(ctx context.Context, top, jobDir, userIndex, job str
 	index.Close()
 	defer os.Remove(path)
 	env := append([]string{"GIT_INDEX_FILE=" + path}, handoverSnapshotIdentity...)
-	if body, err := os.ReadFile(userIndex); err == nil {
-		if err := os.WriteFile(path, body, 0600); err != nil {
-			return "", "", err
-		}
-	} else if errors.Is(err, os.ErrNotExist) {
-		// No index yet: start from HEAD. git refuses an empty index file.
-		if err := os.Remove(path); err != nil {
-			return "", "", err
-		}
-		if _, err := gitWithEnv(ctx, env, "-C", top, "read-tree", "HEAD"); err != nil {
-			return "", "", err
-		}
-	} else {
+	// git refuses an empty file as an index; read-tree creates it.
+	if err := os.Remove(path); err != nil {
+		return "", "", err
+	}
+	if _, err := gitWithEnv(ctx, env, "-C", top, "read-tree", "HEAD"); err != nil {
 		return "", "", err
 	}
 	if _, err := gitWithEnv(ctx, env, "-C", top, "add", "-u", "--", "."); err != nil {
 		return "", "", err
+	}
+	var present []string
+	for _, name := range stagedNew {
+		// A staged file deleted since is gone from the worktree too.
+		if _, err := os.Lstat(filepath.Join(top, name)); err == nil {
+			present = append(present, name)
+		}
+	}
+	if len(present) > 0 {
+		if _, err := gitWithEnv(ctx, env, append([]string{"-C", top, "add", "-f", "--"}, present...)...); err != nil {
+			return "", "", err
+		}
 	}
 	if tree, err = gitWithEnv(ctx, env, "-C", top, "write-tree"); err != nil {
 		return "", "", err
@@ -316,6 +344,22 @@ func handoverSnapshotCommit(ctx context.Context, top, jobDir, userIndex, job str
 		return "", "", err
 	}
 	return tree, strings.TrimSpace(commit), nil
+}
+
+// handoverPaths splits a -z path list.
+func handoverPaths(list string) []string {
+	var paths []string
+	for _, path := range strings.Split(list, "\x00") {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+// handoverSnapshotRef is the immutable origin ref of one capture.
+func handoverSnapshotRef(job, commit string) string {
+	return handoverSnapshotRefPrefix + job + "/" + commit
 }
 
 // handoverStatusNames reports whether a porcelain status names path.

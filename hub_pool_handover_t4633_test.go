@@ -55,7 +55,7 @@ func handoverSnapReply(job string, dirty bool) map[string]any {
 	reply := handoverReadReply(job)
 	reply["dirty"] = dirty
 	if dirty {
-		reply["commit"], reply["ref"] = handoverSnapCommit, handoverSnapshotRefPrefix+job
+		reply["commit"], reply["ref"] = handoverSnapCommit, handoverSnapshotRef(job, handoverSnapCommit)
 	}
 	return reply
 }
@@ -236,7 +236,7 @@ func TestPoolHandoverUrgentImplementerIsHandedOverByTheHub(t *testing.T) {
 		t.Fatalf("owner told before the hand-over finished: %v", lines)
 	}
 	action = closeHandover(t, f, action)
-	if brief := action.Data.Handover.Successor.Brief; !strings.Contains(brief, "commit "+handoverSnapCommit+" at refs/panewire/handover/"+job+" on origin") || !strings.Contains(brief, "git reset --mixed HEAD~1") {
+	if brief := action.Data.Handover.Successor.Brief; !strings.Contains(brief, "commit "+handoverSnapCommit+" at refs/panewire/handover/"+job+"/"+handoverSnapCommit+" on origin") || !strings.Contains(brief, "git reset --mixed HEAD~1") {
 		t.Fatalf("note does not name the snapshot: %q", brief)
 	}
 	finishSettled(t, f)
@@ -305,12 +305,12 @@ func TestPoolHandoverDirtyWorktreeNamesTheSnapshot(t *testing.T) {
 		snap  map[string]any
 		wants []string
 	}{
-		{"pushed snapshot", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", true), []string{"refs/panewire/handover/dirty-job", "git fetch origin 'refs/panewire/handover/dirty-job'"}},
+		{"pushed snapshot", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", true), []string{"refs/panewire/handover/dirty-job", "git fetch origin 'refs/panewire/handover/dirty-job/" + handoverSnapCommit + "'"}},
 		{"clean", handoverReadReply("dirty-job"), handoverSnapReply("dirty-job", false), []string{"held no other work"}},
 		{"push failed", handoverReadReply("dirty-job"), kept, []string{"could not be pushed", "kept at machine-a:/work/dirty-job-checkout"}},
 		{"dirty submodule", handoverReadReply("dirty-job"), submodule, []string{"refs/panewire/handover/dirty-job", "submodule", "kept at machine-a:/work/dirty-job-checkout"}},
 		{"never pushed", map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": false, "submodule": false, "kept": false},
-			map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": true, "submodule": false, "kept": false, "commit": handoverSnapCommit, "ref": handoverSnapshotRefPrefix + "dirty-job"},
+			map[string]any{"outcome": nodeHandoverSnapshotSaved, "branch": "wk/task", "top": "/work/dirty-job-checkout", "base": strings.Repeat("c", 40), "base_ref": "refs/heads/main", "dirty": true, "submodule": false, "kept": false, "commit": handoverSnapCommit, "ref": handoverSnapshotRef("dirty-job", handoverSnapCommit)},
 			[]string{"was never pushed", "refs/panewire/handover/dirty-job"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1048,9 +1048,9 @@ func TestPoolHandoverDropsAPinnedProfileAndBoundsTheLabel(t *testing.T) {
 // The restore command quotes the branch: a valid ref name may hold shell
 // metacharacters.
 func TestPoolHandoverNoteQuotesTheBranch(t *testing.T) {
-	snap := nodeHandoverSnapshotResult{Branch: "work/$(id)", Pushed: handoverPushed, Dirty: true, Commit: handoverSnapCommit, Ref: handoverSnapshotRefPrefix + "j"}
+	snap := nodeHandoverSnapshotResult{Branch: "work/$(id)", Pushed: handoverPushed, Dirty: true, Commit: handoverSnapCommit, Ref: handoverSnapshotRef("j", handoverSnapCommit)}
 	note := handoverNote("j", "machine-a", window5h(), snap)
-	if !strings.Contains(note, "git checkout -B 'work/$(id)' FETCH_HEAD") || strings.Contains(note, "-B work/$(id)") {
+	if !strings.Contains(note, "git checkout -B 'work/$(id)' "+handoverSnapCommit) || strings.Contains(note, "-B work/$(id)") {
 		t.Fatalf("note=%q", note)
 	}
 	if got := shellWord("a'b"); got != `'a'\''b'` {

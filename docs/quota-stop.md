@@ -168,23 +168,28 @@ decides with the §Implementer rule (the job's start, the task's priority and
      - releases it when the pane moved or changed directory, and holds it
        until the pane is idle;
      - then has the old node snapshot the worktree: from the top level
-       (never the pane's subdirectory), a temporary index that starts as a
-       copy of the user's index (`GIT_INDEX_FILE`), `add -u`, `write-tree`
-       and `commit-tree -p HEAD`, pushed to `refs/panewire/handover/<old>`
-       on origin. The user's index, stash and branch are untouched. A pushed
+       (never the pane's subdirectory), a temporary index (`GIT_INDEX_FILE`)
+       read from HEAD's tree, so no flag of the user's index
+       (assume-unchanged, skip-worktree, intent-to-add) carries over; then
+       `add -u`, the files the user staged as new added by name,
+       `write-tree` and `commit-tree -p HEAD`. The commit is pushed, never
+       forced, to its own immutable ref `refs/panewire/handover/<old>/<commit>`
+       on origin, and the note restores by that commit. The user's index, stash and branch are untouched. A pushed
        tip no longer in the worktree's history (`diverged`) or a start point
        that moved releases the row unclosed.
      - **What the ref holds:** the old job's unpushed commits (the snapshot's
        parent is the old HEAD) and one commit on top with every tracked
        path's worktree state — modified, deleted, and new files the user had
        staged — as `git add` stores it.
-     - **What stays only on the old host:** every untracked file (never
+     - **What stays only on the old host:** every untracked or intent-to-add file (never
        added or pushed, whatever its name: it may hold a credential, and the
        ref is readable by anyone who can read origin; operator decision on
        r4613533212), ignored files, Git LFS objects, clean-filtered contents,
        nested repositories and dirty submodules, and anything written after
-       the snapshot. The note lists the untracked paths (quoted, up to 2 KiB,
-       then a count) and names the kept worktree.
+       the snapshot. The note lists those paths (quoted, up to 2 KiB, then a
+       count; the node's result lists at most 50 names and 8 KiB) and names
+       the kept worktree. Any job's `handover-keep` naming a worktree (or a
+       directory inside it) keeps it, whichever job a sweep is handling.
      - The push sends only that ref (`--no-follow-tags`, no submodule
        recursion, no hooks) and the ref must read back on origin as the
        commit.

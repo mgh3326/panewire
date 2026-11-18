@@ -44,3 +44,23 @@ func TestSweepKeepsAHandedOverWorktree(t *testing.T) {
 		}
 	})
 }
+
+// Jobs may share a worktree: another job's mark naming it (or a directory
+// inside it) keeps it while this job is the sweep candidate.
+func TestSweepKeepsAWorktreeAnotherJobHandedOver(t *testing.T) {
+	f, g, _, cwd := checkoutFixture(t)
+	other := filepath.Join(f.a.Jobs, "handed-over-job")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, HandoverKeepFile), []byte(cwd+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.endedSweep(61, time.Hour)
+	if len(g.removed) != 0 {
+		t.Fatalf("a worktree another job's hand-over keeps was removed: %v", g.removed)
+	}
+	if !f.infoHas("task worktree kept", "reason="+sweepWorktreeHandoverKept) {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}

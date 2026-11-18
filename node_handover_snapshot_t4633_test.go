@@ -150,8 +150,7 @@ func TestNodeHandoverSnapshotRestoresTheWorktreeByteForByte(t *testing.T) {
 			delete(want, "new.txt")
 
 			result, _ := handoverSnapshotRun(t, filepath.Join(work, "live"), true)
-			ref := handoverSnapshotRefPrefix + "job-a"
-			if result["outcome"] != nodeHandoverSnapshotSaved || result["dirty"] != true || result["ref"] != ref || result["kept"] != true || result["top"] != work || fmt.Sprint(result["untracked"]) != "[new.txt]" {
+			if result["outcome"] != nodeHandoverSnapshotSaved || result["dirty"] != true || result["ref"] != handoverSnapshotRef("job-a", fmt.Sprint(result["commit"])) || result["kept"] != true || result["top"] != work || fmt.Sprint(result["untracked"]) != "[new.txt]" {
 				t.Fatalf("result=%v", result)
 			}
 			if got := handoverGit(t, work, "diff", "--cached", "--name-status"); got != indexBefore {
@@ -170,6 +169,7 @@ func TestNodeHandoverSnapshotRestoresTheWorktreeByteForByte(t *testing.T) {
 			next := filepath.Join(t.TempDir(), "next")
 			handoverGit(t, filepath.Dir(next), "clone", origin, next)
 			handoverGit(t, next, "checkout", "--detach", start)
+			ref := result["ref"].(string)
 			handoverGit(t, next, "fetch", "origin", ref)
 			if got := handoverGit(t, next, "rev-parse", "FETCH_HEAD"); got != result["commit"] {
 				t.Fatalf("origin ref=%s, want the reported commit %v", got, result["commit"])
@@ -297,13 +297,13 @@ func TestNodeHandoverSnapshotPushesOnlyItsRefAndKeepsTheWorktree(t *testing.T) {
 	handoverGit(t, work, "config", "push.followTags", "true")
 	handoverGit(t, work, "config", "push.recurseSubmodules", "only")
 	result, jobDir := handoverSnapshotRun(t, work, true)
-	if result["ref"] != handoverSnapshotRefPrefix+"job-a" || result["kept"] != true {
+	if result["ref"] != handoverSnapshotRef("job-a", fmt.Sprint(result["commit"])) || result["kept"] != true {
 		t.Fatalf("result=%v", result)
 	}
 	if tags := handoverGit(t, work, "ls-remote", "--tags", "origin"); tags != "" {
 		t.Fatalf("the snapshot push published tags: %q", tags)
 	}
-	if got := handoverGit(t, work, "ls-remote", "origin", handoverSnapshotRefPrefix+"job-a"); !strings.HasPrefix(got, result["commit"].(string)) {
+	if got := handoverGit(t, work, "ls-remote", "origin", result["ref"].(string)); !strings.HasPrefix(got, result["commit"].(string)) {
 		t.Fatalf("origin ref=%q, want %v", got, result["commit"])
 	}
 	if _, err := os.Stat(filepath.Join(jobDir, fleet.HandoverKeepFile)); err != nil {
@@ -347,5 +347,86 @@ func TestNodeHandoverSnapshotNeverPushesUntrackedFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(jobDir, fleet.HandoverKeepFile)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Round 5 (PR #687 head a3c4d2e).
+
+// Intent-to-add entries (git add -N) carry no staged contents: they are never
+// committed or pushed and are listed as local-only. An assume-unchanged edit
+// of a tracked file is still captured: no flag of the user's index carries
+// into the snapshot.
+func TestNodeHandoverSnapshotIgnoresTheUsersIndexFlags(t *testing.T) {
+	work, _ := handoverRepo(t, true)
+	if err := os.WriteFile(filepath.Join(work, "runtime.env"), []byte("TOKEN=secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	handoverGit(t, work, "add", "-N", "runtime.env")
+	handoverGit(t, work, "checkout", "--", "a.txt")
+	handoverGit(t, work, "update-index", "--assume-unchanged", "a.txt")
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hidden edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result, _ := handoverSnapshotRun(t, work, true)
+	commit, _ := result["commit"].(string)
+	if commit == "" {
+		t.Fatalf("result=%v, want the assume-unchanged edit snapshot", result)
+	}
+	tree := handoverGit(t, work, "ls-tree", "-r", "--name-only", commit)
+	if strings.Contains("\n"+tree+"\n", "\nruntime.env\n") {
+		t.Fatalf("an intent-to-add file was pushed: %q", tree)
+	}
+	if blob := handoverGit(t, work, "show", commit+":a.txt"); blob != "hidden edit" {
+		t.Fatalf("a.txt in the snapshot=%q, want the assume-unchanged edit", blob)
+	}
+	if !strings.Contains(fmt.Sprint(result["untracked"]), "runtime.env") {
+		t.Fatalf("untracked=%v, want the intent-to-add file listed", result["untracked"])
+	}
+}
+
+// Each capture has its own ref named by its commit: a later capture never
+// moves the ref an earlier successor note names.
+func TestNodeHandoverSnapshotRefsAreImmutable(t *testing.T) {
+	work, _ := handoverRepo(t, true)
+	first, _ := handoverSnapshotRun(t, work, true)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("four\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := handoverSnapshotRun(t, work, true)
+	if first["ref"] == second["ref"] {
+		t.Fatalf("two captures share ref %v", first["ref"])
+	}
+	for _, r := range []map[string]any{first, second} {
+		if got := handoverGit(t, work, "ls-remote", "origin", r["ref"].(string)); !strings.HasPrefix(got, r["commit"].(string)) {
+			t.Fatalf("ref %v=%q, want %v", r["ref"], got, r["commit"])
+		}
+	}
+}
+
+// Many long untracked names never push the result past the node's budget:
+// the list is cut by bytes and the rest counted.
+func TestNodeHandoverSnapshotListFitsTheResultBudget(t *testing.T) {
+	work, _ := handoverRepo(t, true)
+	// About 600 bytes per path (a name component stops at 255): fifty of
+	// them alone would pass the 28 KiB result budget.
+	deep := filepath.Join(strings.Repeat(strings.Repeat("d", 200)+"/", 2), strings.Repeat("e", 150))
+	if err := os.MkdirAll(filepath.Join(work, deep), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 60 {
+		name := filepath.Join(deep, fmt.Sprintf("%03d-%s", i, strings.Repeat("n", 40)))
+		if err := os.WriteFile(filepath.Join(work, name), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, _ := handoverSnapshotRun(t, work, true)
+	raw := mustJSON(result)
+	if len(raw) > nodeCommandMaxResultBytes {
+		t.Fatalf("result is %d bytes, over %d", len(raw), nodeCommandMaxResultBytes)
+	}
+	listed, _ := result["untracked"].([]any)
+	more, _ := result["untracked_more"].(float64)
+	if len(listed)+int(more) != 61 || more == 0 {
+		t.Fatalf("listed=%d more=%v, want 61 local-only files with some counted", len(listed), more)
 	}
 }

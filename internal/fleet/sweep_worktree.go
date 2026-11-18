@@ -50,6 +50,33 @@ const (
 	sweepWorktreeHandoverKept = "handover_kept"
 )
 
+// handoverKept reports whether a hand-over keeps cwd: the job's own mark, or
+// any job's mark naming the same resolved worktree (jobs may share one). An
+// unreadable mark or jobs directory keeps the worktree too.
+func handoverKept(a *App, job, cwd string) bool {
+	if _, err := os.Lstat(filepath.Join(a.Jobs, job, HandoverKeepFile)); !errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	entries, err := os.ReadDir(a.Jobs)
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		body, err := os.ReadFile(filepath.Join(a.Jobs, entry.Name(), HandoverKeepFile))
+		top := strings.TrimSpace(string(body))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return true
+		case cwd == "" || sweepSamePath(top, cwd) || sweepWithin(top, cwd) || sweepWithin(cwd, top):
+			// The mark names the worktree's top level; a job's cwd may be
+			// inside it (an execution lane) or contain it.
+			return true
+		}
+	}
+	return false
+}
+
 // HandoverKeepFile, in a job's directory, keeps that job's worktree from
 // every sweep: the hub hand-over's successor was told to copy work from it
 // (hk 4633, docs/quota-stop.md "An exhausted pool").
@@ -93,8 +120,7 @@ func (s *TaskPaneSweeper) worktreePlan(ctx context.Context, a *App, j Job, cwd s
 	if !boolean(a.Config.Sweep, "remove_worktrees", true) {
 		return "", "", false, sweepWorktreeDisabled
 	}
-	if _, err := os.Lstat(filepath.Join(a.Jobs, j.ID, HandoverKeepFile)); !errors.Is(err, os.ErrNotExist) {
-		// An unreadable marker keeps the worktree too.
+	if handoverKept(a, j.ID, cwd) {
 		return "", "", false, sweepWorktreeHandoverKept
 	}
 	clone, branch, ok := s.nodeWorktree(ctx, a, cwd)
