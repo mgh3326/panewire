@@ -689,7 +689,7 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	}
 	if moved {
 		action.Phase = poolActionDone
-		if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+		if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
 			return err
 		}
 		h.poolActionObserved.Delete(action.ID)
