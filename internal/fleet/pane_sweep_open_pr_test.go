@@ -214,46 +214,112 @@ func TestPaneSweepKeepsACompletedAuthorWhenPRStateIsUnknown(t *testing.T) {
 	}
 }
 
-// A completed author with no open PR left (merged or closed) is swept as
-// before, by its own record.
-func TestPaneSweepKeepsAPaneWhoseWorktreeCannotBeRead(t *testing.T) {
+// A completed author or task-derived end with no open PR left (merged or closed)
+// closes by the sweep's rules even if the worktree's HEAD or origin cannot be
+// read (hk 4962): there is no open PR to wait on, so an unreadable worktree
+// cannot keep the pane as pr_state_unknown.
+func TestPaneSweepClosesAPaneWhenPRsAreMergedEvenIfWorktreeCannotBeRead(t *testing.T) {
 	for _, end := range []string{"completed author", "task ended"} {
-		for _, list := range []struct {
-			name    string
-			changes []PRChange
-		}{
-			{"empty change list", nil},
-			{"merged only", []PRChange{{Number: 300, State: "merged", Head: paneSweepPRHead}}},
-		} {
-			for _, broken := range []string{"HEAD", "origin"} {
-				t.Run(end+"/"+list.name+"/"+broken, func(t *testing.T) {
-					g := newSweepGitFake(t)
-					f := newPaneSweepFixture(t)
-					f.withGit(g)
-					cwd := g.worktree(t, "j")
-					f.sweptJob("j", "42", cwd)
-					if end == "completed author" {
-						f.tasks["42"], f.category["42"] = "reviewing", "started"
-						putEvent(t, f.a, "j", "job.completed", map[string]any{})
-					} else {
-						f.tasks["42"], f.category["42"] = "deployed", "completed"
-					}
-					f.prChanges["42"] = list.changes
-					if broken == "HEAD" {
-						g.headErr = true
-					} else {
-						g.lsRemoteErr = true
-					}
-					f.at(0)
-					f.at(11)
-					if len(f.closed()) != 0 || f.reaped("j") != nil {
-						t.Fatalf("pane closed although its worktree's %s could not be read", broken)
-					}
-					if !f.infoHas("task pane kept", "job=j", "reason=pr_state_unknown") {
-						t.Fatalf("info lines = %q", f.info)
-					}
-				})
-			}
+		for _, broken := range []string{"HEAD", "origin"} {
+			t.Run(end+"/"+broken, func(t *testing.T) {
+				g := newSweepGitFake(t)
+				f := newPaneSweepFixture(t)
+				f.withGit(g)
+				cwd := g.worktree(t, "j")
+				pane := f.sweptJob("j", "42", cwd)
+				if end == "completed author" {
+					f.tasks["42"], f.category["42"] = "reviewing", "started"
+					putEvent(t, f.a, "j", "job.completed", map[string]any{})
+				} else {
+					f.tasks["42"], f.category["42"] = "deployed", "completed"
+				}
+				f.prChanges["42"] = []PRChange{{Number: 300, State: "merged", Head: paneSweepPRHead}}
+				if broken == "HEAD" {
+					g.headErr = true
+				} else {
+					g.lsRemoteErr = true
+				}
+				f.at(0)
+				f.at(11)
+				if got := f.closed(); len(got) != 1 || got[0] != pane {
+					t.Fatalf("pane %s was not closed when its PR was merged: closed %v, info %q", pane, got, f.info)
+				}
+				if f.reaped("j") == nil {
+					t.Fatalf("job was not reaped after PR merged")
+				}
+			})
+		}
+	}
+}
+
+// A pane whose task ended with no PRs closes even if its worktree cannot be read
+// (hk 4962).
+func TestPaneSweepClosesAPaneWhenTaskEndedWithNoPRsEvenIfWorktreeCannotBeRead(t *testing.T) {
+	for _, end := range []string{"completed author", "task ended"} {
+		for _, broken := range []string{"HEAD", "origin"} {
+			t.Run(end+"/"+broken, func(t *testing.T) {
+				g := newSweepGitFake(t)
+				f := newPaneSweepFixture(t)
+				f.withGit(g)
+				cwd := g.worktree(t, "j")
+				pane := f.sweptJob("j", "42", cwd)
+				if end == "completed author" {
+					f.tasks["42"], f.category["42"] = "reviewing", "started"
+					putEvent(t, f.a, "j", "job.completed", map[string]any{})
+				} else {
+					f.tasks["42"], f.category["42"] = "deployed", "completed"
+				}
+				f.prChanges["42"] = nil
+				if broken == "HEAD" {
+					g.headErr = true
+				} else {
+					g.lsRemoteErr = true
+				}
+				f.at(0)
+				f.at(11)
+				if got := f.closed(); len(got) != 1 || got[0] != pane {
+					t.Fatalf("pane %s was not closed when task had no PRs: closed %v, info %q", pane, got, f.info)
+				}
+				if f.reaped("j") == nil {
+					t.Fatalf("job was not reaped after task ended with no PRs")
+				}
+			})
+		}
+	}
+}
+
+// When the task has an open PR, an unreadable worktree (HEAD or origin) keeps
+// the pane as pr_state_unknown: the worktree may still own the open PR.
+func TestPaneSweepKeepsAPaneWhoseWorktreeCannotBeReadWhenPROpen(t *testing.T) {
+	for _, end := range []string{"completed author", "task ended"} {
+		for _, broken := range []string{"HEAD", "origin"} {
+			t.Run(end+"/"+broken, func(t *testing.T) {
+				g := newSweepGitFake(t)
+				f := newPaneSweepFixture(t)
+				f.withGit(g)
+				cwd := g.worktree(t, "j")
+				f.sweptJob("j", "42", cwd)
+				if end == "completed author" {
+					f.tasks["42"], f.category["42"] = "reviewing", "started"
+					putEvent(t, f.a, "j", "job.completed", map[string]any{})
+				} else {
+					f.tasks["42"], f.category["42"] = "deployed", "completed"
+				}
+				f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+				if broken == "HEAD" {
+					g.headErr = true
+				} else {
+					g.lsRemoteErr = true
+				}
+				f.at(0)
+				f.at(11)
+				if len(f.closed()) != 0 || f.reaped("j") != nil {
+					t.Fatalf("pane closed although its worktree's %s could not be read while an open PR exists", broken)
+				}
+				if !f.infoHas("task pane kept", "job=j", "reason=pr_state_unknown") {
+					t.Fatalf("info lines = %q", f.info)
+				}
+			})
 		}
 	}
 }

@@ -256,6 +256,7 @@ func decideSpawn(evidence spawnEvidence, spawned localSpawnRecord, label string)
 func landedSpawnResult(result hubSpawnResult, row executingSpawn, spawned localSpawnRecord, pane nodeAgentRow) hubSpawnResult {
 	result.RC, result.Pane = 0, pane.PaneID
 	result.StdoutTail = spawnSettledLandedStamp
+	result.CheckoutMode = spawned.CheckoutMode
 	result.Receipt = &fleet.ExecutionReceipt{
 		Job: row.Job, Host: spawned.Host, Pane: pane.PaneID, Profile: spawned.Profile, Model: spawned.Model, Pool: spawned.Pool, AccountKey: spawned.AccountKey,
 		Role: spawned.Role, CWD: firstNonempty(spawned.CWD, pane.Cwd), Label: firstNonempty(row.Label, pane.Name),
@@ -276,6 +277,7 @@ type localSpawnRecord struct {
 	PaneID, HerdrSession, Host, Profile, Model, Role, CWD string
 	Pool, AccountKey                                      string
 	LaneUnregistered                                      bool
+	CheckoutMode                                          string
 }
 
 func (client *HubClient) readLocalSpawnRecord(job string) localSpawnRecord {
@@ -313,13 +315,14 @@ func (client *HubClient) readLocalSpawnRecord(job string) localSpawnRecord {
 				LaneUnregistered bool   `json:"lane_unregistered"`
 				Pool             string `json:"pool"`
 				AccountKey       string `json:"account_key"`
+				CheckoutMode     string `json:"checkout_mode"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || firstNonempty(event.Type, event.Kind, event.Event) != "job.spawned" {
 			continue
 		}
 		p := event.Payload
-		found = localSpawnRecord{PaneID: p.PaneID, HerdrSession: p.HerdrSession, Host: p.Host, Profile: p.Profile, Model: p.Model, Pool: p.Pool, AccountKey: p.AccountKey, Role: p.Role, CWD: p.CWD, LaneUnregistered: p.LaneUnregistered}
+		found = localSpawnRecord{PaneID: p.PaneID, HerdrSession: p.HerdrSession, Host: p.Host, Profile: p.Profile, Model: p.Model, Pool: p.Pool, AccountKey: p.AccountKey, Role: p.Role, CWD: p.CWD, LaneUnregistered: p.LaneUnregistered, CheckoutMode: p.CheckoutMode}
 	}
 	return found
 }

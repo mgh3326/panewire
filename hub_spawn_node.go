@@ -313,6 +313,7 @@ func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, 
 // UUID and wakes them when one copy claims it. It is never restart evidence.
 type nodeSpawnWaiter struct {
 	fingerprint string
+	sparseHash  string
 	claimed     chan struct{}
 	users       int
 }
@@ -328,12 +329,15 @@ func (client *HubClient) beginSpawnAdmission(ctx context.Context, journal *nodeS
 		client.spawnWaiting = make(map[string]*nodeSpawnWaiter)
 	}
 	fingerprint := spawnFingerprint(message)
+	sparseHash := sparseListsHash(message.Checkout)
 	waiter = client.spawnWaiting[message.RequestID]
 	if waiter == nil {
-		waiter = &nodeSpawnWaiter{fingerprint: fingerprint, claimed: make(chan struct{})}
+		waiter = &nodeSpawnWaiter{fingerprint: fingerprint, sparseHash: sparseHash, claimed: make(chan struct{})}
 		client.spawnWaiting[message.RequestID] = waiter
-	} else if waiter.fingerprint != fingerprint {
+	} else if waiter.fingerprint != fingerprint || (waiter.sparseHash != "" && sparseHash != "" && waiter.sparseHash != sparseHash) {
 		return false, nil, false, nil, errors.New("spawn request payload conflicts with pending admission")
+	} else if waiter.sparseHash == "" && sparseHash != "" {
+		waiter.sparseHash = sparseHash
 	}
 	waiter.users++
 	return false, nil, false, waiter, nil

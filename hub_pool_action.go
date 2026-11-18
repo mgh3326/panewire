@@ -87,8 +87,9 @@ func (h *HubServer) startPoolActions(ctx context.Context) {
 		return
 	}
 	h.poolActionOnce.Do(func() {
-		h.spawnWorkers.Add(1)
+		h.spawnWorkers.Add(2)
 		go func() { defer h.spawnWorkers.Done(); h.runPoolActions(ctx) }()
+		go func() { defer h.spawnWorkers.Done(); h.runSupersedeLandings(ctx) }()
 	})
 }
 
@@ -158,6 +159,11 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	if action.Phase == poolActionGuarded {
 		return h.reconcileGuardedPoolAction(ctx, action)
 	}
+	if action.Data.Kind == poolActionKindSupersedeClose {
+		if stop, err := h.prepareSupersedeClose(ctx, &action); stop || err != nil {
+			return err
+		}
+	}
 	ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}
 	var status nodeCloseOpStatusResult
 	if !h.nodeCall(ctx, action.Node, nodeCommandPaneCloseStatus, ref, hubNodeCommandWait, &status) {
@@ -167,6 +173,32 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		action.Phase = poolActionSettled
 		return h.saveFinalPoolAction(ctx, action, "settled")
 	}
+	if action.Data.Kind == poolActionKindSupersedeClose {
+		fenced, err := h.supersedeFenced(ctx, action)
+		if err != nil {
+			return err
+		}
+		if fenced && status.State == nodeCloseOpNone && status.Attempt == "" && action.Data.Args != nil {
+			// The node holds no attempt this request could bind to (its job
+			// directory is gone, or it never recorded one), so a close op for
+			// it can only answer not-a-job or mismatch: nothing is left to
+			// fence, and no tombstone can be written for a job the node no
+			// longer has.
+			return h.refusePoolAction(ctx, action)
+		}
+		if fenced && (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) {
+			// The switch is off, or a hub started with it off moved the
+			// fence since this row was queued: a request stored but not
+			// begun is released, and only the release tombstone retires it,
+			// so an unanswered node leaves the row cancelled-pending across
+			// restarts. A request the node began is finished below.
+			return h.releasePoolAction(ctx, action)
+		}
+		if fenced && status.State == fleet.CloseOpUnknown {
+			// A cancelled row creates no replacement request.
+			return nil
+		}
+	}
 	if (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) && !h.nodeHasCapability(action.Node, hubCapabilityCloseOps) {
 		// Withdrawal can precede a binary rollback. Fence a request that has
 		// not started closing rather than strand it on the withdrawn node.
@@ -174,7 +206,7 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 	}
 	switch status.State {
 	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
-		return h.refusePoolAction(ctx, action)
+		return h.refuseCloseAction(ctx, action)
 	case nodeCloseOpSuperseded:
 		if action.Data.Args == nil || status.Attempt == action.Data.Args.Attempt {
 			return errors.New("invalid superseded close proof")
@@ -195,6 +227,13 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		if action.Data.Args == nil || status.Attempt == "" || status.Attempt != action.Data.Args.Attempt {
 			return nil
 		}
+		if action.Data.Kind == poolActionKindSupersedeClose {
+			// One retry chain per parent, with one budget shared with the
+			// refused-close retries (refuseCloseAction).
+			if may, err := h.supersedeMayRetry(ctx, action); err != nil || !may {
+				return err
+			}
+		}
 		return h.retryUnknownPoolAction(ctx, action)
 	case fleet.CloseOpClosed, fleet.CloseOpGone:
 		// An hk lost read is not settlement: the node may still retry the write.
@@ -207,6 +246,16 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			if action.Data.TargetAttempt != "" && status.Attempt != action.Data.TargetAttempt {
 				return h.releasePoolAction(ctx, action)
 			}
+			if action.Data.Kind == poolActionKindSupersedeClose && action.Data.TargetAttempt == "" {
+				// Bind the parent's attempt at the first look, before a
+				// working pane defers the close: a parent re-prompted into
+				// a new attempt while it works is released above, never
+				// closed by this intent.
+				action.Data.TargetAttempt = status.Attempt
+				if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+					return err
+				}
+			}
 			probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
 			if probe.state == heldPaneAbsent || probe.state == heldPanePresent && probe.row.PaneID != action.Data.Pane {
 				// No command was sent before Args was saved. A tombstone
@@ -215,6 +264,11 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 			}
 			if probe.state != heldPanePresent {
 				return errors.New("pane unavailable")
+			}
+			if action.Data.Kind == poolActionKindSupersedeClose && !supersedeCloseStatus(probe.row.AgentStatus) {
+				// A working (or blocked) parent is never closed: the row
+				// stays pending and the next pass looks again.
+				return nil
 			}
 			args := &nodePaneCloseOpArgs{RequestID: action.ID, Job: action.Job, Epoch: action.Epoch, Attempt: status.Attempt,
 				PaneID: action.Data.Pane, Name: action.Data.Label, AgentStatus: probe.row.AgentStatus, Cwd: probe.row.Cwd,
@@ -249,7 +303,9 @@ func (h *HubServer) reconcilePoolAction(ctx context.Context, action poolAction) 
 		return errors.New("close ownership, capability or answer unavailable")
 	}
 	switch result.Outcome {
-	case fleet.CloseOpRefused, fleet.CloseOpPreempted, fleet.CloseOpCancelled:
+	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
+		return h.refuseCloseAction(ctx, action)
+	case fleet.CloseOpCancelled:
 		return h.refusePoolAction(ctx, action)
 	case nodeCloseOpMismatch, nodeCaptureNotAJob:
 		return h.releasePoolAction(ctx, action)
@@ -282,6 +338,11 @@ func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolActio
 	}
 	retry := action
 	retry.ID = id
+	if retry.Data.Supersede != nil {
+		next := *retry.Data.Supersede
+		next.Generation++
+		retry.Data.Supersede = &next
+	}
 	retry.Data.TargetAttempt = action.Data.Args.Attempt
 	retry.Data.Args = nil
 	retry.Data.RetryID = ""
@@ -300,6 +361,33 @@ func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolActio
 // Keep I1 until the record is terminal; no close, notice or role release is
 // issued while this guard remains.
 func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolAction) error {
+	// The action is stored guarded, so the node may now be told it can stop
+	// owing the intent_cancelled answer (hk 5073): its rollback drain waits
+	// for this ack. It is repeated every pass until the node confirms it, and
+	// the action is not finished before that, so a failed or lost ack is
+	// retried even once the hk record is terminal. Only a node that rejects
+	// the argument (invalid_args: it predates the ack, so it never owed one)
+	// is let go without it. A node that does not answer is retried; the
+	// fence it holds is the safe side.
+	acked := action.Data.Acked
+	var rejected bool
+	askNode := func() (status nodeCloseOpStatusResult, answered bool) {
+		nodeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job, Ack: !acked}
+		var code string
+		answered, code = h.nodeCallCode(nodeCtx, action.Node, nodeCommandPaneCloseStatus, ref, time.Second, &status, nil)
+		rejected = !answered && code == "invalid_args"
+		if answered && !acked && status.State == nodeCloseIntentCancelled {
+			// The node answered the ack: no later pass repeats it.
+			acked = true
+			action.Data.Acked = true
+			if err := h.inbox.store.savePoolAction(ctx, action); err != nil {
+				h.logger.Warn("pool action ack not saved", "job", action.Job, "action", action.ID, "error", h.inbox.store.loggable("pool action", err))
+			}
+		}
+		return status, answered
+	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	exists := false
 	if err == nil {
@@ -309,16 +397,17 @@ func (h *HubServer) reconcileGuardedPoolAction(ctx context.Context, action poolA
 		cancel()
 		state, _ := record["state"].(string)
 		if err == nil && exists && hkTerminalState(state) {
+			if !acked {
+				if _, answered := askNode(); !answered && !rejected {
+					return errors.New("guard ack unconfirmed")
+				}
+			}
 			return h.refusePoolAction(ctx, action)
 		}
 	}
 	// A node may also prove the old request's final job.lost was synced. A
 	// withdrawn or rolled-back node may not answer; never block the sweep on it.
-	nodeCtx, cancel := context.WithTimeout(ctx, time.Second)
-	var status nodeCloseOpStatusResult
-	answered := h.nodeCall(nodeCtx, action.Node, nodeCommandPaneCloseStatus, nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}, time.Second, &status)
-	cancel()
-	if answered && status.Settled {
+	if status, answered := askNode(); answered && status.Settled {
 		return h.refusePoolAction(ctx, action)
 	}
 	if err != nil || !exists {
@@ -409,6 +498,9 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	}
 	if state == "lost" && reason == action.Data.EndReason {
 		eventID := "pool-closed:" + action.Job
+		if action.Data.Kind == poolActionKindSupersedeClose {
+			eventID = supersedeEventID(action.Job)
+		}
 		owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
 		if err != nil {
 			return err

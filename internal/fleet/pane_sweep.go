@@ -776,11 +776,11 @@ func (s *TaskPaneSweeper) readPRs(ctx context.Context, task string) paneSweepPRR
 // is found. "" means no open PR: the close goes ahead. task is the job's task,
 // "" when it has none; taskErr says the task could not be established
 // (inheritedTask: hk could not be read, or a named parent did not resolve to a
-// task). A task that could not be established, a worktree that
-// cannot be read, or an unreadable change list keeps the pane, so a failure
-// never closes a pane that may still own an open PR. The worktree is read
-// before the change list: an empty or merged-only list says nothing about a
-// worktree whose head is unknown.
+// task). A task that could not be established, an unreadable change list, or an
+// unreadable worktree when the task has an open PR keeps the pane, so a failure
+// never closes a pane that may still own an open PR. When the change list has
+// no open PR (empty, or all PRs merged or closed), nothing waits on a PR and
+// the close goes ahead without inspecting git.
 func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, task string, taskErr error, cache map[string]paneSweepPRRead) (reason string, number int) {
 	cwd := str(j.Receipt, "cwd")
 	if cwd == "" {
@@ -795,10 +795,6 @@ func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, ta
 		// change list to wait on.
 		return "", 0
 	}
-	heads, ok := paneSweepHeads(ctx, a, cwd)
-	if !ok {
-		return "pr_state_unknown", 0
-	}
 	read, known := cache[task]
 	if !known {
 		read = s.readPRs(ctx, task)
@@ -807,10 +803,27 @@ func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, ta
 	if read.err != nil {
 		return "pr_state_unknown", 0
 	}
+	if !paneSweepHasOpenPR(read.changes) {
+		return "", 0
+	}
+	heads, ok := paneSweepHeads(ctx, a, cwd)
+	if !ok {
+		return "pr_state_unknown", 0
+	}
 	if number, open := paneSweepOpenPR(read.changes, heads); open {
 		return "open_pr", number
 	}
 	return "", 0
+}
+
+// paneSweepHasOpenPR reports whether any change in the list is in open state.
+func paneSweepHasOpenPR(changes []PRChange) bool {
+	for _, change := range changes {
+		if strings.EqualFold(change.State, "open") {
+			return true
+		}
+	}
+	return false
 }
 
 // paneSweepHeads is the commit(s) that identify the job's worktree: HEAD, and

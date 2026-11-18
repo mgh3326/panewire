@@ -119,6 +119,11 @@ type nodePaneCloseOpResult struct {
 type nodeCloseOpRefArgs struct {
 	RequestID string `json:"request_id"`
 	Job       string `json:"job"`
+	// Ack, on pane.close_status only, is the hub's acknowledgement that it
+	// stored the intent_cancelled answer (hk 5073): the node records it
+	// durably, which lets a rollback drain finish. The hub sends it only
+	// after its guarded action is saved.
+	Ack bool `json:"ack,omitempty"`
 }
 
 // nodeCloseOpReleaseArgs is pane.close_release's decoded arguments, a distinct
@@ -563,6 +568,10 @@ type nodeHubCloseLedger interface {
 	// CancelIntent closes the intent of a request the hub released before
 	// the node registered it.
 	CancelIntent(ctx context.Context, job, requestID string) error
+	// AckIntentCancel records, durably, the hub's acknowledgement of the
+	// request's intent_cancelled answer (fleet.RecordHubCloseAck). The
+	// caller holds the job's end lock.
+	AckIntentCancel(ctx context.Context, job, requestID string) error
 	// Settle runs one step of the node's settlement of the job's hub close
 	// (fleet.HubCloseSettlement).
 	Settle(ctx context.Context, job string) (fleet.HubCloseState, error)
@@ -615,6 +624,10 @@ func (l nodeFleetHubClose) RecordIntent(ctx context.Context, job string, in flee
 }
 func (l nodeFleetHubClose) CancelIntent(ctx context.Context, job, requestID string) error {
 	return fleet.RecordHubCloseCancel(ctx, l.jobs, job, requestID, "released")
+}
+
+func (l nodeFleetHubClose) AckIntentCancel(ctx context.Context, job, requestID string) error {
+	return fleet.RecordHubCloseAck(ctx, l.jobs, job, requestID)
 }
 
 // Settle settles with the node's own hk JobStore (spawn.json
@@ -1058,7 +1071,7 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 		if err != nil {
 			return nil, "journal_failed"
 		}
-		matching, cancelled, laterSettled := false, false, false
+		matching, cancelled, laterSettled, acked := false, false, false, false
 		var attempt string
 		for _, event := range events {
 			switch {
@@ -1066,9 +1079,11 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 				attempt = event.name
 			case event.kind == "job.hub_close_intent" && event.request == args.RequestID:
 				matching = event.attempt == op.Attempt && event.pane == op.PaneID
-				cancelled, laterSettled = false, false
+				cancelled, laterSettled, acked = false, false, false
 			case event.kind == "job.hub_close_cancelled" && event.request == args.RequestID && matching:
 				cancelled = true
+			case event.kind == "job.hub_close_acked" && event.request == args.RequestID:
+				acked = true
 			case event.kind == "job.lost" && event.reason == "hub_close" && event.final && cancelled && attempt == op.Attempt:
 				laterSettled = true
 			}
@@ -1082,6 +1097,14 @@ func (client *HubClient) runCloseOpRef(args nodeCloseOpRefArgs, release bool) (a
 		if cancelled {
 			if err := client.hubCloseLedger().SyncEvents(job); err != nil {
 				return nil, "journal_failed"
+			}
+			if args.Ack && !release && !acked {
+				ackCtx, cancel := context.WithTimeout(context.Background(), hubCloseLockBudget)
+				err := client.hubCloseLedger().AckIntentCancel(ackCtx, args.Job, args.RequestID)
+				cancel()
+				if err != nil {
+					return nil, "journal_failed"
+				}
 			}
 			return nodeCloseOpStatusResult{State: nodeCloseIntentCancelled, Released: op.Released != nil, Attempt: target.attempt}, ""
 		}

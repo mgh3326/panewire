@@ -725,7 +725,12 @@ var settlementBetweenDrainAndJournalReads func()
 // job's end lock and folded j under it.
 func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent, ended, reassigned bool, listed func(ctx context.Context, session, pane string) (bool, error), needHK func() error) (HubCloseState, error) {
 	cancel := func(reason string) (HubCloseState, error) {
-		return HubCloseCancelled, a.eventSynced(ctx, j.ID, hubCloseCancelKind, map[string]any{"request_id": in.RequestID, "reason": reason})
+		payload := map[string]any{"request_id": in.RequestID, "reason": reason}
+		if reason == hubCloseRollbackUnproven {
+			// The hub learns this one from close_status alone (hk 5073).
+			payload[hubCloseAckField] = true
+		}
+		return HubCloseCancelled, a.eventSynced(ctx, j.ID, hubCloseCancelKind, payload)
 	}
 	// Read the drain marker first. Once it is visible every admitted close
 	// has finished and none can start, so a journal read after it is current;
@@ -824,7 +829,7 @@ func (a *App) settleHubCloseIntent(ctx context.Context, j Job, in HubCloseIntent
 				}
 				// No close was proven to have stopped the original pane.
 				// Hand it back to its watcher without writing an hk loss.
-				return cancel("rollback_unproven")
+				return cancel(hubCloseRollbackUnproven)
 			}
 			return HubClosePending, nil
 		}

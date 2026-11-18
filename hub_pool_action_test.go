@@ -417,7 +417,7 @@ func restartPoolActionHub(t *testing.T, f *quotaReplaceFixture) {
 	}
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens:         map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"},
-		InboxStorePath: path, ReportRelayPath: routes, handoffkeep: relay,
+		InboxStorePath: path, ReportRelayPath: routes, handoffkeep: relay, SupersedeClose: old.supersedeClose,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
