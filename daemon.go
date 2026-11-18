@@ -408,10 +408,13 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 				caps := d.capabilities()
 				recordHerdrEvent(ctx, d.store, ev, caps.Protocol, caps.Schema)
 				if d.idleWake != nil && ev.AgentStatus != "" && (ev.Kind == "pane.agent_status_changed" || ev.Kind == "pane_agent_status_changed") {
-					if err := d.idleWake.Observe(ctx, HerdrAgentState{PaneID: ev.PaneID, WorkspaceID: ev.WorkspaceID, Status: ev.AgentStatus, Revision: ev.Revision}, time.Now().UTC()); err != nil {
+					// The agy busy check (hk 5241) judges an idle or done agy
+					// pane by its screen before idle-wake sees it.
+					status := client.agyEventStatus(ctx, ev.PaneID, ev.AgentStatus)
+					if err := d.idleWake.Observe(ctx, HerdrAgentState{PaneID: ev.PaneID, WorkspaceID: ev.WorkspaceID, Status: status, Revision: ev.Revision}, time.Now().UTC()); err != nil {
 						d.cfg.Logger.Warn("idle-wake observation rejected")
-					} else if ev.AgentStatus == "working" && d.stallSafety != nil {
-						if _, status, err := d.stallSafety.sequence(ctx, ev.PaneID); err == nil && status == "working" {
+					} else if status == "working" && d.stallSafety != nil {
+						if _, state, err := d.stallSafety.sequence(ctx, ev.PaneID); err == nil && state == "working" {
 							if err := d.stallSafety.state.markWorking(ctx, ev.PaneID); err != nil {
 								d.cfg.Logger.Warn("stall safety working state was not recorded", "error", err)
 							}
