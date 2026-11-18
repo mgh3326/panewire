@@ -1133,6 +1133,12 @@ func TestJobOwnerFenceRestartWaitsForOwnerRead_t5067(t *testing.T) {
 }
 
 func TestJobOwnerFenceDefaultClientReadFailureDoesNotAdmit_t5067(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("FLEET_HOSTS_CONFIG", filepath.Join(root, "no-hosts-config"))
+	t.Setenv("PANEWIRE_POLICY", "")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(root, "no-service-credential"))
+	t.Setenv("HANDOFFKEEP_URL", "")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
 	hub, _ := ownerFenceHub(t, &ownerFenceHK{})
 	hub.spawnNewApp = nil
 	hub.handoffkeep = nil
