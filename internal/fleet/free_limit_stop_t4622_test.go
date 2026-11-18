@@ -63,7 +63,7 @@ func TestFreeLimitSeenOnAPaneDropsTheFreeRungsUntilReset_T4622(t *testing.T) {
 	}
 
 	// The pane reports the limit; the stop records it and publishes it.
-	if err := a.quotaStopEvent(context.Background(), Job{ID: "job-a", Pane: "w:p1"}, quotastop.Stop{Pool: "devin-free", Reset: reset}, true); err != nil {
+	if err := a.quotaStopEvent(context.Background(), Job{ID: "job-a", Pane: "w:p1"}, quotastop.Stop{Pool: "devin-free", Reset: reset}, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !published {

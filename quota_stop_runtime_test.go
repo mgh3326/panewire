@@ -22,8 +22,8 @@ func TestQuotaStopWakeShadowAndResume(t *testing.T) {
 			}
 			stamp := time.Now().UTC().Format(time.RFC3339)
 			for name, body := range map[string]string{
-				"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + stamp + `","agent_label":"worker-synthetic","owner_lane":"owner","epoch":1}`,
-				"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + stamp + `","pane_id":"workspace:pane-1"}`} {
+				"00001-job.claimed.json": `{"kind":"job.claimed","type":"job.claimed","created_at":"` + stamp + `","agent_label":"worker-synthetic","owner_lane":"owner","epoch":1}`,
+				"00002-job.spawned.json": `{"kind":"job.spawned","type":"job.spawned","created_at":"` + stamp + `","pane_id":"workspace:pane-1"}`} {
 				if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -200,8 +200,8 @@ func TestQuotaStopDeduplicatesPaneAndReset(t *testing.T) {
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339)
 	for name, body := range map[string]string{
-		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + stamp + `","agent_label":"worker-synthetic","owner_lane":"owner","epoch":1}`,
-		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + stamp + `","pane_id":"workspace:pane-1"}`} {
+		"00001-job.claimed.json": `{"kind":"job.claimed","type":"job.claimed","created_at":"` + stamp + `","agent_label":"worker-synthetic","owner_lane":"owner","epoch":1}`,
+		"00002-job.spawned.json": `{"kind":"job.spawned","type":"job.spawned","created_at":"` + stamp + `","pane_id":"workspace:pane-1"}`} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -235,8 +235,8 @@ func TestQuotaStopReadTimeoutRecordsHandover(t *testing.T) {
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339)
 	for name, body := range map[string]string{
-		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + stamp + `","agent_label":"worker-synthetic","owner_lane":"owner","epoch":1}`,
-		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + stamp + `","pane_id":"workspace:pane-1"}`} {
+		"00001-job.claimed.json": `{"kind":"job.claimed","type":"job.claimed","created_at":"` + stamp + `","agent_label":"worker-synthetic","owner_lane":"owner","epoch":1}`,
+		"00002-job.spawned.json": `{"kind":"job.spawned","type":"job.spawned","created_at":"` + stamp + `","pane_id":"workspace:pane-1"}`} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}

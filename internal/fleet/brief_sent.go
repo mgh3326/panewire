@@ -48,7 +48,7 @@ func (a *App) adoptBriefSent(ctx context.Context, j Job) (Job, error) {
 	}
 	receipt["adopted_from"] = eventBriefSent
 	// A revocation is written without this job's locks: read the ledger again
-	// before the write. The adopted receipt cannot clear one (reassignedInLedger),
+	// before the write. The adopted receipt cannot clear one (viewLedger),
 	// so a revocation landing after this check still stops every later write.
 	if e := a.refuseReassigned(j); e != nil {
 		return j, e

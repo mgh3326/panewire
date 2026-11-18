@@ -105,6 +105,7 @@ func (a *App) rearmWatchers(start func(string) error, log func(string), pendingO
 		if err != nil {
 			continue
 		}
+		view := viewLedger(j.Events)
 		credit, pendingCredit := pendingCreditRejection(j)
 		if pendingOnly && !pendingCredit {
 			continue
@@ -112,12 +113,12 @@ func (a *App) rearmWatchers(start func(string) error, log func(string), pendingO
 		if pendingOnly && creditPublicationPaused(j, credit) && !creditPublicationAccountReady(a, j, credit) {
 			continue
 		}
-		if (j.Reaped || j.Pane == "") && !pendingCredit || a.watchActive(id) {
+		if (view.Reaped || j.Pane == "") && !pendingCredit || a.watchActive(id) {
 			continue
 		}
 		// A job ended by an announced quota stop is not finished until its
 		// hand-off grace has run: a watcher that died during it is re-armed.
-		if _, announced := announcedQuotaStop(j); j.Terminal && !announced && !pendingCredit {
+		if _, announced := view.Announced(); view.Ended != "" && !announced && !pendingCredit {
 			continue
 		}
 		if err := start(id); err != nil {
@@ -254,6 +255,9 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if e != nil {
 			return e
 		}
+		// The ledger's attempt and its end, in sequence order (ledgerView):
+		// the one answer every check below reads.
+		view := viewLedger(j.Events)
 		// An open hub close owns this attempt's end, and the node settles it
 		// (watch_hub_close.go HubCloseSettlement): completion, the decision
 		// timeout, the deadline exit and the missing-pane fallback all wait.
@@ -270,7 +274,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// follow its final job.lost (#662 review).
 		// A credit rejection recorded before the close is still published:
 		// other hosts must stop choosing that account (#662 review).
-		if hubCloseSettledNow(j) {
+		if view.Settled {
 			credit, creditPending := pendingCreditRejection(j)
 			if !creditPending {
 				return nil
@@ -291,7 +295,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// Observation state belongs to the attempt it was read on: a
 		// re-prompt, reclaim or respawn since then ends a hand-off and starts
 		// a fresh completion deadline (#662 review).
-		if mark := endMark(j)[0]; mark != watchedAttempt {
+		if mark := view.Attempt; mark != watchedAttempt {
 			if watchedAttempt != "" {
 				handOff = quotaHandOff{}
 				deadline, latePoll = a.Now().Add(timeout), false
@@ -305,7 +309,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// reviewer, by the manager for a handed-over implementer) is not
 		// an end until the grace for the hub's replacement runs out.
 		if !handOff.active {
-			if stop, ok := announcedQuotaStop(j); ok && !j.Reaped {
+			if stop, ok := view.Announced(); ok {
 				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
 			}
 		}
@@ -313,7 +317,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		intent, hasIntent := pendingQuotaIntent(j)
 		quotaRetry = hasIntent
 		agents, e := a.agents(ctx)
-		if e != nil && hasIntent && !creditPending && !j.Reaped {
+		if e != nil && hasIntent && !creditPending && !view.Reaped {
 			// An open close intent outlives a herdr outage: hk alone can
 			// finish it, and anything else waits for herdr.
 			var out quotaIntentOutcome
@@ -340,7 +344,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			if workerEscalated(j) {
 				return a.releaseQuota(ctx, j)
 			}
-			if j.Reaped || j.Terminal && !handOff.active {
+			if view.Reaped || view.Ended != "" && !handOff.active {
 				return nil
 			}
 			return e
@@ -366,6 +370,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				if e != nil {
 					return e
 				}
+				view = viewLedger(j.Events)
 				credit, creditPending = pendingCreditRejection(j)
 			}
 		}
@@ -384,7 +389,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			creditAttempts = 0
 			lastCredit = credit.CreditExhaustedAt
 			published := map[string]any{"pool": credit.Pool, "at": credit.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)}
-			if !j.Terminal && !j.Reaped && !workerEscalated(j) && j.QuotaRole() != "consult" && !handOff.active {
+			if view.Ended == "" && !view.Reaped && !workerEscalated(j) && j.QuotaRole() != "consult" && !handOff.active {
 				// The pane may have resumed while the rejection was being
 				// written, so the hand-off is decided on a fresh row, not on
 				// the snapshot read before the write (hk 4505).
@@ -440,7 +445,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				return err
 			}
 		}
-		if j.Reaped || j.Terminal && !handOff.active {
+		if view.Reaped || view.Ended != "" && !handOff.active {
 			return nil
 		}
 		if workerEscalated(j) {
@@ -582,9 +587,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				// Under the end lock: a hub close recorded since this poll's
 				// look owns the pane now, and a stale re-prompt would close
 				// its intent.
-				deferred, err := a.endUnlessHubClose(id, j, func(Job) error {
-					return a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane})
-				})
+				deferred, err := a.endUnlessHubClose(id, j, func(Job) error { return a.recordQuotaResume(ctx, j) })
 				if err != nil {
 					return err
 				}
@@ -621,6 +624,26 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			return e
 		}
 	}
+}
+
+// recordQuotaResume writes the watcher's resume marker, a job.reprompted that
+// makes a job live again after its pane moved on from a quota stop. The marker
+// is only valid for the attempt seen observed: under the events lock, one a
+// reap, a revocation, an end or another attempt has since superseded is void
+// and nothing is written; the next poll decides on the fresh ledger (hk 5224,
+// consult-4761-bb8ce409).
+func (a *App) recordQuotaResume(ctx context.Context, seen Job) error {
+	attempt := viewLedger(seen.Events).Attempt
+	err := a.eventIf(ctx, seen.ID, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": seen.Pane}, func(v ledgerView) error {
+		if v.Superseded(seen.Pane, attempt) {
+			return errQuotaStopSuperseded
+		}
+		return nil
+	})
+	if errors.Is(err, errQuotaStopSuperseded) {
+		return nil
+	}
+	return err
 }
 
 func workerEscalated(j Job) bool {
