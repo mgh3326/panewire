@@ -278,6 +278,31 @@ func nodeCommandPaneCloseFields(raw json.RawMessage) bool {
 	return true
 }
 
+// nodeCloseStatusFields accepts pane.close_status's required fields plus any
+// subset of the optional ack (hk 5073) and epoch (hk 5296).
+func nodeCloseStatusFields(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	for _, name := range nodeCommandArgFields[nodeCommandPaneCloseStatus] {
+		value, found := fields[name]
+		if !found || isJSONNull(value) {
+			return false
+		}
+		delete(fields, name)
+	}
+	if len(fields) == 0 {
+		return false
+	}
+	for key, value := range fields {
+		if (key != "ack" && key != "epoch") || isJSONNull(value) {
+			return false
+		}
+	}
+	return true
+}
+
 func nodeCommandHasFields(raw json.RawMessage, names []string) bool {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil || len(fields) != len(names) {
@@ -369,7 +394,7 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalEndReason := op == nodeCommandJobMarkLost && nodeCommandHasFields(raw, append(append([]string(nil), names...), "end_reason"))
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
-	optionalAck := op == nodeCommandPaneCloseStatus && nodeCommandHasFields(raw, append(append([]string(nil), names...), "ack"))
+	optionalAck := op == nodeCommandPaneCloseStatus && nodeCloseStatusFields(raw)
 	optionalHandover := op == nodeCommandPaneCloseOp && nodeCommandHasFields(raw, append(append([]string(nil), names...), "handover"))
 	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover) {
 		return nil, false

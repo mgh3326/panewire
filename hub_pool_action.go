@@ -223,6 +223,12 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 		}
 	}
 	ref := nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}
+	missingAsked := action.Data.Kind != poolActionKindSupersedeClose && h.nodeHasCapability(action.Node, hubCapabilityCloseMissing)
+	if missingAsked {
+		// Only a node that advertises close_missing_v1 takes the argument; an
+		// older one keeps today's hold (hk 5296).
+		ref.Epoch = action.Epoch
+	}
 	var status nodeCloseOpStatusResult
 	if !h.nodeCall(ctx, action.Node, nodeCommandPaneCloseStatus, ref, hubNodeCommandWait, &status) {
 		return errors.New("close status unavailable")
@@ -230,6 +236,9 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 	if status.Settled {
 		action.Phase = poolActionSettled
 		return h.saveFinalPoolAction(ctx, action, "settled")
+	}
+	if missingAsked && status.MissingEpoch != 0 {
+		return h.finishMissingJobAction(ctx, action, status)
 	}
 	if action.Data.Kind == poolActionKindSupersedeClose {
 		fenced, err := h.supersedeFenced(ctx, action)
@@ -412,6 +421,38 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 		return h.releasePoolAction(ctx, action)
 	}
 	return nil
+}
+
+// finishMissingJobAction ends a row whose job directory the node proved gone
+// (hk 5296, docs/node-commands.md "A missing job"). The proof is the node's
+// durable tombstone for this request, so no delayed close under its id can act
+// on a directory recreated for a later attempt, and it must name an epoch no
+// lower than the row's. Bare absence never reaches here: the node answers
+// plain none for a directory it cannot prove gone, and the row stays held.
+// The row ends refused (a hand-over: handover_failed, by the finality rule
+// I2), the owner is told, and the reassignment fence is released.
+func (h *HubServer) finishMissingJobAction(ctx context.Context, action poolAction, status nodeCloseOpStatusResult) error {
+	if status.State != nodeCloseOpNone || status.Attempt != "" || status.MissingEpoch < action.Epoch {
+		return errors.New("missing-job proof does not cover this action")
+	}
+	if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil {
+		// refusePoolAction tells the owner of a failed hand-over.
+		action.Data.Handover.Reason = handoverJobMissing
+		return h.refusePoolAction(ctx, action)
+	}
+	eventID := "pool-action-missing:" + action.ID
+	owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		text := fmt.Sprintf("[panewire] Host %s no longer has job %s (its directory is gone, proved by the node); the hub released it without a close (row %s). Check whether the job needs a respawn.", action.Node, action.Job, action.ID)
+		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+		if result.ID == 0 || result.PersistFailed {
+			return errors.New("owner notice unavailable")
+		}
+	}
+	return h.refusePoolAction(ctx, action)
 }
 
 func (h *HubServer) retryUnknownPoolAction(ctx context.Context, action poolAction) error {

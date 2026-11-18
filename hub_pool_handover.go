@@ -42,6 +42,10 @@ const (
 
 	handoverPlaced = "placed"
 	handoverFailed = "handover_failed"
+
+	// handoverJobMissing is the failure reason when the node proved the old
+	// job's directory gone (hk 5296): nothing was closed.
+	handoverJobMissing = "job_missing"
 )
 
 // handoverNoticeID identifies one logical hand-over. Close retries share its
