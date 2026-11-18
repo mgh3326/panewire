@@ -147,6 +147,10 @@ type App struct {
 	// own App reads its operations; nil skips the check (a node-local
 	// selection has no fleet-wide launch record).
 	LivePlacedByAccount func(context.Context, string) (map[string]map[string]int, error)
+	// OnSelectionDrops receives the SWE-2 candidates a placed selection dropped
+	// (SelectionDrop), once per placed job. The hub's App sets it to count them
+	// into the daily loops row; nil (a node's direct spawn) counts nothing.
+	OnSelectionDrops func([]SelectionDrop)
 	// LiveAccountJobs returns running jobs by account key, leaving out the hub
 	// request named by its second argument. Used by the commandcode weekly
 	// window gate (hk 5113).

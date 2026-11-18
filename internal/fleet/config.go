@@ -280,6 +280,9 @@ func LoadConfig(path string) (Config, error) {
 	if err := validatePoolMaxConcurrent(c.Quota); err != nil {
 		return c, err
 	}
+	if err := validateFreeBandPerAccount(c.Quota); err != nil {
+		return c, err
+	}
 	if err := validateMeasurableAccounts(c.Quota); err != nil {
 		return c, err
 	}
