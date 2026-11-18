@@ -779,9 +779,11 @@ type HubServer struct {
 	placementCounts map[string]placementCount
 	// placementGate admits one spawn decision at a time (placement_count.go).
 	placementGate decisionGate
-	// oneTimeActions is the first-run needs already told to the desk, guarded
-	// by mu (hub_one_time_action.go).
-	oneTimeActions map[oneTimeActionKey]time.Time
+	// oneTimeActions are the first-run needs already told to the operator, kept
+	// durable in the hub store, and guarded by oneTimeMu
+	// (hub_one_time_action.go, hub_one_time_action_store.go).
+	oneTimeMu      sync.Mutex
+	oneTimeActions map[oneTimeActionKey]oneTimeActionState
 	fleetLoadMu    sync.Mutex
 	fleetLoadAt    time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
@@ -968,6 +970,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
+	hub.loadOneTimeActions()
 	hub.fleetStatusInterval = config.FleetStatusInterval
 	hub.fleetStatusPublish = config.FleetStatusPublish
 	hub.fleetStatusPlanFn = config.FleetStatusPlans

@@ -51,7 +51,7 @@ func secretServiceItem(ctx context.Context) (string, error) {
 		if len(locked) > 0 {
 			return "", errors.New("agy login item is locked")
 		}
-		return "", errors.New("agy login item is absent")
+		return "", errSecretItemAbsent
 	}
 	var secret struct {
 		Session     dbus.ObjectPath

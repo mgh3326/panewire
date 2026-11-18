@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,11 +13,10 @@ import (
 )
 
 const (
-	hooksTail  = "stderr: HOOKS_REVIEW_REQUIRED: Codex is waiting at its Hooks need review screen; brief withheld\nFix: review the hooks"
-	trustTail  = "stderr: WORKSPACE_TRUST_REQUIRED: Codex directory trust prompt for /work/x; brief withheld\nFix: approve"
-	ompTail    = "stderr: OMP_SETUP_WIZARD: omp is in its setup wizard despite OMP_SKIP_SETUP; seat withheld\nFix: run omp"
-	loginTail  = "stderr: no usable login for the selected account\nFix: sign in"
-	deskNotice = " needs a one-time action: "
+	hooksTail = "stderr: HOOKS_REVIEW_REQUIRED: Codex is waiting at its Hooks need review screen; brief withheld\nFix: review the hooks"
+	trustTail = "stderr: WORKSPACE_TRUST_REQUIRED: Codex directory trust prompt for /work/x; brief withheld\nFix: approve"
+	ompTail   = "stderr: OMP_SETUP_WIZARD: omp is in its setup wizard despite OMP_SKIP_SETUP; seat withheld\nFix: run omp"
+	loginTail = "stderr: no usable login for the selected account\nFix: sign in"
 )
 
 // firstRunRefusal is a node answer that stops at a first-run dialog or a
@@ -31,27 +31,38 @@ func firstRunNodeRequest(request fleet.Submission, id int, profile string) fleet
 	return node
 }
 
-// deskNotices returns the desk notices filed since the last call. The desk is
-// inbox-only (hk 3602): its pane gets only the one-line wake, never a notice
-// body, and the notice is read from the desk's inbox, the way the desk
-// session reads it; reading marks it read.
-func deskNotices(t *testing.T, h *HubServer, destination *hubAgent) []string {
+// oneTimeSentry points h's Sentry client at a recording transport.
+func oneTimeSentry(t *testing.T, h *HubServer) *spawnSentryTransport {
 	t.Helper()
-	for _, relay := range spawnFailedInjections(destination) {
-		if relay.EventID != 0 || !strings.HasPrefix(relay.Text, "[inbox] operator-desk: ") {
-			t.Fatalf("the desk pane got a body: %+v", relay)
-		}
+	transport := &spawnSentryTransport{}
+	h.spawnSentry = spawnReasonSentryClient(t, transport)
+	return transport
+}
+
+// oneTimeMessages is the message of each Sentry event the hub sent, oldest
+// first. The ACTION NEEDED event is the only operator notice of a one-time
+// action.
+func oneTimeMessages(transport *spawnSentryTransport) []string {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	var out []string
+	for _, event := range transport.events {
+		out = append(out, event.Message)
 	}
-	items, err := h.inbox.store.list("operator-desk", true)
+	return out
+}
+
+// deskInboxTexts is every operator-desk inbox item. A one-time action is never
+// a lane event, so this stays empty.
+func deskInboxTexts(t *testing.T, h *HubServer) []string {
+	t.Helper()
+	items, err := h.inbox.store.list("operator-desk", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var texts []string
-	for i := len(items) - 1; i >= 0; i-- {
-		texts = append(texts, items[i].Event.Text)
-		if _, err := h.inbox.store.read(items[i].ID, "operator-desk", time.Now()); err != nil {
-			t.Fatal(err)
-		}
+	for _, item := range items {
+		texts = append(texts, item.Event.Text)
 	}
 	return texts
 }
@@ -59,7 +70,7 @@ func deskNotices(t *testing.T, h *HubServer, destination *hubAgent) []string {
 // A first-run refusal comes after the node's hk job claim (stage launch), so hk
 // holds the job id for that host and another host's claim would be a 409 (hk
 // 4614). A cleaned-up harness may be replaced on that host. The host's launch
-// backoff still counts the refusal and the desk hears which action it needs.
+// backoff still counts the refusal and the operator hears which action it needs.
 func TestFirstRunRefusalAfterClaimPinsTheHost(t *testing.T) {
 	for _, test := range []struct {
 		name, profile, kind, tail, action string
@@ -72,7 +83,8 @@ func TestFirstRunRefusalAfterClaimPinsTheHost(t *testing.T) {
 		{"login missing", "sonnet", "claude", loginTail, "log in", 88},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			h, _, destination := spawnNotifyHubLane(t, "", "operator-desk")
+			h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+			transport := oneTimeSentry(t, h)
 			server := httptest.NewServer(h.Handler())
 			defer server.Close()
 			node := t14Node(t, h, server, true)
@@ -81,14 +93,14 @@ func TestFirstRunRefusalAfterClaimPinsTheHost(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			transport := &directSpawnTransport{h: h, task: task}
+			spawnTransport := &directSpawnTransport{h: h, task: task}
 			type answer struct {
 				reply fleet.HubSpawnReply
 				err   error
 			}
 			first := make(chan answer, 1)
 			go func() {
-				reply, err := dispatchPlacedSpawn(boundedContext(t), transport, firstRunNodeRequest(request, 911, test.profile))
+				reply, err := dispatchPlacedSpawn(boundedContext(t), spawnTransport, firstRunNodeRequest(request, 911, test.profile))
 				first <- answer{reply, err}
 			}()
 			sent := t14ReadNodeSpawn(t, node)
@@ -117,14 +129,12 @@ func TestFirstRunRefusalAfterClaimPinsTheHost(t *testing.T) {
 			if failures != 1 {
 				t.Fatalf("launch backoff for machine-a/%s counts %d failures, want 1", test.kind, failures)
 			}
-			want := "[machine-a] " + test.kind + deskNotice + test.action
-			var notices []string
-			eventually(t, 5*time.Second, "desk notice", func() bool {
-				notices = append(notices, deskNotices(t, h, destination)...)
-				return len(notices) > 0
-			})
-			if len(notices) != 1 || notices[0] != want {
-				t.Fatalf("notices=%q want %q", notices, want)
+			want := "ACTION NEEDED: machine-a " + test.kind + " — " + strings.ReplaceAll(test.action, `"`, "")
+			if got := oneTimeMessages(transport); len(got) != 1 || got[0] != want {
+				t.Fatalf("sentry messages=%q want exactly %q", got, want)
+			}
+			if got := deskInboxTexts(t, h); len(got) != 0 {
+				t.Fatalf("a one-time action reached the desk inbox: %q", got)
 			}
 		})
 	}
@@ -185,60 +195,140 @@ func readinessWith(checked time.Time, kind string, harness fleet.HarnessReadines
 	return &fleet.Readiness{CheckedAt: checked, Harnesses: map[string]fleet.HarnessReadiness{kind: harness}}
 }
 
-// The desk hears a need once while the host keeps reporting it, and again when
-// it returns after the readiness cleared.
+// The operator hears a need once while it stands, and again only after it has
+// cleared for a full report cycle and come back.
 func TestOneTimeActionNoticeIsToldOncePerUnclearedNeed(t *testing.T) {
-	h, _, destination := spawnNotifyHubLane(t, "", "operator-desk")
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
 	start := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
 	dialog := readinessWith(start, "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent, Dialog: fleet.DialogCodexHooksReview})
-	want := `[oci] codex needs a one-time action: run codex once and choose "Trust all and continue"`
-	collect := func() (all []string) {
-		eventually(t, 5*time.Second, "desk notice", func() bool {
-			all = append(all, deskNotices(t, h, destination)...)
-			return len(all) > 0
-		})
-		return all
-	}
+	clean := fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}
+	want := `ACTION NEEDED: oci codex — run codex once and choose Trust all and continue`
 
 	h.noteReadinessActions("oci", dialog, start)
-	if got := collect(); len(got) != 1 || got[0] != want {
+	if got := oneTimeMessages(transport); len(got) != 1 || got[0] != want {
 		t.Fatalf("first report: %q", got)
 	}
 	h.noteReadinessActions("oci", readinessWith(start.Add(45*time.Second), "codex", dialog.Harnesses["codex"]), start.Add(45*time.Second))
 	h.noteReadinessActions("oci", readinessWith(start.Add(90*time.Second), "codex", dialog.Harnesses["codex"]), start.Add(90*time.Second))
 	// A refusal for the same pair while it is uncleared adds nothing either.
 	h.noteOneTimeActionRefusal("oci", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: hooksTail})
-	if got := deskNotices(t, h, destination); len(got) != 0 {
+	if got := oneTimeMessages(transport); len(got) != 1 {
 		t.Fatalf("an uncleared need was told again: %q", got)
 	}
 
 	// A report the node computed before the notice cannot clear it.
-	h.noteReadinessActions("oci", readinessWith(start.Add(-time.Minute), "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}), start.Add(100*time.Second))
+	h.noteReadinessActions("oci", readinessWith(start.Add(-time.Minute), "codex", clean), start.Add(100*time.Second))
 	h.noteReadinessActions("oci", dialog, start.Add(100*time.Second))
-	if got := deskNotices(t, h, destination); len(got) != 0 {
+	if got := oneTimeMessages(transport); len(got) != 1 {
 		t.Fatalf("a stale clear re-told the need: %q", got)
 	}
 
 	// Another host's clean report leaves oci alone.
-	h.noteReadinessActions("other", readinessWith(start.Add(2*time.Minute), "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}), start.Add(2*time.Minute))
+	h.noteReadinessActions("other", readinessWith(start.Add(2*time.Minute), "codex", clean), start.Add(2*time.Minute))
 	h.noteReadinessActions("oci", readinessWith(start.Add(3*time.Minute), "codex", dialog.Harnesses["codex"]), start.Add(3*time.Minute))
-	if got := deskNotices(t, h, destination); len(got) != 0 {
+	if got := oneTimeMessages(transport); len(got) != 1 {
 		t.Fatalf("another host's report cleared oci: %q", got)
 	}
 
-	// The readiness clears, then the dialog comes back: one new notice.
-	h.noteReadinessActions("oci", readinessWith(start.Add(4*time.Minute), "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}), start.Add(4*time.Minute))
-	if got := deskNotices(t, h, destination); len(got) != 0 {
+	// The need clears only once it has stayed gone for one full cycle.
+	gone := start.Add(4 * time.Minute)
+	h.noteReadinessActions("oci", readinessWith(gone, "codex", clean), gone)
+	if got := oneTimeMessages(transport); len(got) != 1 {
 		t.Fatalf("a clear report sent a notice: %q", got)
 	}
-	h.noteReadinessActions("oci", readinessWith(start.Add(5*time.Minute), "codex", dialog.Harnesses["codex"]), start.Add(5*time.Minute))
-	if got := collect(); len(got) != 1 || got[0] != want {
+	h.noteReadinessActions("oci", readinessWith(gone.Add(cycle), "codex", clean), gone.Add(cycle))
+	back := gone.Add(cycle + time.Minute)
+	h.noteReadinessActions("oci", readinessWith(back, "codex", dialog.Harnesses["codex"]), back)
+	if got := oneTimeMessages(transport); len(got) != 2 || got[1] != want {
 		t.Fatalf("returned dialog: %q", got)
+	}
+	if got := deskInboxTexts(t, h); len(got) != 0 {
+		t.Fatalf("a one-time action reached the desk inbox: %q", got)
 	}
 }
 
+// The flapping report: need, gone for less than one cycle, need again tells
+// the operator once, and the same readiness flapping on past a full cycle is
+// still not a second notice until the need has truly cleared.
+func TestOneTimeActionFlappingReportTellsOnce(t *testing.T) {
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+	dialog := fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent, Dialog: fleet.DialogCodexHooksReview}
+	clean := fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}
+	report := func(d time.Duration, harness fleet.HarnessReadiness) {
+		when := start.Add(d)
+		h.noteReadinessActions("oci", readinessWith(when, "codex", harness), when)
+	}
+
+	report(0, dialog)
+	report(time.Minute, clean)
+	report(2*time.Minute, dialog)
+	report(3*time.Minute, clean)
+	report(3*time.Minute+cycle-time.Second, clean)
+	report(9*time.Minute, dialog)
+	if got := oneTimeMessages(transport); len(got) != 1 {
+		t.Fatalf("a flapping report told the need %d times: %q", len(got), got)
+	}
+}
+
+// A hub restart on the same store keeps the standing need told: no second
+// notice. The need clears on the restarted hub and returns: one new notice.
+func TestOneTimeActionRestartKeepsStandingNeed(t *testing.T) {
+	t.Setenv(crashReportDSNEnv, "")
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	start := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+	dialog := readinessWith(start, "codex", fleet.HarnessReadiness{Installed: true, Dialog: fleet.DialogCodexHooksReview})
+	clean := func(at time.Time) *fleet.Readiness {
+		return readinessWith(at, "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent})
+	}
+	want := `ACTION NEEDED: oci codex — run codex once and choose Trust all and continue`
+
+	first := newOneTimeHub(t, path)
+	firstSentry := oneTimeSentry(t, first)
+	first.noteReadinessActions("oci", dialog, start)
+	if got := oneTimeMessages(firstSentry); len(got) != 1 || got[0] != want {
+		t.Fatalf("first hub: %q", got)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newOneTimeHub(t, path)
+	secondSentry := oneTimeSentry(t, second)
+	standing := start.Add(time.Minute)
+	second.noteReadinessActions("oci", readinessWith(standing, "codex", dialog.Harnesses["codex"]), standing)
+	if got := oneTimeMessages(secondSentry); len(got) != 0 {
+		t.Fatalf("a restart told a standing need again: %q", got)
+	}
+	second.noteReadinessActions("oci", clean(start.Add(2*time.Minute)), start.Add(2*time.Minute))
+	second.noteReadinessActions("oci", clean(start.Add(2*time.Minute+cycle)), start.Add(2*time.Minute+cycle))
+	back := start.Add(time.Hour)
+	second.noteReadinessActions("oci", readinessWith(back, "codex", dialog.Harnesses["codex"]), back)
+	if got := oneTimeMessages(secondSentry); len(got) != 1 || got[0] != want {
+		t.Fatalf("returned need after the restart: %q", got)
+	}
+}
+
+// newOneTimeHub opens a hub on the store at path. Close is safe to repeat, so
+// a test may close the hub early and still leave the cleanup in place.
+func newOneTimeHub(t *testing.T, path string) *HubServer {
+	t.Helper()
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken}, InboxStorePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	return h
+}
+
 func TestOneTimeActionNoticeNamesLoginAndTrustAndKeepsScreenOut(t *testing.T) {
-	h, _, destination := spawnNotifyHubLane(t, "", "operator-desk")
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
 	now := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
 	report := &fleet.Readiness{CheckedAt: now, Harnesses: map[string]fleet.HarnessReadiness{
 		"claude": {Installed: true, Login: fleet.ReadinessLoginMissing},
@@ -247,16 +337,12 @@ func TestOneTimeActionNoticeNamesLoginAndTrustAndKeepsScreenOut(t *testing.T) {
 		"devin":  {Installed: true, Login: fleet.ReadinessLoginUnknown},
 	}}
 	h.noteReadinessActions("oci", report, now)
-	var got []string
-	eventually(t, 5*time.Second, "two notices", func() bool {
-		got = append(got, deskNotices(t, h, destination)...)
-		return len(got) >= 2
-	})
+	got := oneTimeMessages(transport)
 	if len(got) != 2 {
 		t.Fatalf("notices=%q", got)
 	}
 	joined := strings.Join(got, "\n")
-	for _, want := range []string{"[oci] claude needs a one-time action: log in", "[oci] codex needs a one-time action: trust the workspace"} {
+	for _, want := range []string{"ACTION NEEDED: oci claude — log in", "ACTION NEEDED: oci codex — trust the workspace"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("notices lack %q: %q", want, got)
 		}
@@ -265,34 +351,34 @@ func TestOneTimeActionNoticeNamesLoginAndTrustAndKeepsScreenOut(t *testing.T) {
 	secret := "stderr: HOOKS_REVIEW_REQUIRED: SECRET-SCREEN-LINE token=abc123\nFix: x"
 	h.noteOneTimeActionRefusal("oci", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: secret})
 	h.noteOneTimeActionRefusal("fresh", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: secret})
-	eventually(t, 5*time.Second, "refusal notice", func() bool {
-		got = append(got, deskNotices(t, h, destination)...)
-		return len(got) >= 3
-	})
-	if strings.Contains(strings.Join(got, "\n"), "SECRET-SCREEN-LINE") || strings.Contains(strings.Join(got, "\n"), "abc123") {
-		t.Fatalf("screen content reached the desk: %q", got)
+	all := strings.Join(oneTimeMessages(transport), "\n")
+	if strings.Contains(all, "SECRET-SCREEN-LINE") || strings.Contains(all, "abc123") {
+		t.Fatalf("screen content reached the operator: %q", all)
+	}
+	if n := len(oneTimeMessages(transport)); n != 4 {
+		t.Fatalf("notices after the refusals = %d, want 4", n)
 	}
 }
 
 func TestOneTimeActionSendsOneSentryWarning(t *testing.T) {
-	h, _, destination := spawnNotifyHubLane(t, "", "operator-desk")
-	transport := &spawnSentryTransport{}
-	h.spawnSentry = spawnReasonSentryClient(t, transport)
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
 	now := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
 	dialog := readinessWith(now, "codex", fleet.HarnessReadiness{Installed: true, Dialog: fleet.DialogCodexHooksReview})
 	h.noteReadinessActions("oci", dialog, now)
 	h.noteReadinessActions("oci", dialog, now.Add(time.Minute))
 	h.noteOneTimeActionRefusal("oci", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: hooksTail})
-	eventually(t, 5*time.Second, "desk notice", func() bool { return len(deskNotices(t, h, destination)) > 0 })
-	transport.mu.Lock()
-	n := len(transport.events)
-	transport.mu.Unlock()
-	if n != 1 {
+	if n := len(oneTimeMessages(transport)); n != 1 {
 		t.Fatalf("sentry events=%d, want 1 while the need is uncleared", n)
 	}
-	// Cleared and back: the same fingerprint is sent once more.
-	h.noteReadinessActions("oci", readinessWith(now.Add(2*time.Minute), "codex", fleet.HarnessReadiness{Installed: true}), now.Add(2*time.Minute))
-	h.noteReadinessActions("oci", readinessWith(now.Add(3*time.Minute), "codex", dialog.Harnesses["codex"]), now.Add(3*time.Minute))
+	// Cleared for a full cycle and back: the same fingerprint is sent once more.
+	gone := now.Add(2 * time.Minute)
+	clean := readinessWith(gone, "codex", fleet.HarnessReadiness{Installed: true})
+	h.noteReadinessActions("oci", clean, gone)
+	h.noteReadinessActions("oci", readinessWith(gone.Add(cycle), "codex", fleet.HarnessReadiness{Installed: true}), gone.Add(cycle))
+	back := gone.Add(cycle + time.Minute)
+	h.noteReadinessActions("oci", readinessWith(back, "codex", dialog.Harnesses["codex"]), back)
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
 	if len(transport.events) != 2 || strings.Join(transport.events[1].Fingerprint, "|") != strings.Join(transport.events[0].Fingerprint, "|") {
