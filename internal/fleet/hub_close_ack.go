@@ -88,6 +88,9 @@ func PendingHubCloseAckJobs(jobs string) ([]string, error) {
 			out = append(out, entry.Name())
 			continue
 		}
+		if hubPlacementOnly(evs) {
+			continue
+		}
 		j, err := foldJob(entry.Name(), ledgerOrder(evs))
 		if err != nil {
 			out = append(out, entry.Name())

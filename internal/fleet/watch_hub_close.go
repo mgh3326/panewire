@@ -142,12 +142,33 @@ func LockJobEnd(jobDir string) (func(), error) {
 	return func() { f.Close() }, nil
 }
 
+// TryLockJobEnd takes the job's end lock non-blockingly and returns its
+// release; ok is false when another process holds it.
+func TryLockJobEnd(jobDir string) (release func(), ok bool, err error) {
+	f, e := secureOpen(filepath.Join(jobDir, jobEndLock), true, nil)
+	if e != nil {
+		return nil, false, e
+	}
+	if !tryLock(f) {
+		f.Close()
+		return nil, false, nil
+	}
+	return func() { f.Close() }, true, nil
+}
+
 // LockJobEndContext takes the job's end lock, waiting at most until ctx is
 // done, so a daemon step never blocks unbounded behind a slow holder.
 func LockJobEndContext(ctx context.Context, jobDir string) (func(), error) {
 	f, e := secureOpen(filepath.Join(jobDir, jobEndLock), true, nil)
 	if e != nil {
 		return nil, e
+	}
+	if tryLock(f) {
+		return func() { f.Close() }, nil
+	}
+	if err := ctx.Err(); err != nil {
+		f.Close()
+		return nil, err
 	}
 	for !tryLock(f) {
 		select {
@@ -170,7 +191,8 @@ const (
 	// HubCloseWatcherAware: a watcher that defers to hub-close intents runs.
 	HubCloseWatcherAware
 	// HubCloseWatcherIncompatible: a watcher that does not read hub-close
-	// intents (an older binary that outlived a node upgrade) runs.
+	// intents (an older binary that outlived a node upgrade, or a watcher
+	// whose lock-lending socket failed) runs.
 	HubCloseWatcherIncompatible
 )
 
@@ -191,7 +213,8 @@ func ProbeHubCloseWatcher(jobDir string) (HubCloseWatcher, error) {
 	}
 	// A watcher takes the watch lock before the hub-close one, so a watcher
 	// caught in between reads as incompatible: the hub retries. So does a v1
-	// watcher, which holds the v1 lock.
+	// watcher, which holds the v1 lock, or a watcher whose lock-lending socket
+	// failed, which holds only the watch lock.
 	if running, e := held(jobWatchLock); e != nil || running {
 		return HubCloseWatcherIncompatible, e
 	}
@@ -266,10 +289,14 @@ func (a *App) endUnlessHubClose(id string, seen Job, end func(j Job) error) (def
 	if e != nil {
 		return false, e
 	}
-	if _, open := pendingHubCloseIntent(j); open || hubCloseSettledNow(j) {
+	view := viewLedger(j.Events)
+	if _, open := pendingHubCloseIntent(j); open || view.Settled {
 		return true, nil
 	}
-	if endMark(j) != endMark(seen) {
+	// The attempt or its effective end changed since the snapshot (a
+	// re-prompt, a reclaim, a reap, a revocation, a completion): the decision
+	// is stale.
+	if view.decision() != viewLedger(seen.Events).decision() {
 		return true, nil
 	}
 	return false, end(j)
@@ -363,40 +390,6 @@ func openHubCloseIntents(j Job) (intents []HubCloseIntent, ended, reassigned boo
 // settlement records (finishHubClose).
 func hubCloseSettledLoss(ev Event) bool {
 	return ev.Kind == "job.lost" && str(ev.Payload, "reason") == hubCloseLostReason && boolean(ev.Payload, "final", false)
-}
-
-// hubCloseSettledNow reports whether the job's current attempt, folded in
-// ledger sequence order, already ended by a settled hub close. It is
-// terminal for the watcher whatever else is active (a quota hand-off) and
-// whatever the event timestamps say (#662 review).
-func hubCloseSettledNow(j Job) bool {
-	settled := false
-	for _, ev := range ledgerOrder(j.Events) {
-		switch {
-		case ev.Kind == "job.claim" || ev.Kind == "job.claimed" || ev.Kind == "job.reclaim" || ev.Kind == "job.spawned" || ev.Kind == "job.reprompted":
-			settled = false
-		case hubCloseSettledLoss(ev):
-			settled = true
-		}
-	}
-	return settled
-}
-
-// endMark identifies, in a folded ledger, the attempt and how many hub closes
-// settled: the newest attempt event's ledger name and the newest settled
-// hub-close loss's. A watcher decision taken on a snapshot is stale once the
-// mark under the end lock differs (#572 r4576226003).
-func endMark(j Job) [2]string {
-	var mark [2]string
-	for _, ev := range ledgerOrder(j.Events) {
-		switch {
-		case ev.Kind == "job.claim" || ev.Kind == "job.claimed" || ev.Kind == "job.reclaim" || ev.Kind == "job.spawned" || ev.Kind == "job.reprompted":
-			mark[0] = ev.name
-		case hubCloseSettledLoss(ev):
-			mark[1] = ev.name
-		}
-	}
-	return mark
 }
 
 // ledgerOrder returns events in ledger sequence order (CompareLedgerNames).
@@ -516,8 +509,9 @@ func HubCloseFenceState(jobs, job string) (open, live bool, err error) {
 	_, open = pendingHubCloseIntent(j)
 	// Watchable as the re-arm pass counts it: an announced quota stop is
 	// terminal locally but its hand-off still needs a watcher.
-	_, handOff := announcedQuotaStop(j)
-	return open, (!j.Terminal || handOff) && !j.Reaped && !hubCloseSettledNow(j), nil
+	v := viewLedger(evs)
+	_, handOff := v.Announced()
+	return open, (v.Ended == "" || handOff) && !v.Reaped && !v.Settled, nil
 }
 
 // lockUnlessHubCloseOwnsEnd takes the job's end lock for a generic end (reap,
@@ -614,6 +608,9 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 		}
 		if err != nil {
 			out = append(out, entry.Name())
+			continue
+		}
+		if hubPlacementOnly(evs) {
 			continue
 		}
 		// Reaped is folded in ledger sequence order, as settlement folds it.

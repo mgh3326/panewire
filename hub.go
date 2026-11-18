@@ -779,11 +779,18 @@ type HubServer struct {
 	placementCounts map[string]placementCount
 	// placementGate admits one spawn decision at a time (placement_count.go).
 	placementGate decisionGate
-	// oneTimeActions is the first-run needs already told to the desk, guarded
-	// by mu (hub_one_time_action.go).
-	oneTimeActions map[oneTimeActionKey]time.Time
-	fleetLoadMu    sync.Mutex
-	fleetLoadAt    time.Time // guarded by fleetLoadMu
+	// oneTimeActions are the first-run needs already told to the operator, kept
+	// durable in the hub store, and guarded by oneTimeMu
+	// (hub_one_time_action.go, hub_one_time_action_store.go).
+	oneTimeMu      sync.Mutex
+	oneTimeActions map[oneTimeActionKey]oneTimeActionState
+	// oneTimeDSN is the panewire Sentry DSN the ACTION NEEDED events go to; ""
+	// when reporting is not configured. oneTimeNotify, when set, replaces the
+	// Sentry send (tests only; hub_one_time_action.go).
+	oneTimeDSN    string
+	oneTimeNotify oneTimeNotifier
+	fleetLoadMu   sync.Mutex
+	fleetLoadAt   time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
 	// handoff; closed makes every call after the first return nil at once.
 	closeMu    sync.Mutex
@@ -968,6 +975,8 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, prStatusHost: config.PRStatusHost, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
+	hub.oneTimeDSN = os.Getenv(crashReportDSNEnv)
+	hub.loadOneTimeActions()
 	hub.fleetStatusInterval = config.FleetStatusInterval
 	hub.fleetStatusPublish = config.FleetStatusPublish
 	hub.fleetStatusPlanFn = config.FleetStatusPlans
@@ -1571,6 +1580,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
+			h.observeNodeLoops(machineID, heartbeat.Loops, received)
 			h.sendHeartbeatDirectives(machineID, agent)
 		}
 		if message.Kind == "job.completed" {
@@ -1801,6 +1811,11 @@ type hubHeartbeatPayload struct {
 	EndedPanes *int `json:"ended_panes,omitempty"`
 	// Checkouts is the node's allow-listed checkout revisions (node_checkout_pull.go).
 	Checkouts map[string]HubCheckoutRev `json:"checkouts,omitempty"`
+	// Loops is the node's current-day loop ledger bucket (node_loop_ledger.go,
+	// hubFeatureNodeLoops). It is nil when the node has not measured one or
+	// predates the ledger: null must never read as zero activity, which is
+	// what clears a machine's row to idle.
+	Loops *hubNodeLoopsPayload `json:"loops,omitempty"`
 }
 
 // hubEndedPanesMax bounds the ended-pane count a node may report: a sweep's
@@ -1850,7 +1865,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" && name != "ended_panes" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "host_activity" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" && name != "checkouts" && name != "ended_panes" && name != "loops" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1972,6 +1987,13 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.Checkouts = checkouts
+	}
+	if rawLoops, exists := fields["loops"]; exists {
+		loops, valid := decodeHubNodeLoops(rawLoops)
+		if !valid {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.Loops = loops
 	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {
@@ -2263,8 +2285,8 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	if sameAgent && len(capabilitySet) == 0 {
 		// The capability-free hello is a compatibility retry for a hub that
 		// did not acknowledge the capable hello. On this live session it must
-		// retain the registration's features while still resetting its job
-		// state; a first hello without features remains an old-node record.
+		// retain the registration's features; a first hello without features
+		// remains an old-node record.
 		for capability := range previousCapabilities {
 			capabilitySet[capability] = true
 		}

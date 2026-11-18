@@ -367,6 +367,13 @@ type TaskPaneSweeper struct {
 	// 4904). It is called once per measured pass, zero included; a pass that
 	// could not read herdr reports nothing.
 	EndedOpen func(open int)
+	// NoteWorktreeSeen and NoteWorktreeRemoved report the worktree tail's flow
+	// to the node's loop ledger (hk 5117): a worktree of an ended job enters
+	// when worktreePlan clears it for removal, and exits when the removal
+	// succeeds. Both are nil except on the node's own sweeper; the checkout
+	// sweep command counts its rows itself.
+	NoteWorktreeSeen    func(jobID string)
+	NoteWorktreeRemoved func(jobID string)
 
 	// staleOpen is the count the pass is reporting, for its log line.
 	staleOpen int
@@ -1070,17 +1077,16 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	swept := SweptPane{Job: j.ID, Pane: j.Pane, Role: paneSweepRole(j), Reason: end.reason}
 	key := paneSweepKey(j)
 	if reason := paneOwnershipProof(j, agents); reason != "" {
-		if reason == "pane_unlisted" && s.Exclusive != nil {
-			defer s.Exclusive()()
-		}
 		return s.paneUnlisted(ctx, a, j, task, end, swept, reason)
 	}
 	if err := a.savePaneScreen(ctx, j, task); err != nil {
 		return paneSweepKept("screen_save_failed")
 	}
 	// Reading and uploading the last screen may wait on herdr or handoffkeep.
-	// Keep both outside the node-command lock; the job and the pane are
-	// re-read below after taking it, immediately before close.
+	// Keep both outside the node-command lock. Lock order is taskPaneSweepMu
+	// -> nodeCommandMu (Exclusive) -> job end lock. Exclusive is taken before
+	// re-reading the job and proof, and the end lock is taken non-blockingly
+	// so the sweep never holds Exclusive while waiting (hk 5063).
 	if s.Exclusive != nil {
 		defer s.Exclusive()()
 	}
@@ -1099,12 +1105,11 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	if err != nil {
 		return paneSweepKept("herdr_unreadable")
 	}
-	if reason := paneOwnershipProof(latest, fresh); reason != "" {
-		return s.paneUnlisted(ctx, a, j, task, end, swept, reason)
-	}
-	// The end lock can wait while a watcher re-prompts or a restore claims
-	// the job. Revalidate the entire decision and pane proof under that lock.
-	current, endUnlock, refusal := a.lockUnchangedEnd(ctx, j)
+	// The end lock is taken non-blockingly under Exclusive: if busy, return
+	// kept with hub_close_owns_end and retry on the next pass.
+	tryCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	current, endUnlock, refusal := a.lockUnchangedEnd(tryCtx, latest)
 	if refusal != "" {
 		delete(s.idleSince, key)
 		delete(s.endedSince, key)
@@ -1113,6 +1118,9 @@ func (s *TaskPaneSweeper) closePane(ctx context.Context, a *App, j Job, task str
 	defer endUnlock()
 	if !s.closeStillEnded(ctx, j, current, task, end) || (paneSweepWaitsOnPR(current) && !paneSweepWaitsOnPR(j)) {
 		return paneSweepKept("job_changed")
+	}
+	if reason := paneOwnershipProof(current, fresh); reason != "" {
+		return s.paneUnlistedHeld(ctx, a, current, swept, reason)
 	}
 	// The session must be read before the close removes the live reference;
 	// it can take time, so the final pane proof follows it.
@@ -1170,7 +1178,12 @@ func (s *TaskPaneSweeper) paneUnlisted(ctx context.Context, a *App, j Job, task 
 	if reason != "pane_unlisted" {
 		return paneSweepUnproven(reason)
 	}
-	current, unlock, refusal := a.lockUnchangedEnd(ctx, j)
+	if s.Exclusive != nil {
+		defer s.Exclusive()()
+	}
+	tryCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	current, unlock, refusal := a.lockUnchangedEnd(tryCtx, j)
 	if refusal != "" {
 		return paneSweepKept(refusal)
 	}

@@ -36,7 +36,7 @@ func newFakeClaudeSession(t *testing.T) *fakeClaudeSession {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	path := filepath.Join(dir, "s.sock")
-	if len(path) > claudeSocketPathLimit {
+	if len(path) > sessionSocketPathLimit {
 		t.Skipf("socket path %q is longer than a Unix socket allows", path)
 	}
 	listener, err := net.Listen("unix", path)
@@ -76,6 +76,12 @@ type claudeWakeNode struct {
 // newClaudeWakeNode is a node whose typed path is a recording seam, with the
 // trial switched on for lanes.
 func newClaudeWakeNode(t *testing.T, lanes ...string) claudeWakeNode {
+	t.Helper()
+	return newSessionWakeNode(t, sessionMessageLanes{claude: lanes})
+}
+
+// newSessionWakeNode is newClaudeWakeNode for any harness's trial switches.
+func newSessionWakeNode(t *testing.T, lanes sessionMessageLanes) claudeWakeNode {
 	t.Helper()
 	typed := new([]string)
 	var mu sync.Mutex
@@ -159,7 +165,7 @@ func TestClaudeWakePostsToRegisteredSocket(t *testing.T) {
 		t.Fatalf("registry mode %v", info.Mode().Perm())
 	}
 	logged := logs.String()
-	if !strings.Contains(logged, "stage="+claudeSessionStageReachedSocket) || strings.Contains(logged, session.path) || strings.Contains(logged, message.Text) || strings.Contains(logged, claudeTestTokenCanary) {
+	if !strings.Contains(logged, "stage="+sessionStageReachedSocket) || strings.Contains(logged, session.path) || strings.Contains(logged, message.Text) || strings.Contains(logged, claudeTestTokenCanary) {
 		t.Fatalf("log must report the honest stage and leak neither path, text nor token: %s", logged)
 	}
 }
@@ -194,7 +200,7 @@ func TestClaudeWakeFallsBackToTyping(t *testing.T) {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			body, _ := json.Marshal(claudeSocketRegistration{Lane: "routing-policy", Pane: "w:p4", Socket: regular})
+			body, _ := json.Marshal(sessionRegistration{Lane: "routing-policy", Pane: "w:p4", Socket: regular})
 			if err := os.WriteFile(claudeSocketRegistryPath(node.root, "routing-policy"), body, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -217,7 +223,7 @@ func TestClaudeWakeFallsBackToTyping(t *testing.T) {
 			if len(*node.typed) != 1 || !strings.HasPrefix((*node.typed)[0], "w:p4\x00") || !strings.HasSuffix((*node.typed)[0], message.Text) {
 				t.Fatalf("typed %q, want the wake line typed once into its pane", *node.typed)
 			}
-			if !strings.Contains(logs.String(), "stage="+claudeSessionStageFellBack) {
+			if !strings.Contains(logs.String(), "stage="+sessionStageFellBack) {
 				t.Fatalf("the fallback was not logged: %s", logs)
 			}
 		})
@@ -264,15 +270,15 @@ func TestClaudeWakeLeavesEveryOtherInjectTyped(t *testing.T) {
 
 func TestClaudeSessionMessageSwitchParsing(t *testing.T) {
 	t.Setenv(claudeSessionMessageLanesEnv, "")
-	if lanes := claudeSessionMessageLanesFromEnv(); len(lanes) != 0 {
+	if lanes := laneListFromEnv(claudeSessionMessageLanesEnv); len(lanes) != 0 {
 		t.Fatalf("an empty switch must be off: %v", lanes)
 	}
 	t.Setenv(claudeSessionMessageLanesEnv, " routing-policy , not a lane!, ,x")
-	if lanes := claudeSessionMessageLanesFromEnv(); strings.Join(lanes, "|") != "routing-policy|x" {
+	if lanes := laneListFromEnv(claudeSessionMessageLanesEnv); strings.Join(lanes, "|") != "routing-policy|x" {
 		t.Fatalf("lanes %v", lanes)
 	}
 	t.Setenv(claudeSessionMessageLanesEnv, "routing-policy")
-	if lanes := newClientRelayControlState(HubClientConfig{}).sessionMessageLanes; len(lanes) != 1 || lanes[0] != "routing-policy" {
+	if lanes := newClientRelayControlState(HubClientConfig{}).sessionMessageLanes.claude; len(lanes) != 1 || lanes[0] != "routing-policy" {
 		t.Fatalf("the node client did not read the switch: %v", lanes)
 	}
 }

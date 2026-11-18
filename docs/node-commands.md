@@ -310,7 +310,10 @@ current registration advertises it. `CloseOpsReady` has three parts:
   executable is named) must be the job's aware watcher.
   - An aware watcher is one that holds
     `jobs/<job>/.panewire-watch-hubclose-v3.lock` for its whole life, and
-    lends its watch lock (below).
+    lends its watch lock (below). A watcher whose lock-lending socket fails runs
+    holding only `.panewire-watch.lock`: it reads as incompatible, so
+    `fleet.HubCloseWatchersReady` withholds readiness and close admission refuses
+    for that job until the watcher completes.
   - A watcher of an older binary holds only `.panewire-watch.lock`, or that
     and the v1 or v2 lock. A v1 watcher lacks the stale-decision check below;
     a v2 one cannot lend its lock.
@@ -331,8 +334,13 @@ first and exits when it is held.
   `/tmp/panewire-<uid>/<hash>/watch.sock` when that path is too long. Its
   directory is created 0700 before the socket binds, and is refused unless it
   is a real directory owned by the user with no group or other access. So no
-  other local user can connect. flock stays held until every reference closes, so the watcher
-  exiting or being killed mid-close cannot free the lock.
+  other local user can connect. If the lending socket cannot be served, the
+  watcher still runs and watches the job holding only `.panewire-watch.lock`.
+  Socket directory cleanup on error or exit is best effort: only the per-job
+  `<hash>` directory is removed, removal errors are ignored, and the shared
+  `/tmp/panewire-<uid>` base directory stays. flock stays held until every
+  reference closes, so the watcher exiting or being killed mid-close cannot
+  free the lock.
 
 - The fence is reconciled under the job's end lock, which admission also
   holds. So a release can never drop the fence of a close admitted
@@ -353,6 +361,19 @@ first and exits when it is held.
   the re-read ledger already holds another end (a revoke, a completion, a
   reap): as the newest end it would read as a live hand-over and mask that
   end. Both lock waits end when the caller's context does.
+- The announcement is appended under the job's `.wrk-events.lock` (the lock a
+  hub revocation and every sequence allocation take), and only if the ledger's
+  current attempt is still the one it observed (the attempt is the newest
+  claim, reclaim, spawn or re-prompt; the quota-stop manager records it with
+  its decision); otherwise it is dropped. The watcher's `job.reprompted` resume
+  marker is appended the same way and is void after a reap, a revocation or an
+  end of that attempt (hk 5224).
+- Every reader of the current attempt (`watch`, the watcher re-arm,
+  `announcedQuotaStop`, the `Reassigned` flag) folds the ledger once, in
+  numeric sequence order and never by timestamp (`ledgerView`,
+  `internal/fleet/ledger_view.go`). Events that share a sequence number are
+  one group in which a revocation is applied last; a claim, reclaim or spawn at
+  a strictly greater sequence clears it.
 - When no intent is open any more (settled, cancelled, or made stale by a
   new attempt), the fence is released and the node re-arms the watchers of
   live jobs, since a watcher that met the fence exited.
@@ -393,7 +414,8 @@ while any close is open: its process-held watcher fence must remain held.
 2. Repeat the same command until it prints `close ops drained; no pending
    jobs` and exits 0. Exit 5 lists pending jobs; the running node's settlement
    pass retries them. An unreadable ledger is pending, so repair storage and
-   retry rather than treating an incomplete scan as an empty drain.
+   retry rather than treating an incomplete scan as an empty drain (a hub-side
+   placement-only directory is not pending).
    Exit 5 also covers a cancelled close the hub has not acknowledged: it
    prints `waiting for the hub to acknowledge cancelled closes of jobs: [...]`.
    The hub acknowledges on its next 10 s pass (see "The hub's acknowledgement"

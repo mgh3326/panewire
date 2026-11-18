@@ -45,13 +45,13 @@ func newRoleStopRigScreen(t *testing.T, role string, startedAgo time.Duration, t
 		t.Fatal(err)
 	}
 	started := rig.now.Add(-startedAgo).UTC().Format(time.RFC3339)
-	spawned := `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `","task_id":"42"`
+	spawned := `{"kind":"job.spawned","type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `","task_id":"42"`
 	if profile != "" {
 		spawned += `,"profile":"` + profile + `"`
 	}
 	spawned += `}`
 	for name, body := range map[string]string{
-		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"implementer","task_id":"42","epoch":1}`,
+		"00001-job.claimed.json": `{"kind":"job.claimed","type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"implementer","task_id":"42","epoch":1}`,
 		"00002-job.spawned.json": spawned} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
@@ -78,7 +78,7 @@ func newRoleStopRigScreen(t *testing.T, role string, startedAgo time.Duration, t
 		rig.sends++
 		return relayInjectResult{Outcome: relayInjectDelivered, Evidence: "visible:nonce_echo", Proven: relayNoncesIn(text)}
 	}
-	q.announce = func(_ context.Context, job, pane string, stop quotastop.Stop) error {
+	q.announce = func(_ context.Context, job, pane, _ string, stop quotastop.Stop) error {
 		rig.announce = append(rig.announce, stop)
 		rig.announced = append(rig.announced, job+" "+pane)
 		return nil
@@ -202,7 +202,7 @@ func TestQuotaStopImplementerFindsItsInheritedTask(t *testing.T) {
 	rig := newRoleStopRig(t, "implementer", time.Hour, `{"tasks":[{"priority":3,"expected":"4h","refs":{"job_id":"builder-job"}}]}`)
 	events := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events")
 	started := rig.now.Add(-time.Hour).UTC().Format(time.RFC3339)
-	claim := `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"implementer","task_inherited_from":"builder-job","epoch":1}`
+	claim := `{"kind":"job.claimed","type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"implementer","task_inherited_from":"builder-job","epoch":1}`
 	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(claim), 0600); err != nil {
 		t.Fatal(err)
 	}

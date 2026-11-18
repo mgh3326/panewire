@@ -36,6 +36,17 @@ func watchLockSocket(jobDir string) (string, error) {
 	return filepath.Join(dir, "watch.sock"), nil
 }
 
+// watchLockBaseDirHook, when non-nil, overrides the base directory for
+// long-path lending sockets in tests.
+var watchLockBaseDirHook func() string
+
+func watchLockBaseDir() string {
+	if watchLockBaseDirHook != nil {
+		return watchLockBaseDirHook()
+	}
+	return filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+}
+
 // watchLockSocketDir is `<job>/.panewire-watch-sock`, or, when that path is
 // too long for a sockaddr_un (104 bytes on macOS),
 // `/tmp/panewire-<uid>/<hash of the job dir>`. Each is created 0700 and must
@@ -44,7 +55,7 @@ func watchLockSocketDir(jobDir string) (string, error) {
 	dir := filepath.Join(jobDir, ".panewire-watch-sock")
 	if len(dir)+len("/watch.sock") >= 100 {
 		sum := sha256.Sum256([]byte(filepath.Clean(jobDir)))
-		base := filepath.Join("/tmp", "panewire-"+strconv.Itoa(os.Getuid()))
+		base := watchLockBaseDir()
 		if err := privateDir(base); err != nil {
 			return "", err
 		}
@@ -63,8 +74,12 @@ func privateDir(dir string) error {
 	if err != nil {
 		return err
 	}
+	return verifyPrivateDir(dir, info, os.Getuid())
+}
+
+func verifyPrivateDir(dir string, info fs.FileInfo, uid int) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 || !ok || int(st.Uid) != os.Getuid() {
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 || !ok || int(st.Uid) != uid {
 		return fmt.Errorf("watch-lock socket directory %s is not private", dir)
 	}
 	return nil
@@ -75,17 +90,21 @@ func privateDir(dir string) error {
 // listening before the watcher takes its capability lock, so a watcher the
 // node probes as aware can always lend.
 func serveWatchLock(jobDir string, lock *os.File) (stop func(), err error) {
-	path, err := watchLockSocket(jobDir)
+	dir, err := watchLockSocketDir(jobDir)
 	if err != nil {
 		return nil, err
 	}
+	path := filepath.Join(dir, "watch.sock")
 	_ = os.Remove(path)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
+		_ = os.Remove(dir)
 		return nil, err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		listener.Close()
+		_ = os.Remove(path)
+		_ = os.Remove(dir)
 		return nil, err
 	}
 	done := make(chan struct{})
@@ -105,6 +124,7 @@ func serveWatchLock(jobDir string, lock *os.File) (stop func(), err error) {
 		listener.Close()
 		<-done
 		_ = os.Remove(path)
+		_ = os.Remove(dir)
 	}, nil
 }
 

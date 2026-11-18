@@ -53,21 +53,31 @@ func (c Config) readFile(path string) ([]byte, error) {
 	return data, nil
 }
 
+// errSecretItemAbsent says the keyring answered and holds no login item for the
+// CLI. It is the only keyring answer that says there is no login.
+var errSecretItemAbsent = errors.New("agy login item is absent")
+
 // secretToken is the OS keyring copy of the login: the keychain item on macOS,
-// the secret service item on Linux, "" elsewhere and when the item is absent,
-// locked or unreadable. The read is bounded at 10 s and never prompts.
-func (c Config) secretToken(ctx context.Context) string {
+// the secret service item on Linux, "" elsewhere. It returns the token, "" when
+// the item holds none, and an error when the keyring could not be read from
+// this process (no session bus, a locked or denied keychain). Such an error
+// says nothing about whether a login is stored, so the caller must not judge
+// one. The read is bounded at 10 s and never prompts.
+func (c Config) secretToken(ctx context.Context) (string, error) {
 	read := c.secretReader()
 	if read == nil {
-		return ""
+		return "", nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	out, err := read(ctx)
-	if err != nil {
-		return ""
+	switch {
+	case errors.Is(err, errSecretItemAbsent):
+		return "", nil
+	case err != nil:
+		return "", err
 	}
-	return envelopeToken(strings.TrimSpace(out))
+	return envelopeToken(strings.TrimSpace(out)), nil
 }
 
 // secretReader is the platform's keyring read: the keychain on macOS, the
@@ -88,10 +98,19 @@ func (c Config) secretReader() func(context.Context) (string, error) {
 	return nil
 }
 
+// securityItemNotFound is `security`'s exit status for an item the keychain
+// does not hold (errSecItemNotFound).
+const securityItemNotFound = 44
+
 // securityKeychain reads the item's secret through `security`. The service and
-// account names are fixed and hold no secret.
+// account names are fixed and hold no secret. An item the keychain does not
+// hold is errSecretItemAbsent; any other failure leaves the keychain unread.
 func securityKeychain(ctx context.Context) (string, error) {
 	out, err := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "gemini", "-a", "antigravity", "-w").Output()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == securityItemNotFound {
+		return "", errSecretItemAbsent
+	}
 	return string(out), err
 }
 
@@ -173,7 +192,7 @@ func (c Config) refresh(ctx context.Context, binary, token string, usedSecret bo
 			return fresh, false
 		}
 		if usedSecret {
-			if fresh := c.secretToken(ctx); fresh != "" {
+			if fresh, _ := c.secretToken(ctx); fresh != "" {
 				return fresh, true
 			}
 		}

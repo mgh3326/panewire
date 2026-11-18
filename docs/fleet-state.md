@@ -158,7 +158,11 @@ and the `login_missing` placement drop are unchanged.
   fingerprint); a host with no measurable account is never probed and never
   marked by the probe (hk 3783). A failure of kind `auth`, `auth_failed`,
   `credentials` or `token_expired` sets `login_missing`, as a failed loop
-  measurement does. A pass clears it. Any other failure (network, rate limit,
+  measurement does. For agy, `credentials` means the keyring answered that it
+  holds no login item; a keyring this node's process cannot read (no session
+  bus, a locked keychain) fails as `probe_failed` and sets nothing, so a
+  daemon context that cannot reach the store no longer reports a working login
+  as missing and flapping. A pass clears it. Any other failure (network, rate limit,
   timeout) changes nothing. The node logs one line per state change and never
   the credential. The key is read at each round, so a change needs no restart.
   Enable it per host only after checking that a probe does not rotate a token
@@ -169,7 +173,8 @@ and the `login_missing` placement drop are unchanged.
   is the harness's login screen and pane cleanup was verified, the node marks
   that (host, harness) `login_missing` at once and sends rc=88 with the
   `AUTH_UNAVAILABLE` refusal and sign-in hint. An unchanged hub classifies it
-  as `auth_unavailable`; the desk gets its one-time `log in` notice. The rc=76
+  as `auth_unavailable`; the operator gets its one-time `log in` notice (a
+  Sentry warning, [placement.md](placement.md#first-run-refusals-and-the-desk-notice)). The rc=76
   refusal comes after the node's hk job claim, so the operation ends on that
   host (hk answers another host's claim of the job id with 409) and the host is
   dropped from the next placement. Without verified cleanup, or without a complete

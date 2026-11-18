@@ -98,7 +98,7 @@ func config(files map[string]string, cloud Doer) Config {
 			}
 			return nil, os.ErrNotExist
 		},
-		SecretService: func(context.Context) (string, error) { return "", errors.New("no secret service") },
+		SecretService: func(context.Context) (string, error) { return "", errSecretItemAbsent },
 		LookPath:      func(string) (string, error) { return "", errors.New("not found") },
 		Processes:     func(context.Context) []Proc { return nil },
 		ListenPorts:   func(context.Context, int) []int { return nil },
@@ -613,7 +613,7 @@ func TestSecretTokenLinuxSecretService(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := secretServiceConfig(func(context.Context) (string, error) { return raw, nil })
-			if got := cfg.secretToken(context.Background()); got != "secret-service-token" {
+			if got, _ := cfg.secretToken(context.Background()); got != "secret-service-token" {
 				t.Fatalf("secretToken = %q", got)
 			}
 		})
@@ -637,7 +637,7 @@ func TestSecretTokenLinuxWithoutASecretService(t *testing.T) {
 				called = true
 				return read(ctx)
 			})
-			if got := cfg.secretToken(context.Background()); got != "" {
+			if got, _ := cfg.secretToken(context.Background()); got != "" {
 				t.Fatalf("secretToken = %q", got)
 			}
 			if !called {
@@ -659,7 +659,7 @@ func TestSecretTokenReadIsBounded(t *testing.T) {
 		deadline = time.Until(at)
 		return "", errors.New("no session bus")
 	})
-	if got := cfg.secretToken(context.Background()); got != "" {
+	if got, _ := cfg.secretToken(context.Background()); got != "" {
 		t.Fatalf("secretToken = %q", got)
 	}
 	if deadline <= 0 || deadline > 10*time.Second {
@@ -673,7 +673,7 @@ func TestSecretTokenReadIsBounded(t *testing.T) {
 	parent, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	if got := cfg.secretToken(parent); got != "" {
+	if got, _ := cfg.secretToken(parent); got != "" {
 		t.Fatalf("secretToken = %q", got)
 	}
 	if elapsed := time.Since(started); elapsed > 5*time.Second {
@@ -690,7 +690,7 @@ func TestSecretTokenPlatforms(t *testing.T) {
 	})
 	cfg.GOOS = "darwin"
 	cfg.Keychain = func(context.Context) (string, error) { return `{"token":{"access_token":"keychain-token"}}`, nil }
-	if got := cfg.secretToken(context.Background()); got != "keychain-token" {
+	if got, _ := cfg.secretToken(context.Background()); got != "keychain-token" {
 		t.Fatalf("darwin secretToken = %q", got)
 	}
 
@@ -699,7 +699,7 @@ func TestSecretTokenPlatforms(t *testing.T) {
 		t.Fatal("the keychain was read on linux")
 		return "", nil
 	}
-	if got := cfg.secretToken(context.Background()); got != "secret-service-token" {
+	if got, _ := cfg.secretToken(context.Background()); got != "secret-service-token" {
 		t.Fatalf("linux secretToken = %q", got)
 	}
 
@@ -713,9 +713,41 @@ func TestSecretTokenPlatforms(t *testing.T) {
 			t.Fatalf("the keychain was read on %s", goos)
 			return "", nil
 		}
-		if got := cfg.secretToken(context.Background()); got != "" {
+		if got, _ := cfg.secretToken(context.Background()); got != "" {
 			t.Fatalf("%s secretToken = %q", goos, got)
 		}
+	}
+}
+
+// An unreadable keyring says nothing about the login, so its failure is a probe
+// failure and not the credentials kind the node reads as login missing. Only
+// an item the keyring answered as absent is credentials.
+func TestMeasureUnreadableSecretServiceIsNotALoginFailure(t *testing.T) {
+	for name, tc := range map[string]struct {
+		read func(context.Context) (string, error)
+		want string
+	}{
+		"no session bus": {
+			read: func(context.Context) (string, error) {
+				return "", errors.New("dbus: couldn't determine address of session bus")
+			},
+			want: quota.ErrKindProbeFailed,
+		},
+		"locked item": {
+			read: func(context.Context) (string, error) { return "", errors.New("agy login item is locked") },
+			want: quota.ErrKindProbeFailed,
+		},
+		"absent item": {
+			read: func(context.Context) (string, error) { return "", errSecretItemAbsent },
+			want: quota.ErrKindCredentials,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Measure(context.Background(), secretServiceConfig(tc.read))
+			if got := quota.KindOf(err); got != tc.want {
+				t.Fatalf("kind %q, want %q (%v)", got, tc.want, err)
+			}
+		})
 	}
 }
 

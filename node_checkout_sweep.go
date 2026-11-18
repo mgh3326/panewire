@@ -103,6 +103,87 @@ func (client *HubClient) nodeCheckoutSweep(ctx context.Context, args nodeCheckou
 	return nodeCheckoutSweepResult{DryRun: args.DryRun, Checkouts: rows}, ""
 }
 
+// nodeCheckoutRevisitInterval paces the daily kept-worktree revisit (hk 5117,
+// track A2): once a day the node runs the node sweep-checkouts logic itself
+// over the worktrees the sweep tail kept, through the same guarded removal,
+// and never touches a worktree in use. The manual command stays.
+const nodeCheckoutRevisitInterval = 24 * time.Hour
+
+// runCheckoutRevisit runs the kept-worktree revisit once a day, starting with
+// one pass at node start like the quota-pool reconcile does. Every pass holds
+// nodeCommandMu: the removals are git mutations that must not interleave with
+// another acting node command (a pane close works through the same lock), and
+// a manual sweep is rare enough that the queue is fine. The lock wraps the
+// pass seam too, so a test pass observes the same serialization.
+func (client *HubClient) runCheckoutRevisit(ctx context.Context) {
+	if client.jobsInboxRoot == "" {
+		return
+	}
+	pass := client.checkoutRevisitPass
+	if pass == nil {
+		pass = client.revisitKeptWorktrees
+	}
+	guarded := func(ctx context.Context) {
+		passCtx, cancel := context.WithTimeout(ctx, nodeCheckoutSweepRunTimeout)
+		defer cancel()
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		pass(passCtx)
+	}
+	guarded(ctx)
+	ticks := client.checkoutRevisitTicks
+	if ticks == nil {
+		ticker := time.NewTicker(nodeCheckoutRevisitInterval)
+		defer ticker.Stop()
+		ticks = ticker.C
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticks:
+			guarded(ctx)
+		}
+	}
+}
+
+// revisitKeptWorktrees runs one non-dry-run checkout sweep and counts it in
+// the worktree flow mechanism: one item per judged *-checkout worktree, out
+// when the guarded removal takes it. A failure counts in the day's errors.
+// runCheckoutRevisit serializes it against other acting node commands; a
+// direct caller holds nodeCommandMu itself.
+func (client *HubClient) revisitKeptWorktrees(ctx context.Context) {
+	// The ledger ticks at the top of every pass: the tick is the liveness
+	// signal between the daily removals.
+	client.nodeLoopTick(nodeWorktreeFlow)
+	result, code := client.nodeCheckoutSweep(ctx, nodeCheckoutSweepArgs{DryRun: false})
+	if code != "" {
+		client.nodeLoopNoteError(nodeWorktreeFlow)
+		return
+	}
+	rows, ok := result.(nodeCheckoutSweepResult)
+	if !ok {
+		client.nodeLoopNoteError(nodeWorktreeFlow)
+		return
+	}
+	for _, row := range rows.Checkouts {
+		// A checkout kept for a live user leaves on its own when that work
+		// ends, so it never enters the flow: counting it would trip the
+		// progress rule on a healthy node with many active checkouts.
+		if row.Outcome == "kept" && fleet.CheckoutSweepLiveKeep(row.Reason) {
+			continue
+		}
+		id := row.Job
+		if id == "" {
+			id = row.Path
+		}
+		client.nodeLoopNoteMade(nodeWorktreeFlow, id)
+		if row.Outcome == "removed" {
+			client.nodeLoopNoteDone(nodeWorktreeFlow, id)
+		}
+	}
+}
+
 // nodeCheckoutOrphanOwners attributes a *-checkout directory to its job when
 // the job's local record is gone, from the spawn journal's completed results.
 // A node without a readable journal attributes nothing and the sweep keeps

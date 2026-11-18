@@ -6,11 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"os"
-	"regexp"
-	"strings"
 	"time"
 )
 
@@ -25,96 +22,21 @@ import (
 // The hub's wire is unchanged: the wake line is the plain relay.inject the hub
 // already sends, recognised on the node by its transport id and exact text.
 
-// claudeWakeCounts is the variable part of the wake line between a lane's name
-// and its list command (inboxWakeText).
-var claudeWakeCounts = regexp.MustCompile(`^\d+ unread \(most urgent: [a-z-]+\)$`)
-
 const claudeSessionMessageLanesEnv = "PANEWIRE_CLAUDE_SESSION_MESSAGE_LANES"
 
 // claudeSessionPostTimeout bounds connect, write and the wait for the session
 // to close its end.
 const claudeSessionPostTimeout = 5 * time.Second
 
-// claudeSessionMessageLanesFromEnv is the trial's switch. Unset or empty is
-// off; an entry that is not a lane label is ignored.
-func claudeSessionMessageLanesFromEnv() []string {
-	var lanes []string
-	for _, lane := range strings.Split(os.Getenv(claudeSessionMessageLanesEnv), ",") {
-		if lane = strings.TrimSpace(lane); validLaneReference(lane) {
-			lanes = append(lanes, lane)
-		}
-	}
-	return lanes
-}
-
-// The delivery stages the node reports for a session-message wake. Only the
-// first is claimed: a post that wrote the line to the session's socket. Claude
-// Code gives the poster no acknowledgement, and a message its receiving session
-// holds for approval, drops (rate limit, duplicate, full queue) or never reads
-// looks the same to the node (docs/claude-session-message.md).
-const (
-	claudeSessionStageReachedSocket = "reached_socket"
-	claudeSessionStageFellBack      = "fell_back_to_typed"
-)
-
-// claudeWakeLane returns the configured lane a plain inject is the inbox wake
-// line of, or "". The line is matched twice: the transport id the hub derives
-// from the lane, and the exact line text for that lane. The desk's "no pane"
-// line for a paneless design lane shares the lane's transport id but not its
-// text, so it is never posted to the lane's own session.
-func (client *HubClient) claudeWakeLane(message hubOutboundMessage) string {
-	if message.Lane != "" || message.EventID != 0 {
-		return ""
-	}
-	for _, lane := range client.relayControl.sessionMessageLanes {
-		if message.JobID != laneEventTransportID(lane, "inbox-wake") {
-			continue
-		}
-		head, tail := "[inbox] "+lane+": ", " | panewire inbox list --lane "+lane
-		if middle, ok := strings.CutSuffix(strings.TrimPrefix(message.Text, head), tail); ok && strings.HasPrefix(message.Text, head) && claudeWakeCounts.MatchString(middle) {
-			return lane
-		}
-	}
-	return ""
-}
-
-// deliverWakeAsSessionMessage posts the lane's wake line to its registered
-// Claude Code session. It reports true when the line reached the socket; false
-// leaves the caller to type the line as before.
-func (client *HubClient) deliverWakeAsSessionMessage(ctx context.Context, message hubOutboundMessage) bool {
-	lane := client.claudeWakeLane(message)
-	if lane == "" {
-		return false
-	}
-	// The hook registers under the same default root as panewire emit, so a
-	// daemon started without --inbox-root or --hub-jobs-root reads it there.
+// postClaudeWake posts the wake line to the lane's registered Claude Code
+// session. The hook registers under the same default root as panewire emit, so
+// a daemon started without --inbox-root or --hub-jobs-root reads it there.
+func (client *HubClient) postClaudeWake(ctx context.Context, lane string, message hubOutboundMessage) error {
 	socket, err := readClaudeSocketRegistration(emitInboxRoot(client.jobsInboxRoot), lane, message.Pane)
-	if err == nil {
-		err = postClaudeSessionMessage(ctx, socket, "panewire-hub: "+message.Text)
-	}
 	if err != nil {
-		// The socket path and the text stay out of the log.
-		slog.Warn("inbox wake session message failed; typing the line", "lane", lane, "stage", claudeSessionStageFellBack, "reason", claudeSessionFailureReason(err))
-		return false
+		return err
 	}
-	slog.Info("inbox wake posted as a session message", "lane", lane, "stage", claudeSessionStageReachedSocket)
-	return true
-}
-
-func claudeSessionFailureReason(err error) string {
-	switch {
-	case errors.Is(err, errClaudeSocketMissing):
-		return "not_registered"
-	case errors.Is(err, errClaudeSocketOtherPane):
-		return "other_pane"
-	case errors.Is(err, errClaudeSocketInvalid):
-		return "registration_invalid"
-	case errors.Is(err, os.ErrNotExist):
-		return "socket_gone"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout"
-	}
-	return "post_failed"
+	return postClaudeSessionMessage(ctx, socket, "panewire-hub: "+message.Text)
 }
 
 // claudeSessionLine is one line of a Claude Code inbox socket: the user-turn
@@ -137,7 +59,7 @@ type claudeSessionContent struct {
 // which the session decides by its own inbound rules. A session that holds the
 // connection open past the wait still counts as written.
 func postClaudeSessionMessage(ctx context.Context, socket, text string) error {
-	if err := validClaudeSocketPath(socket); err != nil {
+	if err := validSessionSocketPath(socket); err != nil {
 		return err
 	}
 	body, err := json.Marshal(claudeSessionLine{Type: "user", Message: claudeSessionContent{Role: "user", Content: text}})
