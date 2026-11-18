@@ -344,3 +344,17 @@ func TestLoopLedgerNoticeRetryWhenPersistFails(t *testing.T) {
 		t.Fatalf("failed notice was marked sent; the next sweep would skip it")
 	}
 }
+
+// An idle hub owes no drain lines, so the drain sweep counts no made: the
+// made >= 20 progress notice must not fire on a healthy idle hub.
+func TestLoopLedgerDrainIdleCountsNoMade(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := loopLedgerTestHub(t, &now, nil)
+	h.reportRelayPath = r20LanesFile(t, `{"lanes":{"x-design":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	ctx := context.Background()
+	h.sweepDrainWakes(ctx, now)
+	h.sweepDrainWakes(ctx, now)
+	if got := h.loopSnapshot()[loopLaneStallDrainWake].Made; got != 0 {
+		t.Fatalf("idle drain made=%d, want 0", got)
+	}
+}
