@@ -44,6 +44,7 @@ func newSupersedeFixture(t *testing.T) *supersedeFixture {
 		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
 		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
 		Logger:          slog.New(slog.NewTextHandler(&logs, nil)),
+		SupersedeClose:  true,
 		handoffkeep:     relayClient,
 	})
 	if err != nil {
@@ -704,4 +705,30 @@ func (s *flakySupersededStore) attempts() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.tries
+}
+
+// TestSupersedeOffByDefaultLeavesParentRunning: without --supersede-close the
+// hub never closes a parent, neither at landing nor in the sweep (hk 5140
+// follow-up; consult-5140-d43fccd5). An implementer child with an explicit
+// --parent-job is the case that would close it when the switch is on.
+func TestSupersedeOffByDefaultLeavesParentRunning(t *testing.T) {
+	f := newSupersedeFixture(t)
+	f.hub.supersedeClose = false
+	f.seedParent(t, "spawned")
+	task := hubSpawnTask{
+		Job:     f.successor,
+		Owner:   "parent",
+		Request: fleet.Submission{RequestID: "d676220b-e763-4af1-aefd-0000000000b1", Args: []string{"--job", f.successor, "--parent-job", f.parent, "--owner", "parent", "--role", "implementer"}},
+	}
+	f.hub.maybeSupersedeParent(task)
+	f.hub.startSupersededSweep()
+	if extra, ok := tryNodeCommand(f.node); ok {
+		t.Fatalf("with the switch off the parent must not reach the node: %v", extra)
+	}
+	if _, ok := supersededOf(t, f); ok {
+		t.Fatalf("with the switch off nothing is recorded superseded")
+	}
+	if infos := supersedeInfos(f.destination); len(infos) != 0 {
+		t.Fatalf("with the switch off no info is sent: %+v", infos)
+	}
 }

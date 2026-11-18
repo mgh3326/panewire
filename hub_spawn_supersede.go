@@ -39,6 +39,9 @@ func supersededParentOf(task hubSpawnTask) string {
 // maybeSupersedeParent starts the successor-closes-parent close after a
 // landed spawn. It never fails the spawn: every failure is one warn.
 func (h *HubServer) maybeSupersedeParent(task hubSpawnTask) {
+	if !h.supersedeClose {
+		return
+	}
 	parent := supersededParentOf(task)
 	successor := task.Job
 	if parent == "" || successor == "" || parent == successor {
@@ -380,6 +383,9 @@ func (h *HubServer) markSupersededChecked(id string) {
 // ticker, at most one pass in flight: a hung node must never hold Sweep's
 // pings, failover broadcasts and notification dispatch behind a 30s reap.
 func (h *HubServer) startSupersededSweep() {
+	if !h.supersedeClose {
+		return
+	}
 	if !h.supersededSweepMu.TryLock() {
 		return
 	}
