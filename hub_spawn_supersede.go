@@ -463,23 +463,31 @@ func (h *HubServer) refuseCloseAction(ctx context.Context, action poolAction) er
 }
 
 // supersedeMayRetry reports whether an unknown supersede request may mint a
-// successor: only while no other request of the parent is live and the shared
-// budget of supersedeMaxGenerations is not spent.
+// successor. A request mints at most one, ever: once it names a RetryID it
+// never mints another, even after that successor and its descendants were
+// refused (the shared unknown-retry path would allow it). No request may
+// mint while another of the parent's requests is live, and the budget of
+// supersedeMaxGenerations counts every row of the parent's chain, final ones
+// included.
 func (h *HubServer) supersedeMayRetry(ctx context.Context, action poolAction) (bool, error) {
 	data := action.Data.Supersede
-	if data == nil || int(data.Generation)+1 >= supersedeMaxGenerations {
+	if data == nil || action.Data.RetryID != "" {
 		return false, nil
 	}
 	rows, err := h.inbox.store.supersedeActionsOf(ctx, action.Job)
 	if err != nil {
 		return false, err
 	}
+	deepest := int(data.Generation)
 	for _, row := range rows {
+		if row.Data.Supersede != nil {
+			deepest = max(deepest, int(row.Data.Supersede.Generation))
+		}
 		if row.ID != action.ID && row.Phase != poolActionRefused && row.Phase != poolActionDone {
 			return false, nil
 		}
 	}
-	return true, nil
+	return deepest+1 < supersedeMaxGenerations, nil
 }
 
 // supersedeEventID is the fixed id of the one info line a supersede close owes

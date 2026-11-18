@@ -1224,11 +1224,38 @@ func TestSupersedeRetriesShareOneChainAndBudget(t *testing.T) {
 	if may, err := f.hub.supersedeMayRetry(t.Context(), first); err != nil || may {
 		t.Fatalf("a request whose chain already has a live successor must not mint another: may=%v err=%v", may, err)
 	}
-	// The budget caps unknown retries too.
-	spent := first
-	spent.Data.Supersede = &poolSupersede{Generation: supersedeMaxGenerations - 1, Fence: first.Data.Supersede.Fence}
-	if may, err := f.hub.supersedeMayRetry(t.Context(), spent); err != nil || may {
-		t.Fatalf("a spent budget must not retry: may=%v err=%v", may, err)
+	// The successor and its descendants are all refused: the original, which
+	// already named its successor, still mints nothing, and a chain that
+	// reached the cap in a final row mints nothing either.
+	second.Phase = poolActionRefused
+	if err := f.hub.inbox.store.savePoolAction(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	rows = f.rows(t)
+	for _, row := range rows {
+		if row.ID == first.ID {
+			first = row
+		}
+	}
+	if first.Data.RetryID == "" {
+		t.Fatalf("the unknown request must name its successor: %+v", first.Data)
+	}
+	if may, err := f.hub.supersedeMayRetry(t.Context(), first); err != nil || may {
+		t.Fatalf("an ancestor that already minted must never mint again, even after its successor was refused: may=%v err=%v", may, err)
+	}
+	// A fresh unknown request (no successor yet) is stopped by the budget of
+	// the whole chain, final rows included.
+	deep := second
+	deep.ID = "deep-final-row"
+	deep.Data.Supersede = &poolSupersede{Generation: supersedeMaxGenerations - 1, Fence: first.Data.Supersede.Fence, Successor: f.successor}
+	deep.Data.Args = nil
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), deep); err != nil {
+		t.Fatal(err)
+	}
+	fresh := first
+	fresh.Data.RetryID = ""
+	if may, err := f.hub.supersedeMayRetry(t.Context(), fresh); err != nil || may {
+		t.Fatalf("a chain whose final row spent the budget must not retry: may=%v err=%v", may, err)
 	}
 }
 
