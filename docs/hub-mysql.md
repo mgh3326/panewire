@@ -204,11 +204,14 @@ for non-secret local URLs.
 3. Change `PANEWIRE_HUB_DATABASE_URL` to the CA-pinned MySQL URL, start the hub,
    and verify nodes, inbox delivery, a spawn, and a consult. Keep PostgreSQL
    fenced read-only for the 48-hour rollback window.
-4. For rollback, stop the hub again. Run
+4. For rollback, stop the hub again and keep all other PostgreSQL writers
+   stopped. Lift the read-only fence so the copier has a writable PostgreSQL
+   target. Run
    `panewire hub store-copy --from-env MYSQL_URL --to-env POSTGRES_URL --replace`,
    then run `panewire hub store-copy --from-env MYSQL_URL --to-env POSTGRES_URL --verify-only`.
-   Switch the URL to PostgreSQL, start the cutover release or
-   newer, and verify nodes, inbox, a spawn, and a consult. Never use an older
+   Keep the hub and other writers stopped until verification succeeds. Switch
+   the URL to PostgreSQL, start the cutover release or newer, and verify nodes,
+   inbox, a spawn, and a consult. Never use an older
    binary against the copied-back store: it cannot deduplicate digest-form keys.
 
 The copier uses a single read-only snapshot and one connection per database.
