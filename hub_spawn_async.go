@@ -1310,6 +1310,11 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	if record == nil || !record.capabilities[hubCapabilityConsultStamp] {
 		req.Args = withoutSpawnFlag(req.Args, fleet.ConsultStampArg)
 	}
+	// --owner-notify is the same kind of extra (hk 5360): the saved request
+	// keeps it, and the hub applies the mode there.
+	if record == nil || !record.capabilities[hubCapabilityOwnerNotify] {
+		req.Args = withoutSpawnFlag(req.Args, fleet.OwnerNotifyArg)
+	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return fleet.HubSpawnReply{}, err
@@ -1583,6 +1588,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	// applies the same filter again (hk 4875).
 	if !record.capabilities[hubCapabilityConsultStamp] {
 		node.Args = withoutSpawnFlag(node.Args, fleet.ConsultStampArg)
+	}
+	if !record.capabilities[hubCapabilityOwnerNotify] {
+		node.Args = withoutSpawnFlag(node.Args, fleet.OwnerNotifyArg)
 	}
 	// Likewise the sparse lists: only a node that advertises
 	// checkout_sparse_v1 reads exclude/include, and every other node gets the

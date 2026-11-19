@@ -96,6 +96,8 @@ func (s *laneInboxStore) ensureSpawnOutboxes(parent context.Context) error {
 	for _, statement := range []string{
 		`CREATE TABLE IF NOT EXISTS placement_record_outbox (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,PRIMARY KEY(request_id,attempt))`,
 		`CREATE TABLE IF NOT EXISTS spawn_notice_outbox (event_id TEXT PRIMARY KEY)`,
+		ownerNoticeDecisionsTable,
+		ownerNoticeDecisionsWindowIndex,
 		spawnPlacementUnsealedIndex,
 		spawnNotificationsUndeliveredIndex,
 	} {

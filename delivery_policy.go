@@ -134,8 +134,12 @@ const consultDoneMarker = "[consult-done]"
 // line instead (inbox_wake.go). WorkerInboxTrial puts matching worker lanes in
 // the same class until WorkerInboxTrialUntil, after which it is off by itself.
 type deliveryRelayPolicy struct {
-	DesignLanes           []string `yaml:"design_lanes"`
-	DeskLanes             []string `yaml:"desk_lanes"`
+	DesignLanes []string `yaml:"design_lanes"`
+	DeskLanes   []string `yaml:"desk_lanes"`
+	// SpawnNoticeMustFix lists the spawn-failure causes a design owner is
+	// always told about, whatever the replay or repeat rules say (hk 5360).
+	// Nil takes defaultSpawnNoticeMustFix; an explicit empty list has none.
+	SpawnNoticeMustFix    []string `yaml:"spawn_notice_must_fix"`
 	InboxWakeWindow       string   `yaml:"inbox_wake_window"`
 	DrainWakeInterval     string   `yaml:"drain_wake_interval"`
 	DrainWakeThreshold    int      `yaml:"drain_wake_threshold"`
@@ -327,6 +331,14 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 	for _, pattern := range p.Relay.DeskLanes {
 		if !validDesignLanePattern(pattern) {
 			return nil, fmt.Errorf("invalid relay.desk_lanes pattern")
+		}
+	}
+	if p.Relay.SpawnNoticeMustFix == nil {
+		p.Relay.SpawnNoticeMustFix = append([]string(nil), defaultSpawnNoticeMustFix...)
+	}
+	for _, cause := range p.Relay.SpawnNoticeMustFix {
+		if !validSpawnNoticeCause(cause) {
+			return nil, fmt.Errorf("invalid relay.spawn_notice_must_fix cause")
 		}
 	}
 	p.Relay.wakeWindow = defaultInboxWakeWindow
