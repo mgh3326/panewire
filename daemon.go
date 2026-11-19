@@ -959,22 +959,15 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	if req.Kind != "lane.event" {
 		// The CLI refuses a superseded attempt before it writes anything; this
 		// is the node's own fence for a client that talks to the socket
-		// directly (docs/producer-attempt-grant.md).
-		current, err := jobowner.Epoch(filepath.Join(d.emitNamespaceRoot(), "jobs"), req.JobID)
-		if err != nil {
+		// directly. It applies the CLI's rule to the submitted epoch: it must
+		// equal the persisted grant, and a revoked grant is refused, so a
+		// future epoch the node has not persisted cannot pass either
+		// (docs/producer-attempt-grant.md).
+		if _, err := jobowner.ProducerEpoch(filepath.Join(d.emitNamespaceRoot(), "jobs"), req.JobID, 0, epoch); err != nil {
+			if producerRefusal(err) {
+				return &codedError{ExitUsage, err}
+			}
 			return &codedError{ExitInternal, fmt.Errorf("job assignment unavailable")}
-		}
-		if epoch < current {
-			return &codedError{ExitUsage, fmt.Errorf("%w: attempt epoch %d, current grant %d", jobowner.ErrStaleAttempt, epoch, current)}
-		}
-		// A revocation leaves the grant file at the old epoch, so the grant
-		// alone would admit the attempt that just lost the job.
-		revoked, err := jobowner.Revoked(filepath.Join(d.emitNamespaceRoot(), "jobs"), req.JobID)
-		if err != nil {
-			return &codedError{ExitInternal, fmt.Errorf("job assignment unavailable")}
-		}
-		if epoch < revoked {
-			return &codedError{ExitUsage, fmt.Errorf("%w: attempt epoch %d, the hub revoked it at epoch %d", jobowner.ErrRevoked, epoch, revoked)}
 		}
 	}
 	if d.cfg.Hub.Client == nil {

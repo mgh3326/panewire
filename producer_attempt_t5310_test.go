@@ -308,7 +308,52 @@ func TestDaemonRefusesRevokedProducerPush_t5310(t *testing.T) {
 		t.Fatalf("epoch 1 after revocation at 2: err=%v", err)
 	}
 	request.Epoch = 2
-	if err := daemon.emitRelayEvent(request); err != nil && strings.Contains(err.Error(), "attempt revoked") {
-		t.Fatalf("epoch 2: err=%v", err)
+	if err := daemon.emitRelayEvent(request); err == nil || !strings.Contains(err.Error(), "attempt revoked") {
+		t.Fatalf("the revoking epoch itself: err=%v", err)
+	}
+	if err := jobowner.Assign(jobs, producerJob, 3); err != nil {
+		t.Fatal(err)
+	}
+	request.Epoch = 3
+	if err := daemon.emitRelayEvent(request); err != nil && (strings.Contains(err.Error(), "attempt revoked") || strings.Contains(err.Error(), "stale attempt")) {
+		t.Fatalf("regranted epoch 3: err=%v", err)
+	}
+}
+
+// A client of the socket cannot pick an epoch the node has not persisted: after
+// A/2 -> B/3 the grant file reads 2 and the revocation marker 3, and a push at 3
+// (B's epoch) or any later one is refused, as is a regrant not yet persisted.
+func TestDaemonRefusesFutureProducerPush_t5310(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		grant, revoke uint64
+		epoch         uint64
+		want          string
+	}{
+		{name: "revocation epoch", grant: 2, revoke: 3, epoch: 3, want: "attempt revoked"},
+		{name: "after the revocation", grant: 2, revoke: 3, epoch: 4, want: "attempt revoked"},
+		{name: "unpersisted regrant", grant: 1, epoch: 3, want: "ahead of the node's grant"},
+		{name: "ahead of a persisted grant", grant: 3, epoch: 4, want: "ahead of the node's grant"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			jobs := filepath.Join(root, "jobs")
+			if tc.grant > 1 {
+				if err := jobowner.Assign(jobs, producerJob, tc.grant); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.revoke > 0 {
+				if err := jobowner.Revoke(jobs, producerJob, tc.revoke); err != nil {
+					t.Fatal(err)
+				}
+			}
+			daemon := t22NamespaceDaemon(root, &bytes.Buffer{})
+			request := localRequest{Op: "emit", Kind: "job.completed", JobID: producerJob, ReportPath: "report.md", OwnerLane: "lane-a", InboxRoot: root, Epoch: tc.epoch}
+			err := daemon.emitRelayEvent(request)
+			if err == nil || ExitCode(err) != ExitUsage || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("epoch %d (grant %d, revoked %d): err=%v, want %q", tc.epoch, tc.grant, tc.revoke, err, tc.want)
+			}
+		})
 	}
 }

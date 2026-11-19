@@ -57,9 +57,11 @@ epoch it means to act under, for example `panewire job done JOB --report R
 
 - **The CLI** (`producer_attempt.go`, used by `job.go` and `emit.go`): the
   check runs first, so a refused call leaves no event file.
-- **The node daemon** (`emitRelayEvent`): a `job.*` push whose epoch is below
-  the node's current grant is refused `stale attempt`, for a client that talks
-  to the socket without the CLI.
+- **The node daemon** (`emitRelayEvent`): a `job.*` push goes through the same
+  `ProducerEpoch` rule as the CLI, so for a client that talks to the socket
+  without the CLI the submitted epoch must equal the persisted grant, and a
+  revoked grant is refused. A future epoch the node has not persisted (the
+  revocation's own epoch, or a regrant not yet landed) is refused, not passed.
 - **The hub** (`observeJobCompletion` and the owner assignment fence): a
   completion whose epoch differs from the job's current epoch is not accepted
   and does not close the job. The A/1 worker's call carries epoch 1, so the hub
