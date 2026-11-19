@@ -361,3 +361,54 @@ func TestSpawnNoticeMustFixConfig_5360(t *testing.T) {
 		t.Fatal("a malformed must-fix cause was accepted")
 	}
 }
+
+// A daemon-started reviewer's completion is a reviewer lifecycle record for a
+// design lane, but a spawn that names --owner-notify withholds it from the
+// owner; the withheld completion is still filed as owner-notify and counted
+// (mergewake review of PR 732).
+func TestOwnerNotifyDaemonReviewerCompletionIsRecordedAndCounted_5360(t *testing.T) {
+	h, _, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	h.now = func() time.Time { return now }
+	const job = "mwr-5360-review-never"
+	req := t4270Request(job, t3426Design, "", "reviewer")
+	req.Args = append(req.Args, fleet.OwnerNotifyArg, fleet.OwnerNotifyNever)
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), req, job, t3426Design, now); err != nil {
+		t.Fatal(err)
+	}
+	h.relayJobCompletionFrom("host-a", t3426Completion(job, t3426Design, ""))
+
+	if items := t4270Items(t, h, t3426Design); len(items) != 0 {
+		t.Fatalf("never: the owner heard a reviewer completion: %+v", items)
+	}
+	rows, deliveredTo := t4270Rows(fake, job)
+	if len(rows) == 0 || deliveredTo[0] != "hub/filtered:owner-notify" {
+		t.Fatalf("hk rows=%d delivered_to=%v, want the completion filed as filtered:owner-notify", len(rows), deliveredTo)
+	}
+	var counted int64
+	for _, row := range h.loopsRowDocument(loopDateOf(now), now).SpawnNotices {
+		if row.Lane == t3426Design && row.Cause == "job_completed" {
+			counted += row.Silenced
+		}
+	}
+	if counted != 1 {
+		t.Fatalf("job_completed silenced for %s=%d, want the withheld completion counted once", t3426Design, counted)
+	}
+}
+
+// The must-fix list accepts the documented cause format: a refusal code,
+// optionally with its detail after a colon (checkout_refused:branch-elsewhere).
+func TestSpawnNoticeMustFixAcceptsDocumentedCauseFormat_5360(t *testing.T) {
+	policy, err := parseDeliveryPolicy([]byte("default: interrupt\nrelay:\n  spawn_notice_must_fix: [checkout_refused:branch-elsewhere, workspace_unresolved]\n"))
+	if err != nil {
+		t.Fatalf("documented cause refused at load: %v", err)
+	}
+	if !policy.spawnNoticeMustFix("checkout_refused:branch-elsewhere") || !policy.spawnNoticeMustFix("workspace_unresolved") {
+		t.Fatalf("configured causes not honoured: %v", policy.Relay.SpawnNoticeMustFix)
+	}
+	for _, bad := range []string{"Bad Cause", "a:b:c", "checkout_refused:"} {
+		if _, err := parseDeliveryPolicy([]byte("default: interrupt\nrelay:\n  spawn_notice_must_fix: [" + bad + "]\n")); err == nil {
+			t.Fatalf("malformed cause %q accepted", bad)
+		}
+	}
+}

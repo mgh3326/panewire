@@ -45,9 +45,11 @@ const (
 // The policy file's relay.spawn_notice_must_fix replaces it.
 var defaultSpawnNoticeMustFix = []string{"workspace_unresolved", "auth_unavailable", "report_path", "brief_upload", "identity_unproven"}
 
-// spawnNoticeCauseShape is a cause key: a refusal code (fleet's closed table),
-// or a notice's own cause word.
-var spawnNoticeCauseShape = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)
+// spawnNoticeCauseShape is a cause key as spawnNoticeCause produces it: a
+// refusal code (fleet's closed table) or a notice's own cause word, optionally
+// with its detail after one colon, as the documented checkout reasons read
+// (checkout_refused:branch-elsewhere).
+var spawnNoticeCauseShape = regexp.MustCompile(`^[a-z0-9_]{1,40}(:[a-z0-9_-]{1,40})?$`)
 
 func validSpawnNoticeCause(cause string) bool {
 	return spawnNoticeCauseShape.MatchString(cause)
