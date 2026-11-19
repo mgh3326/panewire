@@ -117,10 +117,24 @@ type nodePaneCloseOpArgs struct {
 	Handover *nodeHandoverCloseGuard `json:"handover,omitempty"`
 }
 
+// nodeHandoverSnapshotBound binds a snapshot hand-over's close (hk 5324) to
+// what the node stored and verified on origin: Parent is the HEAD the
+// snapshot was taken from and Tree the tracked contents it captured. The
+// snapshot commit itself sits in Commit, since the ref names it.
+type nodeHandoverSnapshotBound struct {
+	Tree   string `json:"tree"`
+	Parent string `json:"parent"`
+}
+
 type nodeHandoverCloseGuard struct {
 	Origin string `json:"origin"`
 	Branch string `json:"branch"`
+	// Commit is the pushed tip the worktree must still equal, or, with
+	// Snapshot, the snapshot commit the worktree must still match.
 	Commit string `json:"commit"`
+	// Snapshot is set only after the snapshot is stored and verified on
+	// origin: the close binds the worktree to its parent and tree.
+	Snapshot *nodeHandoverSnapshotBound `json:"snapshot,omitempty"`
 }
 
 // nodePaneCloseOpResult.Outcome is a final fleet.CloseOp state, or
@@ -172,7 +186,7 @@ type nodeCloseOpStatusResult struct {
 
 func validNodePaneCloseOpArgs(args nodePaneCloseOpArgs) bool {
 	guard := args.Handover
-	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && args.Epoch > 0 && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != "" && (guard == nil || guard.Origin != "" && validNodeRefName(guard.Branch) && nodeShaPattern.MatchString(guard.Commit))
+	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && args.Epoch > 0 && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != "" && (guard == nil || guard.Origin != "" && validNodeRefName(guard.Branch) && nodeShaPattern.MatchString(guard.Commit) && (guard.Snapshot == nil || nodeShaPattern.MatchString(guard.Snapshot.Tree) && nodeShaPattern.MatchString(guard.Snapshot.Parent)))
 }
 
 func validHandoverCloseReason(reason string) bool {
@@ -418,9 +432,14 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 				return nodeCloseHookStop{outcome: fleet.CloseOpRefused}
 			}
 			var reason string
-			prepared, reason = client.handoverPrepare(ctx, nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: guard.Origin, Branch: guard.Branch}, &again)
-			if reason == "" && prepared.tip != guard.Commit {
-				reason = handoverUnpushed
+			check := nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: guard.Origin, Branch: guard.Branch}
+			if bound := guard.Snapshot; bound != nil {
+				prepared, reason = client.handoverSnapshotGuardPrepare(ctx, args.Job, guard, check, &again)
+			} else {
+				prepared, reason = client.handoverPrepare(ctx, check, &again)
+				if reason == "" && prepared.tip != guard.Commit {
+					reason = handoverUnpushed
+				}
 			}
 			if reason != "" {
 				op.Reason = reason
@@ -430,9 +449,14 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 		op.State, op.Updated = fleet.CloseOpClosing, client.nowUTC()
 		return fleet.WriteCloseOp(job, op)
 	}, func() error {
-		if args.Handover != nil {
+		if guard := args.Handover; guard != nil {
 			localCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			check := client.handoverCheckLocal(localCtx, prepared)
+			var check nodeHandoverCheckResult
+			if guard.Snapshot != nil {
+				check = client.handoverSnapshotBoundLocal(localCtx, prepared, guard)
+			} else {
+				check = client.handoverCheckLocal(localCtx, prepared)
+			}
 			cancel()
 			if check.Outcome != handoverCheckOK {
 				op.Reason = check.Outcome

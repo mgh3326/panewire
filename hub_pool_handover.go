@@ -77,6 +77,19 @@ type poolHandover struct {
 	Task string `json:",omitempty"`
 	// Cwd and Branch bind the close to the worktree the successor continues.
 	Cwd, Branch string `json:",omitempty"`
+	// Snapshot is the verified snapshot of a dirty or unpushed worktree (hk
+	// 5324), stored before the close: the close binds the worktree to its
+	// parent and tree, and the successor's checkout starts from its commit.
+	Snapshot *poolHandoverSnapshot `json:",omitempty"`
+}
+
+// poolHandoverSnapshot is what the node stored and verified on origin before
+// the close: the immutable ref, its commit, the tracked tree and the HEAD it
+// was taken from, plus the untracked paths the continuation note names.
+type poolHandoverSnapshot struct {
+	Ref, Commit, Tree, Parent string
+	Untracked                 []string `json:",omitempty"`
+	UntrackedMore             int      `json:",omitempty"`
 }
 
 func (ho *poolHandover) exhaustion() poolExhaustion {
@@ -337,8 +350,13 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 	if !h.nodeCall(ctx, host, nodeCommandHandoverCheck, nodeHandoverCheckArgs{Job: task.Job, Cwd: probe.row.Cwd, Origin: checkout.Origin, Branch: checkout.Branch}, hubNodeCommandWait, &read) {
 		return nil, "worktree_unavailable"
 	}
+	var snapshot *poolHandoverSnapshot
 	if read.Outcome == handoverDirty || read.Outcome == handoverUnpushed {
-		return nil, read.Outcome
+		var refusal string
+		snapshot, read, refusal = h.handoverSnapshot(ctx, host, task.Job, probe.row.Cwd, checkout, read.Outcome)
+		if refusal != "" {
+			return nil, refusal
+		}
 	}
 	if read.Outcome != handoverCheckOK {
 		return nil, "worktree_" + read.Outcome
@@ -354,7 +372,7 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 		// it on, refuse before any close (review 4611190394).
 		return nil, "branch_in_use"
 	}
-	request, err := handoverSuccessorRequest(old, task.Job, newJob, handoverExclude(exhaustion), host, exhaustion, read)
+	request, err := handoverSuccessorRequest(old, task.Job, newJob, handoverExclude(exhaustion), host, exhaustion, read, snapshot)
 	if err != nil {
 		return nil, "invalid_successor"
 	}
@@ -369,7 +387,45 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 		reset = exhaustion.Reset.Unix()
 	}
 	return &poolHandover{Successor: request, Job: newJob, Pool: exhaustion.Pool, Cause: exhaustion.Cause, Reset: reset, Account: exhaustion.Account,
-		Task: taskID, Cwd: probe.row.Cwd, Branch: read.Branch}, ""
+		Task: taskID, Cwd: probe.row.Cwd, Branch: read.Branch, Snapshot: snapshot}, ""
+}
+
+// handoverSnapshot runs worktree.handover_snapshot for a worktree the check
+// found dirty or unpushed, and turns the result into the read the rest of
+// prepareHandover builds on: the snapshot commit stands in for the pushed tip.
+// A node without handover_snapshot_v1 keeps the check's refusal; a failed or
+// refused snapshot is the refusal the owner notice names, with no close.
+func (h *HubServer) handoverSnapshot(ctx context.Context, host, job, cwd string, checkout *fleet.HubCheckout, why string) (*poolHandoverSnapshot, nodeHandoverCheckResult, string) {
+	if !h.nodeHasCapability(host, hubCapabilityHandoverSnapshot) {
+		return nil, nodeHandoverCheckResult{}, why
+	}
+	h.mu.Lock()
+	epoch := uint64(0)
+	if record := h.jobs[job]; record != nil {
+		epoch = record.Epoch
+	}
+	h.mu.Unlock()
+	if epoch == 0 {
+		return nil, nodeHandoverCheckResult{}, "worktree_unavailable"
+	}
+	var snap nodeHandoverSnapshotResult
+	if !h.nodeCall(ctx, host, nodeCommandHandoverSnapshot, nodeHandoverSnapshotArgs{Job: job, Epoch: epoch, Cwd: cwd, Origin: checkout.Origin, Branch: checkout.Branch}, hubNodeCommandWait, &snap) ||
+		!validNodeHandoverSnapshotResult(snap) || snap.Outcome == handoverSnapshotOK && snap.Ref != handoverSnapshotRef(job, snap.Commit) {
+		return nil, nodeHandoverCheckResult{}, "snapshot_failed"
+	}
+	if snap.Outcome != handoverSnapshotOK {
+		refusal := snap.Outcome
+		if !strings.HasPrefix(refusal, "snapshot_") {
+			refusal = "snapshot_" + refusal
+		}
+		if snap.Reason != "" {
+			refusal += "_" + snap.Reason
+		}
+		return nil, nodeHandoverCheckResult{}, refusal
+	}
+	stored := &poolHandoverSnapshot{Ref: snap.Ref, Commit: snap.Commit, Tree: snap.Tree, Parent: snap.Parent, Untracked: snap.Untracked, UntrackedMore: snap.UntrackedMore}
+	read := nodeHandoverCheckResult{Outcome: handoverCheckOK, Top: snap.Top, Branch: snap.Branch, Pushed: snap.Commit}
+	return stored, read, ""
 }
 
 // handoverExclude is the pool the successor excludes: the band a quota
@@ -423,10 +479,11 @@ const herdrAgentNameMax = 32
 
 // handoverSuccessorRequest is the stored successor: the quota replacement's
 // submission (same role, owner and brief, job <old>-q<n>, the spent pool
-// excluded) as a spec checkout of the branch at its last pushed commit, with
-// --parent-job <old> in place of --task (the two are exclusive; the task is
-// inherited) and a continuation note.
-func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude, host string, exhaustion poolExhaustion, read nodeHandoverCheckResult) (fleet.Submission, error) {
+// excluded) as a spec checkout of the branch at its last pushed commit — or,
+// with snapshot, at the verified snapshot commit — with --parent-job <old> in
+// place of --task (the two are exclusive; the task is inherited) and a
+// continuation note.
+func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude, host string, exhaustion poolExhaustion, read nodeHandoverCheckResult, snapshot *poolHandoverSnapshot) (fleet.Submission, error) {
 	next, err := quotaReplacementRequest(old, oldJob, newJob, exhaustion.Pool, exclude, "implementer")
 	if err != nil {
 		return fleet.Submission{}, err
@@ -465,9 +522,33 @@ func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude, hos
 	next.StartConditions = nil
 	dir := fleet.CheckoutWorktreeName(newJob)
 	checkout := &fleet.HubCheckout{Origin: old.Repository.Checkout.Origin, Mode: fleet.HubCheckoutSuccessor, Branch: read.Branch, Sha: read.Pushed, Dir: dir}
+	if snapshot != nil {
+		// The snapshot commit lives under the hand-over ref, which a plain
+		// fetch does not carry; the successor fetches it explicitly.
+		checkout.Fetch = snapshot.Ref
+	}
 	next.Repository = fleet.Repository{Name: old.Repository.Name, Origin: checkout.Origin, Worktree: dir, Checkout: checkout}
-	next.Brief = strings.TrimRight(old.Brief, "\n") + fmt.Sprintf("\n\n## Hand-over from %s\nThe hub handed over this job because pool %s ran out (%s). Continue branch %s from its pushed commit %s. The old worktree may still be at %s:%s until cleanup. If cleanup removes it, non-ignored untracked files and work written after the final check are saved in %s:jobs/%s/abandoned-worktree.patch (relative to the node inbox root). Ignored files are not preserved. Write the report to the --report path (relative to the node's jobs directory: %s).\n", oldJob, exhaustion.Pool, exhaustion.Cause, read.Branch, read.Pushed, host, read.Top, host, oldJob, hubSpawnArg(next.Args, "--report-relative"))
+	next.Brief = strings.TrimRight(old.Brief, "\n") + handoverNote(oldJob, exhaustion, read, snapshot, host, hubSpawnArg(next.Args, "--report-relative"))
 	return next, nil
+}
+
+// handoverNote is the successor's continuation note (docs/quota-stop.md). For
+// a snapshot hand-over it names the ref, the untracked paths, and the
+// abandoned-worktree patch the cleanup writes; "may still be at host:path
+// until cleanup" never promises the old worktree is kept.
+func handoverNote(oldJob string, exhaustion poolExhaustion, read nodeHandoverCheckResult, snapshot *poolHandoverSnapshot, host, report string) string {
+	if snapshot == nil {
+		return fmt.Sprintf("\n\n## Hand-over from %s\nThe hub handed over this job because pool %s ran out (%s). Continue branch %s from its pushed commit %s. The old worktree may still be at %s:%s until cleanup. If cleanup removes it, non-ignored untracked files and work written after the final check are saved in %s:jobs/%s/abandoned-worktree.patch (relative to the node inbox root). Ignored files are not preserved. Write the report to the --report path (relative to the node's jobs directory: %s).\n", oldJob, exhaustion.Pool, exhaustion.Cause, read.Branch, read.Pushed, host, read.Top, host, oldJob, report)
+	}
+	untracked := "No untracked paths sit outside the snapshot."
+	if len(snapshot.Untracked) > 0 {
+		untracked = "Untracked paths not in the snapshot: " + strings.Join(snapshot.Untracked, ", ")
+		if snapshot.UntrackedMore > 0 {
+			untracked += fmt.Sprintf(" (and %d more)", snapshot.UntrackedMore)
+		}
+		untracked += "."
+	}
+	return fmt.Sprintf("\n\n## Hand-over from %s\nThe hub handed over this job because pool %s ran out (%s). The old worktree's tracked changes and unpushed commits were saved to %s (%s); this checkout starts from that commit, continuing branch %s. %s The old worktree may still be at %s:%s until cleanup. If cleanup removes it, those files and work written after the snapshot are saved in %s:jobs/%s/abandoned-worktree.patch (relative to the node inbox root). Ignored files are not preserved. Write the report to the --report path (relative to the node's jobs directory: %s).\n", oldJob, exhaustion.Pool, exhaustion.Cause, snapshot.Ref, snapshot.Commit, read.Branch, untracked, host, read.Top, host, oldJob, report)
 }
 
 // finishHandover is a settled handover row: the old pane is closed and its

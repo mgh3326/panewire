@@ -1217,10 +1217,13 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGit
 // nodePrepareSuccessor prepares a spec spawn's checkout as a local branch (hk
 // 5118): the ref is refs/heads/<branch> and sha is the last pushed commit, so a
 // successor continues the branch with a plain `git push` instead of a detached
-// HEAD.
+// HEAD. With fetch — a snapshot hand-over (hk 5324) — sha is the snapshot
+// commit, fetched under refs/panewire/handover/, and the worktree starts
+// there while still tracking origin/<branch> for a plain `git push`.
 //
-// The freshly fetched origin/<branch> must still be that commit. Someone
-// pushed after the brief, and a successor must not start behind it:
+// The freshly fetched origin/<branch> must still be that commit — or, for a
+// snapshot, an ancestor of it. Someone pushed after the brief, and a
+// successor must not start behind it:
 // `successor_stale want=<sha> origin=<sha>`. The branch is never forced or
 // stolen: a worktree of the clone that already holds it refuses with
 // `branch_in_use worktree=<dir>`. A worktree at dir is reused only on that
@@ -1232,12 +1235,33 @@ func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *node
 	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		return nodeOutcomeGitFailed
 	}
+	if args.Fetch != "" {
+		// The snapshot commit sits under refs/panewire/handover/, which the
+		// full fetch above does not carry.
+		if _, err := git(ctx, "-C", clone, "fetch", "origin", args.Fetch); err != nil {
+			return nodeOutcomeGitFailed
+		}
+	}
 	want := strings.ToLower(args.Sha)
+	if args.Fetch != "" {
+		if _, err := git(ctx, "-C", clone, "cat-file", "-e", want+"^{commit}"); err != nil {
+			result.Reason = "sha=" + want
+			return nodePrepareShaMissing
+		}
+	}
 	originTip := ""
 	if out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/remotes/origin/"+args.Branch+"^{commit}"); err == nil {
 		originTip = strings.ToLower(strings.TrimSpace(string(out)))
 	}
-	if originTip != want {
+	stale := originTip != want
+	if stale && args.Fetch != "" && originTip != "" {
+		// A snapshot commit carries the pushed tip as an ancestor; a push
+		// after the snapshot is still a stale successor.
+		if _, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", originTip, want); err == nil {
+			stale = false
+		}
+	}
+	if stale {
 		if originTip == "" {
 			originTip = "none"
 		}
@@ -1326,22 +1350,36 @@ func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *node
 			}
 			result.FastForwarded = true
 		}
-		if err := nodeSetSuccessorUpstream(ctx, git, dir, args.Branch); err != nil {
-			return nodeOutcomeGitFailed
+		if originTip != "" {
+			if err := nodeSetSuccessorUpstream(ctx, git, dir, args.Branch); err != nil {
+				return nodeOutcomeGitFailed
+			}
 		}
 		return nodePrepareReused
 	}
 	add := []string{"-C", clone, "worktree", "add", dir, args.Branch}
 	if localTip == "" {
-		add = []string{"-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/" + args.Branch}
+		start := "origin/" + args.Branch
+		if args.Fetch != "" {
+			// A snapshot successor branches at the snapshot commit, not at
+			// the pushed tip.
+			start = want
+		}
+		add = []string{"-C", clone, "worktree", "add", "-b", args.Branch, dir, start}
 	}
 	if err := tracker.add(ctx, client.nodeAddRunner(), clone, dir, intent, add...); err != nil {
 		return nodeOutcomeGitFailed
 	}
-	if err := nodeSetSuccessorUpstream(ctx, git, dir, args.Branch); err != nil {
-		// The add itself succeeded, so the failed prepare leaves no worktree.
-		nodeDiscardPreparedWorktree(git, clone, dir)
-		return nodeOutcomeGitFailed
+	if originTip != "" {
+		// A snapshot successor keeps tracking origin/<branch> for a plain
+		// `git push`; when the branch is not on origin at all there is no
+		// upstream to set.
+		if err := nodeSetSuccessorUpstream(ctx, git, dir, args.Branch); err != nil {
+			// The add itself succeeded, so the failed prepare leaves no
+			// worktree.
+			nodeDiscardPreparedWorktree(git, clone, dir)
+			return nodeOutcomeGitFailed
+		}
 	}
 	return nodePreparePrepared
 }

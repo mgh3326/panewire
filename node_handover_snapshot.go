@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
@@ -88,6 +89,15 @@ func validNodeHandoverSnapshotArgs(args nodeHandoverSnapshotArgs) bool {
 
 func handoverSnapshotRef(job, commit string) string {
 	return handoverSnapshotRefPrefix + job + "/" + commit
+}
+
+// validHandoverFetchRef is the fetch a successor spec checkout may name (hk
+// 5324): exactly the hand-over ref form, so a submitted checkout cannot pull
+// an arbitrary ref into the successor's clone. The general fetch grammar
+// (spawnargs.ValidFetchRef) stays closed to it.
+func validHandoverFetchRef(ref string) bool {
+	job, commit, found := strings.Cut(strings.TrimPrefix(ref, handoverSnapshotRefPrefix), "/")
+	return strings.HasPrefix(ref, handoverSnapshotRefPrefix) && found && fleet.ValidJobID(job) && nodeShaPattern.MatchString(commit)
 }
 
 // validHandoverUntrackedPath is one printable relative path for the note.
@@ -543,4 +553,77 @@ func handoverSnapshotLocalOnly(ctx context.Context, top string) ([]string, error
 		}
 	}
 	return paths, nil
+}
+
+// handoverSnapshotGuardPrepare is the cost-first half of a snapshot-bound
+// close recheck (hk 5324): the same worktree-identity reads handoverPrepare
+// makes, then one ls-remote proving the ref still names the stored commit on
+// origin. The worktree side is bound by handoverSnapshotBoundLocal, run last
+// before the close.
+func (client *HubClient) handoverSnapshotGuardPrepare(ctx context.Context, job string, guard *nodeHandoverCloseGuard, check nodeHandoverCheckArgs, target *nodeCloseTarget) (nodeHandoverPrepared, string) {
+	prepared, reason := client.handoverIdentity(ctx, check, target)
+	if reason != "" {
+		return nodeHandoverPrepared{}, reason
+	}
+	ref := handoverSnapshotRef(job, guard.Commit)
+	git := client.nodeGitRunner()
+	out, err := git(ctx, "-C", prepared.top, "ls-remote", "origin", ref)
+	if err != nil || ctx.Err() != nil {
+		return nodeHandoverPrepared{}, handoverGitFailed
+	}
+	if strings.TrimSpace(string(out)) != guard.Commit+"\t"+ref {
+		return nodeHandoverPrepared{}, handoverGitFailed
+	}
+	return prepared, ""
+}
+
+// handoverSnapshotBoundLocal is the fast local half of a snapshot-bound close
+// recheck, run last before the close: the worktree still sits where the
+// snapshot found it, HEAD is still the snapshot's parent, and `git diff`
+// against the snapshot commit reads clean — a new commit or any tracked edit
+// since then is work the snapshot does not hold. Untracked paths never
+// entered the snapshot, so they do not refuse the close.
+func (client *HubClient) handoverSnapshotBoundLocal(ctx context.Context, prepared nodeHandoverPrepared, guard *nodeHandoverCloseGuard) nodeHandoverCheckResult {
+	refuse := func(reason string) nodeHandoverCheckResult { return nodeHandoverCheckResult{Outcome: reason} }
+	git := client.nodeGitRunner()
+	read := func(dir string, gitArgs ...string) (string, bool) {
+		out, err := git(ctx, append([]string{"-C", dir, "-c", "core.fsmonitor=false"}, gitArgs...)...)
+		return string(out), err == nil && ctx.Err() == nil
+	}
+	args, top, bound := prepared.args, prepared.top, guard.Snapshot
+	current, ok := read(args.Cwd, "rev-parse", "--show-toplevel")
+	if !ok || strings.TrimSpace(current) != top {
+		return refuse(handoverGitFailed)
+	}
+	if prepared.receiptCwd != "" {
+		current, ok = read(prepared.receiptCwd, "rev-parse", "--show-toplevel")
+		if !ok || strings.TrimSpace(current) != top {
+			return refuse(handoverGitFailed)
+		}
+	}
+	branch, ok := read(top, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if !ok || strings.TrimSpace(branch) != args.Branch {
+		return refuse(handoverBranchMismatch)
+	}
+	if origin, ok := read(top, "remote", "get-url", "origin"); !ok || strings.TrimSpace(origin) != args.Origin {
+		return refuse(handoverGitFailed)
+	}
+	head, ok := read(top, "rev-parse", "--verify", "HEAD^{commit}")
+	head = strings.ToLower(strings.TrimSpace(head))
+	if !ok || !nodeShaPattern.MatchString(head) {
+		return refuse(handoverGitFailed)
+	}
+	if head != bound.Parent {
+		return refuse(handoverUnpushed)
+	}
+	if _, err := git(ctx, "-C", top, "-c", "core.fsmonitor=false", "diff", "--quiet", "--exit-code", guard.Commit); err != nil {
+		if ctx.Err() != nil {
+			return refuse(handoverGitFailed)
+		}
+		if code, _ := extractGitExitAndStderr(err); code == 1 {
+			return refuse(handoverDirty)
+		}
+		return refuse(handoverGitFailed)
+	}
+	return nodeHandoverCheckResult{Outcome: handoverCheckOK, Top: top, Branch: args.Branch, Pushed: guard.Commit}
 }
