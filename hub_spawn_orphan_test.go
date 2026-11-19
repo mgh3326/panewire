@@ -60,6 +60,14 @@ func newStrandedSpawn(t *testing.T) *strandedSpawn {
 // now, so its deadline (ten minutes after the claim) passed ago-10m ago.
 func newStrandedSpawnClaimedAgo(t *testing.T, ago time.Duration) *strandedSpawn {
 	t.Helper()
+	return newStrandedSpawnWith(t, ago, false)
+}
+
+// newStrandedSpawnWith is newStrandedSpawnClaimedAgo with the attempt
+// grant-required (grant true): the node starts it only with a hub grant, so the
+// hub can fence it (hk 5429 review).
+func newStrandedSpawnWith(t *testing.T, ago time.Duration, grant bool) *strandedSpawn {
+	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
 	if err != nil {
@@ -80,7 +88,7 @@ func newStrandedSpawnClaimedAgo(t *testing.T, ago time.Duration) *strandedSpawn 
 		t.Fatal(err)
 	}
 	spec := *request.Repository.Checkout
-	node := hubSpawnRequest{RequestID: t14RequestID(4231), Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
+	node := hubSpawnRequest{RequestID: t14RequestID(4231), GrantRequired: grant, Machine: "machine-a", CWDKey: "project", Brief: hubSpawnBrief{Inline: "task"}, Checkout: &hubSpawnCheckout{Origin: spec.Origin, Mode: spec.Mode, Branch: spec.Branch, Sha: spec.Sha, Dir: spec.Dir}, Args: []string{"--job", "test-job", "-l", "test-job", "-m", "codex-sol", "--t", "T1", "--task", "42", "--owner", "parent", "--role", "implementer"}, WaitSeconds: 600, DeadlineMS: task.Deadline.UnixMilli()}
 	if task, err = hub.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}

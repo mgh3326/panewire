@@ -1343,16 +1343,31 @@ anything.
 - **Scope.** The requester must be the lane that submitted the request: its
   `--requested-by`, else `--parent`, else its owner lane. Any other lane gets
   403 `not_requester`, and the request's state is not read for that answer.
-- **Parked or unbound** (no node has bound it, including a request parked by
+- **Accepted, unbound, no prior claim** (including a request parked by
   `quota_reset` or `launch_backoff`): it ends `cancelled` at once with reason
   `requester_withdrawn: <TEXT>`. There is no pane probe, and the owner lane and
   the submitter each get one notice.
-- **Bound and possibly sent:** the abandon rule applies unchanged. The request
-  ends only when its node lists no pane bearing the job label. A live labelled
-  pane answers 409 `spawn_abandon_refused` with `reason: pane_present:<pane>`
-  and the request stays with its host. Otherwise the hk job is marked lost with
-  `end_reason` `requester_withdrawn` before the request ends `cancelled` and its
-  (task, role) reservation is released.
+- **Refused, unbound:** a `waiting` start-condition request is not pending and
+  answers 409 `spawn_not_pending`. An accepted request that still holds an hk job
+  claim on a host answers 409 `spawn_abandon_refused` with `reason: claimed_host`
+  and stays with that host.
+- **Bound (not sent):** the request has not crossed the send boundary, so it ends
+  `cancelled` with no fence and no pane probe.
+- **Sent (`dispatching`, `reconciling`, `deadline_exceeded`):** the hub must
+  prove the node cannot start the attempt before it cancels it.
+  - A grant-required attempt is fenced first. The fence commits only when no
+    start grant was recorded (`spawn_attempt_grants`), and a fenced attempt can
+    never start. A granted attempt answers 409 `spawn_abandon_refused` with
+    `reason: granted` and is not withdrawn.
+  - A legacy attempt (no start grant) has no fence. It answers 409
+    `spawn_abandon_refused` with `reason: unfenced_launch` and stays pending
+    until its deadline or the operator ends it.
+  - Once fenced, the abandon rule applies: the request ends only when its node
+    lists no pane bearing the job label. A live labelled pane answers 409
+    `spawn_abandon_refused` with `reason: pane_present:<pane>`. Otherwise the hk
+    job is marked lost with `end_reason` `requester_withdrawn`, and the request
+    ends `cancelled` with its (task, role) reservation released in the same
+    transaction as the outcome.
 - **Already ended or landed:** 409 `spawn_not_pending`. A landed request keeps
   its result.
 - **Credential:** only the operator credential may withdraw. A node credential

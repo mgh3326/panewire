@@ -274,10 +274,14 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 // submitter reads, and the name of its hub log line.
 type spawnEnd struct {
 	code, status, fix, warning string
+	// unboundFix is the fix line for a request no node bound. It names the
+	// actor that ended it, so the owner lane is not told the operator did it
+	// when its own node credential withdrew it (hk 5214).
+	unboundFix string
 }
 
 // spawnAbandonEnd is the operator's end: the request fails (hk 3423, hk 5214).
-var spawnAbandonEnd = spawnEnd{code: spawnAbandonedReason, status: "failed", fix: "the operator abandoned this request; submit the work again under a new job id", warning: "hub spawn abandon"}
+var spawnAbandonEnd = spawnEnd{code: spawnAbandonedReason, status: "failed", fix: "the operator abandoned this request; submit the work again under a new job id", unboundFix: "the request was withdrawn before any node took it; submit the work again under a new job id", warning: "hub spawn abandon"}
 
 // endPendingSpawn finishes task as end says, with reason as its text. It is the
 // one release path for an operator-side end (abandon and requester withdrawal,
@@ -324,7 +328,7 @@ func (h *HubServer) endUnboundSpawn(w http.ResponseWriter, r *http.Request, call
 		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "claimed_host", "request_id": task.Request.RequestID, "job": task.Job, "host": spawnPinnedHost(task)})
 		return
 	}
-	outcome := hubSpawnOutcome{RC: 75, Stage: "placement", Reason: spawnOutcomeReason(end.code, spawnRefusalLine(reason)), Fix: end.fix}
+	outcome := hubSpawnOutcome{RC: 75, Stage: "placement", Reason: spawnOutcomeReason(end.code, spawnRefusalLine(reason)), Fix: end.unboundFix}
 	changed, err := h.completeSpawn(r.Context(), task, outcome)
 	if err != nil || !changed {
 		why := "not_pending"
