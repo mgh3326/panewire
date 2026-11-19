@@ -604,6 +604,15 @@ func TestLaneInboxStoreContractAbortEndsAStalledCall(t *testing.T) {
 				t.Fatal(err)
 			}
 			unlock = func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`); _ = conn.Close() }
+		} else if s.dialect == dialectMySQL {
+			conn, err := s.db.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.ExecContext(context.Background(), `LOCK TABLES lane_inbox_batches WRITE`); err != nil {
+				t.Fatal(err)
+			}
+			unlock = func() { _, _ = conn.ExecContext(context.Background(), `UNLOCK TABLES`); _ = conn.Close() }
 		} else {
 			var path string
 			if err := s.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&path); err != nil {

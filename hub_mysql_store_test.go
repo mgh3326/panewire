@@ -202,7 +202,7 @@ func TestMySQLTransactionsStateReadCommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	level := func(q interface {
+	sessionLevel := func(q interface {
 		QueryRowContext(context.Context, string, ...any) *sql.Row
 	}) string {
 		var got string
@@ -211,16 +211,29 @@ func TestMySQLTransactionsStateReadCommitted(t *testing.T) {
 		}
 		return got
 	}
-	if got := level(db); got != "REPEATABLE-READ" {
+	if got := sessionLevel(db); got != "REPEATABLE-READ" {
 		t.Fatalf("the server default is %s: this test no longer shows the explicit setting", got)
+	}
+	// SET TRANSACTION (the driver's form) changes the next transaction only,
+	// not @@transaction_isolation, so the level a transaction runs at is read
+	// from InnoDB once the transaction has touched a table.
+	if _, err := db.Exec(`CREATE TABLE isolation_probe (x INT)`); err != nil {
+		t.Fatal(err)
 	}
 	tx, err := dialectMySQL.begin(context.Background(), db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if got := level(tx); got != "READ-COMMITTED" {
-		t.Errorf("a store transaction runs at %s, want READ-COMMITTED", got)
+	if _, err := tx.Exec(`SELECT COUNT(*) FROM isolation_probe`); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := tx.QueryRow(`SELECT trx_isolation_level FROM information_schema.innodb_trx WHERE trx_mysql_thread_id=CONNECTION_ID()`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "READ COMMITTED" {
+		t.Errorf("a store transaction runs at %s, want READ COMMITTED", got)
 	}
 	// The store's own pool, opened from the URL, runs at it for statements
 	// outside a transaction too.
@@ -229,7 +242,7 @@ func TestMySQLTransactionsStateReadCommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.close()
-	if got := level(s.db); got != "READ-COMMITTED" {
+	if got := sessionLevel(s.db); got != "READ-COMMITTED" {
 		t.Errorf("the store's pool runs at %s, want READ-COMMITTED", got)
 	}
 }
