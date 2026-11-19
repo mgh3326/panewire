@@ -167,10 +167,31 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cached
       - run: go vet ./...
-      - run: go test ./... -timeout 25m  # the root package outgrew the 10 m default (hk 5408); sharding is the follow-up
+      # The root package runs in test-shard below (hk 5492); this runs the rest of ./...
+      - name: go test, packages other than the root
+        run: go list ./... | grep -v -x "$(go list -m)" | xargs go test
+
+  test-shard:
+    # The root package's tests, split by the same scripts/ci-test-shard.sh as
+    # the CI shard jobs (hk 5492). Each shard runs under the default go test
+    # timeout; the shards together run every test in `go test -list .`.
+    needs: [gate]
+    if: ${{ always() && (needs.gate.result == 'success' || needs.gate.result == 'skipped') && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['0/3', '1/3', '2/3']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go-cached
+      - run: scripts/ci-test-shard.sh ${{ matrix.shard }}
 
   publish:
-    needs: [gate, build, test]
+    needs: [gate, build, test, test-shard]
     if: ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
     runs-on: ubuntu-latest
     permissions:
