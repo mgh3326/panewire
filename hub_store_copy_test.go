@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+func TestHubStoreCopyTableInventory(t *testing.T) {
+	want := copyFixtureTables(t)
+	if len(want) != len(storeCopyTables) {
+		t.Fatalf("portable table count %d, want %d", len(storeCopyTables), len(want))
+	}
+	for i, name := range want {
+		if storeCopyTables[i].name != name {
+			t.Fatalf("table %d is %q, want %q", i, storeCopyTables[i].name, name)
+		}
+	}
+}
+
 func TestHubStoreCopyOrderAndColumns(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
