@@ -42,7 +42,7 @@ func parkedRequest(t *testing.T, h *HubServer, request fleet.Submission, owner s
 	if task.Node != nil || task.Status != "accepted" {
 		t.Fatalf("fixture is not an unbound pending request: %+v", task)
 	}
-	parked, err := h.inbox.store.parkSpawn(context.Background(), request.RequestID, task.Attempt, spawnParkLaunchBackoff, now.Add(time.Hour), now)
+	parked, err := h.inbox.store.parkSpawn(context.Background(), request.RequestID, task.Attempt, spawnParkLaunchBackoff, nil, nil, now.Add(time.Hour), now)
 	if err != nil || !parked {
 		t.Fatalf("park fixture: parked=%v err=%v", parked, err)
 	}

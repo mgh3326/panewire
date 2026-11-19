@@ -56,7 +56,7 @@ func claimParkRequest(t *testing.T, h *HubServer, n int, now time.Time) hubSpawn
 
 func parkNow(t *testing.T, h *HubServer, task hubSpawnTask, reason string) bool {
 	t.Helper()
-	parked, err := h.parkSpawnTask(t.Context(), task, reason, "", h.spawnWakeSnapshot())
+	parked, err := h.parkSpawnTask(t.Context(), task, reason, "", nil, nil, h.spawnWakeSnapshot())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestEventsNoteTheirParkReasons_t4661(t *testing.T) {
 	ctx := t.Context()
 	h.startSpawnCoordinator(ctx)
 	task := claimParkRequest(t, h, 60, time.Now())
-	h.inbox.store.parkSpawn(ctx, task.Request.RequestID, task.Attempt, spawnParkQuota, time.Now().Add(time.Hour), time.Now())
+	h.inbox.store.parkSpawn(ctx, task.Request.RequestID, task.Attempt, spawnParkQuota, nil, nil, time.Now().Add(time.Hour), time.Now())
 	eventually(t, 5*time.Second, "quota refresh wakes the quota-parked request", func() bool {
 		// Each poll finishes another refresh: the coordinator may read the
 		// count first after an earlier one.
@@ -420,7 +420,7 @@ func TestRestartKeepsParkedRowsAndExclusions_t4661(t *testing.T) {
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	parked := claimParkRequest(t, h, 100, now)
-	h.inbox.store.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkHostFull, now.Add(time.Minute), now)
+	h.inbox.store.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkHostFull, nil, nil, now.Add(time.Minute), now)
 	refused := claimParkRequest(t, h, 101, now)
 	bound, err := h.inbox.store.bindSpawn(t.Context(), refused.Request.RequestID, refused.Attempt, boundaryTestNode(refused, 467000, "machine-a"), now)
 	if err != nil {
@@ -455,7 +455,7 @@ func TestRestartKeepsParkedRowsAndExclusions_t4661(t *testing.T) {
 func TestOlderHubPlacesParkedRowsAsAccepted_t4661(t *testing.T) {
 	h := asyncSpawnHub(t)
 	task := claimParkRequest(t, h, 110, time.Now())
-	h.inbox.store.parkSpawn(t.Context(), task.Request.RequestID, task.Attempt, spawnParkQuota, time.Now().Add(time.Hour), time.Now())
+	h.inbox.store.parkSpawn(t.Context(), task.Request.RequestID, task.Attempt, spawnParkQuota, nil, nil, time.Now().Add(time.Hour), time.Now())
 	var n int
 	// The older hub's coordinator scan (e00bb952 / eefebb12).
 	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_operations WHERE status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND request_id=?`, task.Request.RequestID).Scan(&n); err != nil || n != 1 {
@@ -517,10 +517,10 @@ func TestWakeDuringPlacementIsKeptForThePark_t4661(t *testing.T) {
 	h.noteSpawnWake(spawnParkHostFull, spawnParkLaunchBackoff)
 	h.noteSpawnWake(spawnParkQuota)
 	h.wakeParkedSpawns(t.Context(), true) // drained before the parks
-	if parked, err := h.parkSpawnTask(t.Context(), task, spawnParkHostFull, "", before); err != nil || !parked {
+	if parked, err := h.parkSpawnTask(t.Context(), task, spawnParkHostFull, "", nil, nil, before); err != nil || !parked {
 		t.Fatal(parked, err)
 	}
-	if parked, err := h.parkSpawnTask(t.Context(), other, spawnParkPoolCap, "", before); err != nil || !parked {
+	if parked, err := h.parkSpawnTask(t.Context(), other, spawnParkPoolCap, "", nil, nil, before); err != nil || !parked {
 		t.Fatal(parked, err)
 	}
 	h.spawnWakeMu.Lock()

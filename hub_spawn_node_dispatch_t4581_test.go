@@ -421,9 +421,7 @@ func TestSubmittedWorkProgressesWhileStaleQuotaWriterIsHeld_t4581(t *testing.T) 
 	}
 	kickSpawnCoordinator(h)
 	eventually(t, 3*time.Second, "stale quota refresh queued behind the held writer", func() bool {
-		h.quotaRefresh.mu.Lock()
-		defer h.quotaRefresh.mu.Unlock()
-		return h.quotaRefresh.keys[hubQuotaRefreshKey{machine: "desktop", pool: "claude"}]
+		return h.quotaRefreshActive("desktop", "claude")
 	})
 	request := durableSpawnRequest()
 	status, _, body := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, request)
