@@ -287,20 +287,37 @@ func (h *HubServer) ownerNotifyWithheld(ctx context.Context, job, owner string) 
 	return ownerNotifyMode(task.Request.Args) != "" && owner == task.Owner
 }
 
-// receiveOwnerNotifySilenced files a silenced job event as an hk row, the same
-// record the design filter writes, and counts it. It answers the producer as
-// receiveFiltered does: the node's outbox row is acknowledged once hk holds the
-// row. A row another event already holds under the same key also counts as
-// held: it carries the same owner-notify reason. handled is false only when no
-// hk client is configured, so the event takes the ordinary path (the design
-// filter's rule too: nothing is recorded, so nothing is silenced).
+// ownerNotifyRecordReason is the reason a withheld completion is filed under.
+// hk's idempotency key is (kind, job, epoch, report path, reason) and excludes
+// the event id, so the event id is part of the reason: a second completion of
+// the same job gets its own row, not the first one's (mergewake review of
+// PR 732). An event without an id keeps the bare reason.
+func ownerNotifyRecordReason(eventID string) string {
+	if eventID == "" {
+		return "owner-notify"
+	}
+	return "owner-notify:" + eventID
+}
+
+// receiveOwnerNotifySilenced files a silenced job event as an hk row under its
+// own reason, the same record the design filter writes, and counts it. The
+// producer is acknowledged and the event counted only once that row is filed
+// under this event; if hk returns no such row, the event is not acknowledged
+// and not counted, so the producer's retry finds it again. handled is false only
+// when no hk client is configured, so the event takes the ordinary path (the
+// design filter's rule too: nothing is recorded, so nothing is silenced).
 func (h *HubServer) receiveOwnerNotifySilenced(kind string, event *hubJobEventPayload, sender *hubAgent, senderID, lane string) (result relayLaneEventResult, handled bool) {
 	if h.handoffkeep == nil {
 		return relayLaneEventResult{}, false
 	}
-	const reason = "owner-notify"
-	stored, _, ok := h.fileFilteredInHK(h.closeCtx, kind, *event, senderID, reason)
-	if !ok {
+	reason := ownerNotifyRecordReason(event.EventID)
+	// hk's idempotency reason is the record's own Reason field, not the delivered
+	// label, so the copy filed carries the event id there.
+	recorded := *event
+	recorded.Reason = reason
+	stored, filed, ok := h.fileFilteredInHK(h.closeCtx, kind, recorded, senderID, reason)
+	if !ok || !filed {
+		h.logger.Warn("owner-notify record not filed under this event; not acknowledged", "kind", kind, "job", event.JobID, "event_id", event.EventID, "lane", lane)
 		return relayLaneEventResult{PersistFailed: true}, true
 	}
 	h.countSilencedSpawnNotice(event.EventID, lane, "job_completed")

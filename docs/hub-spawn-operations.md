@@ -1343,7 +1343,8 @@ the owner lane of that spawn, whatever the owner's lane class:
   or a given-up request. Every other notice is recorded and counted.
 - absent: the rules above decide.
 
-A `job.completed` withheld by a mode is filed in hk as `filtered:owner-notify`.
+A `job.completed` withheld by a mode is filed in hk as `filtered:owner-notify:<event id>`:
+its own record per event, since hk's idempotency key covers the record's reason.
 A node that predates `owner_notify_v1` refuses the flag, so the hub strips it
 before sending the spawn; the saved request keeps it. An `--owner-notify` value
 other than `final` or `never` is a usage error. Code:

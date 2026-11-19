@@ -294,7 +294,7 @@ func TestOwnerNotifyJobCompletedWithheld_5360(t *testing.T) {
 				return
 			}
 			rows, deliveredTo := t4270Rows(fake, job)
-			if len(rows) == 0 || deliveredTo[0] != "hub/filtered:owner-notify" {
+			if len(rows) == 0 || !strings.HasPrefix(deliveredTo[0], "hub/filtered:owner-notify") {
 				t.Fatalf("mode %q: hk rows=%d delivered_to=%v, want the completion recorded as filtered:owner-notify", tc.mode, len(rows), deliveredTo)
 			}
 		})
@@ -402,7 +402,7 @@ func TestOwnerNotifyDaemonReviewerCompletionIsRecordedAndCounted_5360(t *testing
 		t.Fatalf("never: the owner heard a reviewer completion: %+v", items)
 	}
 	rows, deliveredTo := t4270Rows(fake, job)
-	if len(rows) == 0 || deliveredTo[0] != "hub/filtered:owner-notify" {
+	if len(rows) == 0 || !strings.HasPrefix(deliveredTo[0], "hub/filtered:owner-notify") {
 		t.Fatalf("hk rows=%d delivered_to=%v, want the completion filed as filtered:owner-notify", len(rows), deliveredTo)
 	}
 	var counted int64
@@ -495,5 +495,45 @@ func TestStaleRetryableOwnerRowIsSettledAfterGiveUp_5360(t *testing.T) {
 				t.Fatalf("outbox rows still pending=%d err=%v", open, err)
 			}
 		})
+	}
+}
+
+// Two completions of one job under --owner-notify never are two events: each
+// has its own hk row, and each is counted once. A second completion must not
+// reuse the first one's row, which hk's idempotency key would otherwise allow
+// (mergewake review of PR 732).
+func TestOwnerNotifyEachCompletionHasItsOwnRecord_5360(t *testing.T) {
+	h, _, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	h.now = func() time.Time { return now }
+	const job = "pw-5360-two-completions"
+	req := t4270Request(job, t3426Design, "", "implementer")
+	req.Args = append(req.Args, fleet.OwnerNotifyArg, fleet.OwnerNotifyNever)
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), req, job, t3426Design, now); err != nil {
+		t.Fatal(err)
+	}
+	first := t3426Completion(job, t3426Design, "")
+	second := t3426Completion(job, t3426Design, "")
+	second.EventID = "00002-job.completed.json"
+	h.relayJobCompletionFrom("host-a", first)
+	h.relayJobCompletionFrom("host-a", second)
+
+	rows, deliveredTo := t4270Rows(fake, job)
+	if len(rows) != 2 {
+		t.Fatalf("hk rows=%d delivered_to=%v, want one record per completion", len(rows), deliveredTo)
+	}
+	for _, to := range deliveredTo {
+		if !strings.HasPrefix(to, "hub/filtered:owner-notify") {
+			t.Fatalf("delivered_to=%q, want owner-notify", to)
+		}
+	}
+	var counted int64
+	for _, row := range h.loopsRowDocument(loopDateOf(now), now).SpawnNotices {
+		if row.Lane == t3426Design && row.Cause == "job_completed" {
+			counted += row.Silenced
+		}
+	}
+	if counted != 2 {
+		t.Fatalf("job_completed silenced=%d, want 2", counted)
 	}
 }
