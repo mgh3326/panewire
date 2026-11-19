@@ -109,6 +109,13 @@ func quotaFullExcluded(task hubSpawnTask, now time.Time, err error) []hubSpawnEx
 	if code, _, _ := strings.Cut(text, ":"); code != "role_no_candidate" && !strings.Contains(text, "no placement candidate accepted") && !strings.Contains(text, "no remote candidate completed") {
 		return nil
 	}
+	// The request's own refusals are the cause only when nothing else is
+	// holding a candidate: a host that is disconnected, full or backing off, or
+	// another seat dropped for its own quota, can clear by itself, and the
+	// request keeps parking for it.
+	if spawnTransientBlocker(text) {
+		return nil
+	}
 	var out []hubSpawnExclusion
 	for _, excluded := range liveExclusions(task.Exclusions, now) {
 		if spawnReasonQuotaFull(excluded.Reason) {
@@ -116,6 +123,23 @@ func quotaFullExcluded(task hubSpawnTask, now time.Time, err error) []hubSpawnEx
 		}
 	}
 	return out
+}
+
+// spawnTransientBlockerTokens are the drop reasons of a candidate that can
+// become eligible without any change to the request (spawnParkReason reads the
+// same words to park it).
+var spawnTransientBlockerTokens = []string{"task_slots_full", "active_jobs>=max", "lanes_full", "disconnected", "hub_node_unavailable", "not connected", "did not connect", "launch_backoff", "quota", "QUOTA_"}
+
+// spawnTransientBlocker reports a placement refusal that names a transient
+// blocker besides this request's own full-quota refusals (hub_quota_full).
+func spawnTransientBlocker(text string) bool {
+	text = strings.ReplaceAll(text, "hub_quota_full", "")
+	for _, token := range spawnTransientBlockerTokens {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+	return false
 }
 
 // quotaFullRefusedNotes names each seat a full quota ruled out, appended to the
@@ -149,10 +173,16 @@ func quotaFullRefusedNotes(refused []hubSpawnExclusion) string {
 // the durable copy across a hub restart). A refusal with no end time excludes
 // the band for the request's life.
 func (h *HubServer) learnQuotaFull(exclusion hubSpawnExclusion, full fleet.QuotaFull, band string) hubSpawnExclusion {
-	if full.Reset.IsZero() || !full.Reset.After(h.now()) {
+	if full.Reset.IsZero() {
 		return exclusion
 	}
+	// The reset is the exclusion's expiry even when it has already passed (a
+	// refusal that reaches the hub a second after its limit ended): zero would
+	// rule the band out for the request's life.
 	exclusion.ExpiresMS = full.Reset.UnixMilli()
+	if !full.Reset.After(h.now()) {
+		return exclusion
+	}
 	if full.Free && band != "" {
 		h.observePoolCooling("quota_stop pool="+band+" reset_at="+full.Reset.UTC().Format(time.RFC3339), h.now())
 	}

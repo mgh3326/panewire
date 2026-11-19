@@ -371,3 +371,47 @@ func TestQuotaFullExcludedEndsTheRequestInsteadOfParkingIt_T5358(t *testing.T) {
 		}
 	}
 }
+
+// A transient blocker beside the request's own refusals keeps the request
+// parked: another host that is disconnected, full or backing off can clear by
+// itself (mergewake finding on #731, head 687ae18).
+func TestQuotaFullExcludedKeepsParkingForATransientBlocker_T5358(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	task := hubSpawnTask{Exclusions: []hubSpawnExclusion{{Machine: "mac-a", Profile: "sonnet", Reason: "spawn_failed:quota_full"}}}
+	ours := "no remote candidate completed; tried: mac-a hub_quota_full"
+	if got := quotaFullExcluded(task, now, errors.New(ours)); len(got) != 1 {
+		t.Fatalf("only our own refusals: %+v", got)
+	}
+	for _, blocker := range []string{"mac-b disconnected", "mac-b task_slots_full", "mac-b active_jobs>=max", "mac-b lanes_full", "mac-b launch_backoff", "mac-b hub_node_unavailable", "mac-b QUOTA_EXHAUSTED"} {
+		if got := quotaFullExcluded(task, now, errors.New(ours+", "+blocker)); len(got) != 0 {
+			t.Errorf("%q beside our refusals still ended the request: %+v", blocker, got)
+		}
+	}
+	// The parking decision itself, as the placement pass reads it.
+	if spawnParkReason(80, ours+", mac-b disconnected") == "" {
+		t.Fatal("a disconnected host must keep the request parkable")
+	}
+}
+
+// A free-limit refusal that reaches the hub after its stated reset must not rule
+// the band out for the request's life (mergewake finding on #731).
+func TestQuotaFullWithAPastResetExcludesNothingLive_T5358(t *testing.T) {
+	f := newQuotaFullFixture(t, quotaFullRequest())
+	reset := f.clock.Add(-time.Second)
+	if _, err := f.node(1160, quotaFullAnswer(reset)); err != nil {
+		t.Fatal(err)
+	}
+	got := f.stored(t)
+	if len(got.Exclusions) != 1 || got.Exclusions[0].ExpiresMS != reset.UnixMilli() {
+		t.Fatalf("exclusions %+v, want one that expired at the stated reset", got.Exclusions)
+	}
+	if live := liveExclusions(got.Exclusions, *f.clock); len(live) != 0 {
+		t.Fatalf("an already-ended limit is still live: %+v", live)
+	}
+	if args := withQuotaExclusions(got.Request.Args, liveExclusions(got.Exclusions, *f.clock)); hubSpawnArg(args, "--exclude-pool") != "" {
+		t.Fatalf("the next selection still excludes %q", hubSpawnArg(args, "--exclude-pool"))
+	}
+	if snap := f.h.fleetSnapshot(*f.clock); len(snap.Cooling) != 0 {
+		t.Fatalf("an ended limit cooled the band: %v", snap.Cooling)
+	}
+}
