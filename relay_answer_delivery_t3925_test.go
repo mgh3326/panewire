@@ -93,7 +93,10 @@ func TestRelayOmpUnprovenAnswerDoesNotRetype_t3925(t *testing.T) {
 	previous := relayObserveWindow
 	relayObserveWindow = 50 * time.Millisecond
 	t.Cleanup(func() { relayObserveWindow = previous })
-	sc := t3276WorkingUnprovable()["omp-working"]
+	// hk 5413: a working omp pane holds the answer instead of typing it
+	// (TestOmpDirectiveHeldWhileWorking_5413), so the unproven case is the
+	// idle pane whose text stays in the composer.
+	sc := t3276Harnesses()["omp-idle"]
 	rig := t3276Start(t)
 	directive := rig.send("ev-omp-uncertain", "decision", "answer")
 	pane := t3276InstallPane(t, sc, t3276TypedFor(directive), false)

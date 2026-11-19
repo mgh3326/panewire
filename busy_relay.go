@@ -1390,9 +1390,12 @@ func relayRetriesOnce(result relayInjectResult) bool {
 	case relayInjectRetryable:
 		return true
 	case relayInjectMaybeInPane:
-		// Omp has no composer rule to guard a repeat after a send.
+		// hk 5413: omp retries only an empty composer with no echo after a
+		// send. Its composer is located, so the composer state is the proof of
+		// absence. Any other unproven verdict (composer unlocated, text held
+		// in it, or a return already spent) may already hold the message.
 		if strings.EqualFold(result.Harness, "omp") && !strings.HasPrefix(result.Evidence, "presend:") {
-			return false
+			return result.Evidence == "unproven:composer_empty"
 		}
 		// "unproven:..." (also behind a "presend:" prefix) is the reads
 		// showing nothing: no adapter, an unreadable pane, an empty or

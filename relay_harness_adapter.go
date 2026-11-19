@@ -38,6 +38,13 @@ type relayHarnessAdapter struct {
 	// divider lines; a nil edge means the harness draws no locatable composer.
 	composerEdge  func(line string) bool
 	composerGlyph string
+	// composerRow locates a one-row composer instead (omp, hk 5413): it returns
+	// the index of the row holding the composer, whose text follows
+	// composerGlyph. nil means the divider rule above applies.
+	composerRow func(lines []string) (int, bool)
+	// composerHint is the text omp draws right-aligned on an empty composer's
+	// row. It is not composer text, so the row is cut at it.
+	composerHint string
 	// queued reports the harness's "accepted into the submit-later queue"
 	// evidence on a visible read; nil means the harness shows none.
 	queued func(screen string) bool
@@ -74,10 +81,17 @@ func relayQueuedClaudeCodex(screen string) bool {
 }
 
 // relayHarnessAdapters is the closed table of harnesses the relay can prove a
-// delivery on. The grok, omp and cmd entries have no captured queue banner, so
-// they use the one rule that needs none (relayProofEchoAndWorking). That rule needs the pane idle or done before the
-// send, so a message injected into a working grok, omp or cmd pane is typed but
-// stays unconfirmed until a live capture gives a transcript rule.
+// delivery on. The grok and cmd entries have no captured queue banner, so they
+// use the one rule that needs none (relayProofEchoAndWorking): that rule needs
+// the pane idle or done before the send, so a message injected into a working
+// grok or cmd pane is typed but stays unconfirmed until a live capture gives a
+// transcript rule.
+//
+// omp has a captured composer (hk 5413, testdata/relay_omp): a one-row composer
+// at the foot of the screen, and a submitted prompt echoed in the transcript
+// above it. Its proof is that echo; a pending paste sits in the composer and is
+// never proof. omp is workingUnprovable: a directive is held while its pane is
+// working, because no capture shows a message typed into a working omp pane.
 //
 // cmd is also the one pane-level harness: herdr answers agent get and agent
 // read for it but refuses agent prompt and agent send-keys with
@@ -91,8 +105,30 @@ var relayHarnessAdapters = map[string]relayHarnessAdapter{
 	"codex":  {queued: relayQueuedClaudeCodex, proof: relayProofTranscriptEcho, observe: true},
 	"devin":  {composerEdge: isDevinDividerLine, composerGlyph: "❭", queued: devinQueued, proof: relayProofTranscriptEcho, maxAttempts: relayDevinMaxInjectAttempts},
 	"grok":   {proof: relayProofEchoAndWorking, observe: true},
-	"omp":    {proof: relayProofEchoAndWorking, observe: true},
+	"omp":    {composerRow: relayOmpComposerRow, composerGlyph: ompComposerGlyph, composerHint: ompComposerHint, proof: relayProofTranscriptEcho, observe: true, workingUnprovable: true},
 	"cmd":    {composerEdge: isClaudeDividerLine, composerGlyph: "❯", proof: relayProofEchoAndWorking, observe: true, paneTransport: true, workingUnprovable: true},
+}
+
+// ompComposerGlyph opens omp's composer row: the row's text follows it, as in
+// "╰─ <typed text>" (testdata/relay_omp, captured on omp 18.14.2).
+const ompComposerGlyph = "╰─"
+
+// ompComposerHint is the hint omp draws right-aligned on the composer row while
+// the composer is empty ("╰─    ⇧⇥ to change thinking effort"), captured on
+// omp 18.14.2. Typed text replaces it.
+const ompComposerHint = "⇧⇥ to change thinking effort"
+
+// relayOmpComposerRow locates omp's composer. It is the screen's last non-blank
+// row when that row opens with ompComposerGlyph; any other screen has no
+// locatable composer, so nothing in it can be read as the composer's text.
+func relayOmpComposerRow(lines []string) (int, bool) {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		return i, strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), ompComposerGlyph)
+	}
+	return 0, false
 }
 
 // harnessLoginScreens is the closed table of the screen each harness shows when

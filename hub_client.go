@@ -909,6 +909,15 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		return relayVerifyOutcome(ctx, pane, harness, text, "", "presend:", presendQueued, false, presend)
 	}
 	adapter, known := relayAdapterFor(harness)
+	if known && adapter.composerRow != nil {
+		// hk 5413: omp's one-row composer is found at presend, and a draft in
+		// it that is not this row's residue is not ours to type over. An
+		// unlocated composer is refused too: nothing can then show whether a
+		// pending paste is already sitting in it.
+		if state := relayComposerState(harness, presend.visible); state != "composer_empty" {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:" + state}
+		}
+	}
 	if known && adapter.paneTransport {
 		// cmd presses return right after the text, so a draft already in the
 		// composer would be submitted with the relay text appended to it. Type
@@ -1148,7 +1157,24 @@ const devinComposerQueueHint = "Press Enter to send queued messages now"
 // none and its placeholder is plain text, so its composer is never located.
 func relayComposer(harness, screen string) (string, bool) {
 	adapter, ok := relayAdapterFor(harness)
-	if !ok || adapter.composerEdge == nil {
+	if !ok {
+		return "", false
+	}
+	if adapter.composerRow != nil {
+		lines := strings.Split(screen, "\n")
+		row, ok := adapter.composerRow(lines)
+		if !ok {
+			return "", false
+		}
+		text := lines[row]
+		if adapter.composerHint != "" {
+			if cut := strings.Index(text, adapter.composerHint); cut >= 0 {
+				text = text[:cut]
+			}
+		}
+		return strings.TrimPrefix(compactWhitespace(text), adapter.composerGlyph), true
+	}
+	if adapter.composerEdge == nil {
 		return "", false
 	}
 	region, ok := composerRegionWith(screen, adapter.composerEdge)

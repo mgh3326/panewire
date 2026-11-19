@@ -948,6 +948,17 @@ const promptAnchorMinRunes = 12
 // or all of it when no composer is located.
 func promptTranscript(harness, screen string) string {
 	lines := strings.Split(screen, "\n")
+	if adapter, known := relayAdapterFor(harness); known && adapter.composerRow != nil {
+		// hk 5413: omp's composer is its last row, so the transcript is the
+		// rows above it. Without a located composer no row can be cut off, and
+		// an echo test on the whole screen would read a pending paste as
+		// submitted, so there is no transcript at all.
+		row, ok := adapter.composerRow(lines)
+		if !ok {
+			return ""
+		}
+		return strings.Join(lines[:row], "\n")
+	}
 	if top, _, ok := promptComposer(harness, lines); ok {
 		return strings.Join(lines[:top], "\n")
 	}
