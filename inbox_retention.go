@@ -45,8 +45,8 @@ func (s *laneInboxStore) prune(now time.Time, policy inboxRetentionPolicy) (int6
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, s.q(`WITH ranked AS (
- SELECT id, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY created_at DESC,id DESC) AS position FROM lane_inbox
- ) DELETE FROM lane_inbox WHERE (created_at<? OR id IN (SELECT id FROM ranked WHERE position>?))
+ SELECT id, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY created_at DESC,id DESC) AS lane_rank FROM lane_inbox
+ ) DELETE FROM lane_inbox WHERE (created_at<? OR id IN (SELECT id FROM ranked WHERE lane_rank>?))
  AND `+laneInboxTerminal+`
  AND NOT `+laneInboxUnread+`
  AND created_at<? AND read_at<? AND acked_at<? AND delivered_at<? AND superseded_at<?

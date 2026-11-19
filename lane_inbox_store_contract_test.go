@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -29,6 +30,11 @@ import (
 // a service container; locally it is unset and the Postgres half skips — no
 // database server is started on a host for these tests.
 const hubTestDatabaseURLEnv = "PANEWIRE_TEST_HUB_DATABASE_URL"
+
+// hubTestMySQLURLEnv names a disposable MySQL server, as a mysql:// URL whose
+// user may create and drop databases. CI sets it from a service container;
+// locally it is unset and the MySQL half skips, as the Postgres half does.
+const hubTestMySQLURLEnv = "PANEWIRE_TEST_HUB_MYSQL_URL"
 
 // laneInboxBackend opens fresh, empty storage. The returned opener opens that
 // same storage again on every call, so a test can close and reopen it.
@@ -61,7 +67,57 @@ func laneInboxBackends() []laneInboxBackend {
 				return s
 			}
 		}},
+		{name: "mysql", fresh: func(t *testing.T) func() *laneInboxStore {
+			config, _ := hubMySQLTestDatabase(t)
+			return func() *laneInboxStore {
+				s, err := openLaneInboxStoreMySQLConfig(context.Background(), config.Clone())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = s.close() })
+				return s
+			}
+		}},
 	}
+}
+
+// hubMySQLTestDatabase creates a private database on the CI server and returns
+// a config and a URL for it. The database is dropped when the test ends, so
+// runs with -count=N never share rows. utf8mb4_bin is the collation of the
+// live database (docs/hub-mysql.md).
+func hubMySQLTestDatabase(t *testing.T) (*mysql.Config, string) {
+	t.Helper()
+	base := os.Getenv(hubTestMySQLURLEnv)
+	if base == "" {
+		t.Skip(hubTestMySQLURLEnv + " is unset; the MySQL backend runs in CI against a service container")
+	}
+	admin, err := hubMySQLConfig(base)
+	if err != nil {
+		t.Fatal("test database URL is invalid")
+	}
+	connector, err := mysql.NewConnector(admin)
+	if err != nil {
+		t.Fatal("test database URL is invalid")
+	}
+	db := sql.OpenDB(connector)
+	t.Cleanup(func() { _ = db.Close() })
+	name := "pwtest_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := db.Exec(`CREATE DATABASE ` + name + ` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec(`DROP DATABASE ` + name); err != nil {
+			t.Error(err)
+		}
+	})
+	config := admin.Clone()
+	config.DBName = name
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme != "mysql" {
+		t.Fatal("test database URL must be a mysql:// URL")
+	}
+	u.Path = "/" + name
+	return config, u.String()
 }
 
 // hubPostgresTestSchema creates a private schema in the CI database and
@@ -101,7 +157,7 @@ func hubPostgresTestSchema(t *testing.T) (*pgx.ConnConfig, string) {
 }
 
 // hubInboxStorage names where a test hub keeps its inbox: a SQLite file, or
-// a Postgres schema when dsn is set.
+// a Postgres schema or MySQL database when dsn is set.
 type hubInboxStorage struct{ path, dsn string }
 
 // forEachHubInboxStorage runs a hub-level inbox test once per backend.
@@ -111,6 +167,10 @@ func forEachHubInboxStorage(t *testing.T, run func(t *testing.T, storage hubInbo
 	})
 	t.Run("postgres", func(t *testing.T) {
 		_, dsn := hubPostgresTestSchema(t)
+		run(t, hubInboxStorage{dsn: dsn})
+	})
+	t.Run("mysql", func(t *testing.T) {
+		_, dsn := hubMySQLTestDatabase(t)
 		run(t, hubInboxStorage{dsn: dsn})
 	})
 }
@@ -544,6 +604,15 @@ func TestLaneInboxStoreContractAbortEndsAStalledCall(t *testing.T) {
 				t.Fatal(err)
 			}
 			unlock = func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`); _ = conn.Close() }
+		} else if s.dialect == dialectMySQL {
+			conn, err := s.db.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.ExecContext(context.Background(), `LOCK TABLES lane_inbox_batches WRITE`); err != nil {
+				t.Fatal(err)
+			}
+			unlock = func() { _, _ = conn.ExecContext(context.Background(), `UNLOCK TABLES`); _ = conn.Close() }
 		} else {
 			var path string
 			if err := s.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name='main'`).Scan(&path); err != nil {
@@ -947,6 +1016,96 @@ func TestLaneInboxStoreContractAccountCreditMarks_t5138(t *testing.T) {
 		}
 		if marks, err = open().accountCreditMarks(t.Context()); err != nil || len(marks) != 0 {
 			t.Fatalf("marks after delete = %+v, %v; want none", marks, err)
+		}
+	})
+}
+
+// A compare-and-set that matches a row and changes nothing still reports one
+// row (clientFoundRows), on every backend: the hub reads the count as "the
+// guarded row was there".
+func TestLaneInboxStoreContractCompareAndSetCountsMatchedRows(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		ctx := context.Background()
+		if err := s.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_queue(request_id,next_check_ms) VALUES(?,0)`), "r1"); err != nil {
+			t.Fatal(err)
+		}
+		matched := func(query string, args ...any) int64 {
+			result, err := s.db.ExecContext(ctx, s.q(query), args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n, err := s.dialect.rowsMatched(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		if n := matched(`UPDATE spawn_queue SET next_check_ms=0 WHERE request_id=? AND next_check_ms=0`, "r1"); n != 1 {
+			t.Errorf("an update that changes nothing matched %d rows, want 1", n)
+		}
+		if n := matched(`UPDATE spawn_queue SET next_check_ms=5 WHERE request_id=? AND next_check_ms=0`, "r1"); n != 1 {
+			t.Errorf("an update that changes a row matched %d, want 1", n)
+		}
+		if n := matched(`UPDATE spawn_queue SET next_check_ms=9 WHERE request_id=? AND next_check_ms=0`, "r1"); n != 0 {
+			t.Errorf("a compare that fails matched %d rows, want 0", n)
+		}
+		if n := matched(`DELETE FROM spawn_queue WHERE request_id=?`, "r1"); n != 1 {
+			t.Errorf("a delete matched %d rows, want 1", n)
+		}
+	})
+}
+
+// insertOnce says whether this call stored the row, on every backend: the
+// duplicate shows as false and leaves one row, however the dialect spells it.
+func TestLaneInboxStoreContractInsertOnceReportsADuplicate(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		ctx := context.Background()
+		if err := s.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		const insert = `INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`
+		for i, want := range []bool{true, false} {
+			got, err := s.insertOnce(ctx, s.db, insert, "", "job-1", "req-1", nil)
+			if err != nil || got != want {
+				t.Fatalf("insert %d = %v, %v, want %v", i+1, got, err, want)
+			}
+		}
+		// A different job claiming the same request is a duplicate too: any
+		// unique key counts.
+		if got, err := s.insertOnce(ctx, s.db, insert, "", "job-2", "req-1", nil); err != nil || got {
+			t.Fatalf("a second job on the request = %v, %v, want a duplicate", got, err)
+		}
+		if n := countRows(t, s.db, s.q(`SELECT count(*) FROM spawn_reservations`)); n != 1 {
+			t.Fatalf("rows = %d, want 1", n)
+		}
+	})
+}
+
+// A key far longer than any column bound is stored, deduplicated and kept
+// apart from a key that shares its first bytes, on every backend (a producer
+// part such as a report path has no length bound of its own).
+func TestLaneInboxStoreContractVeryLongEventKeys(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		now := time.UnixMilli(1_700_000_000_000).UTC()
+		longA := strings.Repeat("p", 5000) + "A"
+		longB := strings.Repeat("p", 5000) + "B"
+		first, err := s.put(longA, "lane-a", "lane.event", "inbox", quietEvent("ev-a", "FYI"), now, 0, 0)
+		if err != nil || !first.Fresh {
+			t.Fatalf("first long key = %+v, %v", first, err)
+		}
+		again, err := s.put(longA, "lane-a", "lane.event", "inbox", quietEvent("ev-a", "changed"), now, 0, 0)
+		if err != nil || again.Fresh || again.ID != first.ID {
+			t.Fatalf("the same long key again = %+v, %v", again, err)
+		}
+		other, err := s.put(longB, "lane-a", "lane.event", "inbox", quietEvent("ev-b", "FYI"), now, 0, 0)
+		if err != nil || !other.Fresh || other.ID == first.ID {
+			t.Fatalf("a long key sharing a prefix = %+v, %v", other, err)
 		}
 	})
 }

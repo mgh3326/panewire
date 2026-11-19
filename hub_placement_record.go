@@ -727,20 +727,21 @@ func (s *laneInboxStore) saveDeferredPlacementSnapshot(parent context.Context, d
 		return false, nil, err
 	}
 	defer tx.Rollback()
-	var result sql.Result
+	var written bool
 	if d.Base != nil && d.Base.Exists {
-		result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET payload=?,delivery=? WHERE request_id=? AND attempt=? AND recorded=0 AND payload=? AND delivery=?`), string(d.Payload), d.Delivery, d.RequestID, d.Attempt, string(d.Base.Payload), d.Base.Delivery)
-	} else {
-		result, err = tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?)`, "request_id,attempt")), d.RequestID, d.Attempt, string(d.Payload), d.Delivery)
-	}
-	if err != nil {
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET payload=?,delivery=? WHERE request_id=? AND attempt=? AND recorded=0 AND payload=? AND delivery=?`), string(d.Payload), d.Delivery, d.RequestID, d.Attempt, string(d.Base.Payload), d.Base.Delivery)
+		if err != nil {
+			return false, nil, err
+		}
+		n, err := s.dialect.rowsMatched(result)
+		if err != nil {
+			return false, nil, err
+		}
+		written = n != 0
+	} else if written, err = s.insertOnce(ctx, tx, `INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?)`, "request_id,attempt", d.RequestID, d.Attempt, string(d.Payload), d.Delivery); err != nil {
 		return false, nil, err
 	}
-	written, err := s.dialect.rowsMatched(result)
-	if err != nil {
-		return false, nil, err
-	}
-	if written != 0 {
+	if written {
 		if err := s.enqueuePlacementRecord(ctx, tx, d.RequestID, d.Attempt); err != nil {
 			return false, nil, err
 		}
@@ -748,7 +749,7 @@ func (s *laneInboxStore) saveDeferredPlacementSnapshot(parent context.Context, d
 	if err := s.commitNoting(tx, readPlacementRecord); err != nil {
 		return false, nil, err
 	}
-	if written != 0 {
+	if written {
 		return true, &placementDeferredBase{Exists: true, Payload: d.Payload, Delivery: d.Delivery}, nil
 	}
 	var payload, delivery string

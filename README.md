@@ -7,8 +7,10 @@ Panewire is a daemon, hub and CLI for agent placement, launch, job lifecycle, pa
 The hub defaults informational events to a durable per-lane inbox. See
 [quiet delivery](docs/quiet-delivery.md) for `emit --deliver`, inbox commands,
 policy overrides, digest windows, and display-only Claude Code examples. The
-inbox is a SQLite file by default or Postgres when `PANEWIRE_HUB_DATABASE_URL`
-is set; see [hub inbox on Postgres](docs/hub-postgres.md).
+inbox is a SQLite file by default, or Postgres or MySQL when
+`PANEWIRE_HUB_DATABASE_URL` is set (its scheme chooses); see
+[hub inbox on Postgres](docs/hub-postgres.md) and
+[hub store on MySQL](docs/hub-mysql.md).
 
 The hub can relay terminal and escalation records to a small hierarchy of
 operator-owned lanes. Start it with `--lanes /etc/panewire/lanes.json`; the

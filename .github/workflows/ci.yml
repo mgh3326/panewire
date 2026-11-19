@@ -12,7 +12,7 @@ on:
         default: ''
         type: string
       suite:
-        description: Which suites to run (all, test, postgres)
+        description: Which suites to run (all, test, postgres, mysql)
         required: false
         default: all
         type: string
@@ -87,7 +87,7 @@ jobs:
     # not a red verdict, so this job is then skipped, as ci-ok is (hk 2924).
     # Any failure still runs it, and it fails.
     if: ${{ always() && github.event_name == 'pull_request' && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}
-    needs: [vet, shard, postgres]
+    needs: [vet, shard, postgres, mysql]
     strategy:
       fail-fast: false
       matrix:
@@ -99,11 +99,14 @@ jobs:
           VET_RESULT: ${{ needs.vet.result }}
           SHARD_RESULT: ${{ needs.shard.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
+          MYSQL_RESULT: ${{ needs.mysql.result }}
         run: |
           [ "$VET_RESULT" = success ] || { echo "vet job did not succeed: $VET_RESULT"; exit 1; }
           [ "$SHARD_RESULT" = success ] || { echo "a test shard did not succeed: $SHARD_RESULT"; exit 1; }
           # postgres runs only when the PR touches the inbox store.
           case "$POSTGRES_RESULT" in success|skipped) ;; *) echo "postgres job did not succeed: $POSTGRES_RESULT"; exit 1 ;; esac
+          # mysql runs on the same pull requests as postgres.
+          case "$MYSQL_RESULT" in success|skipped) ;; *) echo "mysql job did not succeed: $MYSQL_RESULT"; exit 1 ;; esac
 
   post-test:
     # The main stage's basic check set. Race, macOS and the release build live
@@ -137,9 +140,9 @@ jobs:
 
   store-paths:
     # Pull request only: does this change touch the hub inbox store? The
-    # production hub keeps its inbox in Postgres, so such a PR also runs the
-    # postgres job below before merge (operator decision 2026-11-06);
-    # every other PR stays light.
+    # production hub keeps its inbox in Postgres (and moves to MySQL, hk 4898),
+    # so such a PR also runs the postgres and mysql jobs below before merge
+    # (operator decision 2026-11-06); every other PR stays light.
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     outputs:
@@ -153,7 +156,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|inbox_|hub_inbox|hub_postgres|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_postgres_migrations/'; then
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|inbox_|hub_inbox|hub_postgres|hub_mysql|hub_database|hub_sql|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_(postgres|mysql)_migrations/'; then
             echo "store=true" >> "$GITHUB_OUTPUT"
           else
             echo "store=false" >> "$GITHUB_OUTPUT"
@@ -193,7 +196,8 @@ jobs:
         run: |
           set -o pipefail
           go test -race -count=2 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensPostgresInbox|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-test.log"
-          if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-test.log"; then
+          # The MySQL half of a shared test skips here (no MySQL service in this job).
+          if grep -- '--- SKIP' "$RUNNER_TEMP/postgres-test.log" | grep -qiv mysql; then
             echo "a Postgres test skipped"; exit 1
           fi
       # Main stage (r2 §1): the full Postgres integration test, without -race,
@@ -206,7 +210,7 @@ jobs:
         run: |
           set -o pipefail
           go test -count=1 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead' . 2>&1 | tee "$RUNNER_TEMP/postgres-store.log"
-          if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-store.log"; then
+          if grep -- '--- SKIP' "$RUNNER_TEMP/postgres-store.log" | grep -qiv mysql; then
             echo "a Postgres test skipped"; exit 1
           fi
       - name: migration and startup check on Postgres (main stage)
@@ -217,8 +221,63 @@ jobs:
         run: |
           set -o pipefail
           go test -count=1 -v -run 'HubServerOpensPostgresInbox|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-migrate.log"
-          if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-migrate.log"; then
+          if grep -- '--- SKIP' "$RUNNER_TEMP/postgres-migrate.log" | grep -qiv mysql; then
             echo "a Postgres test skipped"; exit 1
+          fi
+
+  mysql:
+    # The hub inbox's MySQL backend (docs/hub-mysql.md, hk 4898 phase 1b): the
+    # same store contract suite as the postgres job above, run against a MySQL
+    # 8.4 service container, so the three dialects are held to one suite. Like
+    # Postgres it needs a Linux runner's service container, and hosts never run
+    # a database for tests. The root account has no password (the service is
+    # bound to the runner's loopback, 127.0.0.1:53306) and the URL is loopback, so it
+    # carries no CA; a hub's URL always does (hubMySQLConfig).
+    # Post-merge and dispatch runs, and a pull request whose store-paths job
+    # found an inbox-store change.
+    needs: [store-paths]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","mysql"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: panewire
+        ports: ["127.0.0.1:53306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: ./.github/actions/setup-go-cached
+      - name: store contract and must-ack on MySQL
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          PANEWIRE_TEST_HUB_MYSQL_URL: mysql://root@127.0.0.1:53306/panewire
+        shell: bash
+        # A skip of the MySQL half would mean it silently did not run; the
+        # Postgres half of a shared test skips here, as the MySQL half does in
+        # the postgres job.
+        run: |
+          set -o pipefail
+          go test -race -count=2 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensMySQLInbox|HubDatabaseURL|MySQL' . 2>&1 | tee "$RUNNER_TEMP/mysql-test.log"
+          if grep -- '--- SKIP' "$RUNNER_TEMP/mysql-test.log" | grep -qiE 'mysql'; then
+            echo "a MySQL test skipped"; exit 1
+          fi
+      # Main stage: the full MySQL integration test, without -race, for every
+      # store test, and never narrowed by changed paths.
+      - name: store contract on MySQL (main stage, no race)
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          PANEWIRE_TEST_HUB_MYSQL_URL: mysql://root@127.0.0.1:53306/panewire
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensMySQLInbox|HubDatabaseURL|MySQL' . 2>&1 | tee "$RUNNER_TEMP/mysql-store.log"
+          if grep -- '--- SKIP' "$RUNNER_TEMP/mysql-store.log" | grep -qiE 'mysql'; then
+            echo "a MySQL test skipped"; exit 1
           fi
 
   ci-ok:
@@ -226,7 +285,7 @@ jobs:
     # dispatches, a partial suite must not mint an exact 'ci-ok' check run.
     name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
     runs-on: ubuntu-latest
-    needs: [test, post-test, postgres, auto-tag-test]
+    needs: [test, post-test, postgres, mysql, auto-tag-test]
     # A needed job that was only cancelled (a hosted runner not acquired) is
     # not a red verdict: ci-ok is then skipped, which mergewake reads as
     # unknown and holds on, instead of failing and reading as Red. Any
@@ -243,6 +302,7 @@ jobs:
           POST_TEST_RESULT: ${{ needs.post-test.result }}
           EVENT: ${{ github.event_name }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
+          MYSQL_RESULT: ${{ needs.mysql.result }}
           SUITE: ${{ inputs.suite || 'all' }}
         # A job the suite selects must succeed. A job it does not select
         # reports skipped, which passes (ci_workflow_test.go).
@@ -258,22 +318,26 @@ jobs:
             fi
           }
           case "$SUITE" in
-            all|test|postgres) ;;
+            all|test|postgres|mysql) ;;
             *) echo "unknown suite: $SUITE"; exit 1 ;;
           esac
           case "$SUITE" in all|test) test=yes ;; *) test=no ;; esac
           case "$SUITE" in all|postgres) postgres=yes ;; *) postgres=no ;; esac
+          case "$SUITE" in all|mysql) mysql=yes ;; *) mysql=no ;; esac
           if [ "$EVENT" = pull_request ]; then
             require yes test "$TEST_RESULT"
             require no post-test "$POST_TEST_RESULT"
-            # A PR runs postgres only for an inbox-store change.
+            # A PR runs postgres and mysql only for an inbox-store change.
             case "$POSTGRES_RESULT" in success|skipped) ;; *) echo "postgres job did not succeed: $POSTGRES_RESULT"; exit 1 ;; esac
+            case "$MYSQL_RESULT" in success|skipped) ;; *) echo "mysql job did not succeed: $MYSQL_RESULT"; exit 1 ;; esac
             postgres=checked
+            mysql=checked
           else
             require no test "$TEST_RESULT"
             require "$test" post-test "$POST_TEST_RESULT"
           fi
           [ "$postgres" = checked ] || require "$postgres" postgres "$POSTGRES_RESULT"
+          [ "$mysql" = checked ] || require "$mysql" mysql "$MYSQL_RESULT"
           echo "ok=true" >> "${GITHUB_OUTPUT:-/dev/null}"
 
   auto-tag-test:

@@ -112,17 +112,16 @@ func (s *laneInboxStore) ensureConsults() error {
 func (s *laneInboxStore) insertConsult(parent context.Context, c hubConsult) (hubConsult, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO consult_requests
+	fresh, err := s.insertOnce(ctx, s.db, `INSERT INTO consult_requests
 		(id,idem_key,task,pr,head,requester,machine,caller_pane,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,updated_ms,claim_until_ms,exclude_profiles,answered_ms,deadline_ms,respawns,notified,owner)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, "idem_key")),
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, "idem_key",
 		c.ID, c.IdemKey, c.Task, c.PR, c.Head, c.Requester, c.Machine, c.CallerPane, c.QuestionDoc, c.AuthorJob, c.AuthorFamily, c.State,
 		c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc,
 		c.Created.UnixMilli(), consultUpdatedMillis(c), consultMs(c.ClaimUntil), strings.Join(c.ExcludeProfiles, ","), c.Answered.UnixMilli(), c.Deadline.UnixMilli(), c.Respawns, consultBoolInt(c.Notified), c.Owner)
 	if err != nil {
 		return hubConsult{}, false, err
 	}
-	n, _ := s.dialect.rowsMatched(result)
-	if n == 1 {
+	if fresh {
 		// A new consult is the consult loop's work (hk 5302).
 		s.noteWork(readConsult)
 		return c, true, nil

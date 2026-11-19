@@ -120,7 +120,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 		deliveryPolicyDefault = "default"
 	}
 	deliveryPolicyPath := flags.String("delivery-policy", deliveryPolicyDefault, "default embedded YAML, YAML file, or off to disable the inbox (env PANEWIRE_DELIVERY_POLICY)")
-	inboxStorePath := flags.String("inbox-store", defaultHubInboxPath(), "durable hub inbox SQLite file, used when "+hubDatabaseURLEnv+" is unset; empty disables the inbox")
+	inboxStorePath := flags.String("inbox-store", defaultHubInboxPath(), "durable hub inbox SQLite file, used when "+hubDatabaseURLEnv+" (a postgres:// or mysql:// URL) is unset; empty disables the inbox")
 	logFilePath := flags.String("log-file", "", "optional hub log file, appended with mode 0640; stderr/journal output is unchanged")
 	// Retired for one release: existing hub units still pass these; the v2
 	// quota shadow store is gone and both values are ignored.

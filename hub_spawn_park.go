@@ -293,6 +293,15 @@ func (h *HubServer) wakeParkedSpawns(ctx context.Context, ticked bool) {
 // forgets any priority read; a later park keeps both, a bind-and-refusal
 // included, so the wait that is counted is the whole one (the expressions
 // read the row's old values).
+//
+// MySQL assigns a SET list left to right, so a later expression sees the
+// columns an earlier one set; Postgres and SQLite read the old row for all of
+// them. TestHubUpdatesReadNoEarlierAssignment holds every update to the order
+// that gives the same answer on both. Here park_priority, its failure count
+// and park_since_ms, which they read, come last; park_reason and next_check_ms
+// read each other, so next_check_ms goes first and park_reason reads it after:
+// a row that keeps its wake keeps it unchanged, a row that does not has just
+// been set to next, which the same test (next_check_ms>next) fails.
 func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt int, reason string, next, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
@@ -301,7 +310,7 @@ func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt in
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_since_ms=CASE WHEN park_since_ms=0 THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), reason, next.UnixMilli(), next.UnixMilli(), now.UnixMilli(), id, attempt)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,park_since_ms=CASE WHEN park_since_ms=0 THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), next.UnixMilli(), next.UnixMilli(), reason, now.UnixMilli(), id, attempt)
 	if err != nil {
 		return false, err
 	}
