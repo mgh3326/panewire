@@ -6,11 +6,52 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quotastop"
 )
+
+// stubDetachedWatcher points the detached watcher at a stand-in that records
+// its pid and idles. The cleanup kills that pid and waits for it to be gone,
+// so no watcher outlives the test (hk 5343). It returns the pid file path.
+func stubDetachedWatcher(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "watcher.pid")
+	script := filepath.Join(dir, "panewire-stand-in")
+	// The stand-in idles like a watcher waiting for a report; exec keeps its pid.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho $$ > "+pidFile+"\nexec sleep 60\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	restore := fleet.SetWatcherExecutable(func() (string, error) { return script, nil })
+	t.Cleanup(restore)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return // no watcher was started, so none can leak
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Errorf("stand-in watcher pid file %q: %v", pidFile, err)
+			return
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			t.Errorf("stand-in watcher pid %d: %v", pid, err)
+			return
+		}
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		if !waitUntil(5*time.Second, func() bool { return !processRunning(process, pid) }) {
+			t.Errorf("stand-in watcher pid %d survived the test", pid)
+		}
+	})
+	return pidFile
+}
 
 // An urgent pinned worker that stops at the codex usage limit is handed over
 // (never resumed) with one owner notice and one hk quota-stop note (hk 2847).
@@ -58,6 +99,7 @@ func TestQuotaStopCodexReplayHandsOverUrgentWorker(t *testing.T) {
 		return relayInjectResult{Outcome: relayInjectDelivered}
 	}
 
+	watcherPID := stubDetachedWatcher(t)
 	rig.observe("working", 1, rig.now)
 	rig.observe("idle", 2, rig.now.Add(time.Second))
 	rig.manager.Tick(context.Background(), rig.now.Add(5*time.Second))
@@ -78,4 +120,10 @@ func TestQuotaStopCodexReplayHandsOverUrgentWorker(t *testing.T) {
 	if owners != 1 {
 		t.Fatalf("owner notices = %d, want exactly one", owners)
 	}
+	// The hand-over re-arms the job's watcher; the stand-in must have started,
+	// or the cleanup's no-survivor check would prove nothing (hk 5343).
+	eventually(t, 5*time.Second, "re-armed watcher stand-in started", func() bool {
+		_, err := os.Stat(watcherPID)
+		return err == nil
+	})
 }
