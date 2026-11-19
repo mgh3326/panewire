@@ -218,10 +218,12 @@ var ddl = []string{
 // check only meta.schema_version and name the columns they read, so they open
 // the file unchanged and simply never see the side table.
 //
-// started_at copies the row's own started_at. A side row describes a quota row
-// only while both agree, so a quota row an older binary deleted and recorded
-// again (it knows nothing of this table) reads as having no epoch rather than
-// inheriting the dead attempt's.
+// A side row describes a quota row only while that row stands. The trigger
+// below deletes the side row whenever its quota row is deleted, by any binary
+// or the script, so a row an older binary deleted and recorded again, even in
+// the same second, has no epoch rather than inheriting the dead attempt's.
+// started_at copies the row's own as a second check; it is not unique, since
+// timestamps are whole seconds, and is never relied on alone.
 const epochDDL = `CREATE TABLE IF NOT EXISTS quota_pool_epochs (
 		job_id     TEXT    NOT NULL,
 		pool       TEXT    NOT NULL,
@@ -229,6 +231,11 @@ const epochDDL = `CREATE TABLE IF NOT EXISTS quota_pool_epochs (
 		started_at TEXT    NOT NULL,
 		PRIMARY KEY (job_id, pool)
 	)`
+
+const epochDropTrigger = `CREATE TRIGGER IF NOT EXISTS quota_pool_epochs_drop AFTER DELETE ON quota_pool_records
+	BEGIN
+		DELETE FROM quota_pool_epochs WHERE job_id = OLD.job_id AND pool = OLD.pool;
+	END`
 
 // conn is one open database handle.
 type conn struct {
@@ -311,9 +318,11 @@ func (s *Store) rw(ctx context.Context, bootstrap bool) (*conn, error) {
 	}
 	// Every reader of the side table opens through here, so it exists by then;
 	// a ledger an older binary created gets it on its first write by this one.
-	if _, e = c.c.ExecContext(ctx, epochDDL); e != nil {
-		c.Close()
-		return nil, errf(ExitStorage, "cannot open the state db %s: %v", s.DB, e)
+	for _, stmt := range []string{epochDDL, epochDropTrigger} {
+		if _, e = c.c.ExecContext(ctx, stmt); e != nil {
+			c.Close()
+			return nil, errf(ExitStorage, "cannot open the state db %s: %v", s.DB, e)
+		}
 	}
 	return c, nil
 }

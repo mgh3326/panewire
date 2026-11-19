@@ -112,35 +112,69 @@ func TestQuotaEpochOldReleaseThenNewAcquire_t5294(t *testing.T) {
 	noAmbiguityWarning(t, a)
 }
 
-// A row recorded before epochs existed is released when the job ends here,
-// and never because a grant happens to match.
+// A row recorded before epochs existed is released when the job's current
+// attempt has ended here, and never because a grant happens to match.
 func TestQuotaEpochLessRowReleasedOnlyByTerminalEnd_t5294(t *testing.T) {
-	t.Run("terminal end releases it whatever the grant", func(t *testing.T) {
+	legacyJob := func(t *testing.T) *App {
+		a := testApp(t)
+		ledgerRunner(t, a)
+		seedJob(t, a, "j", "implementer")
+		seedLedgerQuota(t, a, "j", 0)
+		return a
+	}
+	snapshot := func(t *testing.T, a *App) Job {
+		j, err := a.job("j")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	t.Run("the current attempt's end releases it whatever the grant", func(t *testing.T) {
 		for _, grant := range []uint64{1, 3} {
-			a := testApp(t)
-			ledgerRunner(t, a)
-			seedJob(t, a, "j", "implementer")
-			seedLedgerQuota(t, a, "j", 0)
+			a := legacyJob(t)
 			if grant > 1 {
 				if err := jobowner.Assign(a.Jobs, "j", grant); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := a.releaseQuota(t.Context(), Job{ID: "j", OwnerEpoch: 1}); err != nil {
+			putEvent(t, a, "j", "job.lost", map[string]any{})
+			if err := a.releaseQuota(t.Context(), snapshot(t, a)); err != nil {
 				t.Fatal(err)
 			}
 			wantPools(t, a, "j")
 		}
 	})
-	t.Run("a matching grant does not release it once the hub reassigned the job", func(t *testing.T) {
-		a := testApp(t)
-		ledgerRunner(t, a)
-		seedJob(t, a, "j", "implementer")
-		seedLedgerQuota(t, a, "j", 0)
+	t.Run("a live job's row is not released by a matching grant", func(t *testing.T) {
+		a := legacyJob(t)
+		if err := a.releaseQuota(t.Context(), snapshot(t, a)); err != nil {
+			t.Fatal(err)
+		}
+		wantPools(t, a, "j", "example")
+	})
+	t.Run("a hub revocation keeps it even with a matching grant", func(t *testing.T) {
+		a := legacyJob(t)
+		putEvent(t, a, "j", "job.lost", map[string]any{})
 		if err := jobowner.Revoke(a.Jobs, "j", 2); err != nil {
 			t.Fatal(err)
 		}
-		if err := a.releaseQuota(t.Context(), Job{ID: "j", OwnerEpoch: 1}); err != nil {
+		if err := a.releaseQuota(t.Context(), snapshot(t, a)); err != nil {
+			t.Fatal(err)
+		}
+		wantPools(t, a, "j", "example")
+	})
+	// A1 is revoked and the job returns to A3, whose new spawn clears the
+	// revocation. A delayed A1 watcher must not free the row A3 may be using.
+	t.Run("a delayed watcher of an older attempt keeps it after the job started again", func(t *testing.T) {
+		a := legacyJob(t)
+		putEvent(t, a, "j", "job.lost", map[string]any{})
+		a1 := snapshot(t, a)
+		moveA1B2A3(t, a)
+		putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "t_level": "T1", "role": "implementer"})
+		putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p2", "tab_id": "w:t1", "label": "agent-a", "profile": "cmd-dsflash41", "family": "deepseek"})
+		if current := snapshot(t, a); current.Ended != "" || current.Reassigned {
+			t.Fatalf("setup: the job did not start again: %+v", current)
+		}
+		if err := a.releaseQuota(t.Context(), a1); err != nil {
 			t.Fatal(err)
 		}
 		wantPools(t, a, "j", "example")

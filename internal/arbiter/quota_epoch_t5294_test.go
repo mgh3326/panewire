@@ -207,14 +207,22 @@ func TestQuotaEpochSideTableKeepsVersion2ReadableByOlderBinaries_t5294(t *testin
 	if err := db.QueryRow("SELECT count(*) FROM (SELECT job_id, pool, profile, started_at FROM quota_pool_records ORDER BY job_id, pool)").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("legacy read: %d rows, err=%v", count, err)
 	}
+	var started string
+	if err := db.QueryRow("SELECT started_at FROM quota_pool_records WHERE job_id = ? AND pool = ?", "job-new", "example").Scan(&started); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec("DELETE FROM quota_pool_records WHERE job_id = ? AND pool = ?", "job-new", "example"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("INSERT INTO quota_pool_records (job_id, pool, profile, started_at) VALUES (?, ?, ?, ?)", "job-new", "example", "cmd-x", iso(s.now().Add(time.Hour))); err != nil {
+	// The older binary recorded the row again within the same second, so the
+	// timestamps are equal: only the side row's deletion keeps the new row from
+	// inheriting the dead attempt's epoch (the clock here is frozen).
+	if _, err := db.Exec("INSERT INTO quota_pool_records (job_id, pool, profile, started_at) VALUES (?, ?, ?, ?)", "job-new", "example", "cmd-x", started); err != nil {
 		t.Fatal(err)
 	}
-	// The older binary deleted and recorded the row again, leaving the dead
-	// attempt's side row: it must not give the new row an epoch.
+	if _, found := epochRow(t, s, "job-new", "example"); found {
+		t.Fatal("the side row outlived a delete by an older binary")
+	}
 	if released, e := s.ReleaseQuotaPoolEpoch(ctx, "job-new", "example", 4, nil); e != nil || released {
 		t.Fatalf("a re-recorded row inherited the old epoch: released=%v err=%v", released, e)
 	}

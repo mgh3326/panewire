@@ -298,8 +298,10 @@ func canonicalJSON(v any) (string, bool) {
 // other way round.
 //
 // A row with no epoch was written before epochs were recorded and cannot be
-// told apart from a newer attempt's. It is released only when the job itself
-// ended here: no hub revocation stands, so no other attempt took the job.
+// told apart from a newer attempt's. It is released only when the ending
+// attempt is the job's current one and that attempt has ended here with no
+// revocation standing; a delayed watcher of an older attempt, for a job that
+// has since started again, leaves it.
 func (a *App) releaseQuota(ctx context.Context, j Job) error {
 	pools, err := a.ledger().QuotaPools(ctx, j.ID)
 	if err != nil {
@@ -320,7 +322,8 @@ func (a *App) releaseQuota(ctx context.Context, j Job) error {
 			a.warn("quota without a recorded epoch retained for job %s: ledger unreadable: %v", j.ID, err)
 			return false
 		}
-		return !current.Reassigned
+		ending, now := viewLedger(j.Events), viewLedger(current.Events)
+		return ending.Attempt == now.Attempt && now.Ended != "" && !now.Revoked
 	}
 	for _, pool := range pools {
 		if pool == "" {
