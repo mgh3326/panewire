@@ -20,22 +20,30 @@ import (
 )
 
 func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
+	var app *fleet.App
+	var err error
 	if h.spawnNewApp != nil {
-		return h.spawnNewApp(out, errout)
-	}
-	app, err := fleet.New(out, errout)
-	if app != nil {
-		app.LiveSpawnProfiles = h.liveSpawnProfiles
-		app.LivePlacedByAccount = h.liveProfilesByAccount
-		app.LiveAccountJobs = h.liveAccountJobs
-		// Each placed selection's dropped SWE-2 candidates count into the daily
-		// loops row (docs/loops.md, selection_drops).
-		app.OnSelectionDrops = h.noteSelectionDrops
-		// The hub owns the durable account credit marks: its in-process
-		// selection reads them directly, in addition to the snapshot (hk 5138).
-		app.AccountCreditMarks = func(context.Context) (map[string]time.Time, error) {
-			return h.snapshotAccountCreditMarks(h.now().UTC())
+		app, err = h.spawnNewApp(out, errout)
+	} else {
+		app, err = fleet.New(out, errout)
+		if app != nil {
+			app.LiveSpawnProfiles = h.liveSpawnProfiles
+			app.LivePlacedByAccount = h.liveProfilesByAccount
+			app.LiveAccountJobs = h.liveAccountJobs
+			// Each placed selection's dropped SWE-2 candidates count into the daily
+			// loops row (docs/loops.md, selection_drops).
+			app.OnSelectionDrops = h.noteSelectionDrops
+			// The hub owns the durable account credit marks: its in-process
+			// selection reads them directly, in addition to the snapshot (hk 5138).
+			app.AccountCreditMarks = func(context.Context) (map[string]time.Time, error) {
+				return h.snapshotAccountCreditMarks(h.now().UTC())
+			}
 		}
+	}
+	// The consult floor classifies design lanes by the loaded relay policy
+	// (hk 4241). Without a loaded policy the app keeps the built-in list.
+	if app != nil && h.inbox != nil && h.inbox.policy != nil {
+		app.IsDesignLane = h.inbox.policy.designLane
 	}
 	return app, err
 }

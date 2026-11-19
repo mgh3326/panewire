@@ -10,9 +10,10 @@ import (
 	"github.com/mgh3326/panewire/internal/grade"
 )
 
-// consultDesignLane matches the hub's current relay.design_lanes list:
-// ["*-design", "routing-policy", "fleet-policy"]. The policy's
-// consult.design_session floor is SS (hk:doc policy/model-families).
+// consultDesignLane is the built-in design-session list, used only when no
+// hub relay policy is loaded (designSessionLane): ["*-design", "routing-policy",
+// "fleet-policy"]. A loaded policy's relay.design_lanes decides instead. The
+// policy's consult.design_session floor is SS (hk:doc policy/model-families).
 func consultDesignLane(lane string) bool {
 	if lane == "" || lane == "operator-desk" || strings.HasSuffix(lane, "-operator-desk") {
 		return false
@@ -33,10 +34,21 @@ func consultFloorOf(askerGrade string) string {
 	return grades[min(gradeOrder[askerGrade]+1, len(grades)-1)]
 }
 
+// designSessionLane reports whether lane is a design-session lane for the
+// consult floor. The loaded hub relay policy decides when one is injected
+// (App.IsDesignLane; desk lanes never match); without one the built-in list
+// applies. resolve and spawn --parent both classify through here, so they agree.
+func (a *App) designSessionLane(lane string) bool {
+	if a.IsDesignLane != nil {
+		return lane != "" && a.IsDesignLane(lane)
+	}
+	return consultDesignLane(lane)
+}
+
 // consultFloorFor applies the policy floor for a design-session asker and the
 // ordinary asker+1 floor for every other lane.
-func consultFloorFor(askerGrade, lane string) string {
-	if consultDesignLane(lane) {
+func consultFloorFor(askerGrade string, designSession bool) string {
+	if designSession {
 		return "SS"
 	}
 	return consultFloorOf(askerGrade)
@@ -230,7 +242,7 @@ func (p *selPlan) consultStamp() map[string]any {
 	if family == "" {
 		family = "unknown"
 	}
-	floor := consultFloorFor(p.req.grade, p.req.lane)
+	floor := consultFloorFor(p.req.grade, p.req.designSession)
 	used := p.req.usedFloor
 	if used == "" {
 		used = floor

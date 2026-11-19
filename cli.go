@@ -25,6 +25,10 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) > 0 && fleetCommand(args[0]) {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
+		switch args[0] {
+		case "spawn", "work", "delegate", "resolve":
+			return fleet.MainWithDesignLane(ctx, args, os.Stdout, os.Stderr, fleetDesignLaneClassifier(os.Getenv("PANEWIRE_DELIVERY_POLICY")))
+		}
 		return fleet.Main(ctx, args, os.Stdout, os.Stderr)
 	}
 	if len(args) > 0 && args[0] == "quota" {
@@ -173,6 +177,26 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		}
 	}
 	return ExitOK
+}
+
+// fleetDesignLaneClassifier loads the delivery policy the hub reads, so a CLI
+// spawn or resolve classifies design lanes as the hub does (hk 4241). The path
+// follows the hub's own rule: env PANEWIRE_DELIVERY_POLICY, "" meaning the
+// embedded default. "off" and an unreadable policy return nil, which leaves the
+// built-in list in force (fleet.App.designSessionLane).
+func fleetDesignLaneClassifier(path string) func(string) bool {
+	if path == "off" {
+		return nil
+	}
+	if path == "" {
+		path = "default"
+	}
+	policy, err := loadDeliveryPolicy(path)
+	if err != nil {
+		slog.Warn("delivery policy unreadable; consult floor uses the built-in design lanes", "err", err)
+		return nil
+	}
+	return policy.designLane
 }
 
 func fleetCommand(command string) bool {

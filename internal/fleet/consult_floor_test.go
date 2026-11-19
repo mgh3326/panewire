@@ -58,12 +58,93 @@ func consultFloorSelectWith(t *testing.T, o consultFloorOpts, rows []CatalogRow,
 
 func consultFloorSpawnSelect(t *testing.T, rows []CatalogRow, present []string, grade, family, parentLane string) (*selPlan, error) {
 	t.Helper()
+	return consultFloorSpawnSelectClassed(t, nil, rows, present, grade, family, parentLane)
+}
+
+// consultFloorSpawnSelectClassed is consultFloorSpawnSelect with the loaded
+// relay policy's design-lane classifier injected (nil: the built-in list).
+func consultFloorSpawnSelectClassed(t *testing.T, isDesign func(string) bool, rows []CatalogRow, present []string, grade, family, parentLane string) (*selPlan, error) {
+	t.Helper()
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, s, q := selFixture(t, grade, rows, pools, present)
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
+	a.IsDesignLane = isDesign
 	serveRouting(t, routingDoc(routingBlockV1))
 	s.Role, s.RoutingRole, s.Parent, s.ParentFamily = "implementer", "consult", parentLane, family
 	return a.selectProfile(context.Background(), s)
+}
+
+// A loaded relay policy with an empty design_lanes list names no design lane,
+// so no lane gets the SS floor, the built-in list included.
+func TestConsultPolicyEmptyListGivesNoDesignSession(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("opus", "high", "A+", "claude"), consultFloorRung("codex-sol", "high", "A+", "codex"), consultFloorRung("codex-astra", "high", "SS", "codex")}
+	none := func(string) bool { return false }
+	for _, lane := range []string{"panewire-design", "routing-policy"} {
+		sel, err := consultFloorSpawnSelectClassed(t, none, rows, consultFloorBothPools, "A", "anthropic", lane)
+		if err != nil {
+			t.Fatalf("%s select: %v", lane, err)
+		}
+		if c := consultFloorStamp(t, sel); c["floor"] != "A+" {
+			t.Fatalf("%s under an empty policy list stamped %v, want A+ floor", lane, c)
+		}
+	}
+}
+
+// A custom design_lanes list decides the SS floor: its lane gets SS, and a
+// built-in design name it omits does not.
+func TestConsultPolicyCustomListDecidesDesignSession(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("opus", "high", "A+", "claude"), consultFloorRung("codex-sol", "high", "A+", "codex"), consultFloorRung("codex-astra", "high", "SS", "codex")}
+	custom := func(lane string) bool { return lane == "custom-design" }
+	sel, err := consultFloorSpawnSelectClassed(t, custom, rows, consultFloorBothPools, "A", "anthropic", "custom-design")
+	if err != nil {
+		t.Fatalf("custom-design select: %v", err)
+	}
+	if c := consultFloorStamp(t, sel); c["floor"] != "SS" {
+		t.Fatalf("custom-design stamped %v, want SS floor", c)
+	}
+	sel, err = consultFloorSpawnSelectClassed(t, custom, rows, consultFloorBothPools, "A", "anthropic", "panewire-design")
+	if err != nil {
+		t.Fatalf("panewire-design select: %v", err)
+	}
+	if c := consultFloorStamp(t, sel); c["floor"] != "A+" {
+		t.Fatalf("panewire-design omitted from the custom list stamped %v, want A+ floor", c)
+	}
+}
+
+// resolve --lane and spawn --parent classify one lane the same way under the
+// same loaded policy: both stamp the same floor.
+func TestConsultPolicyResolveAndSpawnAgreeOnLane(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("opus", "high", "A+", "claude"), consultFloorRung("codex-sol", "high", "A+", "codex"), consultFloorRung("codex-astra", "high", "SS", "codex")}
+	custom := func(lane string) bool { return lane == "custom-design" }
+	for _, lane := range []string{"custom-design", "routing-policy"} {
+		sel, err := consultFloorSpawnSelectClassed(t, custom, rows, consultFloorBothPools, "A", "anthropic", lane)
+		if err != nil {
+			t.Fatalf("%s spawn select: %v", lane, err)
+		}
+		spawnFloor := consultFloorStamp(t, sel)["floor"]
+
+		pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
+		a, _, q := selFixture(t, "A", rows, pools, consultFloorBothPools)
+		q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
+		a.IsDesignLane = custom
+		serveRouting(t, routingDoc(routingBlockV1))
+		out := captureOut(a)
+		if err := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", "T1", "--grade", "A", "--lane", lane, "--author-family", "anthropic", "--json"}); err != nil {
+			t.Fatalf("%s resolve consult: %v", lane, err)
+		}
+		var r map[string]any
+		if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+			t.Fatalf("%s resolve json: %v\n%s", lane, err, out)
+		}
+		selection, ok := r["selection"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s resolve selection missing: %v", lane, r)
+		}
+		consult, ok := selection["consult"].(map[string]any)
+		if !ok || consult["floor"] != spawnFloor {
+			t.Fatalf("%s: resolve floor %v, spawn floor %v; they must agree", lane, selection["consult"], spawnFloor)
+		}
+	}
 }
 
 func TestConsultDesignSessionUsesSSFloor(t *testing.T) {
