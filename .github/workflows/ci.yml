@@ -271,6 +271,10 @@ jobs:
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/store-copy.log"; then
             echo "store copy integration skipped"; exit 1
           fi
+      - name: copied-back key mutation probe
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+        run: scripts/ci-store-copy-key-mutant.sh
       - name: store contract and must-ack on MySQL
         if: ${{ github.event_name == 'pull_request' }}
         env:
