@@ -334,7 +334,7 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 				// its job when close operations are later enabled.
 				// A waited stop is released too: its wait row answers a repeat,
 				// and a later stop with another reset must reach the job (hk 4633).
-				if results[i].action == poolJobNotified && (results[i].role == "reviewer" || results[i].role == "consult" || results[i].why == poolWaitReason) {
+				if poolClaimReleased(results[i]) {
 					h.poolSweep.release(task.Job)
 				}
 			} else {
@@ -360,6 +360,14 @@ func (h *HubServer) sweepExhaustedPool(ctx context.Context, exhaustion poolExhau
 	}
 	level("pool exhausted sweep", "pool", exhaustion.Pool, "account", exhaustion.Account, "cause", exhaustion.Cause, "reset", exhaustion.Reset.Format(time.RFC3339),
 		"jobs", len(onPool), "notified", notified, "skipped", skippedSummary(skipped))
+}
+
+// poolClaimReleased reports a notified result whose job claim the sweep
+// releases: a reviewer or consult notice, and a waited implementer stop (its
+// wait row answers a repeat, and a later stop with another reset must reach
+// the job).
+func poolClaimReleased(r poolJobResult) bool {
+	return r.action == poolJobNotified && (r.role == "reviewer" || r.role == "consult" || poolWaited(r.why))
 }
 
 // skippedSummary renders the skip reasons as "reason=count,..." in a stable order.

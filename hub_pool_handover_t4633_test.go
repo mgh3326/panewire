@@ -1208,3 +1208,30 @@ func TestPoolHandoverSiblingClaimIsTheSameSuccessor(t *testing.T) {
 		t.Fatal("the live successor's task role was released")
 	}
 }
+
+// hk 5349: a task that names no expected time waits on the policy default; the
+// sweep must release that waited job's claim like any other wait, so a later
+// stop with another reset reaches it.
+func TestPoolHandoverWaitWithoutExpectedTimeReleasesTheClaim_T5349(t *testing.T) {
+	const job = "wait-default"
+	f := handoverFixture(t, job, 3, 0)
+	exhaustion := window5h()
+	exhaustion.Reset = time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	result := sweepHandover(t, f, exhaustion, nil)
+	if result.action != poolJobNotified || result.why != "reset_within_default_expected" {
+		t.Fatalf("sweep=%+v, want a wait on the policy default", result)
+	}
+	if !poolClaimReleased(result) {
+		t.Fatalf("the sweep would keep the claim of a waited job: %+v", result)
+	}
+	for _, why := range []string{"reset_within_expected", "reset_passed"} {
+		if !poolClaimReleased(poolJobResult{action: poolJobNotified, role: "implementer", why: why}) {
+			t.Fatalf("wait reason %q does not release the claim", why)
+		}
+	}
+	for _, why := range []string{"reset_too_late", "resume_limit"} {
+		if poolClaimReleased(poolJobResult{action: poolJobNotified, role: "implementer", why: why}) {
+			t.Fatalf("%q is not a wait; its claim must stay with the hand-over", why)
+		}
+	}
+}
