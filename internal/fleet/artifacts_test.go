@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -75,6 +76,11 @@ func TestArtifactSweepConfirmationAndHashGates(t *testing.T) {
 			doc, _ := json.Marshal(map[string]string{"body": string(body)})
 			noHKCLI(t, f)
 			reopened := false
+			// The handler runs on the HTTP server goroutine, where t.Fatal is not
+			// allowed: it records a write failure here and the test asserts on it
+			// after artifactSweep returns.
+			var mu sync.Mutex
+			var mutateErr error
 			useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
 				switch {
 				case r.Route() == "GET /v1/tasks/42":
@@ -92,7 +98,10 @@ func TestArtifactSweepConfirmationAndHashGates(t *testing.T) {
 					}
 					if tt.mutate {
 						if e := os.WriteFile(path, []byte("changed"), 0600); e != nil {
-							t.Fatal(e)
+							mu.Lock()
+							mutateErr = e
+							mu.Unlock()
+							return http.StatusInternalServerError, `{"error":"write_failed"}`, true
 						}
 					}
 				}
@@ -104,6 +113,12 @@ func TestArtifactSweepConfirmationAndHashGates(t *testing.T) {
 				args = append(args, "--apply")
 			}
 			e = a.artifactSweep(context.Background(), args)
+			mu.Lock()
+			gotMutateErr := mutateErr
+			mu.Unlock()
+			if gotMutateErr != nil {
+				t.Fatalf("write the changed artifact during the sweep: %v", gotMutateErr)
+			}
 			if code(e) != tt.wantCode {
 				t.Fatalf("%v", e)
 			}
