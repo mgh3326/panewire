@@ -172,6 +172,18 @@ func (h *HubServer) endWaitingSpawn(ctx context.Context, task hubSpawnTask, stat
 // beginWaitingSpawnCheck records this check's time and reports whether it may
 // run; the rate limit keeps a failing hk from being asked every coordinator
 // tick.
+// waitingSpawnPollAt is when the next start-condition check may run: the poll
+// after the last one, or now when none has run (hk 5302 gates the coordinator
+// on it while rows wait).
+func (h *HubServer) waitingSpawnPollAt(now time.Time) time.Time {
+	h.waitingMu.Lock()
+	defer h.waitingMu.Unlock()
+	if h.waitingCheckedAt.IsZero() {
+		return now
+	}
+	return h.waitingCheckedAt.Add(waitingSpawnPoll)
+}
+
 func (h *HubServer) beginWaitingSpawnCheck(now time.Time) bool {
 	h.waitingMu.Lock()
 	defer h.waitingMu.Unlock()
@@ -285,7 +297,7 @@ func (s *laneInboxStore) giveUpWaitingSpawn(parent context.Context, task hubSpaw
 	if err = s.releaseEndedSpawn(ctx, tx, task, "given_up", string(raw), now); err != nil {
 		return false, err
 	}
-	return true, tx.Commit()
+	return true, s.commitNoting(tx, spawnEndedReads...)
 }
 
 // endWaitingSpawn records a refused or cancelled start-condition outcome: the
@@ -313,7 +325,7 @@ func (s *laneInboxStore) endWaitingSpawn(parent context.Context, task hubSpawnTa
 	if err = s.releaseEndedSpawn(ctx, tx, task, status, string(raw), now); err != nil {
 		return false, err
 	}
-	return true, tx.Commit()
+	return true, s.commitNoting(tx, spawnEndedReads...)
 }
 
 // recordWaitingSpawnResult stores the last evaluation of a waiting row, so
@@ -342,5 +354,9 @@ func (s *laneInboxStore) returnToWaiting(parent context.Context, task hubSpawnTa
 		return false, err
 	}
 	n, _ := result.RowsAffected()
+	if n == 1 {
+		// A row back in waiting is the next start-condition check's work.
+		s.noteWork(readSpawnScan)
+	}
 	return n == 1, nil
 }

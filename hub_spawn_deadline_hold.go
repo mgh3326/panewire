@@ -80,7 +80,7 @@ func (s *laneInboxStore) noteUnresolvedSpawn(parent context.Context, task hubSpa
 	if err = queueSpawnNoticeRows(ctx, s, tx, task, spawnUnresolvedEventID(task), string(raw), now, true); err != nil {
 		return false, err
 	}
-	return true, tx.Commit()
+	return true, s.commitNoting(tx, readSpawnNotice)
 }
 
 // settleCompletedSpawn settles a bound deadline_exceeded request as succeeded

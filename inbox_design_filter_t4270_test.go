@@ -360,7 +360,7 @@ func TestHeldSpawnNoticeClaimLosesToReplay_t4270(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.flushSpawnNotifications(t.Context())
-	held := h.readSpawnNotifications(t.Context(), spawnNoticeHeld)
+	held, _ := h.readSpawnNotifications(t.Context(), spawnNoticeHeld)
 	if len(held) != 1 {
 		t.Fatalf("held rows=%d, want 1", len(held))
 	}

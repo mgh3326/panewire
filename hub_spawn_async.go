@@ -486,35 +486,94 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			rollbackLogged = time.Now()
 			h.logSpawnRollbackRows(ctx)
 		}
-		if h.drain.admit() {
-			h.loopTick(loopSpawnCoordinator)
-			// Start conditions are checked first so a row released in this
-			// tick is scheduled by the scan below rather than the next one.
-			h.checkWaitingSpawns(ctx)
-			// A request parked too long tells its owner once (hk 4662); the
-			// pass is rate-limited, so most ticks skip it.
-			h.checkParkedSpawnNotices(ctx)
-			h.spawnCoordinatorScan(ctx, schedule)
-		}
-		h.flushSpawnNotifications(ctx)
-		// Terminal spawn failures with --task owe their hk task one comment (hk
-		// 5137); the sweep posts each once and retries failures with backoff.
-		h.flushSpawnTaskFailNotices(ctx)
+		h.stepSpawnCoordinator(ctx, schedule)
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 			ticked = true
 		case <-h.spawnKick:
+			// The kick is a write announcing work for the queue (a submission, a
+			// wake, a finished dispatch): the scan reads on this wake.
+			h.inbox.store.readGate(readSpawnScan).touch()
+		case <-h.inbox.store.readGate(readSpawnScan).wake:
+		case <-h.inbox.store.readGate(readSpawnNotice).wake:
+		case <-h.inbox.store.readGate(readSpawnTaskFail).wake:
 		}
 	}
+}
+
+// stepSpawnCoordinator is one iteration of the coordinator's reads. Each read
+// touches the store only when a write kicked it, its earliest due time passed,
+// or the backstop lapsed (read_gate.go): an idle coordinator sends no query
+// between backstops (hk 5302).
+func (h *HubServer) stepSpawnCoordinator(ctx context.Context, schedule func(hubSpawnTask) bool) {
+	if h.drain.admit() {
+		h.loopTick(loopSpawnCoordinator)
+		h.gatedRead(readSpawnScan, "", func() readResult { return h.spawnScanPass(ctx, schedule) })
+	}
+	h.gatedRead(readSpawnNotice, "", func() readResult { return h.flushSpawnNotifications(ctx) })
+	// Terminal spawn failures with --task owe their hk task one comment (hk
+	// 5137); the sweep posts each once and retries failures with backoff.
+	h.gatedRead(readSpawnTaskFail, "", func() readResult { return h.flushSpawnTaskFailNotices(ctx) })
+}
+
+// spawnScanRetry is how soon the coordinator looks at the queue again while a
+// scan found work: the cadence it always had (hk 5302).
+const spawnScanRetry = 2 * time.Second
+
+// spawnScanPass is one gated pass over the queue: start conditions, the parked
+// notices, and the runnable page. A pass that found nothing to run asks the
+// queue when to look next, so an idle coordinator wakes for a parked request's
+// next_check_ms, a waiting row's poll or a stale probe, and for nothing else.
+func (h *HubServer) spawnScanPass(ctx context.Context, schedule func(hubSpawnTask) bool) readResult {
+	// Start conditions are checked first so a row released in this pass is
+	// scheduled by the scan below rather than the next one.
+	h.checkWaitingSpawns(ctx)
+	// A request parked too long tells its owner once (hk 4662); the sweep is
+	// rate-limited to spawnParkNoticePoll.
+	h.checkParkedSpawnNotices(ctx)
+	found, failed := h.spawnCoordinatorScan(ctx, schedule)
+	if failed {
+		return readResult{failed: true}
+	}
+	if found {
+		// Rows are in flight or waiting for a slot: read again at the old cadence.
+		return readResult{found: true, due: h.retryAt(spawnScanRetry)}
+	}
+	now := h.now().UTC()
+	wake, err := h.inbox.store.spawnQueueWake(ctx, now)
+	if err != nil {
+		h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:spawnQueueWake", err)
+		return readResult{failed: true}
+	}
+	h.loopClearSilent("hub_spawn_async.go:spawnQueueWake")
+	due := wake.next
+	for _, task := range wake.stale {
+		at := spawnStaleProbeAt(task, now)
+		if !at.After(now) {
+			// Due already (a row never probed has no last run): the probe
+			// interval grew since the scan, so read again at the usual cadence.
+			at = now.Add(spawnScanRetry)
+		}
+		due = earliestDue(due, at.UnixMilli())
+	}
+	if wake.waiting > 0 {
+		due = earliestDue(due, h.waitingSpawnPollAt(now).UnixMilli())
+	}
+	if wake.parked > 0 {
+		due = earliestDue(due, h.parkedNoticePollAt(now).UnixMilli())
+	}
+	return readResult{due: due}
 }
 
 // spawnCoordinatorScan pages the pending spawn rows and hands each new row to
 // schedule, recording made/done in the loop ledger. A store failure counts a
 // silent ledger error (one log line per streak) and keeps the pass's other
 // half: a failed page read still tries the ordinary pending read below.
-func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubSpawnTask) bool) {
+//
+// It reports whether it handed any row to schedule, and whether a read failed.
+func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubSpawnTask) bool) (found, failed bool) {
 	// Work claimed during a scan may move later in the ordering. Do not
 	// schedule the same row twice in one pass, even if it reappears.
 	seen := map[string]bool{}
@@ -536,6 +595,7 @@ func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubS
 				}
 			}
 		}
+		found = found || len(tasks) > 0
 		if len(tasks) < 32 {
 			break
 		}
@@ -549,7 +609,9 @@ func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubS
 	ordinary, err := h.inbox.store.pendingSpawns(ctx, now)
 	if err != nil {
 		h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:pendingSpawns", err)
+		scanFailed = true
 	} else {
+		found = found || len(ordinary) > 0
 		h.loopClearSilent("hub_spawn_async.go:pendingSpawns")
 		var oldest time.Time
 		for _, task := range ordinary {
@@ -567,6 +629,7 @@ func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubS
 			h.loopSetOldestPending(loopSpawnCoordinator, now.Sub(oldest))
 		}
 	}
+	return found, scanFailed
 }
 
 // handleQueuedBinding expires or unbinds an unsent row independently of the

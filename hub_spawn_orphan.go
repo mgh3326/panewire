@@ -59,8 +59,15 @@ func spawnPending(status string) bool {
 // next replay at now. The back-off lives in the row's last_run_ms, so it
 // survives a hub restart.
 func spawnStaleProbeDue(task hubSpawnTask, now time.Time) bool {
+	return !now.Before(spawnStaleProbeAt(task, now))
+}
+
+// spawnStaleProbeAt is when a deadline_exceeded row's next replay falls due,
+// by the back-off its age at now implies. The interval grows with the age, so
+// the coordinator's gate asks again when this time arrives (hk 5302).
+func spawnStaleProbeAt(task hubSpawnTask, now time.Time) time.Time {
 	every := min(max(now.Sub(task.Deadline)/4, spawnStaleProbeMin), spawnStaleProbeMax)
-	return !now.Before(task.LastRun.Add(every))
+	return task.LastRun.Add(every)
 }
 
 // reprobeStaleSpawn runs one back-off probe of a bound request that is past

@@ -505,33 +505,51 @@ func (h *HubServer) startConsultCoordinator(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(consultPollInterval)
 		defer ticker.Stop()
+		gate := h.inbox.store.readGate(readConsult)
 		for {
-			h.reconcileConsults(ctx)
+			h.stepConsults(ctx)
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+			case <-gate.wake:
 			}
 		}
 	}()
 }
 
-func (h *HubServer) reconcileConsults(ctx context.Context) {
+// stepConsults is one iteration of the consult loop: it reads the active
+// consults only when a consult write kicked the loop, the due time of the last
+// pass came, or the backstop lapsed. An idle loop sends no query (hk 5302;
+// read_gate.go).
+func (h *HubServer) stepConsults(ctx context.Context) {
+	h.gatedRead(readConsult, loopConsultCoordinator, func() readResult { return h.reconcileConsults(ctx) })
+}
+
+// reconcileConsults moves every active consult along and reports when to look
+// again: a consult that is not settled waits on a job record or a deadline no
+// store write announces, so the loop reads again after consultPollInterval for
+// as long as one is active, and not at all once none is.
+func (h *HubServer) reconcileConsults(ctx context.Context) readResult {
 	if h.inbox == nil {
-		return
+		return readResult{}
 	}
 	h.loopTick(loopConsultCoordinator)
 	active, err := h.inbox.store.activeConsults(ctx)
 	if err != nil {
 		h.loopNoteSilentError(loopConsultCoordinator, "hub_consults.go:activeConsults", err)
-		return
+		return readResult{failed: true}
 	}
 	h.loopClearSilent("hub_consults.go:activeConsults")
+	result := readResult{found: len(active) > 0}
+	if result.found {
+		result.due = h.retryAt(consultPollInterval)
+	}
 	var app *fleet.App
 	for _, c := range active {
 		h.loopNoteMade(loopConsultCoordinator, c.ID)
 		if ctx.Err() != nil {
-			return
+			return readResult{failed: true}
 		}
 		if c.State == consultAnswered {
 			// The answer is saved; only its one lane event may still be owed.
@@ -585,6 +603,7 @@ func (h *HubServer) reconcileConsults(ctx context.Context) {
 			h.consultJobFailed(ctx, c, firstNonEmptyString(task.Outcome.Reason, task.Status))
 		}
 	}
+	return result
 }
 
 // settleConsult records the answer when the job has completed and its report

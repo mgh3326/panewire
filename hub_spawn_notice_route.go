@@ -61,26 +61,47 @@ const (
 	spawnNoticeHold
 )
 
-func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
+// spawnNoticeRetry is how soon the flush reads the outbox again while a
+// notification is unsettled: the cadence it always had (hk 5302).
+const spawnNoticeRetry = 2 * time.Second
+
+// flushSpawnNotifications routes the outbox and reports what the coordinator's
+// gate needs: a row it read is looked at again after spawnNoticeRetry (it may
+// still be owed, and an empty read settles it), and a held row is looked at
+// when its hold ends. An outbox that reads empty leaves no due time: the next
+// notice comes with a write that kicks the flush.
+func (h *HubServer) flushSpawnNotifications(ctx context.Context) readResult {
 	if h.inbox == nil || h.handoffkeep == nil {
-		return
+		return readResult{}
 	}
-	for _, n := range h.readSpawnNotifications(ctx, spawnNoticePending) {
+	pending, err := h.readSpawnNotifications(ctx, spawnNoticePending)
+	if err != nil {
+		return readResult{failed: true}
+	}
+	result := readResult{found: len(pending) > 0}
+	for _, n := range pending {
 		if h.correctionAwaitsUnresolved(ctx, n) {
 			continue
 		}
 		h.routeSpawnNotification(ctx, n)
 	}
-	h.flushHeldSpawnNotifications(ctx)
+	if len(pending) > 0 {
+		result.due = h.retryAt(spawnNoticeRetry)
+	}
+	held := h.flushHeldSpawnNotifications(ctx)
+	result.found = result.found || held.found
+	result.failed = result.failed || held.failed
+	result.due = earliestDue(result.due, held.due)
+	return result
 }
 
-func (h *HubServer) readSpawnNotifications(ctx context.Context, state int) []spawnNotification {
+func (h *HubServer) readSpawnNotifications(ctx context.Context, state int) ([]spawnNotification, error) {
 	store := h.inbox.store
 	op, done := store.op(ctx)
 	defer done()
 	rows, err := store.db.QueryContext(op, store.q(`SELECT n.event_id,n.request_id,n.job,n.owner,n.result,n.created_ms FROM spawn_notice_outbox o JOIN spawn_notifications n ON n.event_id=o.event_id WHERE n.delivered=? ORDER BY n.created_ms,n.event_id LIMIT 32`), state)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var batch []spawnNotification
@@ -91,7 +112,7 @@ func (h *HubServer) readSpawnNotifications(ctx context.Context, state int) []spa
 		}
 		batch = append(batch, n)
 	}
-	return batch
+	return batch, rows.Err()
 }
 
 func (h *HubServer) setSpawnNotificationState(ctx context.Context, id string, from, to int) {
@@ -206,29 +227,49 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 // request's current attempt is ever published at expiry. Rows are ordered by
 // creation and share one hold, so the first row still inside it ends the pass.
 // Rows a crash left publishing are published again.
-func (h *HubServer) flushHeldSpawnNotifications(ctx context.Context) {
+func (h *HubServer) flushHeldSpawnNotifications(ctx context.Context) readResult {
 	now := h.now()
-	for _, n := range h.readSpawnNotifications(ctx, spawnNoticePublishing) {
+	var result readResult
+	publishing, err := h.readSpawnNotifications(ctx, spawnNoticePublishing)
+	if err != nil {
+		return readResult{failed: true}
+	}
+	for _, n := range publishing {
 		h.publishHeldSpawnNotification(ctx, n)
 	}
-	for _, n := range h.readSpawnNotifications(ctx, spawnNoticeHeld) {
+	if len(publishing) > 0 {
+		// A publish that failed returns the row to held: read it again.
+		result.found, result.due = true, h.retryAt(spawnNoticeRetry)
+	}
+	held, err := h.readSpawnNotifications(ctx, spawnNoticeHeld)
+	if err != nil {
+		return readResult{failed: true}
+	}
+	for _, n := range held {
 		task, err := h.inbox.store.spawnTask(ctx, n.request)
 		if err != nil {
+			result.due = earliestDue(result.due, h.retryAt(spawnNoticeRetry))
 			continue
 		}
 		attempt := spawnNoticeAttempt(n.id)
 		if task.Attempt > attempt || task.Status != "retryable" {
 			h.logger.Info("reviewer spawn failure superseded by a later outcome", "request", n.request, "job", n.job, "event_id", n.id, "attempt", task.Attempt, "status", task.Status)
 			h.setSpawnNotificationState(ctx, n.id, spawnNoticeHeld, spawnNoticeDone)
+			result.found = true
 			continue
 		}
-		if now.Before(time.UnixMilli(n.at).Add(h.quietTimings.spawnFailureHold)) {
-			return
+		if holdEnds := time.UnixMilli(n.at).Add(h.quietTimings.spawnFailureHold); now.Before(holdEnds) {
+			// The rows are oldest first, so no later row is due sooner.
+			result.due = earliestDue(result.due, holdEnds.UnixMilli())
+			return result
 		}
 		if h.claimHeldSpawnNotification(ctx, n, attempt) {
 			h.publishHeldSpawnNotification(ctx, n)
 		}
+		result.found = true
+		result.due = earliestDue(result.due, h.retryAt(spawnNoticeRetry))
 	}
+	return result
 }
 
 // claimHeldSpawnNotification moves a held row to publishing only while its

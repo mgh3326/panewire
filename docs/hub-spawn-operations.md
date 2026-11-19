@@ -272,7 +272,9 @@ account and no placement count.
 finished quota refresh note the reasons in the table. On its next tick the
 coordinator makes at most `spawn_wake_batch` (8) parked rows with a noted
 reason due now, earliest next check first; when the batch was full the
-reasons stay noted and the next batch waits for the next timer tick (2 s),
+reasons stay noted and the next batch waits for the next timer tick (2 s; the
+tick is in memory, the batch's rows are read because the woken rows kick the
+scan, hk 5302),
 however often the coordinator is kicked meanwhile. An event noted for a
 park's reason while its placement ran is noted again once the park lands, so
 a drained wake is never lost; `launch_backoff` is never event-woken. A
@@ -1450,6 +1452,44 @@ and credentials are excluded. Export failure never authorizes a retry or changes
 the committed business outcome. `TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized`
 uses a fake transport and also checks that ordinary HTTP traffic is untraced.
 
+## Read gates (hk 5302)
+
+The coordinator and two other loops used to read their store on every tick even
+with nothing owed: the coordinator every 2 s, the placement-record probe every
+2 s, the consult loop every 5 s. A `readGate` (`read_gate.go`; design hk:doc
+`design/2026-11-18/pw-4898-hub-store-mysql` §3) lets each loop read its own
+queue or outbox only when one of these holds:
+
+- **start:** the gate is unprimed, so the first pass after a hub start (or
+  after a failed pass) reads the store and rebuilds the due time from the
+  queue. Work a previous hub left is found by this pass, not by a kick.
+- **kick:** a write that adds work for the loop called `noteWork` after its
+  commit, or the coordinator's `spawnKick` fired. The write also wakes the
+  loop's select, so the read does not wait for a tick.
+- **due:** the earliest time the last pass left behind has passed.
+- **backstop (60 s, `readBackstop`):** a write nobody taught the gate about is
+  delayed at most this long. When a backstop pass finds work, the hub logs
+  `hub read backstop found work that no kick announced` with `loop=<name>`;
+  that line is the evidence that a write path misses its kick.
+
+The loops still tick in memory every 2 s or 5 s (the liveness ledger, drain
+marks, the wake of parked rows): only the store read is gated. `--spawn-rollback-drain`
+still counts blocking rows once a minute.
+
+| Gate | Loop | Reads (when open) | Kicked by (after commit) | Due time it keeps |
+|---|---|---|---|---|
+| `spawn_scan` | coordinator scan | start-condition check, parked notices, `pendingSpawnPage`, `pendingSpawns`; then, if nothing was runnable, one read of the queue | `claimSpawn`, `activateStagedSpawn`, `resumeCleanedSpawn`, `returnToWaiting`, `wakeParkedSpawns` (rows woken), every `spawnKick` | 2 s while a row is runnable or in flight; else the earliest parked `next_check_ms`, the next stale probe, the next start-condition poll while a row waits, the next parked-notice sweep while a row is parked |
+| `spawn_notice` | `flushSpawnNotifications` | the pending, publishing and held rows of `spawn_notice_outbox` | `completeSpawn`, the waiting give-up and end, `noteUnresolvedSpawn`, `saveSpawnNotice`, `resumeCleanedSpawn` (a replay supersedes a held notice) | 2 s while a row was read (it may be owed; an empty read settles it); a held row's hold end |
+| `spawn_task_fail` | `flushSpawnTaskFailNotices` | `task_fail_notice_outbox` rows due, then the earliest `retry_ms` | `completeSpawn`, the waiting give-up and end | the earliest row's `retry_ms`; 2 s while a due row stays unposted; none when the outbox is empty |
+| `placement_record` | `flushPlacementRecords` | the outbox head, then the snapshots | `saveSpawnPlacementSnapshot`, the deferred trace save, every write that ends an operation, `placementKick` | 2 s while an over attempt's snapshot is unsealed or a deferred trace save waits; none for running attempts |
+| `consult` | `reconcileConsults` | `activeConsults` | `insertConsult`, `updateConsult` | 5 s while a consult is active (a running one waits on a job record no write announces); none when none is |
+
+A new writer that gives a loop work calls `noteWork` after its commit (or ends
+its transaction with `commitNoting`), never before: a loop that took the mark
+earlier would read the old state and spend it. `TestReadGateWritersNoteTheirLoops`
+lists the writers; `TestReadGatesIdle` holds an idle hub to zero store calls
+between backstops.
+
 ## Spawn queue and the terminal transitions (hk 5299)
 
 `spawn_queue(request_id, next_check_ms)` holds one row per non-terminal
@@ -1495,8 +1535,8 @@ design hk:doc `design/2026-11-18/pw-4898-hub-store-mysql` §2-§3).
 | `spawn_notice_outbox(event_id)` | each `spawn_notifications` row whose `delivered` is not 1 (not routed, held, or being published) | in the transaction that writes the notification | in the transaction that sets `delivered=1` |
 
 - The recorder lists the outbox joined to the snapshot and the operation,
-  oldest operation first, and the 2 s probe reads one outbox row: an idle hub
-  reads an empty table. The notice router pages the outbox and joins the
+  oldest operation first, and the probe reads one outbox row when a write
+  kicked it or a due time passed (hk 5302): an idle hub reads nothing. The notice router pages the outbox and joins the
   notification for its state.
 - `spawn_placement_snapshots` and `spawn_notifications` keep their rows and
   their `recorded`, `delivered` and `telemetry_recorded` columns. The telemetry

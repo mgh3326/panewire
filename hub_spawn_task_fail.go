@@ -239,22 +239,61 @@ func spawnTaskFailNoticePermanent(status int) bool {
 // are filtered by the query before LIMIT, so backed-off rows never monopolize
 // the page and starve newer failures, and an hk outage cannot hold the
 // coordinator loop past one bounded sweep.
-func (h *HubServer) flushSpawnTaskFailNotices(ctx context.Context) {
+//
+// It reports what the coordinator's gate needs (hk 5302): the sweep is next due
+// when the earliest outbox row's retry delay ends, or after spawnTaskFailRetry
+// while a row is due and still unposted, and not at all while the outbox is
+// empty: the next failure comes with a write that kicks the sweep.
+func (h *HubServer) flushSpawnTaskFailNotices(ctx context.Context) readResult {
 	if h.inbox == nil || h.handoffkeep == nil {
-		return
+		return readResult{}
 	}
 	ids, err := h.inbox.store.pendingSpawnTaskFailNoticeIDs(ctx, h.now().UTC(), spawnTaskFailNoticeLimit)
-	if err != nil || len(ids) == 0 {
-		return
+	if err != nil {
+		return readResult{failed: true}
 	}
-	sweepCtx, cancel := context.WithTimeout(ctx, spawnTaskFailSweepBudget)
-	defer cancel()
-	for _, id := range ids {
-		if sweepCtx.Err() != nil {
-			return
+	if len(ids) > 0 {
+		sweepCtx, cancel := context.WithTimeout(ctx, spawnTaskFailSweepBudget)
+		for _, id := range ids {
+			if sweepCtx.Err() != nil {
+				break
+			}
+			h.postSpawnTaskFailNotice(sweepCtx, id)
 		}
-		h.postSpawnTaskFailNotice(sweepCtx, id)
+		cancel()
 	}
+	// The earliest row left, read after the sweep so a delay it just recorded
+	// counts.
+	next, err := h.inbox.store.nextSpawnTaskFailNotice(ctx)
+	if err != nil {
+		return readResult{failed: true}
+	}
+	now := h.now().UTC()
+	if next > 0 && next <= now.UnixMilli() {
+		// Still owed and due: a page limit, a spent budget or a busy request.
+		next = h.retryAt(spawnTaskFailRetry)
+	}
+	return readResult{found: len(ids) > 0, due: next}
+}
+
+// spawnTaskFailRetry is how soon the sweep looks again while an outbox row is
+// due and was not posted: the cadence it always had (hk 5302).
+const spawnTaskFailRetry = 2 * time.Second
+
+// nextSpawnTaskFailNotice is the earliest retry time (unix ms) of an outbox
+// row, or 0 when the outbox is empty. The outbox is indexed by it.
+func (s *laneInboxStore) nextSpawnTaskFailNotice(parent context.Context) (int64, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var next sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT min(retry_ms) FROM task_fail_notice_outbox`).Scan(&next); err != nil {
+		return 0, err
+	}
+	if !next.Valid {
+		return 0, nil
+	}
+	// A row due since 0 is due now: the gate's "none" is 0.
+	return max(next.Int64, 1), nil
 }
 
 // spawnTaskFailDelay backs a row off after hk did not take its comment. The

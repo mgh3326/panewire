@@ -338,6 +338,9 @@ func (s *laneInboxStore) wakeParkedSpawns(parent context.Context, reasons []stri
 			return 0, err
 		}
 	}
+	if n > 0 {
+		return int(n), s.commitNoting(tx, readSpawnScan)
+	}
 	return int(n), tx.Commit()
 }
 

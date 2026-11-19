@@ -122,6 +122,8 @@ func (s *laneInboxStore) insertConsult(parent context.Context, c hubConsult) (hu
 	}
 	n, _ := result.RowsAffected()
 	if n == 1 {
+		// A new consult is the consult loop's work (hk 5302).
+		s.noteWork(readConsult)
 		return c, true, nil
 	}
 	existing, err := s.consultByKey(parent, c.IdemKey)
@@ -223,7 +225,13 @@ func (s *laneInboxStore) updateConsult(parent context.Context, c hubConsult, gua
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	n, err := result.RowsAffected()
+	if n > 0 {
+		// A state change (queued, running, answered, a respawn intent, a
+		// notified mark) is what the consult loop acts on.
+		s.noteWork(readConsult)
+	}
+	return n, err
 }
 
 // consultUpdatedMillis is the row's last write; a row written before the

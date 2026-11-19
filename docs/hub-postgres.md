@@ -72,6 +72,16 @@ way.
   full scans a second of both batch tables; on live that was 441 scans of each
   in 40 s, 93,492 rows of `lane_inbox_batch_quarantine` and 281,358 of
   `lane_inbox_batches`.
+- The coordinator, the placement-record probe and the consult loop read only
+  on a kick or a due time (hk 5302); see "Read gates" in
+  `hub-spawn-operations.md`. Idle, each sent a transaction a tick: the
+  coordinator's runnable page, stale probe, notice flush (three reads) and
+  task-comment sweep every 2 s (its start-condition check and parked-notice
+  sweep once a minute), the probe's outbox read every 2 s, and the consult
+  scan every 5 s. They now
+  send nothing between a 60 s backstop. The polls that cannot be replaced by a
+  write mark (a start-condition check asks hk, a running consult waits on a job
+  record) keep their cadence only while such a row exists.
 - The same gating covers batch building (hk 5301). `makeHeldBatches` and
   `makeBatchesDue` each opened a transaction and scanned the hold, digest and
   escalation sets of `lane_inbox` on every 100 ms tick, so they now run only

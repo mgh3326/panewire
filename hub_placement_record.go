@@ -61,7 +61,7 @@ func (s *laneInboxStore) saveSpawnPlacementSnapshot(parent context.Context, requ
 	if err := s.enqueuePlacementRecord(ctx, tx, requestID, attempt); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitNoting(tx, readPlacementRecord)
 }
 
 // spawnPlacementSnapshot reads the persisted placement trace of one attempt,
@@ -441,24 +441,38 @@ func (h *HubServer) wakePlacementRecords() bool {
 }
 
 func (h *HubServer) runPlacementRecords(parent context.Context) {
+	if h.inbox == nil {
+		return
+	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	stop := context.AfterFunc(h.closeCtx, cancel)
 	defer stop()
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
+	gate := h.inbox.store.readGate(readPlacementRecord)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		h.flushPlacementRecords(ctx)
+		h.stepPlacementRecords(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		case <-h.placementKick:
+			// An attempt ended or a record is owed: this wake reads.
+			gate.touch()
+		case <-gate.wake:
 		}
 	}
+}
+
+// stepPlacementRecords is one iteration of the probe: it reads the outbox only
+// when a write kicked the probe, its due time passed or the backstop lapsed,
+// so an idle probe sends no query (hk 5302; read_gate.go).
+func (h *HubServer) stepPlacementRecords(ctx context.Context) {
+	h.gatedRead(readPlacementRecord, loopPlacementRecords, func() readResult { return h.flushPlacementRecords(ctx) })
 }
 
 // deliverPlacementRecord builds the attempt's hk placement record from its
@@ -731,7 +745,7 @@ func (s *laneInboxStore) saveDeferredPlacementSnapshot(parent context.Context, d
 			return false, nil, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitNoting(tx, readPlacementRecord); err != nil {
 		return false, nil, err
 	}
 	if written != 0 {
@@ -1042,42 +1056,50 @@ func (h *HubServer) pendingPlacementRecords(ctx context.Context) bool {
 // flushPlacementRecords retries records still spooled from before a restart.
 // Without a pending snapshot there is nothing the outbox owes, so no delivery
 // App is built.
-func (h *HubServer) flushPlacementRecords(ctx context.Context) {
+//
+// It reports what the probe's gate needs (hk 5302): a snapshot whose attempt is
+// over is looked at again after placementRecordRetry until its record is
+// sealed, a deferred trace save keeps the probe alive the same way, and an
+// outbox that holds only running attempts needs no poll: the write that ends
+// an attempt kicks the probe.
+func (h *HubServer) flushPlacementRecords(ctx context.Context) readResult {
 	if h.inbox == nil {
-		return
+		return readResult{}
 	}
 	h.loopTick(loopPlacementRecords)
 	if !h.pendingPlacementRecords(ctx) && !h.hasDeferredTraceSaves() {
-		return
+		return readResult{}
 	}
 	// Deferred saves retry first: a landed row turns an orphaned spooled
 	// record back into a pending one the reconciliation below can seal.
 	h.retryDeferredTraceSaves()
 	if !h.pendingPlacementRecords(ctx) {
-		return
+		return h.placementRecordIdle()
 	}
 	pending, err := h.inbox.store.pendingPlacementSnapshots(h.closeCtx)
 	if err != nil {
 		h.loopNoteSilentError(loopPlacementRecords, "hub_placement_record.go:pendingPlacementSnapshots", err)
 		h.logger.Warn("placement snapshots could not be listed; records stay pending", "error", err)
-		return
+		return readResult{failed: true}
 	}
 	h.loopClearSilent("hub_placement_record.go:pendingPlacementSnapshots")
 	for _, row := range pending {
 		h.loopNoteMade(loopPlacementRecords, row.RequestID+"/"+strconv.Itoa(row.Attempt))
 	}
 	if len(pending) == 0 {
-		return
+		return h.placementRecordIdle()
 	}
+	result := h.placementRecordIdle()
 	// Reconcile each attempt separately, using the delivery settings saved
 	// with that attempt even when several share the same spool directory.
 	for _, row := range pending {
 		if ctx.Err() != nil {
-			return
+			return readResult{failed: true}
 		}
 		if !row.attemptOver() {
 			continue
 		}
+		result.found, result.due = true, h.retryAt(placementRecordRetry)
 		app, err := h.placementRecordApp(row.Delivery)
 		if err != nil {
 			h.notePlacementStall(row.RequestID, row.Job, row.Attempt, "delivery_app_unavailable")
@@ -1128,4 +1150,18 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) {
 		release()
 		cancel()
 	}
+	return result
+}
+
+// placementRecordRetry is how soon the probe looks at an over attempt's
+// snapshot again: the cadence it always had (hk 5302).
+const placementRecordRetry = 2 * time.Second
+
+// placementRecordIdle is the probe's result when no snapshot is owed a pass:
+// nothing to look at, unless a deferred trace save is still waiting to land.
+func (h *HubServer) placementRecordIdle() readResult {
+	if h.hasDeferredTraceSaves() {
+		return readResult{due: h.retryAt(placementRecordRetry)}
+	}
+	return readResult{}
 }

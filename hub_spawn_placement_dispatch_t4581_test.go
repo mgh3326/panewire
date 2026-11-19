@@ -202,7 +202,8 @@ func TestLegacyPlacementReconciliation_t4581(t *testing.T) {
 				t.Fatal("conflicting legacy trace was lost")
 			}
 			var noticeText string
-			for _, n := range hub.readSpawnNotifications(t.Context(), spawnNoticePending) {
+			pendingNotices, _ := hub.readSpawnNotifications(t.Context(), spawnNoticePending)
+			for _, n := range pendingNotices {
 				if strings.Contains(n.raw, "legacy_placement_record_conflict") {
 					var result hubSpawnOutcome
 					_ = json.Unmarshal([]byte(n.raw), &result)
