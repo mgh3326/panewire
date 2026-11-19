@@ -165,8 +165,11 @@ because no text has been sent.
 
 omp has a captured composer (hk 5413, `testdata/relay_omp/README.md`): the row
 that opens with `╰─` and holds the typed text after it, plus the rows below it
-when the text wraps. Those rows are indented by three spaces; any other row below
-the glyph row leaves the composer unlocated. The glyph row must be inside the
+when the text wraps. Those rows are indented by three spaces, and blank rows
+between them are allowed; any other row below the glyph row leaves the composer
+unlocated. The right-aligned placeholder (`⇧⇥ to change thinking effort`) is
+read as an empty composer only when it is the whole of the glyph row with nothing
+below; a draft that contains that text is composer text. The glyph row must be inside the
 visible read, so a composer taller than that read is unlocated too and presend
 refuses it (`presend:composer_unlocated`), rather than typing into a pane it
 cannot see. Its rules: a pending paste in that row is composer residue, and

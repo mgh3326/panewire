@@ -1167,15 +1167,16 @@ func relayComposer(harness, screen string) (string, bool) {
 			return "", false
 		}
 		// The composer is the glyph row and its wrap continuations below it. The
-		// hint is drawn only on the glyph row, and only while the composer is
-		// empty, so it is cut from that row alone.
-		first := lines[row]
-		if adapter.composerHint != "" {
-			if cut := strings.Index(first, adapter.composerHint); cut >= 0 {
-				first = first[:cut]
-			}
+		// hint is a placeholder only when it is the whole of an empty composer:
+		// the glyph row holds exactly the glyph and the hint, and nothing is
+		// below it. A draft that starts with or contains the same text is
+		// composer text and is read whole (mergewake 734).
+		first, rest := lines[row], lines[row+1:]
+		if adapter.composerHint != "" && strings.TrimSpace(strings.Join(rest, "")) == "" &&
+			compactWhitespace(first) == compactWhitespace(adapter.composerGlyph+adapter.composerHint) {
+			return "", true
 		}
-		text := strings.Join(append([]string{first}, lines[row+1:]...), "\n")
+		text := strings.Join(append([]string{first}, rest...), "\n")
 		return strings.TrimPrefix(compactWhitespace(text), adapter.composerGlyph), true
 	}
 	if adapter.composerEdge == nil {

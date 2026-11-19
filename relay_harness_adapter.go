@@ -121,8 +121,8 @@ const ompComposerHint = "⇧⇥ to change thinking effort"
 // relayOmpComposerRow locates omp's composer and returns the index of its first
 // row. A composer wider than the pane wraps onto continuation rows, each indented
 // by the three-space wrap indent (testdata/relay_omp, long-*), so the composer is
-// the row that opens with ompComposerGlyph plus every row below it, which must
-// all be indented or blank. A screen whose rows below the glyph are not wrap
+// the row that opens with ompComposerGlyph plus every row below it, each of which
+// is indented or blank. A screen whose rows below the glyph are not wrap
 // continuations, or that has no glyph row, has no locatable composer, so nothing
 // in it can be read as the composer's text. A composer taller than the visible
 // read has its glyph row out of the read, and is unlocated the same way.
@@ -136,7 +136,7 @@ func relayOmpComposerRow(lines []string) (int, bool) {
 			continue
 		}
 		for _, below := range lines[i+1 : end] {
-			if !strings.HasPrefix(below, "   ") {
+			if strings.TrimSpace(below) != "" && !strings.HasPrefix(below, "   ") {
 				return 0, false
 			}
 		}
