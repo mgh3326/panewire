@@ -35,10 +35,17 @@ func seedJob(t *testing.T, a *App, id, role string) {
 // as a live local spawn leaves it.
 func seedLedger(t *testing.T, a *App, id string) {
 	t.Helper()
+	seedLedgerQuota(t, a, id, 1)
+}
+
+// seedLedgerQuota claims id and records its quota row the way a spawn under
+// grant epoch does; epoch 0 is a row an earlier binary wrote, with none.
+func seedLedgerQuota(t *testing.T, a *App, id string, epoch uint64) {
+	t.Helper()
 	if _, e := a.ledger().Claim(context.Background(), arbiter.Claim{Job: id, Lane: "owner", T: "T1", AgentLabel: "agent-a"}); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := a.ledger().RecordQuotaPool(context.Background(), arbiter.QuotaRun{Job: id, Profile: "cmd-dsflash41", Gate: arbiter.Gate{Pool: "example"}}); e != nil {
+	if _, e := a.ledger().RecordQuotaPool(context.Background(), arbiter.QuotaRun{Job: id, Profile: "cmd-dsflash41", Gate: arbiter.Gate{Pool: "example"}, Epoch: epoch}); e != nil {
 		t.Fatal(e)
 	}
 }

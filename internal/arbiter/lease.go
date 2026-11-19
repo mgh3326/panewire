@@ -256,10 +256,13 @@ func ParseGate(profile, text, expectedPool string) (Gate, error) {
 	return g, nil
 }
 
-// QuotaRun is the quota_pool record of one run.
+// QuotaRun is the quota_pool record of one run. Epoch is the hub grant epoch
+// of the attempt acquiring it (hk 5294); zero records no epoch, as a row an
+// earlier binary wrote has none.
 type QuotaRun struct {
 	Job, Profile, LaunchProfile string
 	Gate                        Gate
+	Epoch                       uint64
 }
 
 // QuotaResult is the recorded run.
@@ -270,7 +273,9 @@ type QuotaResult struct {
 
 // RecordQuotaPool writes the quota_pool execution record (no TTL, no fencing)
 // for a registered job and marks it leased. A second record for the same
-// (job, pool) is ExitDuplicate.
+// (job, pool) is ExitDuplicate, except that an attempt with a greater epoch
+// takes over the row of a lower one: the hub revoked that attempt, and its
+// late release will find the row no longer its own and leave it be.
 func (s *Store) RecordQuotaPool(ctx context.Context, q QuotaRun) (QuotaResult, error) {
 	var out QuotaResult
 	if q.Gate.Pool == "" || q.Profile == "" {
@@ -287,6 +292,19 @@ func (s *Store) RecordQuotaPool(ctx context.Context, q QuotaRun) (QuotaResult, e
 		if err := requireJob(c, q.Job); err != nil {
 			return err
 		}
+		var superseded uint64
+		if q.Epoch > 0 {
+			held, err := quotaEpoch(c, q.Job, q.Gate.Pool)
+			if err != nil {
+				return err
+			}
+			if held > 0 && held < q.Epoch {
+				if _, err = c.exec("DELETE FROM quota_pool_records WHERE job_id = ? AND pool = ?", q.Job, q.Gate.Pool); err != nil {
+					return sqlErr(err)
+				}
+				superseded = held
+			}
+		}
 		if _, err := c.exec("INSERT INTO quota_pool_records (job_id, pool, profile, started_at) VALUES (?, ?, ?, ?)", q.Job, q.Gate.Pool, q.Profile, iso(moment)); err != nil {
 			if isUnique(err) {
 				d := errf(ExitDuplicate, "quota_pool record duplicate: job=%s pool=%s", q.Job, q.Gate.Pool)
@@ -295,12 +313,28 @@ func (s *Store) RecordQuotaPool(ctx context.Context, q QuotaRun) (QuotaResult, e
 			}
 			return sqlErr(err)
 		}
+		// A side row left by a record this one replaced or an older binary
+		// deleted is overwritten; with no epoch it must not outlive its row.
+		if q.Epoch > 0 {
+			_, err := c.exec("INSERT OR REPLACE INTO quota_pool_epochs (job_id, pool, epoch, started_at) VALUES (?, ?, ?, ?)", q.Job, q.Gate.Pool, q.Epoch, iso(moment))
+			if err != nil {
+				return sqlErr(err)
+			}
+		} else if err := dropQuotaEpoch(c, q.Job, q.Gate.Pool); err != nil {
+			return err
+		}
 		if _, err := c.exec("UPDATE jobs SET state = 'leased', updated_at = ? WHERE job_id = ?", iso(moment), q.Job); err != nil {
 			return sqlErr(err)
 		}
 		p := map[string]any{"job_id": q.Job, "pool": q.Gate.Pool, "profile": q.Profile, "started_at": iso(moment)}
 		if q.LaunchProfile != "" {
 			p["launch_profile"] = q.LaunchProfile
+		}
+		if q.Epoch > 0 {
+			p["epoch"] = q.Epoch
+		}
+		if superseded > 0 {
+			p["superseded_epoch"] = superseded
 		}
 		for k, v := range q.Gate.Audit {
 			p[k] = v
@@ -310,6 +344,25 @@ func (s *Store) RecordQuotaPool(ctx context.Context, q QuotaRun) (QuotaResult, e
 		return err
 	})
 	return out, e
+}
+
+// quotaEpoch is the epoch that acquired the (job, pool) row, or 0 when the
+// row has none: it predates the side table, an older binary recorded it, or
+// there is no row.
+func quotaEpoch(c *conn, job, pool string) (uint64, error) {
+	var epoch int64
+	err := c.row(`SELECT e.epoch FROM quota_pool_epochs AS e
+		JOIN quota_pool_records AS q ON q.job_id = e.job_id AND q.pool = e.pool AND q.started_at = e.started_at
+		WHERE e.job_id = ? AND e.pool = ?`, job, pool).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && epoch < 0 {
+		return 0, nil
+	}
+	return uint64(epoch), sqlErr(err)
+}
+
+func dropQuotaEpoch(c *conn, job, pool string) error {
+	_, err := c.exec("DELETE FROM quota_pool_epochs WHERE job_id = ? AND pool = ?", job, pool)
+	return sqlErr(err)
 }
 
 // QuotaPools lists the pools a job holds a quota_pool record for.
@@ -329,22 +382,60 @@ func (s *Store) QuotaPools(ctx context.Context, job string) ([]string, error) {
 	return pools, nil
 }
 
-// ReleaseQuotaPool deletes a job's quota_pool record and marks the job
-// released. A missing record is ExitFencing.
-func (s *Store) ReleaseQuotaPool(ctx context.Context, job, pool string, force bool) error {
-	return s.ReleaseQuotaPoolIf(ctx, job, pool, force, nil)
-}
-
-// ReleaseQuotaPoolIf checks guard under the job's events lock before the
-// release event is published. A failed guard rolls back the quota deletion.
-func (s *Store) ReleaseQuotaPoolIf(ctx context.Context, job, pool string, force bool, guard func() error) error {
+// QuotaEpoch is the epoch that acquired the (job, pool) row; zero when the row
+// has none, or there is no row.
+func (s *Store) QuotaEpoch(ctx context.Context, job, pool string) (uint64, error) {
+	if _, e := os.Stat(s.DB); errors.Is(e, fs.ErrNotExist) {
+		return 0, nil
+	}
 	c, e := s.rw(ctx, false)
 	if e != nil {
-		return e
+		return 0, e
+	}
+	defer c.Close()
+	return quotaEpoch(c, job, pool)
+}
+
+// ReleaseQuotaPool deletes a job's quota_pool record whatever attempt
+// acquired it, and marks the job released if it holds nothing else. A missing
+// record is ExitFencing. It is for the operator override and for a caller that
+// just recorded the row itself; an attempt ending releases with
+// ReleaseQuotaPoolEpoch.
+func (s *Store) ReleaseQuotaPool(ctx context.Context, job, pool string, force bool) error {
+	_, err := s.release(ctx, job, pool, force, func(uint64) bool { return true })
+	return err
+}
+
+// ReleaseQuotaPoolEpoch releases the (job, pool) row an attempt acquired, and
+// only that: a row acquired at another epoch belongs to another attempt and is
+// left alone (released is false), however the current grant compares.
+//
+// A row with no epoch predates this record and cannot be attributed to an
+// attempt. It is released only when terminal, asked only for such a row, says
+// the job itself has ended here, never by matching a grant. terminal runs
+// under the ledger's write transaction, so it must not call back into the
+// Store. A missing row is ExitFencing.
+func (s *Store) ReleaseQuotaPoolEpoch(ctx context.Context, job, pool string, epoch uint64, terminal func() bool) (released bool, err error) {
+	if epoch == 0 {
+		return false, errf(ExitUsage, "a quota_pool release by epoch needs the attempt's epoch")
+	}
+	return s.release(ctx, job, pool, false, func(row uint64) bool {
+		if row == 0 {
+			return terminal != nil && terminal()
+		}
+		return row == epoch
+	})
+}
+
+func (s *Store) release(ctx context.Context, job, pool string, force bool, mine func(rowEpoch uint64) bool) (bool, error) {
+	c, e := s.rw(ctx, false)
+	if e != nil {
+		return false, e
 	}
 	defer c.Close()
 	moment := s.now()
-	return c.write(func() error {
+	released := false
+	e = c.write(func() error {
 		var profile, started string
 		err := c.row("SELECT profile, started_at FROM quota_pool_records WHERE job_id = ? AND pool = ?", job, pool).Scan(&profile, &started)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -353,8 +444,18 @@ func (s *Store) ReleaseQuotaPoolIf(ctx context.Context, job, pool string, force 
 		if err != nil {
 			return sqlErr(err)
 		}
+		epoch, err := quotaEpoch(c, job, pool)
+		if err != nil {
+			return err
+		}
+		if !mine(epoch) {
+			return nil
+		}
 		if _, err = c.exec("DELETE FROM quota_pool_records WHERE job_id = ? AND pool = ?", job, pool); err != nil {
 			return sqlErr(err)
+		}
+		if err = dropQuotaEpoch(c, job, pool); err != nil {
+			return err
 		}
 		if err = settleJob(c, job, moment); err != nil {
 			return err
@@ -363,7 +464,15 @@ func (s *Store) ReleaseQuotaPoolIf(ctx context.Context, job, pool string, force 
 		if force {
 			kind += ".force"
 		}
-		_, err = s.recordEventGuarded(ctx, c, job, kind, map[string]any{"job_id": job, "pool": pool, "profile": profile, "started_at": started, "forced": force}, nil, guard)
-		return err
+		p := map[string]any{"job_id": job, "pool": pool, "profile": profile, "started_at": started, "forced": force}
+		if epoch > 0 {
+			p["epoch"] = epoch
+		}
+		if _, err = s.recordEvent(ctx, c, job, kind, p, nil); err != nil {
+			return err
+		}
+		released = true
+		return nil
 	})
+	return released && e == nil, e
 }
