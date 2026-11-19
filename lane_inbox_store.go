@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -642,6 +643,19 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	defer tx.Rollback()
 	if e.Cause != "" {
 		if err := s.dialect.lockLaneCause(ctx, tx, lane, e.Cause); err != nil {
+			return laneInboxItem{}, err
+		}
+	}
+	// MySQL stores oversized keys as digests. A copied-back PostgreSQL
+	// store may therefore contain the digest while older PostgreSQL rows
+	// retain their original hex-encoded keys. See docs/hub-mysql.md.
+	if s.dialect == dialectPostgres && len(key) > mysqlEventKeyMax {
+		digest := hex.EncodeToString(dialectMySQL.storedKey(key).([]byte))
+		item, err := scanLaneInbox(tx.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), digest))
+		if err == nil {
+			return item, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			return laneInboxItem{}, err
 		}
 	}

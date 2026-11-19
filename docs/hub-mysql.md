@@ -175,3 +175,8 @@ on Postgres. The copier and the rehearsal are phase 2 and the cutover is
 phase 3 (hk 4898); Postgres support is removed after the cutover's rollback
 window. Setting a `mysql://` URL on a live hub before then is the operator's
 cutover step, not a configuration option.
+
+When a store has been copied back from MySQL to Postgres, run the cutover
+release or newer. Do not roll the hub binary back below the copier release
+while that copied-back store is in use: oversized event keys may be stored as
+digests, and older binaries cannot deduplicate them.
