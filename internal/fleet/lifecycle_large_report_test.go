@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -40,6 +41,10 @@ func TestDoneKeepsReportAtDocumentLimitInline(t *testing.T) {
 func TestDonePublishesLargeReportAsAttachmentAndManifest(t *testing.T) {
 	const documentMaxBytes = 512 << 10
 	r := newDoneRig(t)
+	// The Handle callback runs on the HTTP server goroutine, where t.Fatal is not
+	// allowed: it records a decode failure here and the test asserts on it below.
+	var decodeMu sync.Mutex
+	var decodeErr error
 	body := strings.Repeat("x", documentMaxBytes+1)
 	digest := reportDigest([]byte(body))
 	key := reportDocumentKey("j", digest)
@@ -53,7 +58,10 @@ func TestDonePublishesLargeReportAsAttachmentAndManifest(t *testing.T) {
 				Body string `json:"body"`
 			}
 			if err := json.Unmarshal(req.Body, &doc); err != nil {
-				t.Fatalf("decode document request: %v", err)
+				decodeMu.Lock()
+				decodeErr = err
+				decodeMu.Unlock()
+				return http.StatusBadRequest, `{"error":"invalid_document"}`, true
 			}
 			if len(doc.Body) > documentMaxBytes {
 				return http.StatusRequestEntityTooLarge, `{"error":"invalid_document"}`, true
@@ -62,8 +70,15 @@ func TestDonePublishesLargeReportAsAttachmentAndManifest(t *testing.T) {
 		return 0, "", false
 	})
 	r.write(body)
-	if err := r.done(); err != nil {
-		t.Fatalf("done large report: %v", err)
+	doneErr := r.done()
+	decodeMu.Lock()
+	gotDecodeErr := decodeErr
+	decodeMu.Unlock()
+	if gotDecodeErr != nil {
+		t.Fatalf("decode document request: %v", gotDecodeErr)
+	}
+	if doneErr != nil {
+		t.Fatalf("done large report: %v", doneErr)
 	}
 
 	var attachment hkRequest
