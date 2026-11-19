@@ -260,6 +260,17 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - uses: ./.github/actions/setup-go-cached
+      - name: store copy round trips
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+          PANEWIRE_TEST_HUB_MYSQL_URL: mysql://root@127.0.0.1:53306/panewire
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run '^TestHubStoreCopyRoundTrips$' . 2>&1 | tee "$RUNNER_TEMP/store-copy.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/store-copy.log"; then
+            echo "store copy integration skipped"; exit 1
+          fi
       - name: store contract and must-ack on MySQL
         if: ${{ github.event_name == 'pull_request' }}
         env:
@@ -286,17 +297,6 @@ jobs:
           go test -count=1 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensMySQLInbox|HubDatabaseURL|MySQL' . 2>&1 | tee "$RUNNER_TEMP/mysql-store.log"
           if grep -- '--- SKIP' "$RUNNER_TEMP/mysql-store.log" | grep -qiE 'mysql'; then
             echo "a MySQL test skipped"; exit 1
-          fi
-      - name: store copy round trips
-        env:
-          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
-          PANEWIRE_TEST_HUB_MYSQL_URL: mysql://root@127.0.0.1:53306/panewire
-        shell: bash
-        run: |
-          set -o pipefail
-          go test -count=1 -v -run '^TestHubStoreCopyRoundTrips$' . 2>&1 | tee "$RUNNER_TEMP/store-copy.log"
-          if grep -q -- '--- SKIP' "$RUNNER_TEMP/store-copy.log"; then
-            echo "store copy integration skipped"; exit 1
           fi
 
   ci-ok:
