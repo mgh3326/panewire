@@ -207,10 +207,45 @@ func TestLadderStepNeedsParentJobAndReplacedPR(t *testing.T) {
 	}
 	bare := fx.s
 	bare.replacedRung = &Job{ID: rebindParent, Task: "42"}
+	bare.OverrideReason = "ladder step sonnet high → cmd-dsflash41 high"
 	if err := fx.a.recordLadderStep(context.Background(), bare, Launch{Effort: "high"}, seat); err == nil {
 		t.Fatal("ladder step over a parent with no PR was not refused")
 	}
 	if len(fake.reps) != 0 {
 		t.Fatalf("rows = %d, want 0", len(fake.reps))
+	}
+}
+
+// An author that never recorded `job joined` (nearly all of them, hk 5521) still
+// gets its ladder-step row: the PR comes from the override reason the hub
+// writes, and the row names the repository so a count per PR is exact.
+func TestLadderStepRowTakesThePRFromTheOverrideReason(t *testing.T) {
+	fx, fake := ladderFixture(t)
+	fx.s.OverrideReason = "ladder step sonnet@high -> sonnet@xhigh, round 5, mgh3326/panewire#77"
+	bare := fx.s
+	bare.replacedRung = &Job{ID: rebindParent, Task: "42", Profile: "sonnet", Effort: "high"}
+	seat := fx.a.Policy.Profiles[fx.s.Profile]
+	if err := fx.a.recordLadderStep(context.Background(), bare, Launch{Effort: "xhigh"}, seat); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.reps) != 1 {
+		t.Fatalf("rows = %d, want 1", len(fake.reps))
+	}
+	notes := ladderNotes(t, fake.reps[0])
+	if notes["kind"] != ladderStepKind || notes["pr"] != float64(77) || notes["repo"] != "mgh3326/panewire" || notes["job"] != rebindParent {
+		t.Fatalf("notes = %v", notes)
+	}
+}
+
+func TestLadderStepReasonPR(t *testing.T) {
+	for reason, want := range map[string]int{
+		"ladder step a@b -> c@d, round 5, mgh3326/panewire#77": 77,
+		"ladder step sonnet high → opus high, PR 12":           12,
+		"ladder step a@b -> c@d":                               0,
+		"ladder step a -> b, round 5, bad repo#x":              0,
+	} {
+		if _, n := ladderStepReasonPR(reason); n != want {
+			t.Errorf("%q: got %d want %d", reason, n, want)
+		}
 	}
 }

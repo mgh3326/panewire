@@ -47,6 +47,37 @@ A stored submission with the retired `worker` role is refused as
 receives a decision event; the existing author's reservation remains until the
 job ends and the ordinary cleanup releases it.
 
+## A completed author is not a gone author
+
+An author's first READY completes its hk job record (and frees its task role),
+and the author then fixes the PR's findings in the same pane through every
+later review round. By round 5 a completed record is the normal case, not a
+refusal (hk 5521: 7 of the 19 round-5 calls on the 32 PRs with 7+ reviewed heads
+stopped at `job ... is not live (state "completed")`, and the CLI sent no lane
+event). So the step looks at the pane, not at the record's state:
+
+- `completed` record, pane present: the step goes on exactly as for a live
+  author, except that hk keeps the record terminal. No lost mark is written
+  over it and no reservation is carried over from it (it is free already): the
+  successor claims the task role fresh, and a refusal before the close
+  discards the staged successor instead of restoring a role to a terminal job.
+  The successor's `--parent-job` rebind moves the task from the completed
+  parent as it does for a hand-over.
+- `completed` record, pane gone: `job_not_live` ("the job completed and its
+  pane is gone"), an info event, `author_ended` false: the author ended on its
+  own and the step never touched it.
+- A replay that finds a staged successor of a completed author with the pane
+  gone cannot tell this step's close from an independent one, so it answers
+  `parent_ended` (rc 1) and releases the stage.
+
+The CLI no longer judges the job's state or task binding. It reads the record
+only for the rung to step from; `job_not_live` (lost, escalated), `job_mismatch`
+(the stored submission or the record names another task) and the rest are the
+hub's refusals, and every hub refusal files one lane event for the owner (see
+the table below). The CLI itself still refuses, with rc 2 and no event, only
+what the hub cannot see: usage errors, an unreadable or malformed findings file
+and an unreadable job record.
+
 ## The CLI's half
 
 The CLI reads the author's hk job record (`profile`, `effort`, `pool`,
@@ -104,3 +135,39 @@ must match the same job, round and PR. If the predecessor ended for a different 
 The policy allows one ladder step per job chain; a job whose id already
 carries a ladder step (`-l1`, with or without later quota-stop `-q<n>`
 replacements) gets `no_rung`.
+
+## Reading the refusals
+
+Every refusal the hub answers also files one lane event for the job's owner
+lane, so a refusal is countable without the hub database:
+
+| refusal | event id | type | rc |
+| --- | --- | --- | --- |
+| before the pane closed (`job_not_live`, `job_mismatch`, `pane_busy`, `pane_not_closed`, `worktree_*`, `staged_expired`, `no_rung`, `quota_refused`, ...) | `ladder-step:<job>:<round>:preflight:<code>` | info | 2 |
+| after the pane closed (the PR is authorless) | `ladder-step:<job>:<round>:ended:<code>:esc` | decision | 1 |
+| step done | `ladder-step:<successor>` | info | 0 |
+
+`pane_not_closed` names why the close was refused after the colon
+(`question_open`, `pane_changed`, `close_unreadable`, `capture_failed`): a pane
+that went back to work or waits on an answer is worth retrying, the others are
+not. `panewire inbox status --event-id ladder-step:<job>:<round>:preflight:<code>`
+answers whether a given refusal was filed.
+
+## Counting step-ups
+
+A step that placed its successor writes one `ladder_step` rep (docs/reps.md
+§Ladder steps) for the replaced rung: `notes.job` is the replaced author,
+`notes.pr` and `notes.repo` name the PR (read from the step's own override
+reason, so an author that never ran `job joined` is counted), `notes.rounds`
+and `notes.takes_over` the successor. Step-ups per PR:
+
+```sh
+panewire reps list --limit 100000 --json |
+  jq -r '.reps[] | select((.notes|fromjson? // {}).kind == "ladder_step")
+         | (.notes|fromjson) | "\(.repo // "?")#\(.pr)\t\(.job)\t\(.takes_over.profile)@\(.takes_over.effort)"' |
+  sort | uniq -c
+```
+
+A refused call leaves no rep; its record is the refusal event above, and on
+the mergewake side its `ladder-intact`, `ladder-escalated` and
+`ladder-ended-no-successor` audit rows.

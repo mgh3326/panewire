@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -172,6 +173,11 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		return h.escalateAuthorRefusal(ctx, request, owner, "job_unreadable", "the job's hk record is unreadable", false)
 	}
 	owner = firstNonempty(escalateAuthorStr(record, "owner_lane"), owner)
+	// The record's own task binding: a job the task was rebound away from is
+	// not the task's author, whatever its stored submission says.
+	if bound := escalateAuthorScalar(record["task_id"]); bound != "" && bound != request.Task {
+		return h.escalateAuthorRefusal(ctx, request, owner, "job_mismatch", "the job is bound to task "+bound+", not "+request.Task, false)
+	}
 	if staged {
 		identity := prior.Request.LadderStep
 		if identity == nil || identity.Parent != request.Job || identity.Round != request.Round || identity.PR != request.PR {
@@ -193,7 +199,13 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	}
 	state := escalateAuthorStr(record, "state")
 	resume := state == "lost" && escalateAuthorStr(record, "end_reason") == endReason
-	if state != "claimed" && state != "spawned" && !resume {
+	// An author's first READY completes its hk record and frees its task role,
+	// and the author goes on fixing the PR's findings in the same pane through
+	// every later review round (hk 5521). A completed record is therefore not a
+	// dead author: its pane decides, below. hk keeps the record terminal, so no
+	// lost mark is written over it and no reservation is carried over from it.
+	finished := state == "completed"
+	if state != "claimed" && state != "spawned" && !resume && !finished {
 		if staged && hkTerminalState(state) {
 			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
 				return hubEscalateAuthorResult{}, err
@@ -213,6 +225,17 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		if probe.state == heldPaneUnknown {
 			return hubEscalateAuthorResult{Code: "pending", Reason: "the author pane state is unknown; retry"}, nil
 		}
+	}
+	if finished && probe.state != heldPanePresent {
+		if staged {
+			// The step closed the pane and the record cannot say so: the
+			// predecessor is gone and no successor will take its place.
+			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+				return hubEscalateAuthorResult{}, err
+			}
+			return h.escalateAuthorParentEnded(ctx, request, owner), nil
+		}
+		return h.escalateAuthorRefusal(ctx, request, owner, "job_not_live", "the job completed and its pane is gone", false)
 	}
 	if staged {
 		next = prior.Request
@@ -264,7 +287,16 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		if _, err := fleet.ValidateSubmission(next); err != nil {
 			return h.escalateAuthorRefusal(ctx, request, owner, "successor_invalid", err.Error(), false)
 		}
-		prior, _, err = h.inbox.store.claimSpawnReplacing(ctx, next, newJob, owner, h.now().UTC(), holder.Request.RequestID, spawn.RoleKey(), "staged", "")
+		previousID, previousRole := holder.Request.RequestID, spawn.RoleKey()
+		if finished {
+			// The completed author's role is free already (or is freed now): the
+			// successor claims it fresh instead of taking it over.
+			previousID = ""
+			if err := h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, spawn.RoleKey()); err != nil {
+				return hubEscalateAuthorResult{}, err
+			}
+		}
+		prior, _, err = h.inbox.store.claimSpawnReplacing(ctx, next, newJob, owner, h.now().UTC(), previousID, previousRole, "staged", "")
 		if err != nil {
 			return h.escalateAuthorRefusal(ctx, request, owner, "claim_refused", err.Error(), false)
 		}
@@ -272,7 +304,15 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	}
 	if !resume && probe.state == heldPanePresent {
 		cancel := func(code, why string) (hubEscalateAuthorResult, error) {
-			if err := h.inbox.store.cancelStagedSpawn(ctx, prior.Request.RequestID, holder.Request.RequestID, spawn.RoleKey()); err != nil {
+			// A completed author's role was free before the stage, and a
+			// reservation is never restored to a terminal job.
+			cancelStage := func() error {
+				if finished {
+					return h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey())
+				}
+				return h.inbox.store.cancelStagedSpawn(ctx, prior.Request.RequestID, holder.Request.RequestID, spawn.RoleKey())
+			}
+			if err := cancelStage(); err != nil {
 				return hubEscalateAuthorResult{}, fmt.Errorf("cannot cancel staged step: %w", err)
 			}
 			return h.escalateAuthorRefusal(ctx, request, owner, code, why, false)
@@ -290,15 +330,18 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			code, why := escalateAuthorPlanRefusal(err)
 			return cancel(code, why)
 		}
-		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, holder.Job); !closed {
+		if closed, closeReason := h.closeHeldPane(ctx, holder, name, probe.row, holder.Job); !closed {
 			again := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 			if again.state == heldPanePresent {
-				return cancel("pane_not_closed", "the author pane could not be closed")
+				// The close refusal says why (question_open, pane_changed, ...):
+				// the owner and mergewake tell a pane that went back to work from
+				// one that is waiting on an answer.
+				return cancel("pane_not_closed", "the author pane could not be closed: "+firstNonempty(closeReason, "unknown"))
 			}
 			return hubEscalateAuthorResult{Code: "pending", Reason: "pane close outcome is unknown; retry"}, nil
 		}
 	}
-	if !resume {
+	if !resume && !finished {
 		lost, why := h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
 		if !lost {
 			return h.escalateAuthorRefusal(ctx, request, owner, "job_not_marked", why, true)
@@ -454,6 +497,23 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 			}
 			continue
 		}
+		if state == "completed" {
+			// A completed record says nothing of the pane: the author may still
+			// be fixing the PR (hk 5521). Only a probe that finds the pane gone
+			// makes the predecessor's end independent; a pane still there is an
+			// author the expired stage never touched.
+			switch h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state {
+			case heldPanePresent:
+				if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
+					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
+					request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
+					_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
+				}
+				continue
+			case heldPaneUnknown:
+				continue
+			}
+		}
 		if hkTerminalState(state) {
 			if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
 				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
@@ -600,6 +660,18 @@ func gradeRank(value string) int {
 func escalateAuthorStr(record map[string]any, key string) string {
 	value, _ := record[key].(string)
 	return value
+}
+
+// escalateAuthorScalar reads a task id an hk record carries as a string or a
+// JSON number.
+func escalateAuthorScalar(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return ""
 }
 
 // escalateAuthorNumeric reports a decimal task id.

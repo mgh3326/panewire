@@ -2,8 +2,12 @@ package fleet
 
 import (
 	"context"
+	"errors"
+	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // The consult seat for an A task is A+ in another family; the exclusion used
@@ -93,5 +97,45 @@ func TestConsultAnswerProblem(t *testing.T) {
 		if problem := ConsultAnswerProblem(body); problem == "" {
 			t.Fatalf("%s: accepted", name)
 		}
+	}
+}
+
+// A question document over the brief bound is not a refused consult (hk 5521:
+// panewire#687's 16-head question was refused "exceeds the consult brief
+// bound" and the author got no consult). The brief carries the first part,
+// names the key, and stays inside the bound.
+func TestConsultBriefKeepsAnOversizedQuestionInsideTheBound(t *testing.T) {
+	useFakeHK(t).SetDoc("design/big-q", "## Question\n"+strings.Repeat("finding F1 is open on x.go:3 é\n", 4000))
+	a := &App{}
+	brief, err := a.consultBrief(context.Background(), ConsultPlanInput{}, "design/big-q")
+	if err != nil {
+		t.Fatalf("an oversized question must not refuse the consult: %v", err)
+	}
+	if len(brief) > hubMaxBriefBytes || !utf8.ValidString(brief) {
+		t.Fatalf("brief is %d bytes (bound %d), valid UTF-8 %v", len(brief), hubMaxBriefBytes, utf8.ValidString(brief))
+	}
+	for _, want := range []string{consultPreamble, "hk:doc/design/big-q", "## Question", "handoffkeep doc get design/big-q"} {
+		if !strings.Contains(brief, want) {
+			t.Fatalf("brief lacks %q", want)
+		}
+	}
+	small := &App{}
+	useFakeHK(t).SetDoc("design/small-q", "## Question\nshort")
+	if b, err := small.consultBrief(context.Background(), ConsultPlanInput{}, "design/small-q"); err != nil || strings.Contains(b, "brief bound") {
+		t.Fatalf("a question inside the bound is sent whole: %v", err)
+	}
+}
+
+// A configured pool-order file that is missing refuses selection (a consult
+// included) and says which setting names it (hk 5521).
+func TestPoolPolicyMissingFileNamesTheSetting(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "pool-order.json")
+	_, err := LoadPoolPolicy(missing)
+	if err == nil || !strings.Contains(err.Error(), "[local].pool_policy") || !strings.Contains(err.Error(), missing) || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("err=%v", err)
+	}
+	t.Setenv("PANEWIRE_POOL_POLICY", missing)
+	if _, err := LoadPoolPolicy(""); err == nil || !strings.Contains(err.Error(), "PANEWIRE_POOL_POLICY") {
+		t.Fatalf("err=%v", err)
 	}
 }

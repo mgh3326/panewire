@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,6 +42,13 @@ func (a *App) recordLadderStep(ctx context.Context, s Spawn, launch Launch, seat
 	old := *s.replacedRung
 	pr, _ := joinedPR(old)
 	number := prNumber(pr)
+	repo := ""
+	if number == 0 {
+		// Authors rarely record `job joined` (7 of 470 job ledgers on one host,
+		// hk 5521), so the PR the step names in its own override reason is the
+		// record of record: the hub writes "..., round N, owner/repo#N".
+		repo, number = ladderStepReasonPR(s.OverrideReason)
+	}
 	if number == 0 {
 		return fmt.Errorf("replaced job %s joined no PR", old.ID)
 	}
@@ -58,7 +67,7 @@ func (a *App) recordLadderStep(ctx context.Context, s Spawn, launch Launch, seat
 	rounds := outcomeRounds(old)
 	notes, _ := json.Marshal(map[string]any{
 		"source": "panewire", "schema": 1, "kind": ladderStepKind,
-		"job": old.ID, "task": s.Task, "pr": number,
+		"job": old.ID, "task": s.Task, "pr": number, "repo": repo,
 		"grade": s.TaskGrade, "tier": s.T, "rounds": rounds,
 		// reviewed_heads stays null: panewire keeps no record of the heads
 		// mergewake reviewed (docs/reps.md §Ladder steps), so the count is
@@ -83,4 +92,22 @@ func (a *App) recordLadderStep(ctx context.Context, s Spawn, launch Launch, seat
 	}
 	_, _, err = store.AddOutcome(ctx, rep)
 	return err
+}
+
+// ladderStepPRPattern is the PR a ladder-step override reason ends with:
+// owner/repo#N (the hub's) or "PR N" (rstack wake's).
+var ladderStepPRPattern = regexp.MustCompile(`(?:([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)#|\bPR )([0-9]+)\s*$`)
+
+// ladderStepReasonPR reads the PR a ladder-step override reason names: its
+// repository when it names one, and its number; 0 when it names none.
+func ladderStepReasonPR(reason string) (repo string, number int) {
+	m := ladderStepPRPattern.FindStringSubmatch(strings.TrimSpace(reason))
+	if m == nil {
+		return "", 0
+	}
+	n, err := strconv.Atoi(m[2])
+	if err != nil || n < 1 {
+		return "", 0
+	}
+	return m[1], n
 }

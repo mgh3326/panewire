@@ -422,7 +422,9 @@ func (s *laneInboxStore) claimSpawnFrom(parent context.Context, request fleet.Su
 }
 
 // claimSpawnReplacing transfers the task role in the same transaction as the
-// successor claim, so another worker cannot claim the gap between them.
+// successor claim, so another worker cannot claim the gap between them. With
+// no previousID but a roleKey it claims that role fresh, for a predecessor
+// whose own hold is already released.
 func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fleet.Submission, job, owner string, now time.Time, previousID, roleKey, status, replacedFrom string) (hubSpawnTask, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
@@ -475,6 +477,11 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 		if n, _ := s.dialect.rowsMatched(result); n != 1 {
 			return hubSpawnTask{}, false, errSpawnClaimed
 		}
+		taskRole = roleKey
+	} else if roleKey != "" {
+		// A role nobody holds (the completed author's, hk 5521) is claimed
+		// fresh by a successor that inherits its task and so holds none by its
+		// own submission; another holder makes the insert a refused claim.
 		taskRole = roleKey
 	}
 	claimed, err := s.insertOnce(ctx, tx, `INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`, "", job, request.RequestID, taskRole)

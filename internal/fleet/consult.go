@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/mgh3326/panewire/internal/spawnargs"
+	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 // Consult request planning (hk 4552 phase 1, operator decision 250). The hub
@@ -257,11 +259,21 @@ func (a *App) consultBrief(ctx context.Context, in ConsultPlanInput, questionKey
 	if err != nil {
 		return "", fail(exitConfig, "question document %s unreadable: %v", questionKey, hkErrText(err))
 	}
-	brief := consultPreamble + "Question document: hk:doc/" + questionKey + "\n\n" + doc.Body
-	if len([]byte(brief)) > hubMaxBriefBytes {
+	head := consultPreamble + "Question document: hk:doc/" + questionKey + "\n\n"
+	brief := head + doc.Body
+	if len(brief) <= hubMaxBriefBytes {
+		return brief, nil
+	}
+	// A question document over the brief bound is not a refused consult
+	// (hk 5521: panewire#687's 16-head question was): the brief carries its
+	// first part and names the key, and the consult reads the rest from hk. The
+	// answer's table still owes a row for every finding id in the whole document.
+	note := "\n\n[panewire: this question document is longer than the " + strconv.Itoa(hubMaxBriefBytes) + "-byte brief bound; the text above is its first part. Read all of it with `handoffkeep doc get " + questionKey + "` and answer every finding id in it.]\n"
+	room := hubMaxBriefBytes - len(head) - len(note)
+	if room < 1 {
 		return "", fail(exitUsage, "question document exceeds the consult brief bound")
 	}
-	return brief, nil
+	return head + textbound.PrefixWithin(doc.Body, room) + note, nil
 }
 
 // ConsultAnswerProblem reports why a completed consult report does not carry

@@ -1058,6 +1058,10 @@ func TestEscalateAuthorDropsStageForIndependentlyTerminalParent(t *testing.T) {
 			f.jobs.records[f.job]["state"] = state
 			f.jobs.records[f.job]["end_reason"] = "quota_stop replaced_by=other"
 			f.jobs.mu.Unlock()
+			// The first call closed the pane: a completed record with the
+			// pane gone is the independent end (a completed record with the
+			// pane still there is a working author, hub_escalate_author_completed_test.go).
+			f.paneAbsent = true
 			result, _ := f.escalate(t, nil)
 			if result.Code != "parent_ended" {
 				t.Fatalf("result=%+v", result)
