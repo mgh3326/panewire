@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -56,6 +57,24 @@ type escalateFixture struct {
 	markLostFails     bool
 	markLostCompleted bool
 	paneCwd           string
+	// panesUnknown makes the holder's node answer the pane list incompletely.
+	panesUnknown bool
+	// closeLost makes pane.close fail on the node side (the pane closed or not:
+	// paneAbsent says which a later list shows).
+	closeLost bool
+	// taskBound overrides the job hk's task names; rebindAfterReads, with
+	// rebindTo, makes the task name rebindTo from the read after that many.
+	taskBound        string
+	rebindTo         string
+	rebindAfterReads int
+	taskReads        int
+	// taskState is the task's hk state; taskFailAfter makes every read after
+	// that many fail (0: never).
+	taskState     string
+	taskFailAfter int
+	// markerAtCapture and markerAtClose record whether the staged successor
+	// carried the close marker when the node was asked to capture and to close.
+	markerAtCapture, markerAtClose bool
 
 	mu       sync.Mutex
 	commands []map[string]json.RawMessage
@@ -96,9 +115,11 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 		"state": "spawned", "profile": "sonnet", "effort": "high", "pool": "claude",
 		"family": "anthropic", "model": "sonnet-m", "owner_lane": "parent", "task_id": "42",
 	}}}
+	var fx *escalateFixture
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: jobs, Out: out, Err: errout, TaskState: func(context.Context, string) (fleet.TaskStatus, error) {
-			return fleet.TaskStatus{JobID: job + "-l1"}, nil
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout, TaskState: func(ctx context.Context, _ string) (fleet.TaskStatus, error) {
+			bound, state, err := fx.boundJob(ctx, job)
+			return fleet.TaskStatus{JobID: bound, State: state}, err
 		}, Quota: escalateQuota{rows: []fleet.CatalogRow{
 			{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
 			{Profile: "sonnet", Effort: "xhigh", Grade: "A+", Pool: "claude", Gate: "escalation", ModelID: "sonnet-m"},
@@ -115,6 +136,7 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 		t.Fatal(err)
 	}
 	f := &escalateFixture{hub: hub, server: server, node: node, jobs: jobs, destination: destination, job: job}
+	fx = f
 	hub.ladderPlan = func(context.Context, fleet.Submission) error { return nil }
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -127,6 +149,38 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 		<-done
 	})
 	return f
+}
+
+// boundJob is the job hk's task names: the author until a successor has been
+// activated, then the successor (the node's rebind), unless a test pins it.
+func (f *escalateFixture) boundJob(ctx context.Context, job string) (bound, state string, err error) {
+	f.mu.Lock()
+	f.taskReads++
+	reads, override, rebindTo, after, state, failAfter := f.taskReads, f.taskBound, f.rebindTo, f.rebindAfterReads, f.taskState, f.taskFailAfter
+	f.mu.Unlock()
+	if failAfter > 0 && reads > failAfter {
+		return "", "", errors.New("task read failed")
+	}
+	if rebindTo != "" && reads > after {
+		return rebindTo, state, nil
+	}
+	if override != "" {
+		return override, state, nil
+	}
+	if successor, err := f.hub.inbox.store.latestSpawnForJob(ctx, job+"-l1"); err == nil && successor.Status != "staged" {
+		return job + "-l1", state, nil
+	}
+	return job, state, nil
+}
+
+// markerSet reports whether the staged successor carries the close marker.
+func (f *escalateFixture) markerSet(ctx context.Context) bool {
+	successor, err := f.hub.inbox.store.latestSpawnForJob(ctx, f.job+"-l1")
+	if err != nil {
+		return false
+	}
+	marked, err := f.hub.inbox.store.stagedCloseMarked(ctx, successor.Request.RequestID)
+	return err == nil && marked
 }
 
 func (f *escalateFixture) request() hubEscalateAuthorRequest {
@@ -179,7 +233,7 @@ func (f *escalateFixture) reply(op string) map[string]any {
 		if f.paneAbsent {
 			panes = []nodeAgentRow{}
 		}
-		return map[string]any{"result": map[string]any{"agents": []nodeAgentRow{}, "panes": panes, "panes_ok": true}}
+		return map[string]any{"result": map[string]any{"agents": []nodeAgentRow{}, "panes": panes, "panes_ok": !f.panesUnknown}}
 	case "worktree.prepare":
 		switch f.prepareOutcome {
 		case "", nodePrepareReused:
@@ -201,8 +255,15 @@ func (f *escalateFixture) reply(op string) map[string]any {
 		}
 		return map[string]any{"result": nodeWorktreeInspectResult{Worktree: &nodeWorktree{Path: paneCwd, Branch: "wk/task", Head: strings.Repeat("b", 40), OriginURL: "https://github.com/example/project.git"}, Check: check}}
 	case "pane.capture":
+		f.markerAtCapture = f.markerSet(context.Background())
 		return map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}}
 	case "pane.close":
+		f.markerAtClose = f.markerSet(context.Background())
+		if f.closeLost {
+			// The node closed the pane and its reply never arrived.
+			f.paneAbsent = true
+			return map[string]any{"error": "close_failed"}
+		}
 		return map[string]any{"result": map[string]any{"outcome": nodePaneClosed}}
 	case "job.mark_lost":
 		if f.markLostFails {
@@ -1058,6 +1119,10 @@ func TestEscalateAuthorDropsStageForIndependentlyTerminalParent(t *testing.T) {
 			f.jobs.records[f.job]["state"] = state
 			f.jobs.records[f.job]["end_reason"] = "quota_stop replaced_by=other"
 			f.jobs.mu.Unlock()
+			// The first call closed the pane: a completed record with the
+			// pane gone is the independent end (a completed record with the
+			// pane still there is a working author, hub_escalate_author_completed_test.go).
+			f.paneAbsent = true
 			result, _ := f.escalate(t, nil)
 			if result.Code != "parent_ended" {
 				t.Fatalf("result=%+v", result)

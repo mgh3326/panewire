@@ -77,8 +77,10 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		}
 	}
 	// Node replies provide elapsed durations, not synchronized clocks. End-align
-	// stage spans instead of inventing a cross-host causal timeline.
-	for _, stage := range []string{"claim", "placement", "checkout", "launch", "landing"} {
+	// stage spans instead of inventing a cross-host causal timeline. The steps
+	// after placement are node claim, pane start (launch), brief submit (submit)
+	// and landing proof (landing); see docs/hub-spawn-operations.md (hk 5585).
+	for _, stage := range []string{"claim", "placement", "checkout", "launch", "submit", "landing"} {
 		if ms, ok := result.StageMS[stage]; ok && ms >= 0 && ms <= 3600000 {
 			child := trace.StartChild(stage)
 			child.EndTime = trace.EndTime

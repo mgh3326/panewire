@@ -1498,11 +1498,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	a.stage("launch", startedLaunch)
 	launchRecorded = true
-	startedLanding := time.Now()
-	landingRecorded := false
+	// Brief submit (hk 5585): the pointer is written, typed into the pane and
+	// recorded. It ends before the landing proof, so the trace separates the two.
+	startedSubmit := time.Now()
+	submitRecorded := false
 	defer func() {
-		if !landingRecorded {
-			a.stage("landing", startedLanding)
+		if !submitRecorded {
+			a.stage(StageBriefSubmit, startedSubmit)
 		}
 	}()
 	pointer, e := a.writeDeliveredBrief(s.Job, payload)
@@ -1518,6 +1520,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.recordBriefSent(ctx, s, seat, launch, pane, tab, pool, owner, payload); e != nil {
 		return e
 	}
+	a.stage(StageBriefSubmit, startedSubmit)
+	submitRecorded = true
+	startedLanding := time.Now()
+	landingRecorded := false
+	defer func() {
+		if !landingRecorded {
+			a.stage("landing", startedLanding)
+		}
+	}()
 	if e = a.confirmBrief(ctx, seat.Kind, pane, pointer, initialScreen); e != nil {
 		return e
 	}

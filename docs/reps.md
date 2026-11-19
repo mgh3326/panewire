@@ -97,6 +97,11 @@ The row:
   `takes_over` (job, profile, effort, model, harness of the rung that takes
   over) and `reviewed_heads`.
 
+The PR is the one the replaced job joined (`job.joined`); when it recorded none
+(nearly every author: 7 of 470 job ledgers on one host, hk 5521) it is the PR at
+the end of the override reason, `owner/repo#N` (the hub's) or `PR N`, and
+`notes.repo` carries the repository when the reason names one.
+
 `reviewed_heads` is always `null`. panewire keeps no record of the PR heads
 mergewake reviewed, so the count is unknown, never zero. `blockers_found` goes
 as 0, as in failure rows, because the envelope cannot send it as NULL.
@@ -114,5 +119,5 @@ Two things hold regardless of what happens to the PR later:
 is a real failed attempt, but a replaced job that later closes unmerged also
 gets a failure row, so the two can both count against one rung.
 
-A spawn that names no parent job, or a parent that joined no PR, writes no
-ladder row. The spawn still succeeds and a warning is logged.
+A spawn that names no parent job, or whose parent joined no PR and whose
+override reason names none, writes no ladder row. The spawn still succeeds and a warning is logged.

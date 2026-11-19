@@ -404,7 +404,9 @@ func (s *laneInboxStore) claimSpawnFrom(parent context.Context, request fleet.Su
 }
 
 // claimSpawnReplacing transfers the task role in the same transaction as the
-// successor claim, so another worker cannot claim the gap between them.
+// successor claim, so another worker cannot claim the gap between them. With
+// no previousID but a roleKey it claims that role fresh, for a predecessor
+// whose own hold is already released.
 func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fleet.Submission, job, owner string, now time.Time, previousID, roleKey, status, replacedFrom string) (hubSpawnTask, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
@@ -458,6 +460,11 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 			return hubSpawnTask{}, false, errSpawnClaimed
 		}
 		taskRole = roleKey
+	} else if roleKey != "" {
+		// A role nobody holds (the completed author's, hk 5521) is claimed
+		// fresh by a successor that inherits its task and so holds none by its
+		// own submission; another holder makes the insert a refused claim.
+		taskRole = roleKey
 	}
 	claimed, err := s.insertOnce(ctx, tx, `INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`, "", job, request.RequestID, taskRole)
 	if err != nil {
@@ -506,6 +513,37 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	return accepted, true, nil
 }
 
+// markStagedClose records, on a staged ladder successor, that its step is
+// about to ask for the predecessor's pane close. A staged row is not placed,
+// so it has no use for claimed_ms (the node's claim stamp, always 0 until a
+// placement binds); the stamp holds the intent's time until activation clears
+// it. It is how a replay tells a pane this step closed from one that went on
+// its own when hk cannot (a completed predecessor stays terminal).
+func (s *laneInboxStore) markStagedClose(parent context.Context, id string, now time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE request_id=? AND status='staged' AND node_id IS NULL`), now.UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
+		return errSpawnClaimed
+	}
+	return nil
+}
+
+// stagedCloseMarked reports whether markStagedClose ran for the staged row.
+func (s *laneInboxStore) stagedCloseMarked(parent context.Context, id string) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var stamp int64
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT claimed_ms FROM spawn_operations WHERE request_id=? AND status='staged'`), id).Scan(&stamp)
+	if err != nil {
+		return false, err
+	}
+	return stamp > 0, nil
+}
+
 func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, now time.Time, deadlineSeconds int) error {
 	ctx, done := s.op(parent)
 	defer done()
@@ -513,7 +551,7 @@ func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, 
 	// activated at or past it has a deadline already passed, and the first
 	// pass gives it up unsent instead of placing it (hk 4660).
 	deadline := now.Add(time.Duration(deadlineSeconds) * time.Second).UnixMilli()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted', deadline_ms=CASE WHEN expires_ms>0 AND expires_ms<? THEN expires_ms ELSE ? END WHERE request_id=? AND status='staged'`), deadline, deadline, id)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted', claimed_ms=0, deadline_ms=CASE WHEN expires_ms>0 AND expires_ms<? THEN expires_ms ELSE ? END WHERE request_id=? AND status='staged'`), deadline, deadline, id)
 	if err != nil {
 		return err
 	}

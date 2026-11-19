@@ -89,16 +89,30 @@ var poolBands = []string{"waste", "free", "ranked"}
 // interval after the free band (PoolPolicy.tierOf).
 const creditTier = "credit"
 
+// LoadPoolPolicy loads the policy a config's [local].pool_policy names (empty:
+// PANEWIRE_POOL_POLICY, then the built-in order).
 func LoadPoolPolicy(path string) (PoolPolicy, error) {
+	return loadPoolPolicyNamedBy(path, "[local].pool_policy")
+}
+
+// loadPoolPolicyNamedBy is LoadPoolPolicy for a path some other setting named:
+// setBy is what an unreadable file's error points the operator at.
+func loadPoolPolicyNamedBy(path, setBy string) (PoolPolicy, error) {
 	b := defaultPoolOrder
 	if path == "" {
-		path = os.Getenv("PANEWIRE_POOL_POLICY")
+		path, setBy = os.Getenv("PANEWIRE_POOL_POLICY"), "PANEWIRE_POOL_POLICY"
 	}
 	if path != "" {
 		var e error
 		b, e = os.ReadFile(expand(path))
 		if e != nil {
-			return PoolPolicy{}, e
+			// A configured file that is missing fails closed rather than
+			// falling back to the built-in order: a host that names a policy
+			// file and lacks it would otherwise select under a different order
+			// from the one the operator set (hk 5521: two consults refused on
+			// a host whose config named /etc/panewire/pool-order.json). Say
+			// which setting names it.
+			return PoolPolicy{}, fmt.Errorf("pool order policy file named by %s is unreadable (create it, or unset the setting to use the built-in order): %w", setBy, e)
 		}
 	}
 	var p PoolPolicy
