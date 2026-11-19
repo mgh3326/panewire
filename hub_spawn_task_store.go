@@ -158,6 +158,11 @@ type hubSpawnExclusion struct {
 	// the request's life when the refusal names none (hk 5358). Empty for
 	// every other refusal.
 	Pool string `json:"pool,omitempty"`
+	// Account is the account the refused seat ran on, when the placement pass
+	// recorded one. It is evidence for the refusal text: a quota refusal of an
+	// account-scoped pool excludes the seat (and, for CommandCode credit, the
+	// account mark), never the pool's other accounts.
+	Account string `json:"account,omitempty"`
 }
 
 // liveAt reports whether the exclusion still rules its host (or profile) out

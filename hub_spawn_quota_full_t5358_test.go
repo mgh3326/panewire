@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,8 @@ type quotaFullFixture struct {
 	request   fleet.Submission
 	clock     *time.Time
 	node      func(id int, answer map[string]any) (fleet.HubSpawnReply, error)
+	t         *testing.T
+	conn      *websocket.Conn
 }
 
 func newQuotaFullFixture(t *testing.T, request fleet.Submission) *quotaFullFixture {
@@ -65,11 +68,15 @@ func newQuotaFullFixture(t *testing.T, request fleet.Submission) *quotaFullFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &quotaFullFixture{h: h, transport: &directSpawnTransport{h: h, task: task}, request: request, clock: &clock}
+	f := &quotaFullFixture{h: h, transport: &directSpawnTransport{h: h, task: task}, request: request, clock: &clock, t: t, conn: conn}
 	f.node = func(id int, answer map[string]any) (fleet.HubSpawnReply, error) {
 		return placeOnNodeRequest(t, f.transport, conn, quotaFullNodeRequest(request, id, "machine-a"), id, answer)
 	}
 	return f
+}
+
+func (f *quotaFullFixture) node2(node fleet.HubSpawnRequest, id int, answer map[string]any) (fleet.HubSpawnReply, error) {
+	return placeOnNodeRequest(f.t, f.transport, f.conn, node, id, answer)
 }
 
 func (f *quotaFullFixture) stored(t *testing.T) hubSpawnTask {
@@ -291,5 +298,76 @@ func placementSkipsRequest(t *testing.T, f *quotaFullFixture, id int, profile st
 	reply, err := f.transport.Spawn(boundedContext(t), node)
 	if err != nil || !reply.NextHost {
 		t.Fatalf("the refused seat was not skipped: reply=%+v err=%v", reply, err)
+	}
+}
+
+// A refusal of an account-scoped pool excludes the seat and, for CommandCode
+// credit, the account: never the pool, whose other accounts may be funded
+// (mergewake finding on #731). Only the shared Devin free band is a pool.
+func TestQuotaFullOfAnAccountScopedPoolExcludesNoPool_T5358(t *testing.T) {
+	for _, test := range []struct {
+		name, pool, profile, tail string
+		marked                    bool
+	}{
+		{"commandcode credit", "commandcode", "omp-commandcode", "quota gate: credit_exhausted balance=0", true},
+		{"claude window", "claude", "sonnet", "quota gate: quota exhausted window=5h cutoff=90", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newQuotaFullFixture(t, quotaFullRequest())
+			account := test.pool + ":0123456789abcdef"
+			if err := f.h.notePlacementTrace(f.stored(t), fleet.PlacementTrace{Chosen: "machine-a", Profile: test.profile, Pool: test.pool, AccountKey: account}, ""); err != nil {
+				t.Fatal(err)
+			}
+			node := quotaFullNodeRequest(f.request, 1150, "machine-a")
+			node.Args = []string{"--job", "test-job", "-m", test.profile, "-l", "test-job", "--role", "implementer"}
+			answer := quotaFullAnswer(time.Time{})
+			answer["stdout_tail"] = "stderr: " + test.tail + "\nFix: x"
+			reply, err := f.node2(node, 1150, answer)
+			if err != nil || !reply.NextHost {
+				t.Fatalf("reply=%+v err=%v", reply, err)
+			}
+			got := f.stored(t).Exclusions
+			if len(got) != 1 || got[0].Pool != "" || got[0].Account != account || got[0].Profile != test.profile {
+				t.Fatalf("exclusions %+v, want the seat and its account only", got)
+			}
+			if args := withQuotaExclusions(f.stored(t).Request.Args, liveExclusions(got, *f.clock)); hubSpawnArg(args, "--exclude-pool") != "" {
+				t.Fatalf("next selection excludes pools %q", hubSpawnArg(args, "--exclude-pool"))
+			}
+			if held := f.h.accountCreditMarkHeld(account, *f.clock); held != test.marked {
+				t.Fatalf("account mark held=%v, want %v", held, test.marked)
+			}
+		})
+	}
+}
+
+// When this request's own full-quota refusals leave no candidate, the request
+// ends with the refusals named; it is not parked as a lack of hosts until its
+// limit (mergewake finding on #731).
+func TestQuotaFullExcludedEndsTheRequestInsteadOfParkingIt_T5358(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	live := hubSpawnExclusion{Machine: "mac-personal", Profile: "devin-swe2-flash", Reason: "spawn_failed:quota_full", Pool: "devin-free", ExpiresMS: now.Add(time.Hour).UnixMilli()}
+	seat := hubSpawnExclusion{Machine: "mac-dev", Profile: "sonnet", Reason: "spawn_failed:quota_full", Account: "claude:0123456789abcdef"}
+	expired := hubSpawnExclusion{Machine: "old", Profile: "sonnet", Reason: "spawn_failed:quota_full", ExpiresMS: now.Add(-time.Minute).UnixMilli()}
+	other := hubSpawnExclusion{Machine: "x", Reason: "cwd_unmapped"}
+	task := hubSpawnTask{Exclusions: []hubSpawnExclusion{live, seat, expired, other}}
+	for _, text := range []string{"role_no_candidate: every candidate was excluded", "no placement candidate accepted spawn; no local fallback; tried: mac-dev hub_quota_full"} {
+		got := quotaFullExcluded(task, now, errors.New(text))
+		if len(got) != 2 {
+			t.Fatalf("%q: refused %+v, want the two live quota refusals", text, got)
+		}
+	}
+	for _, err := range []error{nil, errors.New("role_no_candidate: pool at concurrency cap"), errors.New("QUOTA_EXHAUSTED: claude")} {
+		if got := quotaFullExcluded(task, now, err); len(got) != 0 {
+			t.Fatalf("%v: %+v, want none", err, got)
+		}
+	}
+	if got := quotaFullExcluded(hubSpawnTask{Exclusions: []hubSpawnExclusion{other, expired}}, now, errors.New("role_no_candidate: x")); len(got) != 0 {
+		t.Fatalf("no live quota refusal, nothing to answer with: %+v", got)
+	}
+	notes := quotaFullRefusedNotes(quotaFullExcluded(task, now, errors.New("role_no_candidate: x")))
+	for _, want := range []string{"mac-personal/devin-swe2-flash quota_full pool=devin-free until", "mac-dev/sonnet quota_full account=claude:0123456789abcdef"} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("notes %q lack %q", notes, want)
+		}
 	}
 }

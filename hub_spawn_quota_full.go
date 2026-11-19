@@ -51,19 +51,35 @@ func spawnProfileAuto(args []string) bool {
 	return profile == "" || profile == "auto"
 }
 
-// quotaBand names the quota band a refused seat draws on, for --exclude-pool:
-// devin-free for a SWE-2 free rung, else the pool the placement pass recorded
-// for the chosen seat. Empty when neither is known, in which case only the
-// seat (host and profile) is excluded.
-func (t *directSpawnTransport) quotaBand(ctx context.Context, node hubSpawnRequest, profile string) string {
+// quotaBand names the pool a full-quota refusal rules out for the rest of the
+// request, for --exclude-pool: only devin-free, the SWE-2 free rungs of the one
+// Devin account that shares the free bucket, which the quota-stop replacement
+// and the exhausted-pool sweep also hold as a band. Every other pool holds
+// several accounts, and a refusal describes only the selected one: excluding the
+// pool would discard the funded accounts too, so those refusals exclude the seat
+// (host and profile) and, for CommandCode credit, the account (refusedAccount).
+func (t *directSpawnTransport) quotaBand(profile string) string {
 	if fleet.IsFreeRung(profile) {
 		return "devin-free"
 	}
+	return ""
+}
+
+// refusedAccount is the account the refused seat ran on, from the placement
+// pass's recorded choice. A CommandCode credit refusal also marks it with the
+// hub's durable account mark (hk 5138), so selection skips that account alone
+// until a reading shows credits again, for this request and every other.
+func (t *directSpawnTransport) refusedAccount(ctx context.Context, node hubSpawnRequest, profile string, full fleet.QuotaFull) string {
 	trace, ok := t.savedPlacementChoice(ctx, node.Machine, profile)
-	if !ok || trace.Pool == "" {
+	if !ok || trace.AccountKey == "" {
 		return ""
 	}
-	return fleet.BandKey(trace.Pool)
+	if trace.Pool == commandcodePoolName && strings.HasPrefix(full.Reason, "credit_exhausted") {
+		if err := t.h.markAccountCreditExhausted(trace.Pool, trace.AccountKey, t.h.now()); err != nil {
+			t.h.logger.Warn("account credit mark could not be stored", "pool", trace.Pool, "account", trace.AccountKey, "error", err)
+		}
+	}
+	return trace.AccountKey
 }
 
 // savedPlacementChoice is the pass's recorded choice, when it chose host and
@@ -78,6 +94,52 @@ func (t *directSpawnTransport) savedPlacementChoice(ctx context.Context, host, p
 		return trace, false
 	}
 	return trace, trace.Chosen == host && trace.Profile == profile
+}
+
+// quotaFullExcluded returns the request's live full-quota exclusions when the
+// selection or the placement ended on "no candidate" (role_no_candidate, no
+// placement candidate accepted). The request's own refusals caused that, so
+// waiting for a host to appear cannot change it: the request ends with the
+// refusals named, not parked until its limit (hk 5358).
+func quotaFullExcluded(task hubSpawnTask, now time.Time, err error) []hubSpawnExclusion {
+	if err == nil || strings.Contains(err.Error(), "concurrency cap") {
+		return nil
+	}
+	text := err.Error()
+	if code, _, _ := strings.Cut(text, ":"); code != "role_no_candidate" && !strings.Contains(text, "no placement candidate accepted") && !strings.Contains(text, "no remote candidate completed") {
+		return nil
+	}
+	var out []hubSpawnExclusion
+	for _, excluded := range liveExclusions(task.Exclusions, now) {
+		if spawnReasonQuotaFull(excluded.Reason) {
+			out = append(out, excluded)
+		}
+	}
+	return out
+}
+
+// quotaFullRefusedNotes names each seat a full quota ruled out, appended to the
+// placement's own refusal, so the requester reads every candidate and why it
+// was dropped.
+func quotaFullRefusedNotes(refused []hubSpawnExclusion) string {
+	if len(refused) == 0 {
+		return ""
+	}
+	notes := make([]string, 0, len(refused))
+	for _, excluded := range refused {
+		note := excluded.Machine + "/" + excluded.Profile + " quota_full"
+		if excluded.Pool != "" {
+			note += " pool=" + excluded.Pool
+		}
+		if excluded.Account != "" {
+			note += " account=" + excluded.Account
+		}
+		if excluded.ExpiresMS > 0 {
+			note += " until " + time.UnixMilli(excluded.ExpiresMS).UTC().Format(time.RFC3339)
+		}
+		notes = append(notes, note)
+	}
+	return "; refused by the node's quota gate: " + strings.Join(notes, ", ")
 }
 
 // learnQuotaFull applies what a full-quota refusal teaches to the exclusion

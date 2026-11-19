@@ -882,7 +882,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
 			return false
 		}
-		if spawnClaimedAnswer(task, err) {
+		if spawnClaimedAnswer(task, err) || len(quotaFullExcluded(task, h.now(), err)) != 0 {
 			return false
 		}
 		return spawnParkReason(fleet.ErrorCode(err), err.Error()) != ""
@@ -914,9 +914,13 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// cleanup-confirmed refusal is the answer, not a selection error caused by
 	// excluding that same harness. Other placement errors retain their detail.
 	claimedAnswer := err != nil && ctx.Err() == nil && spawnClaimedAnswer(task, err)
+	// Every candidate left was ruled out by this request's own full-quota
+	// refusals: that is the request's answer, with the refusals named, not a
+	// lack of hosts to wait out (hk 5358).
+	quotaRefused := quotaFullExcluded(task, h.now(), err)
 	// No candidate can take it now: a request with a limit is parked, not
 	// ended, and is placed again on an event or its next check (hk 4661).
-	if !claimedAnswer && parks(err) {
+	if !claimedAnswer && len(quotaRefused) == 0 && parks(err) {
 		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" {
 			// A recognised no-candidate refusal never ends the request: a
 			// failed or ambiguous park write leaves it accepted for the next
@@ -931,7 +935,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
 	if err != nil {
-		outcome.Reason = spawnOutcomeReason(outcome.Reason, spawnRefusalLine(err.Error()))
+		outcome.Reason = spawnOutcomeReason(outcome.Reason, spawnRefusalLine(err.Error())+quotaFullRefusedNotes(quotaRefused))
 		outcome.Fix = utf8PrefixWithin(spawnRefusalLine(fleet.SpawnRefusalFix(err)), 512)
 	}
 	if err != nil && strings.Contains(err.Error(), "hub_spawn_capability_required") {
@@ -1367,10 +1371,11 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	hold, wait := time.Time{}, false
 	if quotaFullOK {
 		hold, wait = t.h.quotaWaitUntil(t.task, quotaFull)
-		band := t.quotaBand(ctx, node, exclusion.Profile)
+		band := t.quotaBand(exclusion.Profile)
 		if !wait {
 			exclusion.Pool = band
 		}
+		exclusion.Account = t.refusedAccount(ctx, node, exclusion.Profile, quotaFull)
 		exclusion = t.h.learnQuotaFull(exclusion, quotaFull, band)
 	} else if spawnRefusalTriesNextHost(reason) {
 		// A host-local refusal rules the host out for the launch backoff only:

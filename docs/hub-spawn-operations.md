@@ -355,7 +355,7 @@ node marks not retryable keep today's behaviour: the refusal is the answer.
 | The limit's end | What the hub does |
 |---|---|
 | ends inside the request's time limit (`--expires`, the requester's time for the job) less `spawnQuotaStartMargin` (1 min) | holds the request, park reason `quota_reset`, until the end (+1 s). Timer-only: no event wakes it, so it does not start on another pool first. At the end the same pool is selected again. The wait never passes `expires_at`. |
-| ends later, names no end (a window or a credit balance), or the request has no time limit | moves on at once: no back-off, the band recorded in the exclusion, and the next attempt adds `--exclude-pool <band>` to its selection, so the next candidate that fits the grade, role and tags is chosen inside the same request. |
+| ends later, names no end (a window or a credit balance), or the request has no time limit | moves on at once: no back-off, the refused seat (host and profile) recorded in the exclusion with the account it ran on, so the next candidate that fits the grade, role and tags is chosen inside the same request. For the SWE-2 free rungs the next attempt also adds `--exclude-pool devin-free`. |
 
 The budget is the request's own `--expires`; no new flag. A requester that wants
 a 25-minute budget for a review pass passes `--expires 25m` (the default is 1 h
@@ -364,13 +364,22 @@ the refused node records and publishes it (`panewire quota refresh devin`
 merges the host's `devin-free-limit.json` over the account's shared reading,
 [quota stop](quota-stop.md)), and the hub cools the free band in memory until
 the end for every other request. The shared reading is the copy that survives a
-hub restart. Cooling is by band (`devin-free`), as the exhausted-pool sweep does
-it. The exclusion is by seat (host and profile) and band for this request only; a
-refusal that names no end excludes the band for the request's life.
+hub restart. Cooling is by band (`devin-free`), as the exhausted-pool sweep does it. Only the
+free band is excluded as a pool: it is the one Devin account's shared free
+bucket. Every other pool holds several accounts and a refusal describes only the
+selected one, so it excludes the seat and carries the account key, never the pool
+(a CommandCode `credit_exhausted` also sets the hub's durable account mark, hk
+5138, so selection skips that account alone). The exclusion is for this request
+only; a refusal that names no end excludes the seat for the request's life. A
+refusal of such a pool therefore moves on to the next host or account, and
+reaches another pool only through the refreshed reading, until selection takes an
+account exclusion of its own (not in hk 5358).
 
-When no candidate is left the placement's own refusal ends the request, and
-it names every candidate tried and why it was dropped (`hub_quota_full` for each
-refused seat). The refusal is not a launch fault: it does not count toward the
+When no candidate is left the request ends with the placement's own refusal
+plus one note per refused seat (host, profile, pool or account, the reset): a
+`no candidate` answer caused by the request's own full-quota refusals is not
+parked as a lack of hosts. It names every candidate tried and why it was dropped
+(`hub_quota_full` for each refused seat). The refusal is not a launch fault: it does not count toward the
 host's `launch_backoff`. Measure: the day's `spawn_failed:quota_full`
 outcomes in the hub's spawn records are the refusals that still reached a
 requester (before hk 5358 the same refusal read plain `spawn_failed` with the
