@@ -73,3 +73,16 @@ func TestLaneInboxStorePostgresCopyBackLongKey(t *testing.T) {
 		})
 	}
 }
+
+func TestHubStoreCopyLongKeyForms(t *testing.T) {
+	key := "event" + strings.Repeat("x", mysqlEventKeyMax)
+	keys := dialectPostgres.storedKeys(key)
+	if len(keys) != 2 || keys[0] != dialectPostgres.storedKey(key) || keys[1] != hex.EncodeToString(dialectMySQL.storedKey(key).([]byte)) {
+		t.Fatalf("Postgres lookup forms: %v", keys)
+	}
+	for _, dialect := range []sqlDialect{dialectSQLite, dialectMySQL} {
+		if got := dialect.storedKeys(key); len(got) != 1 {
+			t.Fatalf("unexpected lookup forms: %v", got)
+		}
+	}
+}

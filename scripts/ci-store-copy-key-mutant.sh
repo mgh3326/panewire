@@ -38,9 +38,9 @@ import pathlib
 import sys
 path = pathlib.Path(sys.argv[1])
 source = path.read_text()
-old = 'if s.dialect == dialectPostgres && len(key) > mysqlEventKeyMax {'
+old = 'if len(keys) > 1 {'
 assert source.count(old) == 2
-path.write_text(source.replace(old, 'if false && s.dialect == dialectPostgres && len(key) > mysqlEventKeyMax {', 1))
+path.write_text(source.replace(old, 'if false && len(keys) > 1 {', 1))
 PY
 if (cd "$probe_dir" && go test -count=1 -run '^TestLaneInboxStorePostgresCopyBackLongKey/digest$' .) >"$probe_tmp/result.log" 2>&1; then
   echo 'original-only accessor mutant unexpectedly passed'

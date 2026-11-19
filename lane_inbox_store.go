@@ -3,7 +3,6 @@ package panewire
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -290,11 +289,11 @@ func (s *laneInboxStore) storedKey(key string) any {
 // eventKeyPredicate matches both representations found after a MySQL
 // copy-back, while preserving the original PostgreSQL form for older rows.
 func (s *laneInboxStore) eventKeyPredicate(key string) (string, []any) {
-	original := s.storedKey(key)
-	if s.dialect == dialectPostgres && len(key) > mysqlEventKeyMax {
-		return "event_key IN (?,?)", []any{original, hex.EncodeToString(dialectMySQL.storedKey(key).([]byte))}
+	keys := s.dialect.storedKeys(key)
+	if len(keys) > 1 {
+		return "event_key IN (?,?)", keys
 	}
-	return "event_key=?", []any{original}
+	return "event_key=?", keys
 }
 
 // close ends every in-flight call, then closes the database.
@@ -659,8 +658,9 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	// MySQL stores oversized keys as digests. A copied-back PostgreSQL
 	// store may therefore contain the digest while older PostgreSQL rows
 	// retain their original hex-encoded keys. See docs/hub-mysql.md.
-	if s.dialect == dialectPostgres && len(key) > mysqlEventKeyMax {
-		digest := hex.EncodeToString(dialectMySQL.storedKey(key).([]byte))
+	keys := s.dialect.storedKeys(key)
+	if len(keys) > 1 {
+		digest := keys[1]
 		item, err := scanLaneInbox(tx.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), digest))
 		if err == nil {
 			return item, nil
