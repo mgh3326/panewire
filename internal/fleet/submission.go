@@ -522,6 +522,22 @@ func (a *App) stage(name string, started time.Time) {
 	}
 }
 
+// StageBriefSubmit is the timing key of the brief's write, typing and record
+// (hk 5585). It splits the old landing stage: landing now times only the
+// landing proof. A result reports it in stage_ms, never as its coarse stage.
+const StageBriefSubmit = "submit"
+
+// CoarseSpawnStage is the Stage a result reports for a timing stage. Stage
+// rules on the hub (postLaunch, the unconfirmed-landing check) read only
+// claim, placement, checkout, launch and landing, so the submit timing reports
+// as landing, which is what the old single landing stage reported.
+func CoarseSpawnStage(stage string) string {
+	if stage == StageBriefSubmit {
+		return "landing"
+	}
+	return stage
+}
+
 // spawnStatusFailureLimit bounds how many status reads in a row may fail before
 // WaitSpawn gives up; the operation keeps running on the hub meanwhile.
 const spawnStatusFailureLimit = 15

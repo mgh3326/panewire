@@ -762,6 +762,9 @@ type hubClientConnection struct {
 	// acceptsCheckoutBranch is the same for hubFeatureCheckoutBranch
 	// (checkout_branch.go): the spawn result may carry checkout_mode "branch".
 	acceptsCheckoutBranch atomic.Bool
+	// acceptsSpawnStageSubmit is the same for hubFeatureSpawnStageSubmit
+	// (spawn_stage.go): the spawn result's stage_ms may carry "submit".
+	acceptsSpawnStageSubmit atomic.Bool
 	// acceptsNodeLoops is the same for hubFeatureNodeLoops
 	// (node_loop_ledger.go): the heartbeat may carry the node's loop ledger.
 	acceptsNodeLoops atomic.Bool
@@ -2305,6 +2308,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				peer.acceptsCheckoutSparse.Store(slices.Contains(message.Features, hubFeatureCheckoutSparse))
 				peer.acceptsCheckoutBranch.Store(slices.Contains(message.Features, hubFeatureCheckoutBranch))
+				peer.acceptsSpawnStageSubmit.Store(slices.Contains(message.Features, hubFeatureSpawnStageSubmit))
 				peer.acceptsNodeLoops.Store(slices.Contains(message.Features, hubFeatureNodeLoops))
 				// Published last: a reader that sees featuresKnown must also see
 				// every accept bit above, or a held final loss could be written

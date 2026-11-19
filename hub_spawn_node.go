@@ -461,7 +461,27 @@ func (client *HubClient) endHubSpawn(requestID string) {
 
 func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
 	result = spawnResultForHub(result, peer.acceptsLaunchProof.Load(), peer.acceptsCheckoutSparse.Load(), peer.acceptsCheckoutBranch.Load())
+	result = spawnStageMSForHub(result, peer.acceptsSpawnStageSubmit.Load())
 	_ = peer.write(ctx, spawnResultWire(result, extended))
+}
+
+// spawnStageMSForHub gives the submit timing only to a hub that lists its key
+// (hk 5585). Any other hub gets the old landing figure, submit plus landing
+// proof, so its strict stage_ms check still accepts the result. A copy, so the
+// journaled result keeps its own map.
+func spawnStageMSForHub(result hubSpawnResult, acceptsSpawnStageSubmit bool) hubSpawnResult {
+	submit, ok := result.StageMS[fleet.StageBriefSubmit]
+	if !ok || acceptsSpawnStageSubmit {
+		return result
+	}
+	folded := make(map[string]int64, len(result.StageMS))
+	for stage, ms := range result.StageMS {
+		folded[stage] = ms
+	}
+	delete(folded, fleet.StageBriefSubmit)
+	folded["landing"] += submit
+	result.StageMS = folded
+	return result
 }
 
 // spawnResultForHub drops the fields the connected hub does not understand: a

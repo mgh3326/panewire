@@ -65,7 +65,7 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session, checkoutMo
 		if stage == "claim" {
 			result.Retryable = false
 		}
-		result.Stage = stage
+		result.Stage = CoarseSpawnStage(stage)
 		result.StageMS[stage] += duration.Milliseconds()
 	}
 	a.ObserveReceipt = func(receipt ExecutionReceipt) { result.Receipt = receipt }
