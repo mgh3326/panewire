@@ -801,7 +801,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		}
 		// A reviewer's hand-over ends it through its watcher's intent, as hk 4507
 		// does; the implementer's announce would have the hub replace it (hk 5355).
-		if r.decision == "handover" && r.role == "reviewer" {
+		if r.decision == "handover" && r.role == "reviewer" && quotaActsOn(r.role, r.pool) {
 			stop := quotastop.Stop{Pool: r.pool}
 			if at, err := time.Parse(time.RFC3339, r.reset); err == nil {
 				stop.Reset = at

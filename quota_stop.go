@@ -42,8 +42,15 @@ func (p quotaPolicy) resetBeyondMaxWait(reset, now time.Time) bool {
 // reviewerWaitLimit is the longest reset a reviewer's stop may have and still be
 // waited out: the policy's reviewer_wait (default fleet.QuotaReviewerWait),
 // never above max_wait (hk 5355).
+//
+// The watcher holds a reviewer's stop only within fleet.QuotaReviewerWait, so a
+// larger policy value would let the manager wait where the watcher already ended
+// the job (mergewake review, hk 5355): the bound never exceeds that ceiling.
 func (p quotaPolicy) reviewerWaitLimit() time.Duration {
 	limit := p.ReviewerWait
+	if limit > fleet.QuotaReviewerWait {
+		limit = fleet.QuotaReviewerWait
+	}
 	if p.MaxWait > 0 && p.MaxWait < limit {
 		limit = p.MaxWait
 	}
@@ -244,6 +251,11 @@ func quotaDecisionReviewer(policy quotaPolicy, policyOK bool, priority int, star
 	if stop.Reset.IsZero() {
 		return "handover", "reset_unknown"
 	}
+	// A reset already past is due at once, whatever the start says: the stop is
+	// over and the pane is resumed, not ended (hk 5349, as quotaDecisionJob).
+	if !stop.Reset.After(now) {
+		return "wait", "reset_passed"
+	}
 	if stop.Reset.Sub(now) > policy.reviewerWaitLimit() {
 		return "handover", "reset_beyond_reviewer_wait"
 	}
@@ -256,9 +268,6 @@ func quotaDecisionReviewer(policy quotaPolicy, policyOK bool, priority int, star
 	}
 	if stop.Reset.After(started.Add(budget)) {
 		return "handover", "reset_past_review_deadline"
-	}
-	if !stop.Reset.After(now) {
-		return "wait", "reset_passed"
 	}
 	return "wait", "reset_within_reviewer_wait"
 }

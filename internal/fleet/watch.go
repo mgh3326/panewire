@@ -253,6 +253,9 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	var screenRead quotaStopWatch
 	var handOff quotaHandOff
 	var reviewerHold reviewerQuotaHold
+	// holdTaken: this watcher process has taken a reviewer hold (hk 5355), so a
+	// stop after it is ended, not held again.
+	holdTaken := false
 	var creditAttempts int
 	quotaRetry := false
 	var lastCredit time.Time
@@ -594,7 +597,8 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						quotaRetry = true
 					}
 				} else if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
-					if until, ok := reviewerWaitUntil(j, stop, a.Now()); ok {
+					resumed, resumable := reviewerWaitResume(j, a.Now())
+					if until, ok := reviewerWaitUntil(j, stop, a.Now()); ok && !holdTaken && !resumable {
 						// A short reset: hold the job for the manager's resume
 						// (hk 5355). The wait is recorded once, so a second stop
 						// after it ends the job at once; the deadline is extended
@@ -603,8 +607,17 @@ func (a *App) watch(ctx context.Context, args []string) error {
 							return err
 						}
 						reviewerHold = reviewerQuotaHold{active: true, stop: stop, until: until, seq: paneAgent.StateChangeSeq}
+						holdTaken = true
 						deadline = deadline.Add(until.Sub(a.Now()))
 						fmt.Fprintln(a.Err, "quota-stop reviewer held for its reset")
+					} else if resumable && !holdTaken {
+						// A restarted watcher inherits the hold the earlier one wrote
+						// (hk 5355): the durable wait still stands, so the job lives
+						// until its manager's resume or the wait's end.
+						reviewerHold = reviewerQuotaHold{active: true, stop: stop, until: resumed, seq: paneAgent.StateChangeSeq}
+						holdTaken = true
+						deadline = deadline.Add(resumed.Sub(a.Now()))
+						fmt.Fprintln(a.Err, "quota-stop reviewer hold re-armed after restart")
 					} else {
 						if err := a.recordQuotaIntent(ctx, j, stop); errors.Is(err, errQuotaStopSuperseded) {
 							// The hub ended the job on its posted result.

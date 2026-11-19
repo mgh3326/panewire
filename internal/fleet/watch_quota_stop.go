@@ -650,6 +650,29 @@ func reviewerWaitUntil(j Job, stop quotastop.Stop, now time.Time) (time.Time, bo
 	return at.Add(QuotaReviewerWaitGrace), true
 }
 
+// reviewerWaitResume is the hold a restarted watcher inherits (hk 5355): the
+// newest durable wait, while its until is still ahead. The watcher that wrote
+// it held the job in memory only, so a restart inside the wait would otherwise
+// end the job while the manager's resume is pending. A second stop is not
+// re-held here: the watch takes this only once per process, and the manager
+// decides the second stop (resume_limit) either way.
+func reviewerWaitResume(j Job, now time.Time) (time.Time, bool) {
+	var wait map[string]any
+	for _, ev := range j.Events {
+		if ev.Kind == quotaWaitKind {
+			wait = ev.Payload
+		}
+	}
+	if wait == nil {
+		return time.Time{}, false
+	}
+	until, err := time.Parse(time.RFC3339, str(wait, "until"))
+	if err != nil || !until.After(now) {
+		return time.Time{}, false
+	}
+	return until, true
+}
+
 // pendingQuotaIntent returns the job's open close intent: the newest intent not
 // followed by a cancellation, an end, a re-prompt or a new claim or spawn.
 func pendingQuotaIntent(j Job) (quotaIntent, bool) {

@@ -127,3 +127,32 @@ func countOf(kinds []string, kind string) int {
 	}
 	return n
 }
+
+// A watcher restarted inside a reviewer's wait keeps the hold the earlier watcher
+// wrote (mergewake review, hk 5355): the job is not ended before the wait runs out
+// while the manager's resume is still pending.
+func TestWatcherReviewerRestartInsideTheWaitKeepsTheHold(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", "")
+	screen := shortResetScreen(t)
+	reviewerHoldRunner(t, a, f,
+		func(time.Duration) string { return "idle" },
+		func(time.Duration) string { return screen })
+	// The earlier watcher's durable hold: its wait still has three minutes to run.
+	if e := a.event(context.Background(), "j", quotaWaitKind, map[string]any{
+		"pane_id": "w:p1", "pool": "devin-free",
+		"reset_at": a.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339),
+		"until":    a.Now().Add(3 * time.Minute).UTC().Format(time.RFC3339),
+	}); e != nil {
+		t.Fatal(e)
+	}
+	start := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if waited := a.Now().Sub(start); waited < 2*time.Minute {
+		t.Fatalf("the restarted watcher ended the reviewer after %v, inside the inherited wait", waited)
+	}
+	if str(h.record(t, "j"), "state") != "lost" {
+		t.Fatalf("hk record %v, want lost once the wait ran out", h.record(t, "j"))
+	}
+}

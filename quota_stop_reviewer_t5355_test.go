@@ -85,6 +85,9 @@ func TestQuotaReviewerWaitPolicyLine(t *testing.T) {
 		"absent defaults to ten minutes": {base, 10 * time.Minute, true},
 		"explicit value":                 {quotaMaxWaitDoc("reviewer_wait: 3m"), 3 * time.Minute, true},
 		"clamped to max_wait":            {quotaMaxWaitDoc("max_wait: 5m", "reviewer_wait: 20m"), 5 * time.Minute, true},
+		// The watcher holds a reviewer's stop only within ten minutes, so a larger
+		// policy value is clamped to that ceiling (mergewake review, hk 5355).
+		"clamped to the watcher ceiling": {quotaMaxWaitDoc("reviewer_wait: 30m"), 10 * time.Minute, true},
 		"malformed fails the policy":     {quotaMaxWaitDoc("reviewer_wait: soon"), 0, false},
 		"zero fails the policy":          {quotaMaxWaitDoc("reviewer_wait: 0s"), 0, false},
 		"repeated line fails the policy": {quotaMaxWaitDoc("reviewer_wait: 2m", "reviewer_wait: 3m"), 0, false},
@@ -195,5 +198,39 @@ func TestQuotaReviewerResetPastReviewDeadlineEndsAtOnce(t *testing.T) {
 	}
 	if rig.sends != 0 || len(rig.ended) != 1 {
 		t.Fatalf("sends=%d ended=%d, want no resume and one end", rig.sends, len(rig.ended))
+	}
+}
+
+// A reset already past is due at once even when the job's start is missing: the
+// stop is over and the pane is resumed, not ended (mergewake review, hk 5355).
+func TestQuotaReviewerResetPassedWithoutStartIsResumed(t *testing.T) {
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	policy, ok := parseQuotaPolicy(quotaMaxWaitDoc())
+	if !ok {
+		t.Fatal("policy did not parse")
+	}
+	passed := quotaStop{Pool: "devin-free", Reset: now.Add(-time.Minute)}
+	if d, reason := quotaDecisionReviewer(policy, true, 3, time.Time{}, 4*time.Hour, 0, passed, now); d != "wait" || reason != "reset_passed" {
+		t.Fatalf("passed reset without a start: decision=%s reason=%s, want wait reset_passed", d, reason)
+	}
+	future := quotaStop{Pool: "devin-free", Reset: now.Add(2 * time.Minute)}
+	if d, reason := quotaDecisionReviewer(policy, true, 3, time.Time{}, 4*time.Hour, 0, future, now); d != "handover" || reason != "start_unknown" {
+		t.Fatalf("future reset without a start: decision=%s reason=%s, want handover start_unknown", d, reason)
+	}
+}
+
+// The quota-stop path acts only on a proven stop (mergewake review, hk 5355): a
+// reviewer hand-over recorded for a failed screen read (pool unknown) must not
+// reach the watcher's intent, even with --quota-stop-act on.
+func TestQuotaReviewerUnprovenHandoverIsNotEndedWhenActing(t *testing.T) {
+	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
+	rig.q.act = true
+	now := rig.now
+	if _, err := rig.store.db.Exec(`INSERT INTO quota_stop_decisions(event_id,job,pane,label,pool,reset,decision,reason,role,created) VALUES('evt-unproven','job-active','workspace:pane-1','worker-synthetic','unknown','unknown','handover','screen_read_timeout','reviewer',?)`, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	rig.q.tick(context.Background(), now, false)
+	if len(rig.ended) != 0 {
+		t.Fatalf("an unproven reviewer hand-over ended the reviewer: %+v", rig.ended)
 	}
 }
