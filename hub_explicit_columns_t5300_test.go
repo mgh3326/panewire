@@ -222,3 +222,31 @@ func oldActiveConsultIDs(t *testing.T, s *laneInboxStore) []string {
 	}
 	return ids
 }
+
+// hk 5300: a rollback to a binary that predates the column writes "-q<n>" rows
+// with replaced_from NULL. The next start marks them on either backend, not
+// only the SQLite one; Postgres runs it on each start, not only in migration
+// 0031.
+func TestSpawnReplacedFromBackfillsOnEveryStart(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		first := open()
+		if err := first.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		// Written as an old binary writes them: no replaced_from.
+		claimSpawnForTest(t, first, "401", "mwr-4-q1", "")
+		claimSpawnForTest(t, first, "402", "nightly-quality-gate", "")
+
+		restarted := open()
+		if err := restarted.ensureSpawnTasks(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := restarted.quotaSuccessorSpawns(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parents := successorParents(got); !maps.Equal(parents, map[string]string{"mwr-4-q1": "mwr-4"}) {
+			t.Fatalf("after the restart: %v, want mwr-4-q1 replacing mwr-4", parents)
+		}
+	})
+}

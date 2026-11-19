@@ -177,6 +177,12 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		// at every start (hk 5298).
 		ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 		defer done()
+		// replaced_from is backfilled at every start, not only by migration
+		// 0031: a rollback to a binary that predates the column writes "-q<n>"
+		// rows with NULL, and a later upgrade must mark them too (hk 5300).
+		if err := s.backfillSpawnReplacedFrom(ctx); err != nil {
+			return err
+		}
 		if err := s.reconcileSpawnQueue(ctx); err != nil {
 			return err
 		}
@@ -939,7 +945,7 @@ func (s *laneInboxStore) backfillSpawnReplacedFrom(ctx context.Context) error {
 	type successor struct{ id, parent string }
 	var found []successor
 	if err := func() error {
-		rows, err := s.db.QueryContext(ctx, `SELECT request_id,job FROM spawn_operations WHERE replaced_from IS NULL AND job LIKE '%-q%'`)
+		rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id,job FROM spawn_operations WHERE replaced_from IS NULL AND job LIKE '%-q%'`))
 		if err != nil {
 			return err
 		}
@@ -958,7 +964,7 @@ func (s *laneInboxStore) backfillSpawnReplacedFrom(ctx context.Context) error {
 		return err
 	}
 	for _, next := range found {
-		if _, err := s.db.ExecContext(ctx, `UPDATE spawn_operations SET replaced_from=? WHERE request_id=? AND replaced_from IS NULL`, next.parent, next.id); err != nil {
+		if _, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET replaced_from=? WHERE request_id=? AND replaced_from IS NULL`), next.parent, next.id); err != nil {
 			return err
 		}
 	}
