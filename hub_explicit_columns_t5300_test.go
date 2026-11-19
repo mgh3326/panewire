@@ -109,7 +109,7 @@ func TestSpawnReplacedFromBackfillsOnStartSQLite(t *testing.T) {
 	}
 }
 
-// hk 5300 (postgres 0028): the same backfill, run by the migration on a
+// hk 5300 (postgres 0030): the same backfill, run by the migration on a
 // database that recorded the file before its rows were set. CI only.
 func TestLaneInboxStorePostgresUpgradeBackfillsReplacedFrom_t5300(t *testing.T) {
 	config, _ := hubPostgresTestSchema(t)
@@ -118,11 +118,11 @@ func TestLaneInboxStorePostgresUpgradeBackfillsReplacedFrom_t5300(t *testing.T) 
 		t.Fatal(err)
 	}
 	claimSpawnForTest(t, first, "301", "mwr-3-q1", "")
-	// Roll the schema back to what the hub before 0028 left: the column is
+	// Roll the schema back to what the hub before 0030 left: the column is
 	// NULL and the migration is not recorded.
 	for _, statement := range []string{
 		`UPDATE spawn_operations SET replaced_from=NULL`,
-		`DELETE FROM panewire_schema_migrations WHERE version='0028_explicit_columns'`,
+		`DELETE FROM panewire_schema_migrations WHERE version='0030_explicit_columns'`,
 	} {
 		if _, err := first.db.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -139,7 +139,7 @@ func TestLaneInboxStorePostgresUpgradeBackfillsReplacedFrom_t5300(t *testing.T) 
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].Job != "mwr-3-q1" || got[0].ReplacedFrom != "mwr-3" {
-		t.Fatalf("after the 0028 backfill: %+v, want mwr-3-q1 replacing mwr-3", got)
+		t.Fatalf("after the 0030 backfill: %+v, want mwr-3-q1 replacing mwr-3", got)
 	}
 }
 

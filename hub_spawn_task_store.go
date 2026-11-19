@@ -200,7 +200,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// notice columns are hk 4662's (postgres: 0019); the placed seat columns
 	// are hk 5124's (postgres: 0022), task_fail_notice_ms is hk 5137's
 	// (postgres: 0023), task_fail_retry_ms is hk 5137's (postgres: 0024), and
-	// replaced_from is hk 5300's (postgres: 0028).
+	// replaced_from is hk 5300's (postgres: 0030).
 	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
@@ -881,7 +881,7 @@ func (s *laneInboxStore) quotaSuccessorSpawns(parent context.Context) ([]hubSpaw
 }
 
 // backfillSpawnReplacedFrom sets replaced_from on a "<old>-q<n>" row an older
-// hub wrote before the column (postgres: 0028 does the same in SQL). It reads
+// hub wrote before the column (postgres: 0030 does the same in SQL). It reads
 // only rows still NULL, so once a row is set no later start rewrites it.
 func (s *laneInboxStore) backfillSpawnReplacedFrom(ctx context.Context) error {
 	type successor struct{ id, parent string }
