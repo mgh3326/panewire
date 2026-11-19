@@ -25,6 +25,18 @@ func TestHubStoreCopyTableInventory(t *testing.T) {
 	}
 }
 
+func TestHubStoreCopySchemaMismatch(t *testing.T) {
+	if !storeCopySameColumns([]string{"id", "value"}, []string{"value", "id"}) {
+		t.Fatal("column order should not matter")
+	}
+	if storeCopySameColumns([]string{"id", "value"}, []string{"id", "other"}) {
+		t.Fatal("different columns accepted")
+	}
+	if storeCopySameColumns([]string{"id"}, []string{"id", "extra"}) {
+		t.Fatal("extra source column accepted")
+	}
+}
+
 func TestHubStoreCopyOrderAndColumns(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

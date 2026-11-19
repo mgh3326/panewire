@@ -194,6 +194,13 @@ func copyHubStore(ctx context.Context, from, to, selection string, verify, repla
 		if err != nil {
 			return hubDatabaseError("columns "+table.name, err)
 		}
+		sourceColumns, err := storeCopySourceColumns(ctx, source, src, table)
+		if err != nil {
+			return hubDatabaseError("source columns "+table.name, err)
+		}
+		if sourceColumns != nil && !storeCopySameColumns(columns, sourceColumns) {
+			return fmt.Errorf("%s: source and target columns differ", table.name)
+		}
 		if !verify {
 			if _, err = target.ExecContext(ctx, "DELETE FROM "+table.name); err != nil {
 				return hubDatabaseError("clear "+table.name, err)
@@ -232,6 +239,44 @@ func storeCopyColumns(ctx context.Context, tx *sql.Tx, table string) ([]string, 
 	}
 	defer rows.Close()
 	return rows.Columns()
+}
+
+// Old PostgreSQL and SQLite stores predate the MySQL lock-row table. Its
+// absence means there are no lock rows to copy, not an incomplete schema.
+func storeCopySourceColumns(ctx context.Context, tx *sql.Tx, source *storeCopyDB, table storeCopyTable) ([]string, error) {
+	if table.name == "supersede_lane_cause" && source.dialect != dialectMySQL {
+		var exists bool
+		var err error
+		if source.sqlite {
+			err = tx.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='supersede_lane_cause'`).Scan(&exists)
+		} else {
+			err = tx.QueryRowContext(ctx, `SELECT to_regclass('supersede_lane_cause') IS NOT NULL`).Scan(&exists)
+		}
+		if err != nil || !exists {
+			return nil, err
+		}
+	}
+	cols, err := storeCopyColumns(ctx, tx, table.name)
+	if err == nil && source.sqlite && table.name == "lane_inbox_batches" {
+		cols = append(cols, "seq")
+	}
+	return cols, err
+}
+func storeCopySameColumns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]bool, len(a))
+	for _, c := range a {
+		set[c] = true
+	}
+	for _, c := range b {
+		if !set[c] {
+			return false
+		}
+		delete(set, c)
+	}
+	return len(set) == 0
 }
 
 type storeCopyResult struct {
