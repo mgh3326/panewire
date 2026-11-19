@@ -41,6 +41,12 @@ type nodeJobResult struct {
 	// (see nodeJobBookkeepingEvent). A nil value is a node that predates the
 	// field: the caller reads it as unknown, never as zero.
 	ActivityEvents *int `json:"activity_events,omitempty"`
+	// QuotaResumes counts the quota-stop resumes this node recorded for the job
+	// (quota_stop_decisions, attempted=1). It is set whether or not the job
+	// directory exists; nil is a node that predates the field, or one whose
+	// record could not be read. The hub reads unknown as one resume taken
+	// (hub_pool_handover.go nodeResumes), so it hands over rather than waits.
+	QuotaResumes *int `json:"quota_resumes,omitempty"`
 }
 
 // nodeJobBookkeepingEvent reports whether an events/NNNNN-<kind>.json file
@@ -117,6 +123,9 @@ func (client *HubClient) nodeJobResult(args nodeJobResultArgs) (any, string) {
 		return nil, "result_failed"
 	}
 	result := nodeJobResult{Found: found}
+	if count, err := client.quotaResumeCount(args.Job); err == nil {
+		result.QuotaResumes = &count
+	}
 	if !found {
 		return result, ""
 	}
@@ -255,6 +264,9 @@ func (client *HubClient) nodeJobResult(args nodeJobResultArgs) (any, string) {
 func validNodeJobResult(r nodeJobResult) bool {
 	if isJSONNull(r.Findings) {
 		r.Findings = nil
+	}
+	if r.QuotaResumes != nil && *r.QuotaResumes < 0 {
+		return false
 	}
 	if !r.Found {
 		return r.Findings == nil && r.FindingsError == "" && r.Report == (nodeJobReport{}) && !r.Completed

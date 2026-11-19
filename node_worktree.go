@@ -714,8 +714,11 @@ func nodeGitHead(ctx context.Context, git relayCommandRunner, dir string) (strin
 }
 
 // nodeRegenerable reports whether an ignored path inside a worktree matches
-// the caller's regenerable allowlist. A glob containing a slash must match
-// the whole path; a slash-free one may match only the last segment.
+// the caller's regenerable allowlist. Gitignore semantics: a glob with a
+// leading or middle slash must match the whole path; a glob whose only slash
+// is the trailing one ("name/") and a slash-free glob may match the last
+// segment. A trailing slash alone never anchors, and the directory form
+// approves only a wholly ignored directory entry (see docs/node-commands.md).
 func nodeRegenerable(globs []string, name string) bool {
 	// git reports a wholly ignored directory as one "dir/" entry; only a
 	// directory pattern (one ending in "/") may approve deleting all of it.
@@ -726,14 +729,16 @@ func nodeRegenerable(globs []string, name string) bool {
 		base = p[i+1:]
 	}
 	for _, raw := range globs {
-		// The slash test reads the glob as given: "logs/" or "/build" is a
-		// whole-path pattern, not a last-segment one.
+		// The slash test reads the glob without its trailing slash: "logs/"
+		// is a last-segment directory pattern, "/build" and "a/b/" anchor.
 		g := strings.Trim(raw, "/")
-		if g == "" || (dirEntry && !strings.HasSuffix(raw, "/")) {
+		// A trailing-slash pattern approves only a directory entry, and a
+		// directory entry needs one.
+		if g == "" || dirEntry != strings.HasSuffix(raw, "/") {
 			continue
 		}
 		match := base
-		if strings.Contains(raw, "/") {
+		if strings.Contains(strings.TrimSuffix(raw, "/"), "/") {
 			match = p
 		}
 		if ok, _ := path.Match(g, match); ok {
