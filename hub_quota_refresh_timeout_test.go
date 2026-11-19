@@ -193,3 +193,50 @@ func TestHubSpawnTimeoutNamesFinishedQuotaRefresh_t4600(t *testing.T) {
 		t.Fatalf("outcome %s does not name the finished attempt", raw)
 	}
 }
+
+// hk 5480: the last attempt stored for a machine/pool can predate the request
+// (an earlier request, an earlier hub process). A request that queued a refresh
+// which has not finished is never told that older attempt is its own: the
+// timeout and the tried list both say the refresh has not finished.
+func TestHubSpawnTimeoutIgnoresARefreshOutcomeFromBeforeTheWait_5480(t *testing.T) {
+	retryHK(t)
+	logs := &controlPlaneLogCapture{}
+	hub := timeoutRefreshHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), logs)
+	server := httptest.NewServer(hub.Handler())
+	t.Cleanup(server.Close)
+	t14NamedNode(t, hub, server, "machine-a", true, true)
+	// An earlier request's attempt on the same key: failed a day ago.
+	if err := hub.inbox.store.recordQuotaRefreshAttempt(t.Context(), "machine-a", "claude", "node_lost", time.Now().Add(-24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	request := durableSpawnRequest()
+	task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.executeSpawnTask(t.Context(), task)
+	parked, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil || parked.Status != "accepted" || parked.Node != nil || len(parked.RefreshWaits) == 0 {
+		t.Fatalf("the pending pass must leave the request accepted on a refresh: status=%s node=%v waits=%v err=%v", parked.Status, parked.Node, parked.RefreshWaits, err)
+	}
+	parked.Deadline = time.Now().Add(-time.Second)
+	hub.executeSpawnTask(t.Context(), parked)
+	final, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(final.Outcome.Fix, "had not finished a refresh attempt") || strings.Contains(final.Outcome.Fix, "node_lost") {
+		t.Fatalf("timeout fix %q reports an attempt from before the wait", final.Outcome.Fix)
+	}
+	if final.Outcome.QuotaRefresh != nil {
+		t.Fatalf("outcome names %+v as the refresh result, want none: nothing finished since the wait began", final.Outcome.QuotaRefresh)
+	}
+	if len(final.Outcome.Tried) == 0 {
+		t.Fatal("the timeout recorded no tried list")
+	}
+	for _, tried := range final.Outcome.Tried {
+		if strings.Contains(tried.Reason, "node_lost") || strings.Contains(tried.Reason, "failed") {
+			t.Fatalf("tried %+v carries the stale failure", tried)
+		}
+	}
+}

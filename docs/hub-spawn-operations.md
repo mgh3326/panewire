@@ -65,9 +65,14 @@ so it cannot outlive the request that asked for it, and the hub reports whether
 it queued or joined one: a request with less budget left than that, or one the
 scheduler suppressed in its post-completion cooldown, does not start the wait.
 That seat is then dropped for the request with reason `refresh_unavailable` and
-placement takes the next candidate inside the same request. No refresh state
-survives a hub restart: an accepted request re-evaluates from scratch, and may
-ask for a refresh again, bounded by its remaining time.
+placement takes the next candidate inside the same request. The refresh state
+#738 added (attempt ids, stored results, account-mismatch settlement, demand
+history) is gone; the hk 4600 last-outcome record and the request's refresh
+link still survive a restart. An accepted request re-evaluates from scratch
+after one, and may ask for a refresh again, bounded by its remaining time.
+A last outcome recorded before the request queued that refresh (the link's
+`started_at`) is not the attempt it waited on: the timeout reports that attempt
+as not yet finished.
 
 Refreshes coalesce by machine and pool. At most four run at once, with at most
 one per node; waiting keys are considered in arrival order while busy nodes are

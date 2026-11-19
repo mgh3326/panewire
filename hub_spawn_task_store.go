@@ -115,9 +115,13 @@ func spawnTriedText(tried []hubSpawnTried) string {
 // hubSpawnRefreshWait is one shared quota refresh a request is parked on: the
 // machine that measures the pool. It is stored with the operation
 // (spawn_operations.refresh_waits) so the link survives a hub restart.
+// StartedAt is when this request asked for that refresh: a last outcome seen
+// before it belongs to an earlier attempt, not the one the request waited on.
+// A link stored without it gates nothing.
 type hubSpawnRefreshWait struct {
-	Machine string `json:"machine"`
-	Pool    string `json:"pool"`
+	Machine   string    `json:"machine"`
+	Pool      string    `json:"pool"`
+	StartedAt time.Time `json:"started_at,omitzero"`
 }
 
 // hubSpawnRefreshOutcome is the last finished attempt for the refresh a timed

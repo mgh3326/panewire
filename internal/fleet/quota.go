@@ -676,6 +676,22 @@ func quotaRefreshFits(ctx context.Context, window time.Duration) bool {
 	return time.Until(deadline) >= window
 }
 
+// rereadUsableAccount reads the shared account once more and reports it when it
+// is now usable. It is the check before a seat is dropped as
+// refresh_unavailable: a refresh another request ran may have landed after the
+// reading this pass holds, so the seat goes only if the account is still
+// unusable (hk 5480).
+func (a *App) rereadUsableAccount(ctx context.Context, key string) (SharedAccount, bool) {
+	if a.Source == nil || key == "" {
+		return SharedAccount{}, false
+	}
+	fresh, err := a.Source.SharedAccount(ctx, key)
+	if err != nil || sharedReason(key, fresh) != "" || fresh.Quota == nil {
+		return SharedAccount{}, false
+	}
+	return fresh, true
+}
+
 // refreshUnavailable refuses a seat whose shared reading cannot be measured
 // inside what is left of the request, so placement takes the next candidate
 // (hk 5456).
@@ -720,11 +736,17 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 			if quotaRefreshFits(ctx, a.measureTimeout()) && a.scheduleQuotaRefresh(host, pool) {
 				return j, ErrQuotaRefreshPending
 			}
-			// No measurement this request can wait for: refuse the seat and
-			// let placement try the next candidate (hk 5456). A synchronous
+			// No measurement this request can wait for. A refresh another
+			// request ran may have landed since this reading, so look once
+			// more; only a still-unusable account refuses the seat and lets
+			// placement try the next candidate (hk 5456). A synchronous
 			// measurement here could spend the remaining budget on a slow node.
-			observed = j.Reason
-			return j, refreshUnavailable(key, pool)
+			if fresh, ok := a.rereadUsableAccount(ctx, key); ok {
+				acc, j.Reason, j.State = fresh, "", fresh.State
+			} else {
+				observed = j.Reason
+				return j, refreshUnavailable(key, pool)
+			}
 		}
 		// A stale or missing observation of an account this host does not hold
 		// is never refreshed by the gate, so measure it on the target first.
@@ -768,6 +790,11 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 	if err != nil && !local && !a.planOnly && key != "" && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown {
 		if quotaRefreshFits(ctx, a.measureTimeout()) && a.scheduleQuotaRefresh(host, pool) {
 			return judgment, ErrQuotaRefreshPending
+		}
+		// Same one-shot look as above: with a usable reading the gate is asked
+		// again, and only a still-unusable account drops the seat.
+		if _, ok := a.rereadUsableAccount(ctx, key); ok {
+			return a.judgeGate(ctx, r, pool, j)
 		}
 		return judgment, refreshUnavailable(key, pool)
 	}

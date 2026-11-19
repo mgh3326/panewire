@@ -127,3 +127,106 @@ func TestSpawnStatusPrintsTheTriedList_5480(t *testing.T) {
 		}
 	}
 }
+
+// A refresh another request ran lands while this one is selecting: the hub
+// refuses a new one inside its post-completion cooldown, yet the reading is now
+// fresh. The seat is kept, not dropped as refresh_unavailable (thread on
+// select_accounts.go, hk 5480).
+func TestSelectionKeepsASeatWhoseRefreshLandedWithinTheCooldown_5480(t *testing.T) {
+	rows := []CatalogRow{{Profile: "codex-sol", Effort: "high", Grade: "B", Pool: "codex", Gate: "default", ModelID: "m"}}
+	pools := map[string]PoolView{"codex": {Status: "ok", Class: "spend", Blocking: ptrF(10)}}
+	a, s, q := selFixture(t, "B", rows, pools, []string{"codex"})
+	q.GateDo = gatePools(map[string]string{"codex-sol": "codex"})
+	source := a.Source.(*fakePlacementSource)
+	key := "codex:0000000000000001"
+	source.accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: false, MeasuredAt: a.Now().Add(-time.Hour)}
+	a.ScheduleQuotaRefresh = func(machine, pool string, timeout time.Duration) bool {
+		// Another request's refresh completed after the plan read the account.
+		source.accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: a.Now()}
+		return false
+	}
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.chosen == nil || sel.chosen.row.Profile != "codex-sol" {
+		t.Fatalf("chosen = %+v, want the codex seat kept: its reading is fresh", sel.chosen)
+	}
+}
+
+// A seat whose account is still unusable after the re-read is dropped.
+func TestSelectionDropsASeatThatStaysUnusableAfterTheReread_5480(t *testing.T) {
+	a, s, _ := refreshWaitFixture5480(t)
+	a.ScheduleQuotaRefresh = func(string, string, time.Duration) bool { return false }
+	sel, err := a.selectProfile(context.Background(), s)
+	if err == nil && sel.chosen != nil {
+		t.Fatalf("chosen = %+v, want the stale seat dropped", sel.chosen)
+	}
+	for _, c := range sel.cands {
+		if c.row.Profile == "codex-sol" && c.outcome != "dropped:refresh_unavailable" {
+			t.Fatalf("codex outcome = %q, want dropped:refresh_unavailable", c.outcome)
+		}
+	}
+}
+
+func judgeHostRereadFixture5480(t *testing.T) (*App, *fakePlacementSource, string) {
+	t.Helper()
+	key := "claude:0123456789abcdef"
+	src := &fakePlacementSource{accounts: map[string]SharedAccount{}}
+	a := placementApp(t, src)
+	a.Config.Hosts = map[string]map[string]any{"host-b": {}}
+	a.ScheduleQuotaRefresh = func(string, string, time.Duration) bool { return false }
+	return a, src, key
+}
+
+func freshAccount5480(a *App, key string) SharedAccount {
+	return SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: &PoolView{Status: "ok", Class: "spend", Blocking: ptrF(10)}}
+}
+
+// The judgment of a stale target whose refresh another request ran in the
+// meantime reads the new reading before it drops the seat.
+func TestJudgeHostRereadsAStaleAccountBeforeDroppingTheSeat_5480(t *testing.T) {
+	a, src, key := judgeHostRereadFixture5480(t)
+	a.Quota = &fakeQuota{GateDo: func(QuotaRequest) (string, error) { return "claude", nil }}
+	src.accounts[key] = freshAccount5480(a, key)
+	stale := SharedAccount{Key: key, Observed: true, Fresh: false, MeasuredAt: a.Now().Add(-time.Hour)}
+	if _, err := a.judgeHost(context.Background(), QuotaRequest{}, "claude", "host-b", false, key, stale); err != nil {
+		t.Fatalf("judgeHost = %v, want the seat kept on the fresh reading", err)
+	}
+	// Still stale after the re-read: the seat is dropped.
+	src.accounts[key] = stale
+	_, err := a.judgeHost(context.Background(), QuotaRequest{}, "claude", "host-b", false, key, stale)
+	var refusal *quotaHostRefusal
+	if !errors.As(err, &refusal) || refusal.reason != reasonRefreshUnavailable {
+		t.Fatalf("judgeHost = %v, want a refresh_unavailable refusal", err)
+	}
+}
+
+// The gate path: a reading the gate called unknown, which the re-read shows is
+// usable now, gets the gate asked once more instead of a dropped seat.
+func TestJudgeHostRereadsBeforeTheGateDropsTheSeat_5480(t *testing.T) {
+	a, src, key := judgeHostRereadFixture5480(t)
+	gates := 0
+	a.Quota = &fakeQuota{GateDo: func(QuotaRequest) (string, error) {
+		gates++
+		if gates == 1 {
+			return "", &gateRefusal{cause: fail(exitQuotaUnknown, "QUOTA_UNKNOWN: no reading"), outcome: outcomeQuotaUnknown}
+		}
+		return "claude", nil
+	}}
+	src.accounts[key] = freshAccount5480(a, key)
+	if _, err := a.judgeHost(context.Background(), QuotaRequest{}, "claude", "host-b", false, key, freshAccount5480(a, key)); err != nil {
+		t.Fatalf("judgeHost = %v, want the seat kept once the re-read shows a usable account", err)
+	}
+	if gates != 2 {
+		t.Fatalf("gate asked %d times, want 2", gates)
+	}
+	// An account that is still unusable after the re-read drops the seat.
+	gates = 0
+	src.accounts[key] = SharedAccount{Key: key, Degraded: true}
+	_, err := a.judgeHost(context.Background(), QuotaRequest{}, "claude", "host-b", false, key, freshAccount5480(a, key))
+	var refusal *quotaHostRefusal
+	if !errors.As(err, &refusal) || refusal.reason != reasonRefreshUnavailable {
+		t.Fatalf("judgeHost = %v, want a refresh_unavailable refusal", err)
+	}
+}

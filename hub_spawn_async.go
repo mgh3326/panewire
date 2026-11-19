@@ -830,7 +830,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// asks it to refresh so a timeout can name the machine and pool.
 	var refreshMu sync.Mutex
 	var refreshWaits []hubSpawnRefreshWait
-	rememberRefreshWait := func(machine, pool string) {
+	rememberRefreshWait := func(machine, pool string, started time.Time) {
 		refreshMu.Lock()
 		defer refreshMu.Unlock()
 		for _, wait := range refreshWaits {
@@ -838,7 +838,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 				return
 			}
 		}
-		refreshWaits = append(refreshWaits, hubSpawnRefreshWait{Machine: machine, Pool: pool})
+		refreshWaits = append(refreshWaits, hubSpawnRefreshWait{Machine: machine, Pool: pool, StartedAt: started})
 	}
 	app.ScheduleQuotaRefresh = func(machine, pool string, timeout time.Duration) bool {
 		// A refresh never outlives what is left of the request's attempt
@@ -849,8 +849,11 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		if budget <= 0 {
 			return false
 		}
+		// Read before the schedule call: a refresh that finishes at once is
+		// recorded no earlier than this, so it is never mistaken for a stale one.
+		started := h.now()
 		if h.scheduleQuotaRefresh(machine, pool, budget) {
-			rememberRefreshWait(machine, pool)
+			rememberRefreshWait(machine, pool, started)
 			return true
 		}
 		// Inside the post-completion cooldown: after a failed measurement it
@@ -1054,6 +1057,21 @@ func (h *HubServer) clearSpawnRefreshWaits(task hubSpawnTask) {
 	}
 }
 
+// spawnRefreshAttempt reads the last finished attempt for a refresh a request
+// waited on. An attempt seen before the request asked for that refresh is a
+// stale one, so it reads as not finished (found false).
+func (h *HubServer) spawnRefreshAttempt(wait hubSpawnRefreshWait) (string, time.Time, bool) {
+	outcome, seen, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, wait.Machine, wait.Pool)
+	if err != nil {
+		h.logger.Warn("spawn quota refresh attempt not read", "machine", wait.Machine, "pool", wait.Pool, "error", err)
+		return "", time.Time{}, false
+	}
+	if !found || seen.Before(wait.StartedAt) {
+		return "", time.Time{}, false
+	}
+	return outcome, seen, true
+}
+
 // spawnRefreshWaitOutcome reports whether an unbound request's timeout expired
 // while it waited on a shared quota refresh. It names the wait whose last
 // attempt failed most recently, or, when nothing failed, the wait whose last
@@ -1070,11 +1088,7 @@ func (h *HubServer) spawnRefreshWaitOutcome(task hubSpawnTask) (hubSpawnRefreshW
 	var failure, success *hubSpawnRefreshOutcome
 	var failedAt, succeededAt time.Time
 	for _, candidate := range task.RefreshWaits {
-		outcome, seen, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, candidate.Machine, candidate.Pool)
-		if err != nil {
-			h.logger.Warn("spawn quota refresh attempt not read", "machine", candidate.Machine, "pool", candidate.Pool, "error", err)
-			continue
-		}
+		outcome, seen, found := h.spawnRefreshAttempt(candidate)
 		if !found {
 			continue
 		}
@@ -1168,7 +1182,7 @@ func (h *HubServer) spawnTriedRefreshWaits(task hubSpawnTask) []hubSpawnTried {
 	for _, wait := range task.RefreshWaits {
 		reason := "no refresh attempt finished"
 		if h.inbox != nil {
-			if outcome, _, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, wait.Machine, wait.Pool); err == nil && found {
+			if outcome, _, found := h.spawnRefreshAttempt(wait); found {
 				if outcome != "" {
 					reason = "refresh failed: " + outcome
 				} else {

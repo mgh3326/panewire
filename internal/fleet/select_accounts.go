@@ -260,6 +260,15 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 			sp.accounts[key] = acc
 			return acc
 		}
+		// Nothing can be waited on. Read the shared account once more: a refresh
+		// another request ran may have landed since the plan read it (the
+		// hub's post-completion cooldown refuses a new one right after), and
+		// ruling the candidate out must not rely on the older copy.
+		if fresh, ok := sp.a.rereadUsableAccount(ctx, key); ok {
+			sp.accounts[key] = fresh
+			sp.refreshed[key] = accountRefresh{measured: "ok"}
+			return fresh
+		}
 		// Nothing can measure this account inside what is left of the request.
 		result := accountRefresh{measured: measureNotDue, host: firstHolder(ordered), err: refreshUnavailable(key, pool)}
 		acc = SharedAccount{Key: key, Degraded: true}
