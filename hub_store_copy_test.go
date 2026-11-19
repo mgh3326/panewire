@@ -76,7 +76,18 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 	t.Cleanup(func() { _ = source.close() })
 	names := copyFixtureTables(t)
 	seedCopyFixture(t, source.db, names)
+	// Prime the server's cached statistics before advancing the sequence.
+	var cachedNext int64
+	if err := source.db.QueryRow(`SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='lane_inbox'`).Scan(&cachedNext); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := source.db.Exec(`ALTER TABLE lane_inbox AUTO_INCREMENT=100`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.db.Exec(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at) VALUES ('temporary','lane','lane.event','inbox','{}',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.db.Exec(`DELETE FROM lane_inbox WHERE event_key='temporary'`); err != nil {
 		t.Fatal(err)
 	}
 	var report bytes.Buffer
@@ -328,5 +339,20 @@ func TestHubStoreCopySQLiteReadOnly(t *testing.T) {
 	defer tx.Rollback()
 	if _, err = tx.Exec(`INSERT INTO sample VALUES(1)`); err == nil {
 		t.Fatal("source allowed a write")
+	}
+}
+
+func TestHubStoreCopyCLIEnvironmentURLs(t *testing.T) {
+	t.Setenv("PANEWIRE_COPY_TEST_SOURCE", "sqlite:///nonexistent/secret-source")
+	t.Setenv("PANEWIRE_COPY_TEST_TARGET", "mysql://secret-user:secret-password@127.0.0.1:1/db")
+	var out, stderr bytes.Buffer
+	rc := runHubStoreCopyCLI([]string{"--from-env", "PANEWIRE_COPY_TEST_SOURCE", "--to-env", "PANEWIRE_COPY_TEST_TARGET"}, &out, &stderr)
+	if rc == 0 || strings.Contains(stderr.String(), "secret") {
+		t.Fatalf("rc=%d stderr=%q", rc, stderr.String())
+	}
+	stderr.Reset()
+	rc = runHubStoreCopyCLI([]string{"--from", "sqlite:///x", "--from-env", "PANEWIRE_COPY_TEST_SOURCE", "--to-env", "PANEWIRE_COPY_TEST_TARGET"}, &out, &stderr)
+	if rc != ExitConditionInvalid {
+		t.Fatalf("conflicting source options: rc=%d", rc)
 	}
 }

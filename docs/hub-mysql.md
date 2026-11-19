@@ -188,9 +188,12 @@ current. The copier refuses unmatched source and target columns. Stop the hub
 and keep it stopped throughout the final copy and verification.
 Take and retain the normal database backups. Use the CA-pinned MySQL URL shown
 above; both URLs contain credentials, so supply them from the operator's secure
-runtime without writing them into a script, shell history, or the report.
+runtime without writing them into a script, shell history, or the report. Use
+`--from-env` and `--to-env` with environment variable names so the URLs are not
+exposed in command-line arguments. Literal `--from` and `--to` remain available
+for non-secret local URLs.
 
-1. Run `panewire hub store-copy --from "$POSTGRES_URL" --to "$MYSQL_URL"`.
+1. Run `panewire hub store-copy --from-env POSTGRES_URL --to-env MYSQL_URL`.
    The command migrates the target and refuses existing target rows. For a
    deliberate repeat into a previously populated target, add `--replace`;
    it replaces the selected tables. `--tables` accepts comma-separated table

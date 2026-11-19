@@ -12,6 +12,7 @@ import (
 	"hash"
 	"io"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -71,6 +72,11 @@ func openStoreCopyDB(ctx context.Context, raw string, source bool) (*storeCopyDB
 		if err != nil {
 			return nil, err
 		}
+		if source {
+			// Disable cached information_schema statistics on every connection,
+			// including reconnects, so sequence high-water marks are current.
+			cfg.Params["information_schema_stats_expiry"] = "0"
+		}
 		db, err := openHubMySQL(ctx, cfg)
 		if err != nil {
 			return nil, err
@@ -95,11 +101,23 @@ func runHubStoreCopyCLI(args []string, out, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	from := fs.String("from", "", "source URL")
 	to := fs.String("to", "", "target URL")
+	fromEnv := fs.String("from-env", "", "environment variable containing the source URL")
+	toEnv := fs.String("to-env", "", "environment variable containing the target URL")
 	tables := fs.String("tables", "", "comma-separated tables")
 	verify := fs.Bool("verify-only", false, "compare without copying")
 	replace := fs.Bool("replace", false, "replace target rows")
-	if fs.Parse(args) != nil || *from == "" || *to == "" || fs.NArg() != 0 || (*verify && *replace) {
+	if fs.Parse(args) != nil || fs.NArg() != 0 || (*verify && *replace) || (*from != "" && *fromEnv != "") || (*to != "" && *toEnv != "") {
 		fmt.Fprintln(stderr, "store-copy: invalid arguments")
+		return ExitConditionInvalid
+	}
+	if *fromEnv != "" {
+		*from = os.Getenv(*fromEnv)
+	}
+	if *toEnv != "" {
+		*to = os.Getenv(*toEnv)
+	}
+	if *from == "" || *to == "" {
+		fmt.Fprintln(stderr, "store-copy: source and target URLs are required")
 		return ExitConditionInvalid
 	}
 	if err := copyHubStore(context.Background(), *from, *to, *tables, *verify, *replace, out); err != nil {
