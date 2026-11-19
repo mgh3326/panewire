@@ -189,7 +189,10 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 	h.mu.Lock()
 	delete(h.spawnOrphanProbed, task.Request.RequestID)
 	h.mu.Unlock()
-	if task.Status != "bound" {
+	// A withdrawal's outcome commit already cleared the role in the same
+	// transaction (writeSpawnOutcome), so a second write here could only fail
+	// after the request is cancelled and report a false refusal (hk 5429 review).
+	if task.Status != "bound" && code != spawnWithdrawnReason {
 		if err = h.releaseSpawnRole(ctx, task); err != nil {
 			return false, "release_write_failed"
 		}
