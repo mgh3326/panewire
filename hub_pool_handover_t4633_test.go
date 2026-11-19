@@ -36,7 +36,19 @@ func handoverFixture(t *testing.T, job string, priority int, expected time.Durat
 	f.hub.handoverInputs = func(context.Context, string) handoverInputs {
 		return handoverInputs{policy: handoverPolicy(), policyOK: true, priority: priority, expected: expected, bound: job}
 	}
+	acceptSuccessorHost(f)
 	return f
+}
+
+// acceptSuccessorHost makes machine-b an accepting host: the successor is kept
+// off machine-a, so it needs somewhere else to be placed (hk 5311).
+func acceptSuccessorHost(f *quotaReplaceFixture) {
+	f.hub.mu.Lock()
+	record := f.hub.nodes["machine-b"]
+	record.accepting = true
+	record.state = "connected"
+	record.capabilities = map[string]bool{"spawn_v2": true}
+	f.hub.mu.Unlock()
 }
 
 // window5h is the 5145 case: a 5-hour window whose reset is 1h35m away.
@@ -58,9 +70,36 @@ var releasedReply = poolActionReply{op: nodeCommandPaneCloseRelease, result: map
 // sweepHandover runs the sweep for f's job, answering the pane and worktree checks.
 func sweepHandover(t *testing.T, f *quotaReplaceFixture, exhaustion poolExhaustion, patch map[string]any) poolJobResult {
 	t.Helper()
+	return sweepHandoverWithResumes(t, f, exhaustion, patch, map[string]any{"found": false, "quota_resumes": 0})
+}
+
+// sweepReplay runs a sweep that repeats a stop already waited out. It returns on
+// the wait row before any node read, so it sends no job.result.
+func sweepReplay(t *testing.T, f *quotaReplaceFixture, exhaustion poolExhaustion) poolJobResult {
+	t.Helper()
+	return sweepHandoverWithResumes(t, f, exhaustion, nil, nil)
+}
+
+// sweepHandoverWithResumes is sweepHandover with the node's answer to the
+// sweep's job.result read, which comes before any pane or worktree command.
+// resumes is that answer's body: quota_resumes, or an error for an unreadable
+// record. A nil resumes means the sweep sends no read at all.
+func sweepHandoverWithResumes(t *testing.T, f *quotaReplaceFixture, exhaustion poolExhaustion, patch, resumes map[string]any) poolJobResult {
+	t.Helper()
 	f.holder.Outcome.AccountKey = exhaustion.Account
 	done := make(chan poolJobResult, 1)
 	go func() { done <- f.hub.sweepPoolJob(t.Context(), exhaustion, f.holder) }()
+	if resumes != nil {
+		command := nodeCommandRead(t, f.node)
+		if string(command["op"]) != `"job.result"` {
+			t.Fatalf("first node command %s, want job.result", command["op"])
+		}
+		if code, failed := resumes["error"]; failed {
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"error": code})
+		} else {
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": resumes})
+		}
+	}
 	for patch != nil {
 		select {
 		case result := <-done:
@@ -337,7 +376,7 @@ func TestPoolHandoverWaitsWhenTheResetIsWithinExpected(t *testing.T) {
 		t.Fatalf("owner lines=%q, want one naming the reset", lines)
 	}
 	// The same stop seen again stays a wait and says nothing more.
-	if again := sweepHandover(t, f, exhaustion, nil); again.why != "waiting" {
+	if again := sweepReplay(t, f, exhaustion); again.why != "waiting" {
 		t.Fatalf("repeat=%+v", again)
 	}
 	if lines := ownerLines(t, f.hub, ""); len(lines) != 1 {
@@ -687,8 +726,8 @@ func TestPoolHandoverReplaysAMissedWaitNotice(t *testing.T) {
 	if err := f.hub.inbox.store.insertPoolAction(t.Context(), row, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	sweepHandover(t, f, exhaustion, nil)
-	sweepHandover(t, f, exhaustion, nil)
+	sweepReplay(t, f, exhaustion)
+	sweepReplay(t, f, exhaustion)
 	if lines := ownerLines(t, f.hub, "pool-wait:"); len(lines) != 1 {
 		t.Fatalf("owner lines=%q, want the one missed notice", lines)
 	}
@@ -981,7 +1020,7 @@ func TestPoolHandoverWaitReplayReleasesTheSweepClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sweepExhaustedPool releases a notified implementer only for this reason.
-	if result := sweepHandover(t, f, exhaustion, nil); result.action != poolJobNotified || result.why != poolWaitReason {
+	if result := sweepReplay(t, f, exhaustion); result.action != poolJobNotified || result.why != poolWaitReason {
 		t.Fatalf("replay=%+v, want the wait reason so the claim is released", result)
 	}
 }
@@ -1118,6 +1157,7 @@ func TestPoolHandoverDropsAPinnedProfileAndBoundsTheLabel(t *testing.T) {
 	f.hub.handoverInputs = func(context.Context, string) handoverInputs {
 		return handoverInputs{policy: handoverPolicy(), policyOK: true, priority: 1, bound: job}
 	}
+	acceptSuccessorHost(f)
 	if result := sweepHandover(t, f, window5h(), handoverReadReply(job)); result.action != poolJobQueued {
 		t.Fatalf("sweep=%+v", result)
 	}
