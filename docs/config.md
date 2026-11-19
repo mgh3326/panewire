@@ -2111,6 +2111,7 @@ for ownership and distribution.
 | `XDG_CACHE_HOME` | Cache home of the bench catalog read (`$XDG_CACHE_HOME/panewire/bench`); default `~/.cache`. |
 | `ARTIFICIAL_ANALYSIS_API_KEY` | Free Artificial Analysis Data API key for `panewire catalog aa-sync`; else the mode-0600 `$XDG_CONFIG_HOME/panewire/aa.env`. |
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |
+| `PANEWIRE_HUB_DATABASE_URL` | The hub's database. Unset: the SQLite file at `--inbox-store`. A `postgres://` URL selects Postgres ([hub inbox on Postgres](hub-postgres.md)); a `mysql://` URL selects MySQL, `mysql://user:password@host:port/database?tls-ca=/path/to/ca.pem` ([hub store on MySQL](hub-mysql.md)). The scheme chooses; there is no second key. The URL is a credential, read from the environment only. |
 | `ARBITER_INBOX_ROOT` | Jobs root; production guard requires the canonical inbox. |
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |
 | `PANEWIRE_E6_ARM` | Exact experiment marker when policy requires one: `<canon>@<effort>`, or `<canon>@` (nothing after the `@`) for a rung whose catalog effort is empty, such as `devin-ds41-max@`. The marker names the rung the spawn resolves to: the seat gate refuses `<canon>@` for a rung with an effort and `<canon>@<effort>` for an effortless rung. A hub spawn carries it to the hub and node, so it applies to `--host auto|local|NAME` alike; a marker whose canon differs from `-m` is refused at submit (exit 2). |

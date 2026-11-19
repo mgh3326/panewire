@@ -8,6 +8,9 @@ backends behind one method set:
 |---|---|
 | unset (default) | SQLite file at `--inbox-store`, unchanged behaviour |
 | a `postgres://` URL | Postgres; `--inbox-store` is ignored |
+| a `mysql://` URL | MySQL (hk 4898); see [hub store on MySQL](hub-mysql.md) |
+
+The URL's scheme chooses the backend; there is no second key.
 
 Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
 
@@ -97,20 +100,20 @@ same terms as a wrong result.
 ## The dialect seam
 
 Every statement the hub store sends goes through one `sqlDialect`
-(`hub_sql_dialect.go`) for the parts that differ between databases. SQLite and
-Postgres implement it today; the MySQL dialect of hk 4898 is a third
-implementation, not a third copy of each query. A store query never spells one
-of these forms inline:
+(`hub_sql_dialect.go`) for the parts that differ between databases. SQLite,
+Postgres and MySQL ([hub store on MySQL](hub-mysql.md)) implement it; the MySQL
+dialect of hk 4898 is a third implementation, not a third copy of each query. A
+store query never spells one of these forms inline:
 
 | Need | Seam operation |
 |---|---|
 | `?` placeholders per backend | `rebind` (the store's `q`) |
-| the transaction and its isolation level | `begin` (the store's `beginTx`): READ COMMITTED stated on Postgres, never a server default |
-| insert, no-op on a duplicate key | `insertIgnore` |
+| the transaction and its isolation level | `begin` (the store's `beginTx`): READ COMMITTED stated on Postgres and MySQL, never a server default |
+| insert, no-op on a duplicate key | `insertIgnore`; `insertOnce` (with `duplicateKey`) for a caller that reads the row count as "this call stored the row" |
 | insert, update on a duplicate key | `upsert`, `upsertGreatest`, and `upsertWhere` for the per-column conditional of the placement snapshot |
 | integer cast, string concatenation, the LIKE escape | `castInt`, `concat`, `escapeClause` |
 | a bounded `UPDATE` or `DELETE` whose rows a sorted `LIMIT` names | `updateOrdered`, `deleteWhereIn` |
-| the migration lock, the per-(lane, cause) supersede lock | `lockMigration`, `lockLaneCause`: transaction advisory locks on Postgres, nothing on SQLite |
+| the migration lock, the per-(lane, cause) supersede lock | `lockMigration`, `lockLaneCause`: transaction advisory locks on Postgres, nothing on SQLite; on MySQL a `GET_LOCK` session lock on a pinned connection and a row lock |
 | a compare-and-set's "the guarded row was there" | `rowsMatched`: the rows an `UPDATE` or `DELETE` matched |
 | the `event_key` form, the batch order column, the `lane_inbox` insert, who builds the schema | `storedKey`, `batchOrder`, `laneInboxInsert`, `ownsSchema` |
 
@@ -126,17 +129,10 @@ after the comma. Two tests keep it so:
   one of the forms above inline. Add the form to its list when the seam gains an
   operation.
 
-What the seam does not move yet, and phase 1b (MySQL) takes up:
-
-- The supersede lock stays an advisory lock on Postgres. On MySQL it is a row
-  lock inside its transaction (`SELECT ... FOR UPDATE` on a `lane_cause` row),
-  because `GET_LOCK` belongs to a session; that needs a table, so it is a schema
-  change and lands with the MySQL migrations.
-- `rowsMatched` is `RowsAffected` today. MySQL's driver counts changed rows
-  unless the DSN sets `clientFoundRows=true`; the MySQL dialect opens it that
-  way, so every compare-and-set keeps its meaning.
-- The SQLite schema is still built in Go and Postgres's in
-  `hub_postgres_migrations/`; neither is a seam operation.
+Phase 1b (hk 5448) added the MySQL dialect, which is documented with its
+schema in [hub store on MySQL](hub-mysql.md). The SQLite schema is still built
+in Go, Postgres's is in `hub_postgres_migrations/` and MySQL's in
+`hub_mysql_migrations/`; none of them is a seam operation.
 
 ## Setup (new database)
 
@@ -192,13 +188,14 @@ SQLite backend.
 ## Tests
 
 - `lane_inbox_store_contract_test.go` runs every store case, including
-  must-ack, against both backends.
-- `inbox_must_ack_test.go` runs the hub-level must-ack tests on both
-  backends.
+  must-ack, against every backend: SQLite, Postgres and MySQL.
+- `inbox_must_ack_test.go` runs the hub-level must-ack tests on every
+  backend.
 - `hub_sql_dialect_test.go` asserts the SQL each dialect generates (see
   [The dialect seam](#the-dialect-seam)); it needs no database.
 
 The Postgres half needs `PANEWIRE_TEST_HUB_DATABASE_URL`. CI's `postgres` job
-sets it from a service container, and fails if any test in that job skips.
+sets it from a service container, and fails if any Postgres test in that job
+skips (the MySQL half of a shared test skips there: CI's `mysql` job runs it).
 Each test uses its own schema. Locally the variable is unset, so those cases
 skip. Do not start a database server on a host to run them.

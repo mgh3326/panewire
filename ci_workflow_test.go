@@ -57,6 +57,9 @@ func TestCITiers(t *testing.T) {
 		// postgres also runs on a pull request that touches the inbox store
 		// (store-paths), because the production hub keeps its inbox there.
 		"postgres": `${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}`,
+		// mysql is postgres's twin (hk 4898): the same store contract suite
+		// on a MySQL service container, under the same gate.
+		"mysql": `${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","mysql"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}`,
 	}
 	for name, job := range w.Jobs {
 		if condition, ok := postOnly[name]; ok && job.If == condition {
@@ -70,19 +73,21 @@ func TestCITiers(t *testing.T) {
 			t.Errorf("PR-reachable job %s has unsafe runner: %s", name, runner)
 		}
 		services, _ := yaml.Marshal(job.Services)
-		if strings.Contains(strings.ToLower(string(services)), "postgres") {
-			t.Errorf("PR-reachable job %s has Postgres service", name)
+		if strings.Contains(strings.ToLower(string(services)), "postgres") || strings.Contains(strings.ToLower(string(services)), "mysql") {
+			t.Errorf("PR-reachable job %s has a database service", name)
 		}
 		for _, step := range job.Steps {
-			if strings.Contains(step.Run, "-race") || strings.Contains(step.Run, "postgres:") {
+			if strings.Contains(step.Run, "-race") || strings.Contains(step.Run, "postgres:") || strings.Contains(step.Run, "mysql:") {
 				t.Errorf("PR-reachable job %s runs heavy check", name)
 			}
 		}
 	}
-	if pg := w.Jobs["postgres"]; !slices.Contains(pg.Needs, "store-paths") {
-		t.Error("postgres must need store-paths to decide pull request runs")
+	for _, name := range []string{"postgres", "mysql"} {
+		if !slices.Contains(w.Jobs[name].Needs, "store-paths") {
+			t.Errorf("%s must need store-paths to decide pull request runs", name)
+		}
 	}
-	for _, name := range []string{"post-test", "postgres"} {
+	for _, name := range []string{"post-test", "postgres", "mysql"} {
 		job := w.Jobs[name]
 		if job.If != postOnly[name] {
 			t.Errorf("%s is not post-only (or, for postgres, not store-gated)", name)
@@ -126,11 +131,18 @@ func TestCITiers(t *testing.T) {
 	if !strings.Contains(pgRuns, "migration and startup") {
 		t.Error("main stage must run the migration and startup check")
 	}
+	var myRuns string
+	for _, step := range w.Jobs["mysql"].Steps {
+		myRuns += step.Name + "\n" + step.Run + "\n"
+	}
+	if !strings.Contains(myRuns, "go test -count=1 -v") || !strings.Contains(myRuns, "MySQL") {
+		t.Error("main stage must run the MySQL suite without -race")
+	}
 	gate := w.Jobs["ci-ok"]
 	if gate.If != "${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}" {
 		t.Fatal("ci-ok cancellation rule changed")
 	}
-	for _, required := range []string{"test", "post-test", "postgres", "auto-tag-test"} {
+	for _, required := range []string{"test", "post-test", "postgres", "mysql", "auto-tag-test"} {
 		if !slices.Contains(gate.Needs, required) {
 			t.Errorf("ci-ok must need %s", required)
 		}
@@ -198,20 +210,25 @@ func TestCITiers(t *testing.T) {
 func TestCIGateResults(t *testing.T) {
 	gate := readCI(t, ".github/workflows/ci.yml").Jobs["ci-ok"]
 	for _, tc := range []struct {
-		event, suite, test, post, pg, auto string
-		ok                                 bool
+		event, suite, test, post, pg, my, auto string
+		ok                                     bool
 	}{
-		{"pull_request", "all", "success", "skipped", "skipped", "success", true},
-		{"pull_request", "all", "failure", "skipped", "skipped", "success", false},
-		{"push", "all", "skipped", "success", "success", "success", true},
-		{"push", "all", "skipped", "success", "failure", "success", false},
-		{"workflow_dispatch", "test", "skipped", "success", "skipped", "success", true},
-		{"workflow_dispatch", "postgres", "skipped", "skipped", "success", "success", true},
-		{"push", "all", "skipped", "success", "success", "failure", false},
-		{"push", "unknown", "skipped", "skipped", "skipped", "success", false},
+		{"pull_request", "all", "success", "skipped", "skipped", "skipped", "success", true},
+		{"pull_request", "all", "failure", "skipped", "skipped", "skipped", "success", false},
+		{"push", "all", "skipped", "success", "success", "success", "success", true},
+		{"push", "all", "skipped", "success", "failure", "success", "success", false},
+		{"push", "all", "skipped", "success", "success", "failure", "success", false},
+		{"push", "all", "skipped", "success", "success", "skipped", "success", false},
+		{"workflow_dispatch", "test", "skipped", "success", "skipped", "skipped", "success", true},
+		{"workflow_dispatch", "postgres", "skipped", "skipped", "success", "skipped", "success", true},
+		{"workflow_dispatch", "mysql", "skipped", "skipped", "skipped", "success", "success", true},
+		{"workflow_dispatch", "mysql", "skipped", "skipped", "skipped", "failure", "success", false},
+		{"workflow_dispatch", "mysql", "skipped", "skipped", "success", "success", "success", false},
+		{"push", "all", "skipped", "success", "success", "success", "failure", false},
+		{"push", "unknown", "skipped", "skipped", "skipped", "skipped", "success", false},
 	} {
 		cmd := exec.Command("bash", "-e", "-c", gate.Steps[0].Run)
-		cmd.Env = append(os.Environ(), "EVENT="+tc.event, "SUITE="+tc.suite, "TEST_RESULT="+tc.test, "POST_TEST_RESULT="+tc.post, "POSTGRES_RESULT="+tc.pg, "AUTO_TAG_RESULT="+tc.auto)
+		cmd.Env = append(os.Environ(), "EVENT="+tc.event, "SUITE="+tc.suite, "TEST_RESULT="+tc.test, "POST_TEST_RESULT="+tc.post, "POSTGRES_RESULT="+tc.pg, "MYSQL_RESULT="+tc.my, "AUTO_TAG_RESULT="+tc.auto)
 		out, err := cmd.CombinedOutput()
 		if (err == nil) != tc.ok {
 			t.Errorf("%+v: %s %v", tc, out, err)

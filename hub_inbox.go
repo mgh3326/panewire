@@ -81,8 +81,9 @@ func defaultHubInboxPath() string {
 	return filepath.Join(root, "panewire", "hub-inbox.sqlite3")
 }
 
-// newHubInbox opens the Postgres store when databaseURL is set and the SQLite
-// file at storePath otherwise; an empty storePath disables only the SQLite
+// newHubInbox opens the Postgres or MySQL store when databaseURL is set (its
+// scheme chooses, openLaneInboxStoreURL) and the SQLite file at storePath
+// otherwise; an empty storePath disables only the SQLite
 // fallback.
 func newHubInbox(policyPath, storePath, databaseURL string) (*hubInbox, error) {
 	if policyPath == "off" || (storePath == "" && databaseURL == "") {
@@ -97,7 +98,7 @@ func newHubInbox(policyPath, storePath, databaseURL string) (*hubInbox, error) {
 	}
 	var store *laneInboxStore
 	if databaseURL != "" {
-		store, err = openLaneInboxStorePostgres(context.Background(), databaseURL)
+		store, err = openLaneInboxStoreURL(context.Background(), databaseURL)
 	} else {
 		store, err = openLaneInboxStore(storePath)
 	}

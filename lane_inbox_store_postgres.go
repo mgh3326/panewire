@@ -3,24 +3,15 @@ package panewire
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"embed"
-	"errors"
-	"fmt"
 	"io/fs"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 )
-
-// hubDatabaseURLEnv names the hub's Postgres DSN. When it is unset the hub
-// keeps the SQLite inbox store; see docs/hub-postgres.md. The value carries a
-// credential, so it is never logged or echoed in an error.
-const hubDatabaseURLEnv = "PANEWIRE_HUB_DATABASE_URL"
 
 // hubPostgresMigrations are applied in file-name order, each at most once,
 // inside one transaction under an advisory lock, so concurrent hub starts and
@@ -32,61 +23,6 @@ var hubPostgresMigrations embed.FS
 // hubPostgresMigrationLock is the pg_advisory_xact_lock key that serializes
 // schema migration across processes sharing one database.
 const hubPostgresMigrationLock = 0x70616e6577697265 // "panewire"
-
-const hubPostgresConnectTimeout = 10 * time.Second
-
-// hubPostgresMigrationContext bounds one migration run. A migration may read
-// whole history tables (the outbox migration builds partial indexes and copies
-// owed rows, hk 5298), so it gets the start-up budget, not the connect one: a
-// run cut off at the connect timeout rolls back and the next start repeats the
-// same scan.
-func hubPostgresMigrationContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, laneInboxStartupTimeout)
-}
-
-// errHubDatabaseURL deliberately carries no detail: pgx parse errors can
-// quote parts of the connection string.
-var errHubDatabaseURL = errors.New("hub database URL is invalid")
-
-// hubDatabaseErr is a driver error reduced to the failed step and, for a
-// server error, its SQLSTATE. Its text never holds user, host, database or
-// password.
-type hubDatabaseErr struct{ msg string }
-
-func (e *hubDatabaseErr) Error() string { return e.msg }
-
-// hubDatabaseError reduces err for printing. Connection errors from pgx name
-// the user, host and database, which this repository does not print.
-func hubDatabaseError(step string, err error) error {
-	var reduced *hubDatabaseErr
-	if errors.As(err, &reduced) {
-		return reduced
-	}
-	var pgErr *pgconn.PgError
-	switch {
-	case errors.As(err, &pgErr):
-		return &hubDatabaseErr{fmt.Sprintf("hub database %s failed: SQLSTATE %s", step, pgErr.Code)}
-	case errors.Is(err, context.DeadlineExceeded):
-		return &hubDatabaseErr{fmt.Sprintf("hub database %s failed: timeout", step)}
-	case errors.Is(err, context.Canceled):
-		return &hubDatabaseErr{fmt.Sprintf("hub database %s failed: cancelled", step)}
-	}
-	// The error's type, never its text: a net.OpError's text holds the
-	// server address.
-	return &hubDatabaseErr{fmt.Sprintf("hub database %s failed (%T)", step, err)}
-}
-
-// hubPostgresConnector reduces every connect error, including the pool's
-// reconnects in the middle of a store call, before database/sql returns it.
-type hubPostgresConnector struct{ driver.Connector }
-
-func (c hubPostgresConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	conn, err := c.Connector.Connect(ctx)
-	if err != nil {
-		return nil, hubDatabaseError("connect", err)
-	}
-	return conn, nil
-}
 
 // openLaneInboxStorePostgres opens the hub inbox on Postgres and applies the
 // embedded migrations.
@@ -103,7 +39,7 @@ func openLaneInboxStorePostgresConfig(ctx context.Context, config *pgx.ConnConfi
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := hubPostgresMigrationContext(ctx)
+	ctx, cancel := hubMigrationContext(ctx)
 	defer cancel()
 	if err := migrateHubPostgres(ctx, db); err != nil {
 		db.Close()
@@ -117,10 +53,10 @@ func openHubPostgres(ctx context.Context, config *pgx.ConnConfig) (*sql.DB, erro
 	// Producer ACKs follow the commit, so a DSN must not be able to relax
 	// durability below the SQLite store's FULL synchronous commits.
 	config.RuntimeParams["synchronous_commit"] = "on"
-	db := sql.OpenDB(hubPostgresConnector{stdlib.GetConnector(*config)})
+	db := sql.OpenDB(hubConnector{stdlib.GetConnector(*config)})
 	db.SetMaxOpenConns(4)
 	db.SetConnMaxIdleTime(5 * time.Minute)
-	ctx, cancel := context.WithTimeout(ctx, hubPostgresConnectTimeout)
+	ctx, cancel := context.WithTimeout(ctx, hubConnectTimeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
@@ -149,7 +85,7 @@ func migrateHubPostgresTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	sort.Strings(names)
-	if err := dialectPostgres.lockMigration(ctx, tx); err != nil {
+	if _, err := dialectPostgres.lockMigration(ctx, tx); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS panewire_schema_migrations (

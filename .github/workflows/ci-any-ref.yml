@@ -16,6 +16,7 @@ on:
           - all
           - test
           - postgres
+          - mysql
           - deploy
 
 permissions:
