@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,4 +136,147 @@ func TestEscalateAuthorRefusesARecordBoundToAnotherTask(t *testing.T) {
 		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
 	}
 	f.awaitInfo(t, "job_mismatch", "bound to task 77")
+}
+
+// stageCompletedSuccessor stages the successor of a completed author by hand,
+// as a step that died after staging leaves it; marked adds the close marker
+// the step writes before it asks for the close.
+func (f *escalateFixture) stageCompletedSuccessor(t *testing.T, marked bool) {
+	t.Helper()
+	next, err := escalateAuthorSubmission(escalateHolderRequest(f.job), f.request(), f.job+"-l1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setEscalateAuthorHost(&next, "machine-a")
+	next.Repository.Checkout.Sha = strings.Repeat("b", 40)
+	next.Repository.Checkout.VerifyReuse = true
+	next.LadderStep = &fleet.LadderStepIdentity{Parent: f.job, Round: 5, PR: f.request().PR, Profile: "sonnet", Effort: "xhigh"}
+	if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), "", "42:implementer", "staged", ""); err != nil {
+		t.Fatal(err)
+	}
+	if marked {
+		if err := f.hub.inbox.store.markStagedClose(t.Context(), next.RequestID, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A task that no longer names the author is not the author's step: a
+// replacement started with --parent-job rebinds the task, holds no task role
+// and leaves the old record and pane behind (mergewake review of #750).
+func TestEscalateAuthorRefusesWhenTheTaskNamesAnotherJob(t *testing.T) {
+	for _, completed := range []bool{false, true} {
+		f := newEscalateFixture(t, "pw-task-65")
+		if completed {
+			f.completeAuthorRecord(t)
+		}
+		f.taskBound = "pw-task-65-q1"
+		result, commands := f.escalate(t, nil)
+		if result.Code != "job_mismatch" || result.AuthorEnded || slices.Contains(commandOps(commands), "pane.close") {
+			t.Fatalf("completed=%v result=%+v commands=%v", completed, result, commandOps(commands))
+		}
+		if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+			t.Fatalf("completed=%v: no successor may be staged", completed)
+		}
+	}
+}
+
+// The binding is read again right before the close: a rebind between staging
+// and the close refuses the step with the pane open and the stage released.
+func TestEscalateAuthorRechecksTheTaskBindingBeforeTheClose(t *testing.T) {
+	for _, completed := range []bool{false, true} {
+		f := newEscalateFixture(t, "pw-task-66")
+		if completed {
+			f.completeAuthorRecord(t)
+		}
+		f.rebindTo, f.rebindAfterReads = "pw-task-66-q1", 1
+		result, commands := f.escalate(t, nil)
+		if result.Code != "job_mismatch" || result.AuthorEnded || slices.Contains(commandOps(commands), "pane.close") {
+			t.Fatalf("completed=%v result=%+v commands=%v", completed, result, commandOps(commands))
+		}
+		if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+			t.Fatalf("completed=%v: the stage must be released", completed)
+		}
+		_, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
+		if completed && err == nil || !completed && (err != nil || job != f.job) {
+			t.Fatalf("completed=%v: role job=%q err=%v", completed, job, err)
+		}
+	}
+}
+
+// The node closed a completed author's pane and its reply was lost: the first
+// call cannot confirm the close, and the retry finds the pane gone. The close
+// marker says this step asked for it, so the retry places the successor instead
+// of reporting an independent end (mergewake review of #750).
+func TestEscalateAuthorResumesAfterALostCloseReplyForACompletedAuthor(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-67")
+	f.completeAuthorRecord(t)
+	f.closeLost = true
+	result, commands := f.escalate(t, nil)
+	if result.Code != "pending" || !slices.Contains(commandOps(commands), "pane.close") {
+		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+	}
+	if staged, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err != nil || staged.Status != "staged" {
+		t.Fatalf("the stage must be kept: %+v err=%v", staged, err)
+	}
+	f.closeLost = false
+	placed := placedAnywhere
+	result, commands = f.escalate(t, &placed)
+	if result.Code != "" || result.Job != "pw-task-67-l1" {
+		t.Fatalf("the retry must place the successor: %+v", result)
+	}
+	if slices.Contains(commandOps(commands), "pane.close") {
+		t.Fatalf("the pane is gone already: %v", commandOps(commands))
+	}
+}
+
+// A stage no close was ever asked for, whose completed author's pane is gone,
+// lost its author independently.
+func TestEscalateAuthorUnmarkedStageOfACompletedAuthorWithoutPaneEndedIndependently(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-68")
+	f.completeAuthorRecord(t)
+	f.stageCompletedSuccessor(t, false)
+	f.paneAbsent = true
+	result, _ := f.escalate(t, nil)
+	if result.Code != "parent_ended" {
+		t.Fatalf("result=%+v", result)
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("the stage must be released")
+	}
+}
+
+// The expiry reconciler follows the same marker: a marked stage whose pane is
+// gone is finished, a marked stage with no readable pane list is kept and the
+// owner is asked once, an unmarked one is released.
+func TestExpiredStagedLadderStageOfACompletedAuthorFollowsTheCloseMarker(t *testing.T) {
+	cases := []struct {
+		name            string
+		marked, absent  bool
+		unknown         bool
+		wantStatus      string
+		wantStageKept   bool
+		wantInfoContain string
+	}{
+		{name: "marked and gone is finished", marked: true, absent: true, wantStatus: "accepted", wantStageKept: true},
+		{name: "marked and unreadable is kept with a decision", marked: true, unknown: true, wantStatus: "staged", wantStageKept: true, wantInfoContain: "unresolved"},
+		{name: "unmarked and gone is released", absent: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEscalateFixture(t, "pw-task-69")
+			f.completeAuthorRecord(t)
+			f.stageCompletedSuccessor(t, tc.marked)
+			f.paneAbsent, f.panesUnknown = tc.absent, tc.unknown
+			f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+			f.hub.expireStagedLadderSteps(t.Context())
+			successor, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+			if tc.wantStageKept != (err == nil) || err == nil && successor.Status != tc.wantStatus {
+				t.Fatalf("successor=%+v err=%v", successor, err)
+			}
+			if tc.wantInfoContain != "" {
+				f.awaitInfo(t, tc.wantInfoContain)
+			}
+		})
+	}
 }

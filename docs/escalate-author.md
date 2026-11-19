@@ -162,11 +162,15 @@ reason, so an author that never ran `job joined` is counted), `notes.rounds`
 and `notes.takes_over` the successor. Step-ups per PR:
 
 ```sh
-panewire reps list --limit 100000 --json |
-  jq -r '.reps[] | select((.notes|fromjson? // {}).kind == "ladder_step")
-         | (.notes|fromjson) | "\(.repo // "?")#\(.pr)\t\(.job)\t\(.takes_over.profile)@\(.takes_over.effort)"' |
-  sort | uniq -c
+panewire reps list --limit 5000 --json > reps.json
+jq -r '.source' reps.json      # must not end in "-truncated": the rep window is 5000 server rows
+jq -r '.reps[] | (.notes | fromjson? // {}) | select(.kind == "ladder_step")
+       | "\(.repo // "?")#\(.pr)"' reps.json | sort | uniq -c
 ```
+
+The first line prints the rep window's source: when it ends in `-truncated`
+the newest 5000 rows are all the read sees, and a count is a lower bound. The
+second counts ladder steps per repository and PR, one rep per step.
 
 A refused call leaves no rep; its record is the refusal event above, and on
 the mergewake side its `ladder-intact`, `ladder-escalated` and

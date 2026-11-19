@@ -56,6 +56,17 @@ type escalateFixture struct {
 	markLostFails     bool
 	markLostCompleted bool
 	paneCwd           string
+	// panesUnknown makes the holder's node answer the pane list incompletely.
+	panesUnknown bool
+	// closeLost makes pane.close fail on the node side (the pane closed or not:
+	// paneAbsent says which a later list shows).
+	closeLost bool
+	// taskBound overrides the job hk's task names; rebindAfterReads, with
+	// rebindTo, makes the task name rebindTo from the read after that many.
+	taskBound        string
+	rebindTo         string
+	rebindAfterReads int
+	taskReads        int
 
 	mu       sync.Mutex
 	commands []map[string]json.RawMessage
@@ -96,9 +107,10 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 		"state": "spawned", "profile": "sonnet", "effort": "high", "pool": "claude",
 		"family": "anthropic", "model": "sonnet-m", "owner_lane": "parent", "task_id": "42",
 	}}}
+	var fx *escalateFixture
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: jobs, Out: out, Err: errout, TaskState: func(context.Context, string) (fleet.TaskStatus, error) {
-			return fleet.TaskStatus{JobID: job + "-l1"}, nil
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout, TaskState: func(ctx context.Context, _ string) (fleet.TaskStatus, error) {
+			return fleet.TaskStatus{JobID: fx.boundJob(ctx, job)}, nil
 		}, Quota: escalateQuota{rows: []fleet.CatalogRow{
 			{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
 			{Profile: "sonnet", Effort: "xhigh", Grade: "A+", Pool: "claude", Gate: "escalation", ModelID: "sonnet-m"},
@@ -115,6 +127,7 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 		t.Fatal(err)
 	}
 	f := &escalateFixture{hub: hub, server: server, node: node, jobs: jobs, destination: destination, job: job}
+	fx = f
 	hub.ladderPlan = func(context.Context, fleet.Submission) error { return nil }
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -127,6 +140,25 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 		<-done
 	})
 	return f
+}
+
+// boundJob is the job hk's task names: the author until a successor has been
+// activated, then the successor (the node's rebind), unless a test pins it.
+func (f *escalateFixture) boundJob(ctx context.Context, job string) string {
+	f.mu.Lock()
+	f.taskReads++
+	reads, override, rebindTo, after := f.taskReads, f.taskBound, f.rebindTo, f.rebindAfterReads
+	f.mu.Unlock()
+	if rebindTo != "" && reads > after {
+		return rebindTo
+	}
+	if override != "" {
+		return override
+	}
+	if successor, err := f.hub.inbox.store.latestSpawnForJob(ctx, job+"-l1"); err == nil && successor.Status != "staged" {
+		return job + "-l1"
+	}
+	return job
 }
 
 func (f *escalateFixture) request() hubEscalateAuthorRequest {
@@ -179,7 +211,7 @@ func (f *escalateFixture) reply(op string) map[string]any {
 		if f.paneAbsent {
 			panes = []nodeAgentRow{}
 		}
-		return map[string]any{"result": map[string]any{"agents": []nodeAgentRow{}, "panes": panes, "panes_ok": true}}
+		return map[string]any{"result": map[string]any{"agents": []nodeAgentRow{}, "panes": panes, "panes_ok": !f.panesUnknown}}
 	case "worktree.prepare":
 		switch f.prepareOutcome {
 		case "", nodePrepareReused:
@@ -203,6 +235,11 @@ func (f *escalateFixture) reply(op string) map[string]any {
 	case "pane.capture":
 		return map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}}
 	case "pane.close":
+		if f.closeLost {
+			// The node closed the pane and its reply never arrived.
+			f.paneAbsent = true
+			return map[string]any{"error": "close_failed"}
+		}
 		return map[string]any{"result": map[string]any{"outcome": nodePaneClosed}}
 	case "job.mark_lost":
 		if f.markLostFails {

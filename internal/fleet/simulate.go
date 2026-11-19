@@ -399,7 +399,7 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 	}
 	var policy PoolPolicy
 	if *policyFile != "" {
-		policy, e = LoadPoolPolicy(*policyFile)
+		policy, e = loadPoolPolicyNamedBy(*policyFile, "--policy")
 		if e == nil && policy.CreditFinalDays != nil {
 			a.warn("credit_final_days is deprecated and has no effect")
 		}

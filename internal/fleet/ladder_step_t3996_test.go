@@ -249,3 +249,36 @@ func TestLadderStepReasonPR(t *testing.T) {
 		}
 	}
 }
+
+// A joined PR's repository is kept, so one PR groups under one repository
+// whether or not its author ran `job joined` (mergewake review of #750); the
+// step's reason names it only for the same PR number.
+func TestLadderStepRowKeepsTheJoinedPRsRepository(t *testing.T) {
+	fx, fake := ladderFixture(t)
+	fx.s.OverrideReason = "ladder step sonnet@high -> sonnet@xhigh, round 5, mgh3326/panewire#77"
+	if err := fx.a.Spawn(context.Background(), fx.s); err != nil {
+		t.Fatal(err)
+	}
+	if notes := ladderNotes(t, fake.reps[0]); notes["pr"] != float64(77) || notes["repo"] != "mgh3326/panewire" {
+		t.Fatalf("the joined PR's repository: notes=%v", notes)
+	}
+	for pr, want := range map[string]string{
+		"https://github.com/mgh3326/panewire/pull/77": "mgh3326/panewire",
+		"mgh3326/panewire#77":                         "mgh3326/panewire",
+		"77":                                          "",
+		"https://example.com/a/b/pull/7":              "",
+	} {
+		if got := prRepo(pr); got != want {
+			t.Errorf("prRepo(%q)=%q want %q", pr, got, want)
+		}
+	}
+	// A different PR number in the reason does not lend its repository.
+	fx2, fake2 := ladderFixture(t)
+	fx2.s.OverrideReason = "ladder step a -> b, round 5, other/repo#99"
+	if err := fx2.a.Spawn(context.Background(), fx2.s); err != nil {
+		t.Fatal(err)
+	}
+	if notes := ladderNotes(t, fake2.reps[0]); notes["pr"] != float64(77) || notes["repo"] != "mgh3326/panewire" {
+		t.Fatalf("notes=%v", notes)
+	}
+}

@@ -205,6 +205,11 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	// dead author: its pane decides, below. hk keeps the record terminal, so no
 	// lost mark is written over it and no reservation is carried over from it.
 	finished := state == "completed"
+	if !resume {
+		if result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner); stop {
+			return result, nil
+		}
+	}
 	if state != "claimed" && state != "spawned" && !resume && !finished {
 		if staged && hkTerminalState(state) {
 			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
@@ -227,15 +232,23 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		}
 	}
 	if finished && probe.state != heldPanePresent {
-		if staged {
-			// The step closed the pane and the record cannot say so: the
-			// predecessor is gone and no successor will take its place.
+		if !staged {
+			return h.escalateAuthorRefusal(ctx, request, owner, "job_not_live", "the job completed and its pane is gone", false)
+		}
+		// hk keeps a completed record terminal, so it cannot show who closed
+		// the pane. The staged row's close marker, written before the close was
+		// asked for, does: a marked stage closed the pane itself and goes on to
+		// activation, an unmarked one lost its author independently.
+		marked, err := h.inbox.store.stagedCloseMarked(ctx, prior.Request.RequestID)
+		if err != nil {
+			return hubEscalateAuthorResult{}, err
+		}
+		if !marked {
 			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
 				return hubEscalateAuthorResult{}, err
 			}
 			return h.escalateAuthorParentEnded(ctx, request, owner), nil
 		}
-		return h.escalateAuthorRefusal(ctx, request, owner, "job_not_live", "the job completed and its pane is gone", false)
 	}
 	if staged {
 		next = prior.Request
@@ -330,6 +343,22 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			code, why := escalateAuthorPlanRefusal(err)
 			return cancel(code, why)
 		}
+		// The task's binding is read again right before the irreversible step:
+		// a replacement may have rebound it since staging.
+		if result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner); stop {
+			if _, err := cancel(result.Code, result.Reason); err != nil {
+				return hubEscalateAuthorResult{}, err
+			}
+			return result, nil
+		}
+		if finished {
+			// Write-ahead: a replay that finds this author's pane gone, with
+			// the record completed, knows from the marker that this step asked
+			// for the close.
+			if err := h.inbox.store.markStagedClose(ctx, prior.Request.RequestID, h.now().UTC()); err != nil {
+				return hubEscalateAuthorResult{}, err
+			}
+		}
 		if closed, closeReason := h.closeHeldPane(ctx, holder, name, probe.row, holder.Job); !closed {
 			again := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 			if again.state == heldPanePresent {
@@ -377,6 +406,24 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		return hubEscalateAuthorResult{Code: "pending", Reason: "successor operation unavailable; retry"}, nil
 	}
 	return h.escalateAuthorOutcome(ctx, app, request, owner, newJob, prior)
+}
+
+// escalateAuthorTaskNamesJob reads the task's live binding (hk refs.job_id)
+// and stops a step the task no longer names its author for: a replacement
+// started with --parent-job rebinds the task, holds no task role of its own,
+// and leaves the old author's record and pane behind, so the record's own task
+// id and the free role prove nothing. An unreadable binding is a retry, not a
+// refusal. The caller returns the result when stop is true.
+func (h *HubServer) escalateAuthorTaskNamesJob(ctx context.Context, app *fleet.App, request hubEscalateAuthorRequest, owner string) (result hubEscalateAuthorResult, stop bool) {
+	status, err := app.TaskStatus(ctx, request.Task)
+	if err != nil {
+		return hubEscalateAuthorResult{Code: "pending", Reason: "the task's binding is unreadable; retry"}, true
+	}
+	if status.JobID != request.Job {
+		result, _ = h.escalateAuthorRefusal(ctx, request, owner, "job_mismatch", "the task is bound to "+firstNonempty(status.JobID, "no job")+", not "+request.Job, false)
+		return result, true
+	}
+	return hubEscalateAuthorResult{}, false
 }
 
 // planLadderSuccessor runs the read-only placement plan for the successor and
@@ -502,16 +549,38 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 			// be fixing the PR (hk 5521). Only a probe that finds the pane gone
 			// makes the predecessor's end independent; a pane still there is an
 			// author the expired stage never touched.
+			marked, markErr := h.inbox.store.stagedCloseMarked(ctx, task.Request.RequestID)
+			if markErr != nil {
+				continue
+			}
+			request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 			switch h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state {
 			case heldPanePresent:
 				if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
 					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-					request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 					_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 				}
 				continue
 			case heldPaneUnknown:
+				if marked {
+					// The step asked for the close and no read says whether it
+					// happened: keep the stage and tell the owner once.
+					text := fmt.Sprintf("[panewire] ESC | authorless?: ladder step %s (round %d, %s): the pane close was asked for and its outcome is unresolved; the staged successor is kept. Decide whether %s still has an author.", id.Parent, id.Round, id.PR, id.PR)
+					h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:unresolved:esc", id.Parent, id.Round), JobID: id.Parent, OwnerLane: task.Owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+				}
 				continue
+			default:
+				if marked {
+					// This step closed the pane: finish it.
+					if h.inbox.store.activateStagedSpawn(ctx, task.Request.RequestID, h.now().UTC(), task.Request.DeadlineSeconds) == nil {
+						h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
+						select {
+						case h.spawnKick <- struct{}{}:
+						default:
+						}
+					}
+					continue
+				}
 			}
 		}
 		if hkTerminalState(state) {

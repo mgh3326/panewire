@@ -89,9 +89,16 @@ var poolBands = []string{"waste", "free", "ranked"}
 // interval after the free band (PoolPolicy.tierOf).
 const creditTier = "credit"
 
+// LoadPoolPolicy loads the policy a config's [local].pool_policy names (empty:
+// PANEWIRE_POOL_POLICY, then the built-in order).
 func LoadPoolPolicy(path string) (PoolPolicy, error) {
+	return loadPoolPolicyNamedBy(path, "[local].pool_policy")
+}
+
+// loadPoolPolicyNamedBy is LoadPoolPolicy for a path some other setting named:
+// setBy is what an unreadable file's error points the operator at.
+func loadPoolPolicyNamedBy(path, setBy string) (PoolPolicy, error) {
 	b := defaultPoolOrder
-	setBy := "[local].pool_policy"
 	if path == "" {
 		path, setBy = os.Getenv("PANEWIRE_POOL_POLICY"), "PANEWIRE_POOL_POLICY"
 	}

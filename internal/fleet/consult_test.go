@@ -139,3 +139,12 @@ func TestPoolPolicyMissingFileNamesTheSetting(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+// simulate's --policy names its own setting in the error, not a config key
+// the run never read (mergewake review of #750).
+func TestPoolPolicyMissingFlagFileNamesTheFlag(t *testing.T) {
+	_, err := loadPoolPolicyNamedBy(filepath.Join(t.TempDir(), "p.json"), "--policy")
+	if err == nil || !strings.Contains(err.Error(), "--policy") || strings.Contains(err.Error(), "[local].pool_policy") {
+		t.Fatalf("err=%v", err)
+	}
+}
