@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -64,7 +66,9 @@ func (client *HubClient) runJobDirTTL(ctx context.Context) {
 	if client.jobsInboxRoot == "" {
 		return
 	}
-	expiry := &fleet.JobDirTTL{Every: jobDirTTLEvery}
+	// The TTL pass keeps a dir while the relay owes a row of its job
+	// (hk 3704), so a relay window longer than the TTL floor cannot outrun it.
+	expiry := &fleet.JobDirTTL{Every: jobDirTTLEvery, RelayOwed: client.jobRelayOwed}
 	pass := client.jobDirTTLPass
 	if pass == nil {
 		pass = func(ctx context.Context) { client.sweepJobDirs(ctx, expiry) }
@@ -86,19 +90,45 @@ func (client *HubClient) runJobDirTTL(ctx context.Context) {
 }
 
 // jobRelayOwed reports whether the node still owes the hub a relay row of job:
-// a job event the relay scan offers whose outbox row is neither persisted nor
-// suppressed. It uses the scan and the key relayEventForSend sends with, so the
-// at-end job dir delete (fleet job_dir_end.go, hk 3704) waits for exactly the
-// rows the job's events directory still backs. No outbox, or an unreadable
-// one, answers owed with an error, which keeps the dir.
+// a relay event of the job's own events directory, inside the relay window,
+// whose outbox row is neither persisted nor suppressed. It reads the job's
+// events directly rather than through the inbox index, which skips dormant
+// jobs and any job it cannot load without saying so. Every read it cannot
+// complete answers owed with an error, so the at-end and TTL gates (fleet
+// job_dir_end.go, job_dir_ttl.go; hk 3704) keep the dir. The key is the one
+// relayEventForSend sends with.
 func (client *HubClient) jobRelayOwed(ctx context.Context, job string) (bool, error) {
 	if client.outbox == nil {
 		return true, errors.New("relay outbox unavailable")
 	}
-	for _, event := range scanHubRelayEventsWithin(client.jobsInboxRoot, relayOutboxMaxAge()) {
-		if event.JobID != job {
-			continue
+	if client.jobsInboxRoot == "" {
+		return true, errors.New("jobs inbox root unset")
+	}
+	jobsDir := filepath.Join(client.jobsInboxRoot, "jobs")
+	eventsDir := filepath.Join(jobsDir, job, "events")
+	info, err := os.Stat(eventsDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		// No events directory: no event file is left to offer or resend.
+		return false, nil
+	}
+	if err != nil {
+		return true, err
+	}
+	load, ok := loadHubJobEvents(eventsDir)
+	if !ok || load.incomplete {
+		return true, errors.New("job events unreadable")
+	}
+	for _, event := range load.events {
+		if !event.infoOK {
+			return true, errors.New("job event unstattable")
 		}
+	}
+	now := time.Now()
+	record := newHubIndexedJob(job, info, true, load)
+	// No active-job cut: the relay's own dormancy filter would hide a job
+	// whose row is still sent but unpersisted. The mtime window is the relay
+	// hold ceiling, so a row older than it is no longer owed.
+	for _, event := range appendHubJobRelayEvents(nil, jobsDir, record, now, now.Add(-relayOutboxMaxAge()), time.Time{}) {
 		state, err := client.outbox.RelayOutboxState(ctx, relayEventOutboxKeyFor(relayEventWireForm(event)))
 		if err != nil {
 			return true, err
