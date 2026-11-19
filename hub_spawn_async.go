@@ -1066,7 +1066,9 @@ func (h *HubServer) spawnRefreshAttempt(wait hubSpawnRefreshWait) (string, time.
 		h.logger.Warn("spawn quota refresh attempt not read", "machine", wait.Machine, "pool", wait.Pool, "error", err)
 		return "", time.Time{}, false
 	}
-	if !found || seen.Before(wait.StartedAt) {
+	// seen is stored in milliseconds, so compare at that precision: a refresh
+	// that finished within the millisecond the wait began is not an older one.
+	if !found || seen.Before(wait.StartedAt.Truncate(time.Millisecond)) {
 		return "", time.Time{}, false
 	}
 	return outcome, seen, true
