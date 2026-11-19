@@ -412,3 +412,26 @@ func TestSpawnNoticeMustFixAcceptsDocumentedCauseFormat_5360(t *testing.T) {
 		}
 	}
 }
+
+// A design lane that is the requester of a failure gets its own copy, which is
+// what it replays from, even when the default cause rules would count it. Only
+// the owner's copy is subject to those rules (mergewake review of PR 732).
+func TestDesignRequesterCopyOfRetryableFailureIsDelivered_5360(t *testing.T) {
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	h, _, _ := spawnNotifyHubLanes(t, "", "mergewake-design", "pw-5360-worker")
+	h.now = func() time.Time { return now }
+	const job = "pw-5360-design-requester"
+	req := t4270Request(job, "pw-5360-worker", "mergewake-design", "implementer")
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), req, job, "pw-5360-worker", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.inbox.store.completeSpawn(t.Context(), task, s5360Retryable("checkout_refused:locked"), now); err != nil {
+		t.Fatal(err)
+	}
+	s5360Flush(t, h)
+	items := t4270Items(t, h, "mergewake-design")
+	if len(items) != 1 || !strings.Contains(items[0].Event.Text, "checkout_refused:locked") {
+		t.Fatalf("design requester items=%+v, want its own copy of the failure it replays", items)
+	}
+}

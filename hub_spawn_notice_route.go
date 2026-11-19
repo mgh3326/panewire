@@ -187,6 +187,9 @@ func (h *HubServer) spawnNoticeFor(ctx context.Context, n spawnNotification, res
 		return spawnNoticeDeliver
 	}
 	if result.RC != 0 {
+		if n.owner != task.Owner {
+			return spawnNoticeDeliver // the requester replays from its own failure copy
+		}
 		return h.spawnFailureNoticeAction(n, task, result)
 	}
 	if !daemonStartedReviewer(task.Job, task.Request.Args) {
