@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -422,11 +423,11 @@ func TestHandoverSnapshotPushRefusesFailedOrigin(t *testing.T) {
 	}
 }
 
-// The implementer keeps running: it stops tracking a credential file and
-// commits that, leaving the file on disk, while the snapshot holds the older
-// HEAD. The path must stay out of the tree, and a change that lands while the
-// tree is being built is refused rather than snapshotted.
-func TestHandoverSnapshotIgnoresPathsUntrackedSinceTheCapturedHead(t *testing.T) {
+// The implementer keeps running: it commits after the snapshot read HEAD and
+// before the tree is built (the submodule scans can be long). The parent
+// would then lack that commit, so the build is refused, and a file it stopped
+// tracking stays out of any tree.
+func TestHandoverSnapshotRefusesACommitSinceTheCapturedHead(t *testing.T) {
 	work, _, _ := handoverRepo(t)
 	writeSnapshotFile(t, work, "runtime.env", "tracked once")
 	handoverGit(t, work, "add", "runtime.env")
@@ -436,11 +437,9 @@ func TestHandoverSnapshotIgnoresPathsUntrackedSinceTheCapturedHead(t *testing.T)
 	handoverGit(t, work, "commit", "-m", "stop tracking env")
 	writeSnapshotFile(t, work, "runtime.env", "TOKEN=secret")
 	tree, err := handoverSnapshotTree(t.Context(), work, t.TempDir(), captured)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := exec.CommandContext(t.Context(), "git", "-C", work, "cat-file", "-e", tree+":runtime.env").Run(); err == nil {
-		t.Fatal("a path the user's index no longer tracks was captured")
+	var refused handoverRefusal
+	if !errors.As(err, &refused) || refused.reason != handoverRefusedChanged || tree != "" {
+		t.Fatalf("tree=%q err=%v", tree, err)
 	}
 }
 

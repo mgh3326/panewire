@@ -330,7 +330,9 @@ func handoverSnapshotCheck(ctx context.Context, top string) error {
 // handoverFingerprint is what the snapshot reads from the user's repository:
 // HEAD, the index with its flags, and the staged difference against head.
 // The tree is built from several reads; if this differs before and after, a
-// writer raced them and the lists they were derived from may disagree.
+// writer raced them and the lists they were derived from may disagree. HEAD
+// must be the commit the snapshot takes as its parent: a commit made since it
+// was read would be missing from the pushed ref.
 func handoverFingerprint(ctx context.Context, top, head string) (string, error) {
 	var out strings.Builder
 	for _, args := range [][]string{
@@ -342,6 +344,9 @@ func handoverFingerprint(ctx context.Context, top, head string) (string, error) 
 		part, err := handoverSnapshotGit(ctx, top, nil, "", args...)
 		if err != nil {
 			return "", err
+		}
+		if args[0] == "rev-parse" && strings.ToLower(strings.TrimSpace(part)) != head {
+			return "", handoverRefusal{handoverRefusedChanged}
 		}
 		out.WriteString(part)
 		out.WriteString("\x01")
@@ -370,11 +375,13 @@ func handoverSkipWorktree(ctx context.Context, top string) ([]string, error) {
 // excluded before add -u: a removed path can contain a secret which is now
 // untracked.
 func handoverSnapshotTree(ctx context.Context, top, scratch, head string) (string, error) {
-	if err := handoverSnapshotCheck(ctx, top); err != nil {
-		return "", err
-	}
+	// Read first: the submodule scans below can be slow, and whatever lands
+	// during them differs from this and from the read after the build.
 	before, err := handoverFingerprint(ctx, top, head)
 	if err != nil {
+		return "", err
+	}
+	if err := handoverSnapshotCheck(ctx, top); err != nil {
 		return "", err
 	}
 	index, err := handoverIndex(ctx, top)

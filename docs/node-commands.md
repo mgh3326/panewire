@@ -1080,8 +1080,8 @@ staged gitlink is refused, and so is an unmerged index. Refusals answer
 `staged_gitlink`, `skip_worktree_file`, `unmerged_index` or
 `changed_during_snapshot`; nothing is pushed. The tree is built from several
 git reads against the HEAD read in step 1; the node reads HEAD, the index (with
-its flags) and the staged difference before and after, and refuses when they
-differ, so a commit or an index change by the still-running implementer is
+its flags) and the staged difference before the build and after it, requires
+HEAD to still be that commit, and refuses when anything differs, so a commit or an index change by the still-running implementer is
 never mixed into the tree.
 
 An `ok` result is `{outcome, top, branch, ref, commit, tree, parent,
