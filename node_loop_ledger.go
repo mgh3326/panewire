@@ -98,6 +98,11 @@ func (client *HubClient) nodeLoopInterval(m nodeLoopMechanism) time.Duration {
 	case nodeJobDirTTL:
 		return jobDirTTLEvery
 	case nodeQuotaPoolReconcile:
+		// Opt-in (--quota-pool-reconcile): a node without it never runs the
+		// loop, so it has no cadence to alarm on.
+		if !client.quotaPoolReconcile {
+			return 0
+		}
 		return quotaPoolReconcileInterval
 	case nodeLaneReconcile:
 		return laneReconcileInterval
