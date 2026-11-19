@@ -331,8 +331,7 @@ func (h *HubServer) endUnboundSpawn(w http.ResponseWriter, r *http.Request, call
 		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "claimed_host", "request_id": task.Request.RequestID, "job": task.Job, "host": spawnPinnedHost(task)})
 		return
 	}
-	outcome := hubSpawnOutcome{RC: 75, Stage: "placement", Reason: spawnOutcomeReason(end.code, spawnRefusalLine(reason)), Fix: end.unboundFix}
-	changed, err := h.completeSpawn(r.Context(), task, outcome)
+	outcome, changed, err := h.releaseUnboundSpawn(r.Context(), task, end, reason)
 	if err != nil || !changed {
 		why := "not_pending"
 		if err != nil {
@@ -342,9 +341,22 @@ func (h *HubServer) endUnboundSpawn(w http.ResponseWriter, r *http.Request, call
 		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": why, "request_id": task.Request.RequestID, "job": task.Job})
 		return
 	}
-	h.recordSpawnTrace(task, outcome)
 	h.logger.Warn(end.warning, "request_id", task.Request.RequestID, "job", task.Job, "owner", task.Owner, "status", task.Status, "released", true, "reason", spawnRefusalLine(reason))
 	writeJSON(w, 200, map[string]string{"request_id": task.Request.RequestID, "job_id": task.Job, "status": end.status, "reason": outcome.Reason})
+}
+
+// releaseUnboundSpawn ends an accepted, unbound request as end, with reason in
+// its outcome. It is the one outcome write an unbound end takes, for the
+// requester's withdrawal (hk 5429) and the hub's hand-over withdrawal (hk 5491).
+// changed is false when the request was no longer pending.
+func (h *HubServer) releaseUnboundSpawn(ctx context.Context, task hubSpawnTask, end spawnEnd, reason string) (hubSpawnOutcome, bool, error) {
+	outcome := hubSpawnOutcome{RC: 75, Stage: "placement", Reason: spawnOutcomeReason(end.code, spawnRefusalLine(reason)), Fix: end.unboundFix}
+	changed, err := h.completeSpawn(ctx, task, outcome)
+	if err != nil || !changed {
+		return outcome, false, err
+	}
+	h.recordSpawnTrace(task, outcome)
+	return outcome, true, nil
 }
 
 // validSpawnAbandonReason is one non-empty printable line within the limit.
