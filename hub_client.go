@@ -98,6 +98,10 @@ type hubClientEvent struct {
 	// senderPane is a lane.event's emitting pane, added to the payload only on
 	// a connection whose hub accepts it (relayWire).
 	senderPane string
+	// orderPriority is a lane.event order's priority, added to the payload only
+	// on a connection whose hub advertised hubFeatureLaneEventPriority
+	// (relayWire); an older hub gets the order unmarked.
+	orderPriority string
 	// finalLost is a job.lost whose hk record is lost: it is held until the
 	// hub's features are known, and its final fields are dropped for a hub
 	// that did not advertise hubFeatureFinalLost (relayWire).
@@ -727,6 +731,9 @@ type hubClientConnection struct {
 	// acceptsLaneEventPane is the same for hubFeatureLaneEventPane
 	// (lane_event_sender.go).
 	acceptsLaneEventPane atomic.Bool
+	// acceptsLaneEventPriority is the same for hubFeatureLaneEventPriority
+	// (lane_event_sender.go).
+	acceptsLaneEventPriority atomic.Bool
 	// acceptsLaneEventLong is the same for hubFeatureLaneEventLong
 	// (lane_event_long.go).
 	acceptsLaneEventLong atomic.Bool
@@ -2288,6 +2295,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
 				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
+				peer.acceptsLaneEventPriority.Store(slices.Contains(message.Features, hubFeatureLaneEventPriority))
 				peer.acceptsLaneEventLong.Store(slices.Contains(message.Features, hubFeatureLaneEventLong))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
@@ -2917,8 +2925,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay, job.Cause, job.Head, job.PR})
 		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		payload = relayPayloadNotifyType(payload, job.NotifyType)
-		payload = relayPayloadOptionalString(payload, "priority", job.Priority)
-		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, senderPane: laneEventSenderPane(job), sinkRecord: job.Sink}, true
+		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, senderPane: laneEventSenderPane(job), orderPriority: job.Priority, sinkRecord: job.Sink}, true
 	}
 	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventID, replay)
 	if job.Kind == "job.escalate" || job.Kind == "job.joined" || relayTerminalSignalKinds[job.Kind] {
