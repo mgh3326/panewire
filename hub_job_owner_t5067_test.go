@@ -980,7 +980,7 @@ func TestJobOwnerFenceRestartSuppressesOldNotice_t5067(t *testing.T) {
 				t.Fatal(err)
 			}
 			action.Phase = poolActionSettled
-			if err := f.hub.inbox.store.savePoolAction(t.Context(), action, f.hub.now().UTC()); err != nil {
+			if err := f.hub.inbox.store.savePoolAction(t.Context(), action, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			f.jobs.mu.Lock()
