@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 var (
@@ -57,11 +59,11 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 18 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 19 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" && name != "final" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -73,6 +75,11 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 		return hubJobEventPayload{}, nil, false
 	}
 	if raw, present := fields["late"]; present && json.Unmarshal(raw, &completion.Late) != nil {
+		return hubJobEventPayload{}, nil, false
+	}
+	// final is set only by a node whose hk record for the job is already lost
+	// (job.lost). Absent it is false, which keeps an older node's end unsettled.
+	if raw, present := fields["final"]; present && json.Unmarshal(raw, &completion.Final) != nil {
 		return hubJobEventPayload{}, nil, false
 	}
 	// agent_label is the claim metadata a node carries on the terminal record so
@@ -129,7 +136,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 19 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 20 {
 		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {
@@ -417,6 +424,11 @@ func (h *HubServer) acknowledgeRevocation(machineID string, ack hubJobEventPaylo
 // lockEndingAssignment serializes a terminal event with reassignment and
 // persists its end before the in-memory record can be lost on restart.
 func (h *HubServer) lockEndingAssignment(machineID string, event hubJobEventPayload) (func(), bool) {
+	return h.lockEndingAssignmentAs(machineID, event, false)
+}
+
+// lockEndingAssignmentAs is lockEndingAssignment for a final job.lost (lost).
+func (h *HubServer) lockEndingAssignmentAs(machineID string, event hubJobEventPayload, lost bool) (func(), bool) {
 	h.mu.Lock()
 	job := h.jobs[event.JobID]
 	valid := job != nil && !job.Reassigning && job.Epoch == event.Epoch && job.Node == machineID
@@ -439,7 +451,7 @@ func (h *HubServer) lockEndingAssignment(machineID string, event hubJobEventPayl
 		release()
 		return nil, false
 	}
-	if err := h.endOwnerAssignment(event.JobID, machineID, event.Epoch); err != nil {
+	if err := h.endOwnerAssignmentAs(event.JobID, machineID, event.Epoch, lost); err != nil {
 		h.logger.Warn("job assignment end unavailable", "job", event.JobID)
 		release()
 		return nil, false
@@ -494,6 +506,59 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 	return true
 }
 
+// observeJobLost settles a job from its node's final job.lost (hk 5351): the
+// node has already written the hk record lost, so the job has ended. It runs
+// under the same owner and epoch fence as a revocation (lockEndingAssignment:
+// the current node and epoch only, the owner assignment ended on disk), and
+// then releases the holder's task role unless a pool action still owns the
+// job (I1/I2, #669). A pool action that owns the job keeps the role until
+// admission finds the settle (releaseSettledSpawnRole).
+func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, received time.Time) bool {
+	unlock, ok := h.lockEndingAssignmentAs(machineID, event, true)
+	if !ok {
+		return false
+	}
+	defer unlock()
+	h.mu.Lock()
+	job := h.jobs[event.JobID]
+	if job == nil || job.Reassigning || job.Epoch != event.Epoch || job.Node != machineID {
+		h.mu.Unlock()
+		return false
+	}
+	alreadyClosed := job.Completed
+	job.Completed, job.LostSettled, job.Orphaned, job.LastSeen = true, true, false, received
+	if !alreadyClosed {
+		h.recordUIEventWithJobLocked("job", "lost", machineID, event.JobID, received)
+	}
+	h.mu.Unlock()
+	h.releaseEndedJobRole(h.closeCtx, event.JobID)
+	return true
+}
+
+// releaseEndedJobRole frees the task role of a job the node settled lost. It
+// is called under the job's pool-action lock, so it checks the pool-action
+// fence directly rather than through lockWithoutPoolAction (which would take
+// that lock again). A holder whose spawn has not finished keeps its role: the
+// store releases only a succeeded or failed holder.
+func (h *HubServer) releaseEndedJobRole(ctx context.Context, job string) {
+	if h.inbox == nil {
+		return
+	}
+	store := h.inbox.store
+	if id, err := store.poolActionOwns(ctx, job); err != nil || id != "" {
+		return
+	}
+	holder, err := store.latestSpawnForJob(ctx, job)
+	if err != nil {
+		return
+	}
+	submission, err := fleet.ValidateSubmission(holder.Request)
+	if err != nil || !submission.HoldsTaskRole() {
+		return
+	}
+	_ = store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, submission.RoleKey())
+}
+
 // lateRegisterJobCompletion admits a terminal record for a job that never
 // reached h.jobs, so the operator job view is not silently missing work that
 // finished before a heartbeat could carry it. The record is created with
@@ -503,6 +568,15 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 // A later epoch is accepted only when hk confirms the node's grant; an old hk
 // or a missing record retains the original epoch-1 rule.
 func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJobEventPayload, received time.Time) bool {
+	return h.lateRegisterJobEnd(machineID, completion, received, false)
+}
+
+// lateRegisterJobEnd is lateRegisterJobCompletion for a final job.lost (lost):
+// the registered record is settled lost, and its role is released unless a
+// pool action owns the job (observeJobLost, hk 5351). A hub that restarted
+// before the first heartbeat takes the final loss through here, so the loss is
+// not discarded.
+func (h *HubServer) lateRegisterJobEnd(machineID string, completion hubJobEventPayload, received time.Time, lost bool) bool {
 	if !hubAgentLabelPattern.MatchString(completion.AgentLabel) {
 		return false
 	}
@@ -522,12 +596,12 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 		return false
 	}
 	h.mu.Unlock()
-	if err := h.endOwnerAssignment(completion.JobID, machineID, completion.Epoch); err != nil {
+	if err := h.endOwnerAssignmentAs(completion.JobID, machineID, completion.Epoch, lost); err != nil {
 		return false
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.jobs[completion.JobID] != nil {
+		h.mu.Unlock()
 		return false
 	}
 	ownerLane := completion.OwnerLane
@@ -539,7 +613,12 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 		Node:         machineID,
 		LastSeen:     received,
 		Completed:    true,
+		LostSettled:  lost,
 		FencedNodes:  make(map[string]uint64),
+	}
+	h.mu.Unlock()
+	if lost {
+		h.releaseEndedJobRole(ctx, completion.JobID)
 	}
 	return true
 }

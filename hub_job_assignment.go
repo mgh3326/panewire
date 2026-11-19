@@ -23,12 +23,15 @@ type hubOwnerAssignment struct {
 	From   string   `json:"from,omitempty"`
 	Fenced []string `json:"fenced,omitempty"`
 	Ended  bool     `json:"ended,omitempty"`
+	// Lost marks an end the node settled lost (a final job.lost, hk 5351), so
+	// a restarted hub still knows the holder's role may be released.
+	Lost bool `json:"lost,omitempty"`
 }
 
 const hubOwnerAssignmentMaxBytes = 64 * 1024
 
 func sameOwnerAssignment(a, b hubOwnerAssignment) bool {
-	return a.Job == b.Job && a.Node == b.Node && a.Epoch == b.Epoch && a.From == b.From && a.Ended == b.Ended && slices.Equal(a.Fenced, b.Fenced)
+	return a.Job == b.Job && a.Node == b.Node && a.Epoch == b.Epoch && a.From == b.From && a.Ended == b.Ended && a.Lost == b.Lost && slices.Equal(a.Fenced, b.Fenced)
 }
 
 // seedLandedOwner follows a durable landing without making the spawn answer
@@ -223,13 +226,35 @@ func (h *HubServer) saveOwnerAssignment(assignment hubOwnerAssignment, rebind bo
 // endOwnerAssignment is called under the per-job lock before accepting a
 // terminal event. A restart must not seed a job the hub already saw end.
 func (h *HubServer) endOwnerAssignment(job, node string, epoch uint64) error {
+	return h.endOwnerAssignmentAs(job, node, epoch, false)
+}
+
+// endOwnerAssignmentAs is endOwnerAssignment for an end the node settled lost
+// (a final job.lost, hk 5351). lost is persisted with the end, so a restarted
+// hub can tell the holder's role is free without the in-memory job record.
+func (h *HubServer) endOwnerAssignmentAs(job, node string, epoch uint64, lost bool) error {
 	if h.ownerTransferDir == "" {
 		return nil
 	}
 	assignment, found, err := h.ownerAssignment(job)
-	if err != nil || !found || assignment.Node != node || assignment.Epoch != epoch || assignment.Ended {
+	if err != nil {
 		return err
 	}
-	assignment.Ended = true
+	if !found {
+		if !lost {
+			return nil
+		}
+		// A final loss the hub accepted with no assignment on disk (a job it
+		// learned from a heartbeat before the seed landed) still records its
+		// end, so the lost end outlives a restart (hk 5351).
+		return h.saveOwnerAssignment(hubOwnerAssignment{Job: job, Node: node, Epoch: epoch, Ended: true, Lost: true}, false)
+	}
+	if assignment.Node != node || assignment.Epoch != epoch {
+		return nil
+	}
+	if assignment.Ended && (assignment.Lost || !lost) {
+		return nil
+	}
+	assignment.Ended, assignment.Lost = true, assignment.Lost || lost
 	return h.saveOwnerAssignment(assignment, false)
 }

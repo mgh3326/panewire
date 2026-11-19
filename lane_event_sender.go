@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 )
 
@@ -39,14 +40,22 @@ func (peer *hubClientConnection) laneEventsKnown(acked bool) bool {
 	return acked || peer.featuresKnown.Load()
 }
 
-// splitRelayBurst divides a burst into the events to write now and the
-// lane.event records to hold until the hub's feature state is known.
+// relayHeldForFeatures reports whether a relay event waits for the hub's feature
+// state: a lane.event, and a final job.lost, which hubFeatureFinalLost must
+// take whole. Both the scan burst and the immediate `panewire emit` path hold
+// the same set (hk 5351).
+func relayHeldForFeatures(event hubClientEvent) bool {
+	return event.Kind == "lane.event" || event.finalLost
+}
+
+// splitRelayBurst divides a burst into the events to write now and the events
+// relayHeldForFeatures holds until the hub's feature state is known.
 func splitRelayBurst(events []hubClientEvent, laneKnown bool) (write, held []hubClientEvent) {
 	if laneKnown {
 		return events, nil
 	}
 	for _, event := range events {
-		if event.Kind == "lane.event" {
+		if relayHeldForFeatures(event) {
 			held = append(held, event)
 			continue
 		}
@@ -74,6 +83,11 @@ func (peer *hubClientConnection) relayWire(event hubClientEvent) any {
 	// over its own bound, so the cut form is sent to it (lane_event_long.go).
 	if event.Kind == "lane.event" && !peer.acceptsLaneEventLong.Load() {
 		event.Payload = laneEventPayloadForOldHub(event.Payload, event.sinkRecord)
+	}
+	// A hub without hubFeatureFinalLost takes the job.lost without its final
+	// field, as an older node sends it (hk 5351).
+	if event.finalLost && !peer.acceptsFinalLost.Load() {
+		event.Payload = finalLostPayloadForOldHub(event.Payload)
 	}
 	return hubClientWireEvent(event)
 }
@@ -107,4 +121,20 @@ func (h *HubServer) laneEventFromWorker(machine, pane, lane string) bool {
 		}
 	}
 	return false
+}
+
+// finalLostPayloadForOldHub is a final job.lost without its final field: the
+// pre-PR payload a hub that did not advertise hubFeatureFinalLost
+// decodes. An unreadable payload is sent as it is.
+func finalLostPayloadForOldHub(payload json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return payload
+	}
+	delete(fields, "final")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return payload
+	}
+	return out
 }
