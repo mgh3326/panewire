@@ -97,7 +97,7 @@ func TestSpawnOutboxUpgradeBackfillsPendingRows_t5298(t *testing.T) {
 		}
 		// The store as the previous release left it: no outbox, history only.
 		legacy := []string{`DROP TABLE placement_record_outbox`, `DROP TABLE spawn_notice_outbox`}
-		if s.dialect == laneInboxPostgres {
+		if s.dialect == dialectPostgres {
 			legacy = append(legacy, `DELETE FROM panewire_schema_migrations WHERE version='0028_spawn_outboxes'`)
 		}
 		for _, statement := range legacy {
@@ -318,7 +318,7 @@ func TestSpawnOutboxReconcileReadsOwedRowsByIndex_t5298(t *testing.T) {
 			t.Fatal(err)
 		}
 		catalog := `SELECT name FROM sqlite_master WHERE type='index'`
-		if s.dialect == laneInboxPostgres {
+		if s.dialect == dialectPostgres {
 			catalog = `SELECT indexname FROM pg_indexes WHERE schemaname=current_schema()`
 		}
 		have := outboxKeys(t, s, catalog)
@@ -327,7 +327,7 @@ func TestSpawnOutboxReconcileReadsOwedRowsByIndex_t5298(t *testing.T) {
 				t.Fatalf("index %s missing from %v", name, have)
 			}
 		}
-		if s.dialect == laneInboxPostgres {
+		if s.dialect == dialectPostgres {
 			return // the planner's choice on an empty table proves nothing; CI checks the index exists
 		}
 		for query, index := range map[string]string{

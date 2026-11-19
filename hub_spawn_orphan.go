@@ -373,7 +373,7 @@ func (s *laneInboxStore) pendingSpawnStuck(parent context.Context, task hubSpawn
 		return "", false, err
 	}
 	eventID = fmt.Sprintf("%s:%d:stuck", task.Request.RequestID, task.Attempt)
-	if _, err = s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered,telemetry_recorded) VALUES(?,?,?,?,?,?,1,0) ON CONFLICT DO NOTHING`), eventID, task.Request.RequestID, task.Job, task.Owner, string(raw), now.UnixMilli()); err != nil {
+	if _, err = s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered,telemetry_recorded) VALUES(?,?,?,?,?,?,1,0)`, "")), eventID, task.Request.RequestID, task.Job, task.Owner, string(raw), now.UnixMilli()); err != nil {
 		return "", false, err
 	}
 	var recorded int

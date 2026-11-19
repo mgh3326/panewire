@@ -123,7 +123,7 @@ func (h *HubServer) setSpawnNotificationState(ctx context.Context, id string, fr
 	store := h.inbox.store
 	op, done := store.op(ctx)
 	defer done()
-	tx, err := store.db.BeginTx(op, nil)
+	tx, err := store.beginTx(op)
 	if err != nil {
 		return
 	}
@@ -292,7 +292,7 @@ func (h *HubServer) claimHeldSpawnNotification(ctx context.Context, n spawnNotif
 	if err != nil {
 		return false
 	}
-	rows, _ := res.RowsAffected()
+	rows, _ := store.dialect.rowsMatched(res)
 	return rows == 1
 }
 

@@ -296,16 +296,16 @@ func (h *HubServer) wakeParkedSpawns(ctx context.Context, ticked bool) {
 func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt int, reason string, next, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_since_ms=CASE WHEN park_since_ms=0 THEN CAST(? AS BIGINT) ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), reason, next.UnixMilli(), next.UnixMilli(), now.UnixMilli(), id, attempt)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_since_ms=CASE WHEN park_since_ms=0 THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), reason, next.UnixMilli(), next.UnixMilli(), now.UnixMilli(), id, attempt)
 	if err != nil {
 		return false, err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return false, nil
 	}
 	if err = s.syncSpawnQueueNextCheck(ctx, tx, id); err != nil {
@@ -320,22 +320,22 @@ func (s *laneInboxStore) wakeParkedSpawns(parent context.Context, reasons []stri
 	ctx, done := s.op(parent)
 	defer done()
 	// park_reason may name several reasons, comma-separated: match each.
-	marks := strings.TrimSuffix(strings.Repeat("(','||park_reason||',') LIKE ? OR ", len(reasons)), " OR ")
+	marks := strings.TrimSuffix(strings.Repeat("("+s.dialect.concat("','", "park_reason", "','")+") LIKE ? OR ", len(reasons)), " OR ")
 	args := []any{now.UnixMilli(), now.UnixMilli()}
 	for _, reason := range reasons {
 		args = append(args, "%,"+reason+",%")
 	}
 	args = append(args, limit)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET next_check_ms=? WHERE request_id IN (SELECT request_id FROM spawn_operations WHERE status='accepted' AND node_id IS NULL AND next_check_ms>? AND (`+marks+`) ORDER BY next_check_ms,request_id LIMIT ?)`), args...)
+	result, err := tx.ExecContext(ctx, s.q(s.dialect.updateOrdered("spawn_operations", "request_id", "next_check_ms=?", `status='accepted' AND node_id IS NULL AND next_check_ms>? AND (`+marks+`)`, "next_check_ms,request_id")), args...)
 	if err != nil {
 		return 0, err
 	}
-	n, _ := result.RowsAffected()
+	n, _ := s.dialect.rowsMatched(result)
 	if n > 0 {
 		// The woken rows are the queue rows whose due time now differs from
 		// the operation's: the queue is the small table, so this reads it only.

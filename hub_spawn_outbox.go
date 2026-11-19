@@ -34,7 +34,7 @@ import (
 // record is still owed. Reading the snapshot row keeps a sealed one out, and
 // the key makes a repeat a no-op.
 func (s *laneInboxStore) enqueuePlacementRecord(ctx context.Context, x sqlExecer, requestID string, attempt int) error {
-	_, err := x.ExecContext(ctx, s.q(`INSERT INTO placement_record_outbox(request_id,attempt) SELECT request_id,attempt FROM spawn_placement_snapshots WHERE request_id=? AND attempt=? AND recorded<>1 ON CONFLICT(request_id,attempt) DO NOTHING`), requestID, attempt)
+	_, err := x.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO placement_record_outbox(request_id,attempt) SELECT request_id,attempt FROM spawn_placement_snapshots WHERE request_id=? AND attempt=? AND recorded<>1`, "request_id,attempt")), requestID, attempt)
 	return err
 }
 
@@ -49,19 +49,19 @@ func (s *laneInboxStore) dequeuePlacementRecord(ctx context.Context, x sqlExecer
 // delivered. A notification already delivered stays out, and a repeat is a
 // no-op.
 func (s *laneInboxStore) enqueueSpawnNotice(ctx context.Context, x sqlExecer, eventID string) error {
-	_, err := x.ExecContext(ctx, s.q(`INSERT INTO spawn_notice_outbox(event_id) SELECT event_id FROM spawn_notifications WHERE event_id=? AND delivered<>1 ON CONFLICT(event_id) DO NOTHING`), eventID)
+	_, err := x.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notice_outbox(event_id) SELECT event_id FROM spawn_notifications WHERE event_id=? AND delivered<>1`, "event_id")), eventID)
 	return err
 }
 
 // saveSpawnNotice writes a notification and its outbox row in one transaction,
 // for a producer that has no transaction of its own.
 func (s *laneInboxStore) saveSpawnNotice(ctx context.Context, eventID string, task hubSpawnTask, raw string, now time.Time) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), eventID, task.Request.RequestID, task.Job, task.Owner, raw, now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?)`, "")), eventID, task.Request.RequestID, task.Job, task.Owner, raw, now.UnixMilli()); err != nil {
 		return err
 	}
 	if err := s.enqueueSpawnNotice(ctx, tx, eventID); err != nil {
@@ -119,14 +119,14 @@ func (s *laneInboxStore) reconcileSpawnOutboxes(ctx context.Context) error {
 	if s.outboxReconcileCtx != nil {
 		s.outboxReconcileCtx(ctx)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	for _, statement := range []string{
-		`INSERT INTO placement_record_outbox(request_id,attempt) SELECT request_id,attempt FROM spawn_placement_snapshots WHERE recorded<>1 ON CONFLICT(request_id,attempt) DO NOTHING`,
-		`INSERT INTO spawn_notice_outbox(event_id) SELECT event_id FROM spawn_notifications WHERE delivered<>1 ON CONFLICT(event_id) DO NOTHING`,
+		s.dialect.insertIgnore(`INSERT INTO placement_record_outbox(request_id,attempt) SELECT request_id,attempt FROM spawn_placement_snapshots WHERE recorded<>1`, "request_id,attempt"),
+		s.dialect.insertIgnore(`INSERT INTO spawn_notice_outbox(event_id) SELECT event_id FROM spawn_notifications WHERE delivered<>1`, "event_id"),
 		`DELETE FROM placement_record_outbox WHERE NOT EXISTS (SELECT 1 FROM spawn_placement_snapshots p WHERE p.request_id=placement_record_outbox.request_id AND p.attempt=placement_record_outbox.attempt AND p.recorded<>1)`,
 		`DELETE FROM spawn_notice_outbox WHERE NOT EXISTS (SELECT 1 FROM spawn_notifications n WHERE n.event_id=spawn_notice_outbox.event_id AND n.delivered<>1)`,
 	} {

@@ -268,7 +268,7 @@ func (s *laneInboxStore) releaseWaitingSpawn(parent context.Context, task hubSpa
 	if err != nil {
 		return false, err
 	}
-	n, _ := result.RowsAffected()
+	n, _ := s.dialect.rowsMatched(result)
 	return n == 1, nil
 }
 
@@ -282,7 +282,7 @@ func (s *laneInboxStore) giveUpWaitingSpawn(parent context.Context, task hubSpaw
 	if err != nil {
 		return false, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -291,7 +291,7 @@ func (s *laneInboxStore) giveUpWaitingSpawn(parent context.Context, task hubSpaw
 	if err != nil {
 		return false, err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return false, nil
 	}
 	if err = s.releaseEndedSpawn(ctx, tx, task, "given_up", string(raw), now); err != nil {
@@ -310,7 +310,7 @@ func (s *laneInboxStore) endWaitingSpawn(parent context.Context, task hubSpawnTa
 	if err != nil {
 		return false, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -319,7 +319,7 @@ func (s *laneInboxStore) endWaitingSpawn(parent context.Context, task hubSpawnTa
 	if err != nil {
 		return false, err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return false, nil
 	}
 	if err = s.releaseEndedSpawn(ctx, tx, task, status, string(raw), now); err != nil {
@@ -353,7 +353,7 @@ func (s *laneInboxStore) returnToWaiting(parent context.Context, task hubSpawnTa
 	if err != nil {
 		return false, err
 	}
-	n, _ := result.RowsAffected()
+	n, _ := s.dialect.rowsMatched(result)
 	if n == 1 {
 		// A row back in waiting is the next start-condition check's work.
 		s.noteWork(readSpawnScan)

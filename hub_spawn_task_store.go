@@ -183,7 +183,7 @@ func liveExclusions(exclusions []hubSpawnExclusion, now time.Time) []hubSpawnExc
 }
 
 func (s *laneInboxStore) ensureSpawnTasks() error {
-	if s.dialect == laneInboxPostgres {
+	if !s.dialect.ownsSchema() {
 		// The schema is migrated; the outboxes still reconcile with the history
 		// at every start (hk 5298).
 		ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
@@ -351,7 +351,7 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	}
 	sum := sha256.Sum256(raw)
 	fingerprint := hex.EncodeToString(sum[:])
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
@@ -387,16 +387,16 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 		if err != nil {
 			return hubSpawnTask{}, false, err
 		}
-		if n, _ := result.RowsAffected(); n != 1 {
+		if n, _ := s.dialect.rowsMatched(result); n != 1 {
 			return hubSpawnTask{}, false, errSpawnClaimed
 		}
 		taskRole = roleKey
 	}
-	claimed, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), job, request.RequestID, taskRole)
+	claimed, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`, "")), job, request.RequestID, taskRole)
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
-	n, _ := claimed.RowsAffected()
+	n, _ := s.dialect.rowsMatched(claimed)
 	if n != 1 {
 		tx.Rollback()
 		prior, lookupErr := s.spawnTask(parent, request.RequestID)
@@ -451,7 +451,7 @@ func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, 
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return errSpawnClaimed
 	}
 	s.noteWork(readSpawnScan)
@@ -463,7 +463,7 @@ func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, 
 func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousID, roleKey string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -472,7 +472,7 @@ func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousI
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return errSpawnClaimed
 	}
 	if err = s.dequeueSpawn(ctx, tx, id); err != nil {
@@ -482,14 +482,14 @@ func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousI
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return errSpawnClaimed
 	}
 	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=? WHERE request_id=? AND task_role IS NULL`), roleKey, previousID)
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return errSpawnClaimed
 	}
 	return tx.Commit()
@@ -500,7 +500,7 @@ func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousI
 func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -509,7 +509,7 @@ func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey 
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return errSpawnClaimed
 	}
 	if err = s.dequeueSpawn(ctx, tx, id); err != nil {
@@ -519,7 +519,7 @@ func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey 
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return errSpawnClaimed
 	}
 	return tx.Commit()
@@ -580,7 +580,7 @@ func (s *laneInboxStore) beginSpawnSend(parent context.Context, task hubSpawnTas
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
+	n, err := s.dialect.rowsMatched(result)
 	return n == 1, err
 }
 
@@ -605,7 +605,7 @@ func (s *laneInboxStore) writeSpawnOutcome(parent context.Context, task hubSpawn
 	if outcome.Host == "" {
 		outcome.Host = spawnPinnedHost(task)
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -644,7 +644,7 @@ func (s *laneInboxStore) writeSpawnOutcome(parent context.Context, task hubSpawn
 	if err != nil {
 		return false, err
 	}
-	n, _ := result.RowsAffected()
+	n, _ := s.dialect.rowsMatched(result)
 	if n == 0 {
 		return false, nil
 	}
@@ -753,7 +753,7 @@ func queueSpawnNoticeRows(ctx context.Context, s *laneInboxStore, tx *sql.Tx, ta
 		}
 	}
 	for _, n := range lanes {
-		if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), n.id, task.Request.RequestID, task.Job, n.lane, raw, now.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?)`, "")), n.id, task.Request.RequestID, task.Job, n.lane, raw, now.UnixMilli()); err != nil {
 			return err
 		}
 		if err := s.enqueueSpawnNotice(ctx, tx, n.id); err != nil {
@@ -901,16 +901,16 @@ func (s *laneInboxStore) unbindRefusedSpawnParked(parent context.Context, task h
 	}
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN CAST(? AS BIGINT) ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return hubSpawnTask{}, errSpawnClaimed
 	}
 	if err = s.syncSpawnQueueNextCheck(ctx, tx, task.Request.RequestID); err != nil {
@@ -934,7 +934,7 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return hubSpawnTask{}, errSpawnClaimed
 	}
 	return s.spawnTask(parent, id)
@@ -1148,7 +1148,7 @@ func (s *laneInboxStore) pendingSpawnPage(parent context.Context, after spawnSca
 func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpawnTask, now time.Time) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return task, err
 	}
@@ -1164,11 +1164,11 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
 	}
-	result, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), task.Job, task.Request.RequestID, taskRole)
+	result, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`, "")), task.Job, task.Request.RequestID, taskRole)
 	if err != nil {
 		return task, err
 	}
-	n, _ := result.RowsAffected()
+	n, _ := s.dialect.rowsMatched(result)
 	if n != 1 {
 		return task, errSpawnClaimed
 	}
@@ -1181,7 +1181,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	if err != nil {
 		return task, err
 	}
-	n, _ = result.RowsAffected()
+	n, _ = s.dialect.rowsMatched(result)
 	if n != 1 {
 		return task, errSpawnClaimed
 	}
@@ -1328,7 +1328,7 @@ func (s *laneInboxStore) noteSpawnRefreshWaits(parent context.Context, id string
 func (s *laneInboxStore) recordQuotaRefreshAttempt(parent context.Context, machine, pool, outcome string, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO quota_refresh_attempts(machine,pool,outcome,seen_ms) VALUES(?,?,?,?) ON CONFLICT(machine,pool) DO UPDATE SET outcome=excluded.outcome,seen_ms=excluded.seen_ms`), machine, pool, outcome, now.UnixMilli())
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO quota_refresh_attempts(machine,pool,outcome,seen_ms) VALUES(?,?,?,?)`, "machine,pool", s.dialect.assignIncoming("outcome", "seen_ms"))), machine, pool, outcome, now.UnixMilli())
 	return err
 }
 

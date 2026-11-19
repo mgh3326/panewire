@@ -109,7 +109,7 @@ func openLaneInboxStorePostgresConfig(ctx context.Context, config *pgx.ConnConfi
 		db.Close()
 		return nil, hubDatabaseError("migrate", err)
 	}
-	return newLaneInboxStore(db, laneInboxPostgres), nil
+	return newLaneInboxStore(db, dialectPostgres), nil
 }
 
 // openHubPostgres connects without touching the schema.
@@ -130,7 +130,7 @@ func openHubPostgres(ctx context.Context, config *pgx.ConnConfig) (*sql.DB, erro
 }
 
 func migrateHubPostgres(ctx context.Context, db *sql.DB) error {
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := dialectPostgres.begin(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -149,7 +149,7 @@ func migrateHubPostgresTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	sort.Strings(names)
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(hubPostgresMigrationLock)); err != nil {
+	if err := dialectPostgres.lockMigration(ctx, tx); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS panewire_schema_migrations (

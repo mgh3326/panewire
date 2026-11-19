@@ -3,14 +3,12 @@ package panewire
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,10 +22,11 @@ import (
 // belong on persistent storage and must be backed up together using SQLite;
 // the Postgres backend (lane_inbox_store_postgres.go) holds the same tables.
 // Both backends run the same statements through s.q, which only rebinds
-// placeholders, so one method set is the store contract for either.
+// placeholders; what differs is asked of the dialect (hub_sql_dialect.go), so
+// one method set is the store contract for either.
 type laneInboxStore struct {
 	db      *sql.DB
-	dialect laneInboxDialect
+	dialect sqlDialect
 	// life ends when abort is called: every in-flight and later call fails
 	// at once, so shutdown never waits on a stalled database.
 	life  context.Context
@@ -230,15 +229,8 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		db.Close()
 		return nil, err
 	}
-	return newLaneInboxStore(db, laneInboxSQLite), nil
+	return newLaneInboxStore(db, dialectSQLite), nil
 }
-
-type laneInboxDialect int
-
-const (
-	laneInboxSQLite laneInboxDialect = iota
-	laneInboxPostgres
-)
 
 // laneInboxOpTimeout bounds every store call, including one makeBatches
 // transaction. SQLite's own busy_timeout is 5s. laneInboxStartupTimeout
@@ -253,7 +245,7 @@ const (
 // backlog costs one statement per chunk, not one per item.
 const laneInboxClaimChunk = 500
 
-func newLaneInboxStore(db *sql.DB, dialect laneInboxDialect) *laneInboxStore {
+func newLaneInboxStore(db *sql.DB, dialect sqlDialect) *laneInboxStore {
 	life, abort := context.WithCancel(context.Background())
 	s := &laneInboxStore{db: db, dialect: dialect, life: life, abort: abort, notify: make(chan struct{})}
 	for k := range s.reads {
@@ -278,47 +270,20 @@ func (s *laneInboxStore) opWithin(parent context.Context, timeout time.Duration)
 	return ctx, func() { stop(); cancel() }
 }
 
-// q rebinds the store's ?-placeholders for the backend. No statement in this
-// store carries a literal '?', so a positional rewrite is exact.
+// q rebinds the store's ?-placeholders for the backend.
 func (s *laneInboxStore) q(query string) string {
-	if s.dialect != laneInboxPostgres {
-		return query
-	}
-	var b strings.Builder
-	n := 0
-	for _, r := range query {
-		if r == '?' {
-			n++
-			b.WriteString("$" + strconv.Itoa(n))
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
+	return s.dialect.rebind(query)
 }
 
-// storedKey is the event_key column's form of key. Hub keys join their parts
-// with NUL (relayEventDedupeKey), and producer-supplied parts need not be
-// UTF-8; Postgres text holds neither, so the Postgres store keeps the key
-// hex-encoded. SQLite keeps the raw key, exactly as before.
+// beginTx opens a transaction at the isolation level the dialect names. Every
+// store transaction starts here.
+func (s *laneInboxStore) beginTx(ctx context.Context) (*sql.Tx, error) {
+	return s.dialect.begin(ctx, s.db)
+}
+
+// storedKey is the event_key column's form of key (sqlDialect.storedKey).
 func (s *laneInboxStore) storedKey(key string) string {
-	return laneInboxStoredKey(s.dialect, key)
-}
-
-func laneInboxStoredKey(dialect laneInboxDialect, key string) string {
-	if dialect == laneInboxPostgres {
-		return hex.EncodeToString([]byte(key))
-	}
-	return key
-}
-
-// laneInboxKeyFromStored inverts laneInboxStoredKey.
-func laneInboxKeyFromStored(dialect laneInboxDialect, stored string) (string, error) {
-	if dialect != laneInboxPostgres {
-		return stored, nil
-	}
-	raw, err := hex.DecodeString(stored)
-	return string(raw), err
+	return s.dialect.storedKey(key)
 }
 
 // close ends every in-flight call, then closes the database.
@@ -327,14 +292,9 @@ func (s *laneInboxStore) close() error {
 	return s.db.Close()
 }
 
-// loggable returns err fit for a log line. A Postgres error after connect
-// can still name the server's address (a dropped connection's net error),
-// so it is reduced like a connect error; SQLite errors carry no credential.
+// loggable returns err fit for a log line (sqlDialect.loggable).
 func (s *laneInboxStore) loggable(step string, err error) error {
-	if s.dialect == laneInboxPostgres {
-		return hubDatabaseError(step, err)
-	}
-	return err
+	return s.dialect.loggable(step, err)
 }
 
 // markBatchSent records that handoffkeep now owns a batch's identity. Only
@@ -431,7 +391,7 @@ func addLaneInboxAckState(ctx context.Context, db *sql.DB) error {
 func backfillLaneInboxEventIDs(db *sql.DB) error {
 	ctx, cancel := context.WithTimeout(context.Background(), laneInboxStartupTimeout)
 	defer cancel()
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := dialectSQLite.begin(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -443,7 +403,7 @@ func backfillLaneInboxEventIDs(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	if n, _ := marked.RowsAffected(); n == 1 {
+	if n, _ := dialectSQLite.rowsMatched(marked); n == 1 {
 		if _, err := tx.ExecContext(ctx, `UPDATE lane_inbox SET event_id=json_extract(payload,'$.event_id') WHERE event_id='' AND json_valid(payload) AND json_type(payload,'$.event_id')='text' AND json_extract(payload,'$.event_id')<>''`); err != nil {
 			return err
 		}
@@ -474,7 +434,7 @@ func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
 func (s *laneInboxStore) quarantineBatch(id, reason string) error {
 	ctx, done := s.op(s.life)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_batch_quarantine(batch_id,reason) VALUES(?,?) ON CONFLICT(batch_id) DO NOTHING`), id, reason)
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO lane_inbox_batch_quarantine(batch_id,reason) VALUES(?,?)`, "batch_id")), id, reason)
 	if err == nil {
 		s.noteBatchesChanged()
 	}
@@ -658,17 +618,14 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	if class == "inbox" {
 		stage = laneInboxStageInboxOnly
 	}
-	query := `INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id,cause,delivery_stage,delivery_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
-	if s.dialect == laneInboxSQLite {
-		query = `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id,cause,delivery_stage,delivery_at) VALUES((SELECT max(COALESCE((SELECT max(id) FROM lane_inbox),0),floor)+1 FROM lane_inbox_id_floor WHERE singleton=1),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	query := s.dialect.insertIgnore(s.dialect.laneInboxInsert(), "event_key")
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
 	defer tx.Rollback()
-	if s.dialect == laneInboxPostgres && e.Cause != "" {
-		if _, err := tx.ExecContext(ctx, s.q(`SELECT pg_advisory_xact_lock(hashtext(?))`), lane+"\x1f"+e.Cause); err != nil {
+	if e.Cause != "" {
+		if err := s.dialect.lockLaneCause(ctx, tx, lane, e.Cause); err != nil {
 			return laneInboxItem{}, err
 		}
 	}
@@ -677,7 +634,7 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 		return laneInboxItem{}, err
 	}
 	item, err := scanLaneInbox(tx.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), s.storedKey(key)))
-	n, _ := insert.RowsAffected()
+	n, _ := s.dialect.rowsMatched(insert)
 	item.Fresh = n == 1
 	if err != nil {
 		return item, err
@@ -871,7 +828,7 @@ func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxIt
 	if err != nil {
 		return laneInboxItem{}, err
 	}
-	if n, _ := updated.RowsAffected(); n > 0 {
+	if n, _ := s.dialect.rowsMatched(updated); n > 0 {
 		s.noteBatchesChanged()
 		s.noteWorkChanged()
 	}
@@ -894,7 +851,7 @@ func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (in
 	if err != nil {
 		return 0, err
 	}
-	acked, err := result.RowsAffected()
+	acked, err := s.dialect.rowsMatched(result)
 	if err != nil {
 		return 0, err
 	}
@@ -965,7 +922,7 @@ func (s *laneInboxStore) makeBatchesDue(now time.Time) (int64, error) {
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -1102,7 +1059,7 @@ func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
 func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]laneInboxBatch, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, laneInboxPendingBatchesQuery+s.batchOrder()+` LIMIT 100`)
+	rows, err := s.db.QueryContext(ctx, laneInboxPendingBatchesQuery+s.dialect.batchOrder()+` LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}
@@ -1139,13 +1096,4 @@ func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]lan
 		}
 	}
 	return batches, nil
-}
-
-// batchOrder is the column batches are sent in, creation order: SQLite's
-// implicit rowid, or the identity column Postgres needs in its place.
-func (s *laneInboxStore) batchOrder() string {
-	if s.dialect == laneInboxPostgres {
-		return "seq"
-	}
-	return "rowid"
 }

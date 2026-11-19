@@ -58,7 +58,7 @@ func spawnStatusOwesTaskFailNotice(status string) bool {
 // enqueueSpawn adds a new non-terminal operation to the queue, in the
 // transaction that inserts it. Repeating it is a no-op.
 func (s *laneInboxStore) enqueueSpawn(ctx context.Context, tx *sql.Tx, requestID string) error {
-	_, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_queue(request_id,next_check_ms) VALUES(?,0) ON CONFLICT DO NOTHING`), requestID)
+	_, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_queue(request_id,next_check_ms) VALUES(?,0)`, "")), requestID)
 	return err
 }
 
@@ -80,7 +80,7 @@ func (s *laneInboxStore) endSpawnQueue(ctx context.Context, tx *sql.Tx, requestI
 	if !spawnStatusOwesTaskFailNotice(status) {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, s.q(`INSERT INTO task_fail_notice_outbox(request_id,retry_ms) VALUES(?,0) ON CONFLICT DO NOTHING`), requestID)
+	_, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO task_fail_notice_outbox(request_id,retry_ms) VALUES(?,0)`, "")), requestID)
 	return err
 }
 
@@ -116,16 +116,16 @@ func (s *laneInboxStore) syncSpawnQueueNextCheck(ctx context.Context, ex spawnQu
 // backfillSpawnTaskFailNotices on SQLite: a failure that stamp judged has its
 // mark set and is not owed again. The caller gives it the startup deadline.
 func (s *laneInboxStore) reconcileSpawnQueue(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	for _, statement := range []string{
-		`INSERT INTO spawn_queue(request_id,next_check_ms) SELECT request_id,next_check_ms FROM spawn_operations WHERE status NOT IN (` + spawnTerminalStatuses + `) ON CONFLICT(request_id) DO NOTHING`,
+		s.dialect.insertIgnore(`INSERT INTO spawn_queue(request_id,next_check_ms) SELECT request_id,next_check_ms FROM spawn_operations WHERE status NOT IN (`+spawnTerminalStatuses+`)`, "request_id"),
 		`UPDATE spawn_queue SET next_check_ms=(SELECT next_check_ms FROM spawn_operations WHERE spawn_operations.request_id=spawn_queue.request_id) WHERE next_check_ms<>(SELECT next_check_ms FROM spawn_operations WHERE spawn_operations.request_id=spawn_queue.request_id)`,
 		`DELETE FROM spawn_queue WHERE NOT EXISTS (SELECT 1 FROM spawn_operations o WHERE o.request_id=spawn_queue.request_id AND o.status NOT IN (` + spawnTerminalStatuses + `))`,
-		`INSERT INTO task_fail_notice_outbox(request_id,retry_ms) SELECT request_id,task_fail_retry_ms FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0 ON CONFLICT(request_id) DO NOTHING`,
+		s.dialect.insertIgnore(`INSERT INTO task_fail_notice_outbox(request_id,retry_ms) SELECT request_id,task_fail_retry_ms FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0`, "request_id"),
 		`DELETE FROM task_fail_notice_outbox WHERE NOT EXISTS (SELECT 1 FROM spawn_operations o WHERE o.request_id=task_fail_notice_outbox.request_id AND o.status IN ('failed','refused') AND o.task_fail_notice_ms=0)`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {

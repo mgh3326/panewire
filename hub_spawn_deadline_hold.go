@@ -58,7 +58,7 @@ func (s *laneInboxStore) noteUnresolvedSpawn(parent context.Context, task hubSpa
 	}
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -70,7 +70,7 @@ func (s *laneInboxStore) noteUnresolvedSpawn(parent context.Context, task hubSpa
 	if err != nil {
 		return false, err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return false, nil
 	}
 	raw, err := json.Marshal(spawnUnresolvedOutcome(task))
@@ -225,7 +225,7 @@ func (h *HubServer) recordUnresolvedSpawnError(task hubSpawnTask) {
 	if err != nil {
 		return
 	}
-	if n, _ := recorded.RowsAffected(); n != 1 {
+	if n, _ := h.inbox.store.dialect.rowsMatched(recorded); n != 1 {
 		return
 	}
 	reason := spawnTraceReason(spawnUnresolvedReason)
