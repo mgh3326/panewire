@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 )
 
 const (
@@ -23,10 +24,35 @@ const (
 	// spawnWithdrawnReason is the reason code a requester's withdrawal carries.
 	// spawnOutcomeStatus maps it to cancelled, not failed.
 	spawnWithdrawnReason = "requester_withdrawn"
+	// spawnHandoverWithdrawnReason is the reason code the hub gives a queued
+	// hand-over successor it withdraws because its job no longer needs it (hk
+	// 5491, hub_pool_handover.go). The reason is "handover_withdrawn: <cause>".
+	// It ends cancelled through the same release as a requester's withdrawal.
+	spawnHandoverWithdrawnReason = "handover_withdrawn"
 )
 
 // spawnWithdrawEnd ends a pending request as cancelled for its requester.
 var spawnWithdrawEnd = spawnEnd{code: spawnWithdrawnReason, status: "cancelled", fix: "the requester withdrew this request; submit the work again under a new job id if it is still wanted", unboundFix: "the requester withdrew this request before any node took it; submit the work again under a new job id if it is still wanted", warning: "hub spawn withdraw"}
+
+// spawnHandoverWithdrawEnd ends a queued hand-over successor as cancelled once
+// the hub finds its job no longer needs it (hk 5491).
+var spawnHandoverWithdrawEnd = spawnEnd{code: spawnHandoverWithdrawnReason, status: "cancelled", unboundFix: "the hub withdrew this queued hand-over successor: its job no longer needs it", warning: "hub hand-over successor withdraw"}
+
+// spawnCancelledReason reports whether a reason code ends its request cancelled,
+// not failed: a requester's withdrawal or the hub's hand-over withdrawal.
+func spawnCancelledReason(code string) bool {
+	return code == spawnWithdrawnReason || code == spawnHandoverWithdrawnReason
+}
+
+// spawnHandoverWithdrawCause returns the cause of a hub hand-over withdrawal
+// outcome reason, and false for any other reason.
+func spawnHandoverWithdrawCause(reason string) (string, bool) {
+	code, cause, found := strings.Cut(reason, ": ")
+	if !found || code != spawnHandoverWithdrawnReason {
+		return "", false
+	}
+	return cause, true
+}
 
 // fenceSentWithdrawal makes a possibly sent attempt safe to cancel, or says why
 // it is not (hk 5429 review). A bound attempt has not crossed the send boundary,

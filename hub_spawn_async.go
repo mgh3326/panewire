@@ -2040,6 +2040,9 @@ func (h *HubServer) verifySpawnPane(ctx context.Context, machine string, result 
 // spawnNotificationType keeps a failed spawn out of the owner's digest: the
 // submitter only saw ACCEPTED, so nothing else tells it the work did not start.
 func spawnNotificationType(result hubSpawnOutcome) string {
+	if _, ok := spawnHandoverWithdrawCause(result.Reason); ok {
+		return "info"
+	}
 	if result.RC != 0 || result.LaneUnregistered {
 		return "automation-failed"
 	}
@@ -2047,6 +2050,10 @@ func spawnNotificationType(result hubSpawnOutcome) string {
 }
 
 func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
+	if cause, ok := spawnHandoverWithdrawCause(result.Reason); ok {
+		// hk 5491: a queued hand-over successor the hub withdrew; not a failure.
+		return fmt.Sprintf("[panewire] WITHDRAWN %s request=%s: queued hand-over successor no longer needed (%s)", job, request, cause)
+	}
 	if result.RC == 0 {
 		text := fmt.Sprintf("[panewire] SPAWNED %s host=%s profile=%s pane=%s model=%s", job, result.Host, result.Profile, result.Pane, result.Model)
 		if result.AfterUnresolved {

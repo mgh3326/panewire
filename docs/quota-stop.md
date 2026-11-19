@@ -218,7 +218,12 @@ decides with the §Implementer rule (the job's start, the task's priority and
      <new> on <host>/<profile> (<pool> <cause>)`. Failed for good, or the old
      record ended another way: the row ends `handover_failed`, the task role
      is released, and the owner gets the hand-over-or-respawn notice with the
-     reason.
+     reason. A successor still queued (accepted, unbound, no host claim) is
+     withdrawn when its task is rebound to another job, reaches a terminal hk
+     state (`merged`, `completed`, `canceled`) or its job record is closed: it
+     ends `cancelled` with reason `handover_withdrawn: <cause>` through the
+     requester withdrawal's release, the row ends `withdrawn`, and the owner
+     gets one info line, or none for a terminal task (hk 5491).
 
 The decision reads the task the job record names (a `--parent-job` successor
 inherits it) and the job's start; a task whose `refs.job_id` is unavailable or names another job
