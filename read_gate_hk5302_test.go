@@ -243,7 +243,7 @@ func TestSpawnScanDueTime(t *testing.T) {
 	steps.all()
 	steps.takeHanded()
 	parkedUntil := now.Add(45 * time.Second)
-	if parked, err := h.inbox.store.parkSpawn(t.Context(), task.Request.RequestID, task.Attempt, spawnParkHostFull, nil, nil, parkedUntil, now); err != nil || !parked {
+	if parked, err := h.inbox.store.parkSpawn(t.Context(), task.Request.RequestID, task.Attempt, spawnParkHostFull, nil, parkedUntil, now); err != nil || !parked {
 		t.Fatalf("park = %v %v", parked, err)
 	}
 	// The next pass is the retry the last scan left; it finds the row parked
@@ -323,7 +323,7 @@ func TestReadGatesRebuildAfterRestart(t *testing.T) {
 	runnable := gateClaim(t, first, 51)
 	parked := gateClaim(t, first, 52)
 	parkedUntil := now.Add(30 * time.Second)
-	if ok, err := first.inbox.store.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkHostFull, nil, nil, parkedUntil, now); err != nil || !ok {
+	if ok, err := first.inbox.store.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkHostFull, nil, parkedUntil, now); err != nil || !ok {
 		t.Fatalf("park = %v %v", ok, err)
 	}
 	failed := gateClaim(t, first, 53)
@@ -465,7 +465,7 @@ func TestReadGateWritersNoteTheirLoops(t *testing.T) {
 	}, readConsult)
 	expect(t, "wakeParkedSpawns", func() {
 		parked := gateClaim(t, h, 75)
-		if ok, err := store.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkHostFull, nil, nil, now.Add(time.Hour), now); err != nil || !ok {
+		if ok, err := store.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkHostFull, nil, now.Add(time.Hour), now); err != nil || !ok {
 			t.Fatalf("park = %v %v", ok, err)
 		}
 		if n, err := store.wakeParkedSpawns(t.Context(), []string{spawnParkHostFull}, 8, now); err != nil || n == 0 {
