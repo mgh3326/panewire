@@ -62,6 +62,8 @@ epoch it means to act under, for example `panewire job done JOB --report R
   without the CLI the submitted epoch must equal the persisted grant, and a
   revoked grant is refused. A future epoch the node has not persisted (the
   revocation's own epoch, or a regrant not yet landed) is refused, not passed.
+  A daemon with no configured inbox namespace has no authoritative grant, so it
+  refuses a `job.*` push instead of trusting the request's own root.
 - **The hub** (`observeJobCompletion` and the owner assignment fence): a
   completion whose epoch differs from the job's current epoch is not accepted
   and does not close the job. The A/1 worker's call carries epoch 1, so the hub

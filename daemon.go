@@ -963,7 +963,15 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		// equal the persisted grant, and a revoked grant is refused, so a
 		// future epoch the node has not persisted cannot pass either
 		// (docs/producer-attempt-grant.md).
-		if _, err := jobowner.ProducerEpoch(filepath.Join(d.emitNamespaceRoot(), "jobs"), req.JobID, 0, epoch); err != nil {
+		// The grant lives in the daemon's own namespace. With none configured,
+		// emitNamespaceMatches accepts any request root, and the request's own
+		// root is client-chosen, so there is no authoritative grant to check:
+		// refuse rather than read a relative path under the working directory.
+		root := d.emitNamespaceRoot()
+		if root == "" {
+			return &codedError{ExitUsage, fmt.Errorf("invalid emit request: no inbox namespace configured to check the attempt epoch")}
+		}
+		if _, err := jobowner.ProducerEpoch(filepath.Join(root, "jobs"), req.JobID, 0, epoch); err != nil {
 			if producerRefusal(err) {
 				return &codedError{ExitUsage, err}
 			}

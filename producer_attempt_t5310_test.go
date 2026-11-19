@@ -357,3 +357,21 @@ func TestDaemonRefusesFutureProducerPush_t5310(t *testing.T) {
 		})
 	}
 }
+
+// With no inbox namespace configured the daemon has no authoritative grant: a
+// job.* push is refused, not checked against a path under the working
+// directory or the request's own root (mergewake finding on #720).
+func TestDaemonRefusesProducerPushWithoutNamespace_t5310(t *testing.T) {
+	root := t.TempDir()
+	if err := jobowner.Assign(filepath.Join(root, "jobs"), producerJob, 3); err != nil {
+		t.Fatal(err)
+	}
+	daemon := t22NamespaceDaemon("", &bytes.Buffer{})
+	for _, epoch := range []uint64{1, 3} {
+		request := localRequest{Op: "emit", Kind: "job.completed", JobID: producerJob, ReportPath: "report.md", OwnerLane: "lane-a", InboxRoot: root, Epoch: epoch}
+		err := daemon.emitRelayEvent(request)
+		if err == nil || ExitCode(err) != ExitUsage || !strings.Contains(err.Error(), "no inbox namespace configured") {
+			t.Fatalf("epoch %d: err=%v", epoch, err)
+		}
+	}
+}
