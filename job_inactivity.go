@@ -217,9 +217,6 @@ func newStallSafetyManager(q *quotaStopManager, idle *idleWakeManager, limit tim
 			job := current
 			role, inherited, taskID, _ := q.jobFacts(job.JobID, job.Role)
 			job.Role = role
-			if role == "reviewer" {
-				return "reviewer quota stop passed to watcher", fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(q.root, "jobs"), job.JobID, r.pane, q.session(job.JobID, r.pane), detail.Stop)
-			}
 			candidate := idleWakeCandidate{PaneID: r.pane, WorkspaceID: detail.Agent.WorkspaceID, Label: detail.Agent.Label, Status: status, EventID: "stall:" + key, JobID: job.JobID, OwnerLane: job.OwnerLane}
 			q.store.mu.Lock()
 			_, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stall_wakes(event_id,pane_id,state_change_seq) VALUES(?,?,?)`, candidate.EventID, r.pane, seq)

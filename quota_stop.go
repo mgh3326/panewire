@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
@@ -24,14 +25,29 @@ type quotaPolicy struct {
 	MaxWaits int
 	// MaxWait is the longest reset a stop may be waited out for; zero means the
 	// policy has no max_wait line and only the expected time decides (hk 4503).
-	MaxWait    time.Duration
-	ResumeText string
+	MaxWait time.Duration
+	// ReviewerWait is the longest reset a reviewer's stop may have and still be
+	// waited out (hk 5355). Defaults to fleet.QuotaReviewerWait when the policy
+	// has no line; reviewerWaitLimit clamps it to MaxWait.
+	ReviewerWait time.Duration
+	ResumeText   string
 }
 
 // resetBeyondMaxWait reports whether the reset is further away than the policy's
 // max_wait allows. A policy without the line never reports it.
 func (p quotaPolicy) resetBeyondMaxWait(reset, now time.Time) bool {
 	return p.MaxWait > 0 && reset.Sub(now) > p.MaxWait
+}
+
+// reviewerWaitLimit is the longest reset a reviewer's stop may have and still be
+// waited out: the policy's reviewer_wait (default fleet.QuotaReviewerWait),
+// never above max_wait (hk 5355).
+func (p quotaPolicy) reviewerWaitLimit() time.Duration {
+	limit := p.ReviewerWait
+	if p.MaxWait > 0 && p.MaxWait < limit {
+		limit = p.MaxWait
+	}
+	return limit
 }
 
 func quotaDuration(v string) (time.Duration, bool) {
@@ -68,7 +84,7 @@ func parseQuotaPolicy(body string) (quotaPolicy, bool) {
 		}
 		key = strings.TrimSpace(key)
 		switch key {
-		case "default_expected", "urgent_priorities", "max_waits", "max_wait", "resume_text":
+		case "default_expected", "urgent_priorities", "max_waits", "max_wait", "reviewer_wait", "resume_text":
 			if _, exists := values[key]; exists {
 				return quotaPolicy{}, false
 			}
@@ -115,6 +131,18 @@ func parseQuotaPolicy(body string) (quotaPolicy, bool) {
 		}
 		p.MaxWait = d
 	}
+	p.ReviewerWait = fleet.QuotaReviewerWait
+	if raw, present := values["reviewer_wait"]; present {
+		fields := strings.Fields(raw)
+		if len(fields) == 0 {
+			return quotaPolicy{}, false
+		}
+		d, ok := quotaDuration(fields[0])
+		if !ok {
+			return quotaPolicy{}, false
+		}
+		p.ReviewerWait = d
+	}
 	text, err := strconv.Unquote(values["resume_text"])
 	if err != nil || strings.TrimSpace(text) == "" || strings.ContainsAny(text, "\r\n") {
 		return quotaPolicy{}, false
@@ -132,7 +160,9 @@ func quotaActsFor(role string) bool { return role == "implementer" }
 // quotaActsOn is quotaActsFor for a recorded decision: a decision with no
 // proven quota screen (pool "unknown": a failed or timed-out screen read) is
 // never acted on in shadow mode, because nothing showed the pane is stopped.
-func quotaActsOn(role, pool string) bool { return quotaActsFor(role) && pool != "unknown" }
+func quotaActsOn(role, pool string) bool {
+	return (quotaActsFor(role) || role == "reviewer") && pool != "unknown"
+}
 
 // quotaWaits reports whether a wait decision will actually be waited out,
 // which is also whether the pane shows its wait token: tick skips the action
@@ -187,6 +217,50 @@ func quotaDecisionJob(policy quotaPolicy, policyOK bool, priority int, expected 
 		return "handover", "reset_too_late"
 	}
 	return "wait", reason
+}
+
+// quotaDecisionReviewer is the decision for a reviewer on a quota stop (hk
+// 5355). The reviewer waits and is resumed once at its reset when the reset is
+// within the reviewer bound (fleet.QuotaReviewerWait, and never above the
+// policy's max_wait) and before the review deadline, which is
+// the job's start plus the task's expected time, or the policy's default when
+// the task names none. A reset already past is due at once. Everything else
+// hands the reviewer to the watcher's end at once, as before: an urgent
+// priority, a second stop after one resume, a dialog, an unknown reset, a reset
+// beyond the bound or past the deadline, or a start the job does not show.
+func quotaDecisionReviewer(policy quotaPolicy, policyOK bool, priority int, started time.Time, expected time.Duration, waits int, stop quotaStop, now time.Time) (string, string) {
+	if !policyOK {
+		return "handover", "policy_unavailable"
+	}
+	if policy.Urgent[priority] {
+		return "handover", "urgent"
+	}
+	if waits >= policy.MaxWaits {
+		return "handover", "resume_limit"
+	}
+	if stop.Choice {
+		return "handover", "choice_dialog"
+	}
+	if stop.Reset.IsZero() {
+		return "handover", "reset_unknown"
+	}
+	if stop.Reset.Sub(now) > policy.reviewerWaitLimit() {
+		return "handover", "reset_beyond_reviewer_wait"
+	}
+	if started.IsZero() {
+		return "handover", "start_unknown"
+	}
+	budget := expected
+	if budget <= 0 {
+		budget = policy.Expected
+	}
+	if stop.Reset.After(started.Add(budget)) {
+		return "handover", "reset_past_review_deadline"
+	}
+	if !stop.Reset.After(now) {
+		return "wait", "reset_passed"
+	}
+	return "wait", "reset_within_reviewer_wait"
 }
 
 func quotaDecision(policy quotaPolicy, policyOK bool, priority int, expected time.Duration, waits int, stop quotaStop, now time.Time) (string, string) {

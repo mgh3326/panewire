@@ -593,6 +593,63 @@ type quotaIntent struct {
 	pane   string
 }
 
+// reviewerQuotaHold is a reviewer's quota stop the watcher holds for the
+// manager's resume (hk 5355): the stop, when the hold ends if the pane is still
+// on it, and the pane state it was read in.
+type reviewerQuotaHold struct {
+	active bool
+	stop   quotastop.Stop
+	until  time.Time
+	seq    *int64
+}
+
+// unchanged reports whether the pane is still idle on the stop the hold was read
+// in. A pane that went back to work, or whose state changed, is no longer held.
+func (h reviewerQuotaHold) unchanged(ag Agent) bool {
+	if ag.Status != "idle" && ag.Status != "done" {
+		return false
+	}
+	return h.seq == nil || ag.StateChangeSeq == nil || *h.seq == *ag.StateChangeSeq
+}
+
+// QuotaReviewerWait is the longest reset a reviewer's quota stop may have and
+// still be waited out (hk 5355): the quota-stop manager resumes the pane once at
+// the reset. The manager applies the same bound and the policy's max_wait; the
+// watcher uses it only to decide, at once, whether to hold the job.
+const QuotaReviewerWait = 10 * time.Minute
+
+// QuotaReviewerWaitGrace is how long past its reset a held reviewer stays
+// unended before the watcher ends it: the manager's resume lands at the reset,
+// so a stop still shown after this grace was not resumed.
+const QuotaReviewerWaitGrace = 5 * time.Minute
+
+// quotaWaitKind is the job event the watcher records when it holds a
+// reviewer's quota stop for the manager's resume. A job holds at most one wait:
+// a second stop after it ends the job at once (hk 5355).
+const quotaWaitKind = "job.quota_stop_wait"
+
+// reviewerWaitUntil reports whether the watcher holds reviewer j's quota stop
+// for the manager (hk 5355) and, if so, until when. Only a known reset within
+// QuotaReviewerWait (a passed one included) on a stop that is not a choice dialog
+// is held, and only once per job. Every other stop is ended at once, as before.
+// The manager's policy check (max_wait, the review deadline, the resume limit)
+// decides after the hold and can still end it through the intent path.
+func reviewerWaitUntil(j Job, stop quotastop.Stop, now time.Time) (time.Time, bool) {
+	if stop.Choice || stop.Reset.IsZero() || stop.Reset.Sub(now) > QuotaReviewerWait {
+		return time.Time{}, false
+	}
+	for _, ev := range j.Events {
+		if ev.Kind == quotaWaitKind {
+			return time.Time{}, false
+		}
+	}
+	at := stop.Reset
+	if at.Before(now) {
+		at = now
+	}
+	return at.Add(QuotaReviewerWaitGrace), true
+}
+
 // pendingQuotaIntent returns the job's open close intent: the newest intent not
 // followed by a cancellation, an end, a re-prompt or a new claim or spawn.
 func pendingQuotaIntent(j Job) (quotaIntent, bool) {

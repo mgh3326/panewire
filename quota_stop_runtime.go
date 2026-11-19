@@ -36,11 +36,14 @@ type quotaStopManager struct {
 	enqueue func(hubScannedRelayEvent) bool
 	// announce records job.lost reason quota_stop for a handed-over job, which
 	// the hub then replaces (hub_quota_replace.go).
-	announce   func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error
-	mu         sync.Mutex
-	lastPolicy time.Time
-	policy     quotaPolicy
-	policyOK   bool
+	announce func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error
+	// endReviewer hands a reviewer's quota stop to the job's watcher, which
+	// ends it as hk 4507 does (hk 5355). Tests substitute it.
+	endReviewer func(ctx context.Context, job, pane string, stop quotastop.Stop) error
+	mu          sync.Mutex
+	lastPolicy  time.Time
+	policy      quotaPolicy
+	policyOK    bool
 	// clock times the observation phases; nil is time.Now.
 	clock func() time.Time
 	// show reports a pane's quota wait token, or clears it with an empty
@@ -91,6 +94,9 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	}
 	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
 		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, attempt, stop)
+	}
+	q.endReviewer = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
+		return fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(root, "jobs"), job, pane, q.session(job, pane), stop)
 	}
 	q.read = func(ctx context.Context, pane string) (string, error) {
 		session := ""
@@ -672,9 +678,12 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 	waitErr := q.store.db.QueryRowContext(dbCtx, `SELECT count(*) FROM quota_stop_decisions WHERE job=? AND attempted=1`, job.JobID).Scan(&waits)
 	q.store.mu.Unlock()
 	decision, reason := quotaDecision(policy, policyOK, priority, expected, waits, stop, now)
+	started, _ := time.Parse(time.RFC3339, job.StartedAt)
 	if quotaActsFor(job.Role) {
-		started, _ := time.Parse(time.RFC3339, job.StartedAt)
 		decision, reason = quotaDecisionJob(policy, policyOK, priority, expected, started, waits, stop, now)
+	}
+	if job.Role == "reviewer" {
+		decision, reason = quotaDecisionReviewer(policy, policyOK, priority, started, expected, waits, stop, now)
 	}
 	if !taskOK || waitErr != nil {
 		decision, reason = "handover", "task_unavailable"
@@ -788,6 +797,20 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		// 3334); every other role is only recorded unless the flag is set.
 		if !q.act && !quotaActsOn(r.role, r.pool) {
 			q.update(ctx, r.id, "action_recorded", 1)
+			continue
+		}
+		// A reviewer's hand-over ends it through its watcher's intent, as hk 4507
+		// does; the implementer's announce would have the hub replace it (hk 5355).
+		if r.decision == "handover" && r.role == "reviewer" {
+			stop := quotastop.Stop{Pool: r.pool}
+			if at, err := time.Parse(time.RFC3339, r.reset); err == nil {
+				stop.Reset = at
+			}
+			if err := q.endReviewer(ctx, r.job, r.pane, stop); err != nil {
+				q.backoffAction(ctx, r.id, now)
+			} else {
+				q.update(ctx, r.id, "action_recorded", 1)
+			}
 			continue
 		}
 		if r.decision == "handover" && quotaActsOn(r.role, r.pool) {
