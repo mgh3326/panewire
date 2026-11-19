@@ -135,7 +135,6 @@ func (d *Daemon) Start(ctx context.Context) error {
 				manager.quota.show = manager.quota.reportQuotaWait
 			}
 			manager.quota.enqueue = manager.enqueue
-			manager.quota.republish = d.cfg.Hub.Client.RepublishFleetQuota
 			d.idleWake = manager
 			if err := d.initStallSafety(); err != nil {
 				return err

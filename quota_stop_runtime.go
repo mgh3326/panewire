@@ -44,9 +44,6 @@ type quotaStopManager struct {
 	// PublishLimitObserved, hk 5562). Tests substitute them.
 	recordRung  func(job string, stop quotastop.Stop, now func() time.Time) error
 	publishRung func(ctx context.Context, job string, now func() time.Time) error
-	// republish asks the node's fleet-quota loop to send the published reading to
-	// the hub at once; nil leaves it to the loop's next interval.
-	republish func()
 	// publishRetry is how long a failed publication waits before it is tried
 	// again; zero is rungPublishRetry.
 	publishRetry time.Duration
@@ -559,9 +556,6 @@ func (q *quotaStopManager) keepRungOut(ctx context.Context, job string, stop quo
 		for {
 			err := q.publishRung(ctx, job, time.Now)
 			if err == nil {
-				if q.republish != nil {
-					q.republish()
-				}
 				return
 			}
 			q.logger.Warn("free-limit publication failed; retrying", "job", job, "error", err)

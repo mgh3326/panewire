@@ -79,7 +79,6 @@ func (client *HubClient) runFleetQuota(ctx context.Context) {
 		interval = defaultFleetQuotaInterval
 	}
 	sent := make(map[string]fleetQuotaSent)
-	kick := client.quotaKick()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -89,7 +88,6 @@ func (client *HubClient) runFleetQuota(ctx context.Context) {
 			clear(sent)
 		}
 		client.fleetStateMu.Unlock()
-		client.fleetQuotaRounds.Add(1)
 		client.creditPresencePublisher().Publish(ctx)
 		for _, pool := range client.stateQuotaPools {
 			if ctx.Err() != nil {
@@ -101,31 +99,8 @@ func (client *HubClient) runFleetQuota(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-		case <-kick:
 		}
 	}
-}
-
-// RepublishFleetQuota asks the quota loop to publish its readings now instead
-// of at its next interval. A stop the quota-stop manager just published into the
-// shared store (a Devin free limit, hk 5562) is only a local fact until this
-// node's loop sends it to the hub, and placement reads the hub's copy first.
-// It never blocks: a round already asked for covers this call.
-func (client *HubClient) RepublishFleetQuota() {
-	select {
-	case client.quotaKick() <- struct{}{}:
-	default:
-	}
-}
-
-// quotaKick is the channel RepublishFleetQuota signals; one slot, made on first use.
-func (client *HubClient) quotaKick() chan struct{} {
-	client.fleetStateMu.Lock()
-	defer client.fleetStateMu.Unlock()
-	if client.fleetQuotaKick == nil {
-		client.fleetQuotaKick = make(chan struct{}, 1)
-	}
-	return client.fleetQuotaKick
 }
 
 // fleetQuotaLoginMissingKinds are pacelever's error kinds (kinds.go) that mean
