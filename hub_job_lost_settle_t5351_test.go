@@ -229,3 +229,55 @@ func TestJobLostFinalReleasesThePaneLaneRow(t *testing.T) {
 		return err == nil && !strings.Contains(string(contents), `"lane-a"`)
 	})
 }
+
+// A final job.lost that reaches a hub which has not registered the job yet
+// (a restart before the first heartbeat) is late-registered and settled, not
+// discarded (mergewake: late registration of final losses).
+func TestJobLostBeforeTheHubKnowsTheJobSettlesIt(t *testing.T) {
+	hub, server, node, _, _ := t5351Settle(t, "lost")
+	hub.mu.Lock()
+	delete(hub.jobs, "test-job")
+	hub.mu.Unlock()
+	payload := t5351FinalLost(1)
+	payload["agent_label"] = "test-job"
+	t5351SendJobLost(t, node, payload)
+	eventually(t, 2*time.Second, "the unregistered final job.lost is settled", func() bool { return t5351JobSettled(hub) })
+	eventually(t, 2*time.Second, "the settle releases the task role", func() bool { return !t5351Reserved(t, hub) })
+	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
+	if result := t14Result(t, response); result.status != http.StatusAccepted {
+		t.Fatalf("respawn status=%d body=%s", result.status, result.body)
+	}
+}
+
+// The lost end is durable: a hub that restarted (the in-memory record is gone)
+// still releases the role once the pool action ends, even with hk unreadable
+// (mergewake: LostSettled must survive a restart).
+func TestJobLostSettleSurvivesRestartWhileActionPending(t *testing.T) {
+	hub, server, node, jobs, _ := t5351Settle(t, "lost")
+	hub.ownerTransferDir = t.TempDir()
+	if err := hub.saveOwnerAssignment(hubOwnerAssignment{Job: "test-job", Node: "machine-a", Epoch: 1}, false); err != nil {
+		t.Fatal(err)
+	}
+	store := hub.inbox.store
+	if _, err := store.db.Exec(store.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,0)`), "pa-5351-restart", "test-job", "machine-a", 1, poolActionPending, "{}"); err != nil {
+		t.Fatal(err)
+	}
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	eventually(t, 2*time.Second, "the final job.lost settles the job", func() bool { return t5351JobSettled(hub) })
+	assignment, found, err := hub.ownerAssignment("test-job")
+	if err != nil || !found || !assignment.Ended || !assignment.Lost {
+		t.Fatalf("durable assignment %+v found=%v err=%v", assignment, found, err)
+	}
+	// Restart: the in-memory record is gone, and hk cannot be read.
+	hub.mu.Lock()
+	delete(hub.jobs, "test-job")
+	hub.mu.Unlock()
+	jobs.getErr = map[string]error{"test-job": errors.New("hk unavailable")}
+	if _, err := store.db.Exec(store.q(`UPDATE pool_actions SET phase=? WHERE id=?`), poolActionDone, "pa-5351-restart"); err != nil {
+		t.Fatal(err)
+	}
+	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
+	if result := t14Result(t, response); result.status != http.StatusAccepted {
+		t.Fatalf("respawn after restart: status=%d body=%s", result.status, result.body)
+	}
+}

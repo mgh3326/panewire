@@ -1656,7 +1656,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				// A final job.lost ends the job: the node has written its hk
 				// record lost (hk 5351). Its lane rows point at the job's pane,
 				// which the settle no longer routes to.
-				if h.observeJobLost(machineID, event, received) && event.PaneID != "" {
+				if (h.observeJobLost(machineID, event, received) || h.lateRegisterJobEnd(machineID, event, received, true)) && event.PaneID != "" {
 					h.releasePaneLanes(machineID, event.PaneID, received)
 				}
 			}

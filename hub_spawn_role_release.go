@@ -425,6 +425,12 @@ func (h *HubServer) releaseSettledSpawnRole(ctx context.Context, holder hubSpawn
 	settled := job != nil && job.LostSettled && job.Node == spawnHolderHost(holder)
 	h.mu.Unlock()
 	if !settled {
+		// A restarted hub has no record for the job; the durable assignment
+		// keeps the lost end (hk 5351).
+		assignment, found, err := h.ownerAssignment(holder.Job)
+		settled = err == nil && found && assignment.Ended && assignment.Lost && assignment.Node == spawnHolderHost(holder)
+	}
+	if !settled {
 		return false
 	}
 	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil
