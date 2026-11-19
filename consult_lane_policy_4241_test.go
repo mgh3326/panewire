@@ -87,3 +87,64 @@ func writeConsultPolicy(t *testing.T, raw string) string {
 	}
 	return path
 }
+
+// Under the default policy (embedded, or relay.design_lanes absent) the consult
+// floor keeps today's design lanes: routing-policy and fleet-policy stay SS
+// (hk 4241). Mutant-checked: classifying by the policy's own *-design list fails it.
+func TestConsultDesignLanesDefaultPolicyKeepsBuiltInList(t *testing.T) {
+	embedded, err := loadDeliveryPolicy("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := map[string]*deliveryPolicy{
+		"embedded default":    embedded,
+		"absent design_lanes": quietDesignPolicyOf(t, "default: interrupt\n"),
+	}
+	for name, p := range policies {
+		isDesign := consultDesignLanes(p)
+		if isDesign == nil {
+			t.Fatalf("%s: no classifier loaded", name)
+		}
+		for _, lane := range []string{"panewire-design", "routing-policy", "fleet-policy"} {
+			if !isDesign(lane) {
+				t.Fatalf("%s: %s is not a design-session lane, so it loses the SS floor", name, lane)
+			}
+		}
+		if isDesign("operator-desk") || isDesign("work-operator-desk") {
+			t.Fatalf("%s: a desk lane classified as design", name)
+		}
+	}
+}
+
+// The hub's spawn app under the default policy classifies the built-in lanes.
+func TestHubSpawnAppDefaultPolicyKeepsBuiltInList(t *testing.T) {
+	embedded, err := loadDeliveryPolicy("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &HubServer{
+		inbox: &hubInbox{policy: embedded},
+		spawnNewApp: func(out, errout io.Writer) (*fleet.App, error) {
+			return &fleet.App{Out: out, Err: errout}, nil
+		},
+	}
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("new spawn app: %v", err)
+	}
+	if app.IsDesignLane == nil || !app.IsDesignLane("routing-policy") || !app.IsDesignLane("fleet-policy") {
+		t.Fatal("hub spawn app under the default policy must keep routing-policy and fleet-policy as design lanes")
+	}
+}
+
+// escalate-author picks its consult seat from the job's owner_lane through the
+// same classifier as spawn and resolve (mergewake finding on cli.go, hk 4241).
+// policyAwareFleetCommand is new on this head, so the test cannot build on the
+// previous head; removing "escalate-author" from it fails this test.
+func TestPolicyAwareFleetCommandsIncludeEscalateAuthor(t *testing.T) {
+	for _, c := range []string{"spawn", "work", "delegate", "resolve", "escalate-author"} {
+		if !policyAwareFleetCommand(c) {
+			t.Fatalf("%s must receive the loaded relay policy classifier", c)
+		}
+	}
+}

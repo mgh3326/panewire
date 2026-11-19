@@ -10,10 +10,15 @@ import (
 	"github.com/mgh3326/panewire/internal/grade"
 )
 
-// consultDesignLane is the built-in design-session list, used only when no
-// hub relay policy is loaded (designSessionLane): ["*-design", "routing-policy",
-// "fleet-policy"]. A loaded policy's relay.design_lanes decides instead. The
-// policy's consult.design_session floor is SS (hk:doc policy/model-families).
+// BuiltInDesignLane is the built-in design-session list for the consult floor:
+// ["*-design", "routing-policy", "fleet-policy"]. The root package uses it when
+// the loaded relay policy's design_lanes is absent or the default (hk 4241); a
+// different explicit list replaces it. The policy's consult.design_session
+// floor is SS (hk:doc policy/model-families).
+func BuiltInDesignLane(lane string) bool { return consultDesignLane(lane) }
+
+// consultDesignLane is the built-in design-session list (BuiltInDesignLane),
+// used when no hub relay policy is injected (designSessionLane).
 func consultDesignLane(lane string) bool {
 	if lane == "" || lane == "operator-desk" || strings.HasSuffix(lane, "-operator-desk") {
 		return false

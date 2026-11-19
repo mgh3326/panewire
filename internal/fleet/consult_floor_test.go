@@ -502,3 +502,18 @@ func TestConsultFloorCoolingUnratedDoesNotSuppressFallback(t *testing.T) {
 		t.Fatalf("cooling unrated codex-sol@high reason = %v, want pool_cooling", got)
 	}
 }
+
+// With the built-in classifier (what the default relay policy classifies to)
+// routing-policy and fleet-policy get the SS floor, as before hk 4241.
+func TestConsultBuiltInDesignLanesGetSS(t *testing.T) {
+	rows := []CatalogRow{consultFloorRung("opus", "high", "A+", "claude"), consultFloorRung("codex-sol", "high", "A+", "codex"), consultFloorRung("codex-astra", "high", "SS", "codex")}
+	for _, lane := range []string{"panewire-design", "routing-policy", "fleet-policy"} {
+		sel, err := consultFloorSpawnSelectClassed(t, BuiltInDesignLane, rows, consultFloorBothPools, "A", "anthropic", lane)
+		if err != nil {
+			t.Fatalf("%s select: %v", lane, err)
+		}
+		if c := consultFloorStamp(t, sel); c["floor"] != "SS" {
+			t.Fatalf("%s stamped %v, want SS floor", lane, c)
+		}
+	}
+}

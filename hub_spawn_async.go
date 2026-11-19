@@ -42,8 +42,8 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	}
 	// The consult floor classifies design lanes by the loaded relay policy
 	// (hk 4241). Without a loaded policy the app keeps the built-in list.
-	if app != nil && h.inbox != nil && h.inbox.policy != nil {
-		app.IsDesignLane = h.inbox.policy.designLane
+	if app != nil && h.inbox != nil {
+		app.IsDesignLane = consultDesignLanes(h.inbox.policy)
 	}
 	return app, err
 }

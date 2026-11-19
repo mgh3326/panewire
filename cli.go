@@ -25,8 +25,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) > 0 && fleetCommand(args[0]) {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		switch args[0] {
-		case "spawn", "work", "delegate", "resolve":
+		if policyAwareFleetCommand(args[0]) {
 			return fleet.MainWithDesignLane(ctx, args, os.Stdout, os.Stderr, fleetDesignLaneClassifier(os.Getenv("PANEWIRE_DELIVERY_POLICY")))
 		}
 		return fleet.Main(ctx, args, os.Stdout, os.Stderr)
@@ -179,6 +178,18 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	return ExitOK
 }
 
+// policyAwareFleetCommand reports whether a fleet command selects a consult seat
+// or a spawn parent lane, so it gets the loaded relay policy's design-lane
+// classifier (hk 4241): spawn, work, delegate and resolve by their --parent or
+// --lane, and escalate-author by the job's owner_lane through ConsultSeat.
+func policyAwareFleetCommand(command string) bool {
+	switch command {
+	case "spawn", "work", "delegate", "resolve", "escalate-author":
+		return true
+	}
+	return false
+}
+
 // fleetDesignLaneClassifier loads the delivery policy the hub reads, so a CLI
 // spawn or resolve classifies design lanes as the hub does (hk 4241). The path
 // follows the hub's own rule: env PANEWIRE_DELIVERY_POLICY, "" meaning the
@@ -196,7 +207,7 @@ func fleetDesignLaneClassifier(path string) func(string) bool {
 		slog.Warn("delivery policy unreadable; consult floor uses the built-in design lanes", "err", err)
 		return nil
 	}
-	return policy.designLane
+	return consultDesignLanes(policy)
 }
 
 func fleetCommand(command string) bool {
