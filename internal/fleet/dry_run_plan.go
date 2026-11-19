@@ -42,6 +42,24 @@ type SpawnPlanner interface {
 // would measure and the plan did not.
 const measureWould = "would"
 
+// measurePending and measureNotDue are the Measured values of an account a
+// request asked the hub to measure (pending) and of one whose measurement
+// cannot finish inside what is left of the request (not due), so a refusal
+// never claims a refresh that did not run or one that cannot arrive (hk 5456).
+const (
+	measurePending = "pending"
+	measureNotDue  = "not_due"
+)
+
+// firstHolder names the host a refused measurement would have run on, for the
+// record; empty when the account has no holder.
+func firstHolder(hosts []selHost) string {
+	if len(hosts) == 0 {
+		return ""
+	}
+	return hosts[0].name
+}
+
 // wouldMeasureLine says what a dry run did not do, so a receipt or refusal
 // never claims a measurement the plan skipped. host "" is this machine.
 func (a *App) wouldMeasureLine(host, pool string) {

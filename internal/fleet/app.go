@@ -21,6 +21,25 @@ import (
 // values.
 var BuildVersion, BuildCommit = "dev", "unknown"
 
+// QuotaRefreshAdmission is the hub scheduler's answer to one demand for a
+// shared quota measurement (hk 5456).
+type QuotaRefreshAdmission int
+
+const (
+	// QuotaRefreshRefused: no attempt will run for this demand — no budget
+	// left for the measurement, or the post-completion cooldown is still
+	// running. The caller must not wait: it re-reads the account and moves on.
+	QuotaRefreshRefused QuotaRefreshAdmission = iota
+	// QuotaRefreshAdmitted: an attempt (new, or a live compatible one) will
+	// run, and the caller waits on it.
+	QuotaRefreshAdmitted
+	// QuotaRefreshRetry: the demand is inside the cooldown of a failed
+	// attempt, which may be transient. The caller keeps its wait and stays
+	// pending; a later pass asks again and updates the wait when an attempt is
+	// admitted.
+	QuotaRefreshRetry
+)
+
 type App struct {
 	EnforceTrust bool
 	Runner       Runner
@@ -60,10 +79,21 @@ type App struct {
 	// this decision may read the host view, and its release is called once the
 	// decision has told PlacementTry its host (or ended). Nil does not gate.
 	PlacementGate func(context.Context) (release func(), err error)
-	// ScheduleQuotaRefresh is set by the hub coordinator. It queues a node
-	// measurement without waiting; ordinary CLI spawns keep their synchronous
-	// refresh path.
-	ScheduleQuotaRefresh func(machine, pool string, timeout time.Duration)
+	// ScheduleQuotaRefresh is set by the hub coordinator. It asks the hub's
+	// scheduler to measure one account, without waiting, and reports the
+	// attempt it admitted (the ID of a new attempt or of a live compatible one)
+	// or that the demand was refused — no budget for it, or inside the
+	// post-completion cooldown. A caller must not wait on a refused demand
+	// (hk 5456). Ordinary CLI spawns keep their synchronous refresh path.
+	ScheduleQuotaRefresh func(machine, pool, accountKey string, window time.Duration) (attempt string, admission QuotaRefreshAdmission)
+	// QuotaRefreshSettled is set by the hub coordinator: it reports that the
+	// attempt this request waited on for machine, pool and account finished,
+	// but the reading cannot come from it — it finished with no usable
+	// reading, or the host measured another account. The reason is the refusal
+	// text for the seat. A second wait cannot help, so selection drops the seat
+	// for this request (hk 5456). A transient failure, another account's
+	// completion, and a wait recorded before attempts had IDs never settle it.
+	QuotaRefreshSettled func(machine, pool, accountKey string) (reason string, settled bool)
 	// PlacementTrace is set by the hub coordinator. It receives the
 	// placement decision's candidate trace as each plan is ranked and again
 	// before each candidate's hub bind, so the hub can persist the latest

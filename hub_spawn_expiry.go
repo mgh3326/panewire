@@ -65,13 +65,23 @@ func spawnExpiresAt(task hubSpawnTask) string {
 }
 
 // spawnGivenUpOutcome is the record of a request that reached its limit with
-// no attempt left that could have started.
-func spawnGivenUpOutcome(task hubSpawnTask, host string) hubSpawnOutcome {
+// no attempt left that could have started. It names the candidates the last
+// attempt tried and why each was dropped, or says that none was found, so the
+// requester reads what the budget was spent on and not only that it ran out
+// (hk 5456).
+func spawnGivenUpOutcome(task hubSpawnTask, host string, tried []hubSpawnTried) hubSpawnOutcome {
+	reason := fmt.Sprintf("expires_at %s passed after %d attempt(s)", spawnExpiresAt(task), task.Attempt)
+	if list := spawnTriedText(tried); list != "" {
+		reason += "; no candidate could take it (tried: " + list + ")"
+	} else {
+		reason += "; it never found a candidate that could take it"
+	}
 	return hubSpawnOutcome{
 		RC: 84, Stage: "queue", Host: host,
-		Reason: spawnOutcomeReason("expired", fmt.Sprintf("expires_at %s passed after %d attempt(s)", spawnExpiresAt(task), task.Attempt)),
+		Reason: spawnOutcomeReason("expired", reason),
 		Fix:    "Nothing was started. Submit the spawn again to queue a new request; --expires raises the limit (at most 24h).",
 		E6Arm:  task.Request.E6Arm,
+		Tried:  tried,
 	}
 }
 
@@ -109,7 +119,7 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 		if err != nil {
 			return false, err
 		}
-		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',result=?,deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,claimed_host=?,refresh_waits='[]',failed_attempts=failed_attempts+?,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN ?<>'' THEN `+s.dialect.castInt("?")+` ELSE 0 END,park_priority=CASE WHEN ?<>'' THEN -1 ELSE park_priority END,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), string(rawOutcome), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), pin, failed, parkReason, retryAt, parkReason, now.UnixMilli(), parkReason, task.Request.RequestID, task.Attempt)
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',result=?,deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,claimed_host=?,refresh_waits='[]',tried='[]',failed_attempts=failed_attempts+?,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN ?<>'' THEN `+s.dialect.castInt("?")+` ELSE 0 END,park_priority=CASE WHEN ?<>'' THEN -1 ELSE park_priority END,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), string(rawOutcome), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), pin, failed, parkReason, retryAt, parkReason, now.UnixMilli(), parkReason, task.Request.RequestID, task.Attempt)
 		if err != nil {
 			return false, err
 		}
@@ -121,7 +131,7 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 		}
 		return true, tx.Commit()
 	}
-	given := spawnGivenUpOutcome(task, outcome.Host)
+	given := spawnGivenUpOutcome(task, outcome.Host, outcome.Tried)
 	raw, err := json.Marshal(given)
 	if err != nil {
 		return false, err
