@@ -135,6 +135,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 				manager.quota.show = manager.quota.reportQuotaWait
 			}
 			manager.quota.enqueue = manager.enqueue
+			manager.quota.hold = func(pool string, until time.Time) { d.cfg.Hub.Client.PublishPoolHold(pool, until) }
 			d.idleWake = manager
 			if err := d.initStallSafety(); err != nil {
 				return err

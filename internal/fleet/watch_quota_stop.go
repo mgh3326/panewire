@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -482,18 +483,56 @@ const quotaRecordLockWait = 10 * time.Second
 // check, when not nil, decides under the events lock whether the record is
 // still wanted (eventIf).
 func (a *App) quotaStopEvent(ctx context.Context, j Job, stop quotastop.Stop, final bool, check func(ledgerView) error) error {
-	if stop.Pool == "devin-free" {
-		if e := RecordFreeLimit(devin.Config{Home: a.Home, Now: a.Now}, j.ID, stop); e != nil {
-			a.warn("free-limit observation failed: %v", e)
-		} else {
-			a.publishFreeLimit(ctx, j.ID)
-		}
-	}
+	a.keepLimitedRungOut(ctx, j.ID, stop)
 	payload := quotaStopPayload(j, stop)
 	if final {
 		payload["final"] = true
 	}
 	return a.eventIf(ctx, j.ID, "job.lost", payload, check)
+}
+
+// keepLimitedRungOut keeps the rung a provider-limit stop spent out of new
+// placements until the stop's reset (hk 5562). Today that is the Devin free
+// band, from the stop itself: the limit is recorded on this host and published
+// at once into the account's shared reading, so every host's selection drops
+// the free rungs as free_limit. A stop of another pool is cooled by the hub
+// when it reads the stop's job.lost (hub_pool_cooling.go).
+func (a *App) keepLimitedRungOut(ctx context.Context, job string, stop quotastop.Stop) {
+	if stop.Pool != "devin-free" {
+		return
+	}
+	if e := RecordFreeLimit(devin.Config{Home: a.Home, Now: a.Now}, job, stop); e != nil {
+		a.warn("free-limit observation failed: %v", e)
+		return
+	}
+	if e := a.publishFreeLimit(ctx, job); e != nil {
+		a.warn("%v", e)
+	}
+}
+
+// The quota-stop manager sees a stop when the pane goes idle on it, whatever it
+// then decides (wait, resume or hand over). Before hk 5562 it recorded the
+// limit but left it for the next devin measurement to publish, and a host with a
+// fresh reading never measures: the account kept admitting free rungs that
+// stopped on the same limit. It records before its observation returns (the
+// wake is reserved and never read again, so the record must not depend on a
+// later step) and publishes beside it, retrying a refresh that failed.
+
+// RecordLimitObserved writes the host's record of a provider-limit stop; only a
+// Devin free limit has one. It is a local file write and returns its error.
+func RecordLimitObserved(job string, stop quotastop.Stop, now func() time.Time) error {
+	home, _ := os.UserHomeDir()
+	return RecordFreeLimit(devin.Config{Home: home, Now: now}, job, stop)
+}
+
+// PublishLimitObserved publishes the recorded limit into the account's shared
+// reading, so every host's selection drops the rung until the reset. It returns
+// the refresh's failure (a lease held elsewhere, a store error) for the caller to
+// retry.
+func PublishLimitObserved(ctx context.Context, job string, now func() time.Time) error {
+	home, _ := os.UserHomeDir()
+	a := &App{Home: home, Now: now, Runner: ExecRunner{}, Err: io.Discard}
+	return a.publishFreeLimit(ctx, job)
 }
 
 // freeLimitPublishTimeout bounds publishing a recorded free limit into the
@@ -509,13 +548,14 @@ const freeLimitPublishTimeout = 15 * time.Second
 // record never publishes it, so the account keeps admitting free rungs that
 // stop on the same limit as soon as they start. A failure only logs: the
 // record is durable, and the next measurement publishes it.
-func (a *App) publishFreeLimit(ctx context.Context, job string) {
+func (a *App) publishFreeLimit(ctx context.Context, job string) error {
 	if !a.nativeQuotaPool("devin") {
-		return
+		return nil
 	}
 	if e := checkQuotaPlain(runQuotaCommand(ctx, a.Runner, refreshCommand("devin", "", true), "quota refresh", freeLimitPublishTimeout), "quota refresh"); e != nil {
-		a.warn("free-limit publish for job %s: %v", job, e)
+		return fmt.Errorf("free-limit publish for job %s: %w", job, e)
 	}
+	return nil
 }
 
 // RecordFreeLimit writes a devin free-tier limit a quota-stopped pane reported
