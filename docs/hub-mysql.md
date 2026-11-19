@@ -62,7 +62,8 @@ The hub sets these itself:
 | `collation=utf8mb4_bin` | the collation of the database; a comparison is byte for byte. |
 | `transaction_isolation='READ-COMMITTED'` | the level for a statement outside a transaction. |
 | every transaction: `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` | InnoDB's default is REPEATABLE READ with next-key locks; the hub's statements assume READ COMMITTED. `begin` states it on every transaction, so a server or account default cannot change it. |
-| at most 16 open connections | the account is capped at 24; the pool stays under it, leaving room for the migration's pinned connection and for a restart that briefly overlaps. |
+| at most 12 open connections | the account is capped at 24 and a restart or the cutover runs two hub processes on it for a moment: two pools of 12 fit exactly, so neither meets error 1040. The migration's pinned connection comes out of the pool. |
+| `sql_mode` of the hub's own: `ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION` | an oversized or NULL value is an error, never a truncation, whatever the shared instance's mode is. `NO_BACKSLASH_ESCAPES` stays out: the LIKE escape reads a backslash as one. |
 | the server's `innodb_flush_log_at_trx_commit` must be 1 | a producer's ACK follows the commit, so the log must be flushed at every commit. MySQL has no per-session form of this (Postgres' `synchronous_commit` is one), so the hub reads the server's setting at start and refuses to open on any other value. |
 
 ## The dialect
@@ -83,7 +84,7 @@ The hub sets these itself:
 | `lockMigration` | `GET_LOCK` on the one pinned connection the migration runs on, released with `RELEASE_LOCK`; the name holds the database name's MD5, because lock names are server-wide and the instance is shared. A hub that does not get the lock in 60 s fails its start. If the release fails, the connection is discarded, which frees the lock. |
 | `lockLaneCause` | a row lock: `INSERT ... ON DUPLICATE KEY UPDATE` of the SHA-256 of the (lane, cause) pair into `supersede_lane_cause` holds the row exclusively until the transaction ends. `GET_LOCK` is session-scoped and would outlive the transaction. |
 | `rowsMatched` | `RowsAffected`, with `clientFoundRows`. |
-| `storedKey` | the raw bytes of the key, bound as bytes into a `VARBINARY` column: no hex encoding. |
+| `storedKey` | the raw bytes of the key, bound as bytes into a `VARBINARY(2048)` column: no hex encoding. A key longer than the column (a producer part such as a report path has no bound of its own) is stored as `0xFF "sha256:" + SHA-256`, so it deduplicates like any other key; `event_key` is only matched, never read back. |
 | `batchOrder`, `laneInboxInsert`, `ownsSchema`, `beforeInboxPrune` | `seq` (an `AUTO_INCREMENT` column), the Postgres `lane_inbox` insert, false, nothing (InnoDB hands out an id above the largest it ever gave). |
 
 ### An insert whose count is read
@@ -128,7 +129,7 @@ their partial indexes are not translated one for one:
   number, never an edit to an applied one.
 - **Types.** Text keys are `VARCHAR(n)` (utf8mb4: an index key is at most 3072
   bytes, so at most 768 characters), long text is `MEDIUMTEXT`, `event_key` is
-  `VARBINARY(2048)` (raw bytes), ids are `AUTO_INCREMENT`, millisecond
+  `VARBINARY(2048)` (raw bytes, or the hash of a longer key), ids are `AUTO_INCREMENT`, millisecond
   timestamps stay `BIGINT`, the ledger's time is `DATETIME(3)`. A `TEXT` column
   with a default carries it as an expression, `DEFAULT ('')`.
 - **Indexes.** MySQL has no partial indexes. The hot sets are small tables

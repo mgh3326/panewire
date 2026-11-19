@@ -231,7 +231,7 @@ jobs:
     # 8.4 service container, so the three dialects are held to one suite. Like
     # Postgres it needs a Linux runner's service container, and hosts never run
     # a database for tests. The root account has no password (the service is
-    # reachable from the job only, on 53306) and the URL is loopback, so it
+    # bound to the runner's loopback, 127.0.0.1:53306) and the URL is loopback, so it
     # carries no CA; a hub's URL always does (hubMySQLConfig).
     # Post-merge and dispatch runs, and a pull request whose store-paths job
     # found an inbox-store change.
@@ -244,7 +244,7 @@ jobs:
         env:
           MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
           MYSQL_DATABASE: panewire
-        ports: ["53306:3306"]
+        ports: ["127.0.0.1:53306:3306"]
         options: >-
           --health-cmd "mysqladmin ping -h 127.0.0.1" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:

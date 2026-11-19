@@ -131,6 +131,13 @@ func TestCITiers(t *testing.T) {
 	if !strings.Contains(pgRuns, "migration and startup") {
 		t.Error("main stage must run the migration and startup check")
 	}
+	// The database service is reachable from the job only: its root account
+	// has no password.
+	if raw, err := os.ReadFile(".github/workflows/ci.yml"); err != nil {
+		t.Fatal(err)
+	} else if !strings.Contains(string(raw), `ports: ["127.0.0.1:53306:3306"]`) || strings.Contains(string(raw), `ports: ["53306:3306"]`) {
+		t.Error("the MySQL service must publish its port on 127.0.0.1 only")
+	}
 	var myRuns string
 	for _, step := range w.Jobs["mysql"].Steps {
 		myRuns += step.Name + "\n" + step.Run + "\n"

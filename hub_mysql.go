@@ -3,6 +3,7 @@ package panewire
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
@@ -31,10 +32,11 @@ import (
 // CA, the connection pool, and the migration runner for hub_mysql_migrations.
 
 // hubMySQLMaxConns is the pool ceiling. The hub's account on the shared
-// instance is capped at 24 connections (MAX_USER_CONNECTIONS, hk 4898 a299);
-// the pool stays under it so a restart that briefly holds the old and the new
-// process, or a migration's pinned connection, never meets the cap.
-const hubMySQLMaxConns = 16
+// instance is capped at 24 connections (MAX_USER_CONNECTIONS, hk 4898 a299),
+// and a restart or the cutover briefly runs the old and the new hub process on
+// that one account: two pools of 12 fit the cap exactly, so neither process
+// meets error 1040. The migration's pinned connection comes out of the pool.
+const hubMySQLMaxConns = 12
 
 // hubMySQLMigrationLockWait is how long a hub waits for another hub's
 // migration to finish before it gives up and fails its start.
@@ -187,8 +189,26 @@ func (mysqlDialect) lockLaneCause(ctx context.Context, tx *sql.Tx, lane, cause s
 // UPDATE that matches a row and changes nothing still reports it.
 func (mysqlDialect) rowsMatched(result sql.Result) (int64, error) { return result.RowsAffected() }
 
-// storedKey binds the raw bytes: event_key is a VARBINARY column.
-func (mysqlDialect) storedKey(key string) any { return []byte(key) }
+// mysqlEventKeyMax is the size of the event_key column.
+const mysqlEventKeyMax = 2048
+
+// mysqlHashedKeyPrefix starts the stored form of a key that does not fit the
+// column. 0xFF never starts a hub key (a key begins with a kind name), and a
+// key that does start with it is hashed too, so no raw key equals a hashed one.
+const mysqlHashedKeyPrefix = "\xffsha256:"
+
+// storedKey binds the raw bytes: event_key is a VARBINARY column. A key longer
+// than the column (a producer part such as a report path has no bound of its
+// own) is stored as its SHA-256 instead, so it is deduplicated exactly as a
+// short key is and never truncated or refused. event_key is only ever matched,
+// never read back, so the form is free.
+func (mysqlDialect) storedKey(key string) any {
+	if len(key) > mysqlEventKeyMax || strings.HasPrefix(key, mysqlHashedKeyPrefix) {
+		sum := sha256.Sum256([]byte(key))
+		return append([]byte(mysqlHashedKeyPrefix), sum[:]...)
+	}
+	return []byte(key)
+}
 
 func (mysqlDialect) ownsSchema() bool { return false }
 
@@ -257,6 +277,11 @@ func hubMySQLConfig(raw string) (*mysql.Config, error) {
 		// transactions state explicitly (mysqlDialect.begin).
 		"transaction_isolation": "'READ-COMMITTED'",
 		"time_zone":             "'+00:00'",
+		// An explicit strict mode, the server default minus nothing: an
+		// oversized or NULL value is an error, never a truncation, whatever the
+		// shared instance's own mode is. NO_BACKSLASH_ESCAPES stays out: the
+		// LIKE escape (mysqlDialect.escapeClause) reads a backslash as one.
+		"sql_mode": "'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'",
 	}
 	if caFile := query.Get("tls-ca"); caFile != "" {
 		if cfg.TLS, err = hubMySQLPinnedCA(caFile); err != nil {

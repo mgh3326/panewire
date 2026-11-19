@@ -229,9 +229,14 @@ func TestHubMySQLConfig(t *testing.T) {
 	if cfg.TLS != nil {
 		t.Error("a loopback URL without tls-ca got a TLS config")
 	}
-	// The pool stays under the account's 24 connections (hk 4898 a299).
-	if hubMySQLMaxConns < 1 || hubMySQLMaxConns > 24 {
-		t.Errorf("hubMySQLMaxConns = %d, want 1..24", hubMySQLMaxConns)
+	// The account is capped at 24 connections (hk 4898 a299) and a restart
+	// runs two hub processes on it: two pools must fit.
+	if hubMySQLMaxConns < 1 || 2*hubMySQLMaxConns > 24 {
+		t.Errorf("hubMySQLMaxConns = %d: two overlapping hubs need 2x at most 24", hubMySQLMaxConns)
+	}
+	// A strict mode of the hub's own, without NO_BACKSLASH_ESCAPES.
+	if mode := cfg.Params["sql_mode"]; !strings.Contains(mode, "STRICT_TRANS_TABLES") || strings.Contains(mode, "NO_BACKSLASH_ESCAPES") {
+		t.Errorf("sql_mode = %s", mode)
 	}
 	if c, err := hubMySQLConfig("mysql://app@localhost/db"); err != nil || c.Addr != "localhost:3306" {
 		t.Errorf("default port: %v %v", c, err)
@@ -459,5 +464,32 @@ func TestOpenLaneInboxStoreURLChoosesByScheme(t *testing.T) {
 	}
 	if _, err := openLaneInboxStoreURL(context.Background(), "mysql-ish://u@127.0.0.1:1/db"); !errors.Is(err, errHubDatabaseURL) {
 		t.Errorf("another scheme: err = %v, want the Postgres parser's refusal", err)
+	}
+}
+
+// A key longer than event_key is stored as its hash: deduplicated like any
+// other, never refused or truncated. Two long keys that share their first
+// 2048 bytes stay two keys, and no raw key can equal a hashed one.
+func TestMySQLStoredKeyHashesAKeyThatDoesNotFit(t *testing.T) {
+	stored := func(key string) []byte { return dialectMySQL.storedKey(key).([]byte) }
+	if got := stored("lane.event\x00lane\x00ev-1"); string(got) != "lane.event\x00lane\x00ev-1" {
+		t.Errorf("a short key changed: %q", got)
+	}
+	exact := strings.Repeat("a", mysqlEventKeyMax)
+	if got := stored(exact); string(got) != exact {
+		t.Error("a key of exactly the column's size changed")
+	}
+	longA := strings.Repeat("p", 3000) + "A"
+	longB := strings.Repeat("p", 3000) + "B"
+	a, b := stored(longA), stored(longB)
+	if len(a) > mysqlEventKeyMax || len(b) > mysqlEventKeyMax {
+		t.Errorf("hashed keys are %d and %d bytes, want at most %d", len(a), len(b), mysqlEventKeyMax)
+	}
+	if string(a) == string(b) || string(a) != string(stored(longA)) {
+		t.Error("hashed keys must be distinct for distinct keys and stable for one")
+	}
+	prefixed := mysqlHashedKeyPrefix + "x"
+	if got := stored(prefixed); string(got) == prefixed {
+		t.Error("a raw key that starts like a hashed one was stored raw")
 	}
 }

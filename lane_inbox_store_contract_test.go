@@ -1085,3 +1085,27 @@ func TestLaneInboxStoreContractInsertOnceReportsADuplicate(t *testing.T) {
 		}
 	})
 }
+
+// A key far longer than any column bound is stored, deduplicated and kept
+// apart from a key that shares its first bytes, on every backend (a producer
+// part such as a report path has no length bound of its own).
+func TestLaneInboxStoreContractVeryLongEventKeys(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		now := time.UnixMilli(1_700_000_000_000).UTC()
+		longA := strings.Repeat("p", 5000) + "A"
+		longB := strings.Repeat("p", 5000) + "B"
+		first, err := s.put(longA, "lane-a", "lane.event", "inbox", quietEvent("ev-a", "FYI"), now, 0, 0)
+		if err != nil || !first.Fresh {
+			t.Fatalf("first long key = %+v, %v", first, err)
+		}
+		again, err := s.put(longA, "lane-a", "lane.event", "inbox", quietEvent("ev-a", "changed"), now, 0, 0)
+		if err != nil || again.Fresh || again.ID != first.ID {
+			t.Fatalf("the same long key again = %+v, %v", again, err)
+		}
+		other, err := s.put(longB, "lane-a", "lane.event", "inbox", quietEvent("ev-b", "FYI"), now, 0, 0)
+		if err != nil || !other.Fresh || other.ID == first.ID {
+			t.Fatalf("a long key sharing a prefix = %+v, %v", other, err)
+		}
+	})
+}

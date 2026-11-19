@@ -380,3 +380,21 @@ func TestLaneInboxStoreMySQLRefusesARelaxedServer(t *testing.T) {
 	}
 	db.Close()
 }
+
+// The session's SQL mode is the hub's own: strict, so an oversized value is an
+// error and never a truncation, and without NO_BACKSLASH_ESCAPES.
+func TestLaneInboxStoreMySQLSessionIsStrict(t *testing.T) {
+	config, _ := hubMySQLTestDatabase(t)
+	s, err := openLaneInboxStoreMySQLConfig(context.Background(), config.Clone())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	var mode string
+	if err := s.db.QueryRow(`SELECT @@SESSION.sql_mode`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mode, "STRICT_TRANS_TABLES") || strings.Contains(mode, "NO_BACKSLASH_ESCAPES") {
+		t.Errorf("sql_mode = %s", mode)
+	}
+}
