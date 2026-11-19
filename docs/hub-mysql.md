@@ -176,6 +176,12 @@ phase 3 (hk 4898); Postgres support is removed after the cutover's rollback
 window. Setting a `mysql://` URL on a live hub before then is the operator's
 cutover step, not a configuration option.
 
+The phase 2b rehearsal (hk 4898) copied a dump of the live hub store (about
+73,000 rows) between scratch databases on the hub host and the shared HeatWave
+instance. Postgres to MySQL took 64 s and its verification 12 s; the
+MySQL to Postgres copy-back took 29 s and its verification 12 s, with every
+table equal in both directions. Plan a freeze of 2 to 3 minutes at that size.
+
 When a store has been copied back from MySQL to Postgres, run the cutover
 release or newer. Do not roll the hub binary back below the copier release
 while that copied-back store is in use: oversized event keys may be stored as
@@ -216,5 +222,8 @@ for non-secret local URLs.
 
 The copier uses a single read-only snapshot and one connection per database.
 Stop all writers, including other hub processes, before using `--replace` or
-verifying. A failed copy must be investigated before changing the URL; if a
-failure happens after the target transaction commits, rerun with `--replace`.
+verifying. A failed copy must be investigated before changing the URL. The
+copier migrates the target and commits that before it checks the source, and the
+migration seeds `supersede_fence`, so the target is no longer empty after any
+failure past that point (a source on an older schema included): rerun with
+`--replace`.
