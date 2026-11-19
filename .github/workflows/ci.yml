@@ -135,8 +135,31 @@ jobs:
           fi
       - run: go vet ./...
       - run: go build ./...
-      - run: go test ./... -timeout 25m  # the root package outgrew the 10 m default (hk 5408); sharding is the follow-up
+      # The root package runs in post-shard below (hk 5492); this runs the rest of ./...
+      - name: go test, packages other than the root
+        run: go list ./... | grep -v -x "$(go list -m)" | xargs go test
       - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
+
+  post-shard:
+    # The main stage's root-package tests, split across runners by the same
+    # scripts/ci-test-shard.sh as the pull request shard job (hk 5492). Each
+    # shard runs under the default go test timeout. The shards together run
+    # every test in `go test -list .` (ci_workflow_shard_test.go checks it).
+    # Runner and gate follow post-test: a reviewed main push may use the
+    # PANEWIRE_POST_LINUX_RUNNER variable; every other run uses ubuntu-latest.
+    name: post-shard (${{ matrix.shard }})
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['0/3', '1/3', '2/3']
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: ./.github/actions/setup-go-cached
+      - run: scripts/ci-test-shard.sh ${{ matrix.shard }}
 
   store-paths:
     # Pull request only: does this change touch the hub inbox store? The
@@ -308,7 +331,7 @@ jobs:
     # dispatches, a partial suite must not mint an exact 'ci-ok' check run.
     name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
     runs-on: ubuntu-latest
-    needs: [test, post-test, postgres, mysql, auto-tag-test]
+    needs: [test, post-test, post-shard, postgres, mysql, auto-tag-test]
     # A needed job that was only cancelled (a hosted runner not acquired) is
     # not a red verdict: ci-ok is then skipped, which mergewake reads as
     # unknown and holds on, instead of failing and reading as Red. Any
@@ -323,6 +346,7 @@ jobs:
           AUTO_TAG_RESULT: ${{ needs.auto-tag-test.result }}
           TEST_RESULT: ${{ needs.test.result }}
           POST_TEST_RESULT: ${{ needs.post-test.result }}
+          POST_SHARD_RESULT: ${{ needs.post-shard.result }}
           EVENT: ${{ github.event_name }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           MYSQL_RESULT: ${{ needs.mysql.result }}
@@ -350,6 +374,7 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             require yes test "$TEST_RESULT"
             require no post-test "$POST_TEST_RESULT"
+            require no post-shard "$POST_SHARD_RESULT"
             # A PR runs postgres and mysql only for an inbox-store change.
             case "$POSTGRES_RESULT" in success|skipped) ;; *) echo "postgres job did not succeed: $POSTGRES_RESULT"; exit 1 ;; esac
             case "$MYSQL_RESULT" in success|skipped) ;; *) echo "mysql job did not succeed: $MYSQL_RESULT"; exit 1 ;; esac
@@ -358,6 +383,7 @@ jobs:
           else
             require no test "$TEST_RESULT"
             require "$test" post-test "$POST_TEST_RESULT"
+            require "$test" post-shard "$POST_SHARD_RESULT"
           fi
           [ "$postgres" = checked ] || require "$postgres" postgres "$POSTGRES_RESULT"
           [ "$mysql" = checked ] || require "$mysql" mysql "$MYSQL_RESULT"
