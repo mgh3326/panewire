@@ -137,9 +137,14 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), laneInboxOpTimeout)
 	defer cancel()
 	for _, q := range []string{
+		// busy_timeout must come before the first DDL statement: a reopen
+		// while the previous store's last connection still holds the file
+		// lock (its rollback and WAL checkpoint run after Close returns) has
+		// to wait, not fail at once with SQLITE_BUSY (hk 5449).
+		`PRAGMA busy_timeout=5000`,
 		inboxSurfaceSchema,
 		`CREATE INDEX IF NOT EXISTS lane_inbox_surfaces_lane ON lane_inbox_surfaces(lane,delivered_at)`,
-		`PRAGMA busy_timeout=5000`, `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=FULL`,
+		`PRAGMA journal_mode=WAL`, `PRAGMA synchronous=FULL`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox (
    id INTEGER PRIMARY KEY, event_key TEXT NOT NULL UNIQUE, lane TEXT NOT NULL,
    kind TEXT NOT NULL, class TEXT NOT NULL CHECK(class IN ('inbox','interrupt')),
