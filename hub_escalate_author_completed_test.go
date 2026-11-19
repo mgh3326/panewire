@@ -280,3 +280,95 @@ func TestExpiredStagedLadderStageOfACompletedAuthorFollowsTheCloseMarker(t *test
 		})
 	}
 }
+
+// The close marker is written after the screen is saved and before the close
+// is requested, so a stop during the capture leaves none (mergewake review of
+// #750: the first marker preceded pane.capture).
+func TestEscalateAuthorWritesTheCloseMarkerBetweenCaptureAndClose(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-70")
+	f.completeAuthorRecord(t)
+	placed := placedAnywhere
+	result, _ := f.escalate(t, &placed)
+	if result.Job != "pw-task-70-l1" {
+		t.Fatalf("result=%+v", result)
+	}
+	if f.markerAtCapture || !f.markerAtClose {
+		t.Fatalf("marker at capture=%v at close=%v, want false then true", f.markerAtCapture, f.markerAtClose)
+	}
+}
+
+// Recovery activation (the expiry reconciler) rereads the task first: a task
+// another job took over supersedes the stage, which is released and never
+// dispatched; a closed task releases it too; an unreadable task keeps it
+// (mergewake review of #750).
+func TestExpiredStagedLadderStageOfACompletedAuthorRechecksTheTaskBeforeActivating(t *testing.T) {
+	cases := []struct {
+		name       string
+		set        func(f *escalateFixture)
+		wantStaged bool
+		wantInfo   string
+	}{
+		{name: "task rebound to another job", set: func(f *escalateFixture) { f.taskBound = "pw-task-71-q1" }, wantInfo: "job_mismatch"},
+		{name: "task closed", set: func(f *escalateFixture) { f.taskState = "merged" }, wantInfo: "task_closed"},
+		{name: "task unreadable", set: func(f *escalateFixture) { f.taskFailAfter = 1; f.taskReads = 1 }, wantStaged: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEscalateFixture(t, "pw-task-71")
+			f.completeAuthorRecord(t)
+			f.stageCompletedSuccessor(t, true)
+			f.paneAbsent = true
+			tc.set(f)
+			f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+			f.hub.expireStagedLadderSteps(t.Context())
+			successor, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+			if tc.wantStaged != (err == nil) || err == nil && successor.Status != "staged" {
+				t.Fatalf("successor=%+v err=%v: a superseded stage is released, never activated", successor, err)
+			}
+			if tc.wantInfo != "" {
+				f.awaitInfo(t, tc.wantInfo)
+			}
+		})
+	}
+}
+
+// The explicit replay of a marked stage whose task moved on releases the stage
+// along with the job_mismatch refusal.
+func TestEscalateAuthorReplayReleasesAStageTheTaskMovedPast(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-72")
+	f.completeAuthorRecord(t)
+	f.stageCompletedSuccessor(t, true)
+	f.paneAbsent = true
+	f.taskBound = "pw-task-72-q1"
+	result, _ := f.escalate(t, nil)
+	if result.Code != "job_mismatch" {
+		t.Fatalf("result=%+v", result)
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("the superseded stage must be released")
+	}
+	if _, job, _, err := f.hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer"); err == nil {
+		t.Fatalf("the released stage left the role held by %q", job)
+	}
+}
+
+// A task read that fails right before the close is a retry: the stage is
+// released and the owner is not told of a refusal that never happened.
+func TestEscalateAuthorUnreadableTaskBeforeCloseFilesNoRefusal(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-73")
+	f.completeAuthorRecord(t)
+	f.taskFailAfter = 1
+	result, commands := f.escalate(t, nil)
+	if result.Code != "pending" || slices.Contains(commandOps(commands), "pane.close") {
+		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("the stage must be released")
+	}
+	// A window that proves nothing more happens: a refusal event would be
+	// relayed within it.
+	time.Sleep(300 * time.Millisecond)
+	if texts := f.infoTexts(); len(texts) != 0 {
+		t.Fatalf("a retryable read must file no event: %v", texts)
+	}
+}

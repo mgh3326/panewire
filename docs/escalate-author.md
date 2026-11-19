@@ -66,9 +66,21 @@ event). So the step looks at the pane, not at the record's state:
 - `completed` record, pane gone: `job_not_live` ("the job completed and its
   pane is gone"), an info event, `author_ended` false: the author ended on its
   own and the step never touched it.
-- A replay that finds a staged successor of a completed author with the pane
-  gone cannot tell this step's close from an independent one, so it answers
-  `parent_ended` (rc 1) and releases the stage.
+- hk keeps a completed record terminal, so it cannot show who closed the pane.
+  The staged successor row carries a close marker, written after the screen is
+  saved and just before the close is requested. A retry, a restart or the
+  expiry reconciler that finds the pane gone treats a marked stage as this
+  step's own close and finishes it, an unmarked one as an independent end
+  (`parent_ended`, rc 1), and a marked stage whose pane list is unreadable
+  stays staged with one decision event for the owner. The marker is not a node
+  close result: a stop between the marker and the close request, followed by an
+  independent pane exit, looks like a lost close reply. Recovery therefore
+  activates only while hk's task still names the author and is open; a task
+  another job took over, or a closed one, releases the stage without
+  dispatching it, and an unreadable task keeps it.
+- Both the first call and every recovery read hk's live task binding
+  (`refs.job_id`): a task that no longer names the author is `job_mismatch` and
+  a closed one `task_closed`, with the pane left open.
 
 The CLI no longer judges the job's state or task binding. It reads the record
 only for the rung to step from; `job_not_live` (lost, escalated), `job_mismatch`
@@ -146,6 +158,7 @@ lane, so a refusal is countable without the hub database:
 | before the pane closed (`job_not_live`, `job_mismatch`, `pane_busy`, `pane_not_closed`, `worktree_*`, `staged_expired`, `no_rung`, `quota_refused`, ...) | `ladder-step:<job>:<round>:preflight:<code>` | info | 2 |
 | after the pane closed (the PR is authorless) | `ladder-step:<job>:<round>:ended:<code>:esc` | decision | 1 |
 | step done | `ladder-step:<successor>` | info | 0 |
+| successor placed, task binding unconfirmed | `ladder-step:<job>:<round>:placed:rebind_unconfirmed` | info | 1 |
 
 `pane_not_closed` names why the close was refused after the colon
 (`question_open`, `pane_changed`, `close_unreadable`, `capture_failed`): a pane
@@ -172,6 +185,16 @@ The first line prints the rep window's source: when it ends in `-truncated`
 the newest 5000 rows are all the read sees, and a count is a lower bound. The
 second counts ladder steps per repository and PR, one rep per step.
 
-A refused call leaves no rep; its record is the refusal event above, and on
-the mergewake side its `ladder-intact`, `ladder-escalated` and
+A step that placed its successor writes its rep when the successor lands, so
+the `placed:rebind_unconfirmed` outcome (rc 1) has a rep too: the successor
+runs and only the task binding is unconfirmed. A refusal that never placed a
+successor leaves no rep; its record is the refusal event above, and on the
+mergewake side its `ladder-intact`, `ladder-escalated` and
 `ladder-ended-no-successor` audit rows.
+
+Reps written before the repository was recorded carry `pr` without `repo`. The
+query prints them as `?#N`: those lines are unattributed, they are not
+per-repository counts and a `?#77` line says nothing about which PR 77 it is.
+Report them separately (they predate the first step-up that could place a
+successor, so on a store where no step ever placed one there are none). No
+backfill from job metadata is done.
