@@ -862,11 +862,30 @@ func TestNodeRegenerableGlobRules(t *testing.T) {
 			t.Fatalf("%q must be valid", g)
 		}
 	}
-	if nodeRegenerable([]string{"logs/"}, "a/b/logs") {
-		t.Fatal(`"logs/" is a whole-path glob and must not match a/b/logs`)
+	// "name/" is gitignore-style: its only slash is trailing, so it matches
+	// a wholly ignored directory of that name at any depth.
+	if !nodeRegenerable([]string{"logs/"}, "logs/") || !nodeRegenerable([]string{"logs/"}, "a/b/logs/") {
+		t.Fatal(`"logs/" must approve a wholly ignored logs directory at any depth`)
 	}
-	if !nodeRegenerable([]string{"logs/"}, "logs") || !nodeRegenerable([]string{"*.log"}, "a/b/c.log") {
+	if nodeRegenerable([]string{"logs/"}, "a/b/logs/x/") {
+		t.Fatal(`"logs/" must not approve a directory below a logs directory`)
+	}
+	// A directory pattern never approves a regular file, even one named like it.
+	if nodeRegenerable([]string{"logs/"}, "logs") || nodeRegenerable([]string{"logs/"}, "a/logs") {
+		t.Fatal(`"logs/" approved an ignored regular file named logs`)
+	}
+	if !nodeRegenerable([]string{"*.log"}, "a/b/c.log") {
 		t.Fatal("expected matches failed")
+	}
+	// A leading or middle slash still anchors the glob as a whole path.
+	if nodeRegenerable([]string{"/logs/"}, "a/logs/") || nodeRegenerable([]string{"/logs"}, "a/logs") {
+		t.Fatal("a leading slash must anchor the pattern")
+	}
+	if nodeRegenerable([]string{"a/logs/"}, "x/a/logs/") || !nodeRegenerable([]string{"a/logs/"}, "a/logs/") {
+		t.Fatal("a middle slash must anchor the pattern")
+	}
+	if nodeRegenerable([]string{"a/__pycache__/x"}, "b/a/__pycache__/x") || !nodeRegenerable([]string{"a/__pycache__/x"}, "a/__pycache__/x") {
+		t.Fatal("an inner-slash pattern must match the whole path")
 	}
 	// A wholly ignored directory ("dir/") needs a directory pattern.
 	if nodeRegenerable([]string{"*.log"}, "cache.log/") {
@@ -874,6 +893,57 @@ func TestNodeRegenerableGlobRules(t *testing.T) {
 	}
 	if !nodeRegenerable([]string{"node_modules/"}, "node_modules/") {
 		t.Fatal("a directory glob must approve its directory entry")
+	}
+}
+
+// A "name/" pattern approves a wholly ignored directory at any depth, but a
+// directory that also holds a non-ignored file is reported file by file and
+// is not approved.
+func TestNodeWorktreeRegenerableDirectoryPattern(t *testing.T) {
+	dir := t.TempDir()
+	nodeGit(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("__pycache__/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pyc := filepath.Join(dir, "a", "b", "__pycache__")
+	if err := os.MkdirAll(pyc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A non-ignored sibling keeps "a/b/" out of the wholly ignored set, so
+	// git reports the cache directory itself rather than its outermost parent.
+	if err := os.WriteFile(filepath.Join(dir, "a", "b", "README"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pyc, "x.pyc"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{}
+	ignored, err := nodeWorktreeIgnored(context.Background(), client.nodeGitRunner(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ignored) != 1 || ignored[0] != "a/b/__pycache__/" {
+		t.Fatalf("wholly ignored dir reported as %q", ignored)
+	}
+	if !nodeRegenerable([]string{"__pycache__/"}, ignored[0]) {
+		t.Fatal(`"__pycache__/" must approve a wholly ignored nested directory`)
+	}
+	// One tracked (so not ignored) file in the directory: git reports the
+	// ignored file, not the directory, and the directory pattern must not
+	// approve it. An untracked file there would be ignored by the same rule.
+	if err := os.WriteFile(filepath.Join(pyc, "keep.txt"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nodeGit(t, dir, "add", "-f", "a/b/__pycache__/keep.txt")
+	ignored, err = nodeWorktreeIgnored(context.Background(), client.nodeGitRunner(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ignored) != 1 || ignored[0] != "a/b/__pycache__/x.pyc" {
+		t.Fatalf("partly ignored dir reported as %q", ignored)
+	}
+	if nodeRegenerable([]string{"__pycache__/"}, ignored[0]) {
+		t.Fatal(`"__pycache__/" approved an ignored file in a directory that holds a non-ignored file`)
 	}
 }
 
