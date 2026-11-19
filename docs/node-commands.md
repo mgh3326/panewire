@@ -1328,10 +1328,13 @@ cancelled never takes the lock. A node with no configured work root answers
 `args: {cwd, expect_head, base, regenerable, detached?, disposable?}` — `cwd` inside the linked
 worktree, `expect_head` the 40-hex commit it must still be on, `base` the
 merged-into branch (a `regenerable` pattern must contain a literal
-character: wildcard-only patterns such as `*` are invalid_args; a glob with a
-`/` anywhere matches the whole path; a wholly ignored directory, reported by git as one `dir/` entry, is approved only by a pattern ending in `/`), and `regenerable` an allowlist of ignored paths that
-may be deleted with the worktree (a glob containing `/` matches the whole
-path, a slash-free one matches the last segment). The node re-resolves the
+character: wildcard-only patterns such as `*` are invalid_args), and `regenerable` an allowlist of ignored paths that
+may be deleted with the worktree. Matching follows gitignore: a glob with a
+leading or middle slash (`/build`, `a/logs/`, `build/*`) matches the whole
+path; a glob whose only slash is the trailing one (`name/`) matches a
+wholly ignored directory named `name` at any depth, so `__pycache__/`
+approves `a/b/__pycache__/` but never an ignored regular file; a slash-free glob (`*.log`) matches the last
+segment of an ignored file path and never a directory. A wholly ignored directory is reported by git as one `dir/` entry and is approved only by a pattern ending in `/`; a directory that holds a non-ignored file is reported file by file and is not approved as a whole. The node re-resolves the
 worktree under the per-clone lock, then removes it only when all hold: the
 resolved worktree path and common git dir are under the node's configured
 work root, it appears in `git worktree list`, is not locked, is not
