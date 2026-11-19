@@ -123,7 +123,7 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	record, err := a.escalateAuthorJobRecord(ctx, task, job, round)
+	record, err := a.escalateAuthorJobRecord(ctx, job)
 	if err != nil {
 		return err
 	}
@@ -198,11 +198,14 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 	return nil
 }
 
-// escalateAuthorJobRecord reads the author's job record and refuses a job that
-// is not the task's, not running, or bound to a different task. A record that
-// an earlier ladder step of this round ended is accepted: the hub finishes or
-// re-reports that step.
-func (a *App) escalateAuthorJobRecord(ctx context.Context, task, job string, round int) (map[string]any, error) {
+// escalateAuthorJobRecord reads the author's job record, which names the rung
+// the step starts from. It judges nothing else: whether the job is live (a
+// completed record is not a dead author: the first READY completes it and the
+// author goes on fixing the PR, hk 5521), ended by an earlier step of this
+// round, ended another way or bound to another task is the hub's call, because
+// only the hub's refusal files a lane event for the owner. A CLI refusal here
+// would be an rc 2 no lane ever hears of.
+func (a *App) escalateAuthorJobRecord(ctx context.Context, job string) (map[string]any, error) {
 	store, err := a.jobStore()
 	if err != nil {
 		return nil, err
@@ -210,14 +213,6 @@ func (a *App) escalateAuthorJobRecord(ctx context.Context, task, job string, rou
 	record, err := store.Get(ctx, job)
 	if err != nil {
 		return nil, fail(exitUsage, "job %s has no readable record: %v", job, err)
-	}
-	switch state, _ := record["state"].(string); {
-	case state == "claimed" || state == "spawned" || ladderStepReplayed(record, round):
-	default:
-		return nil, fail(exitUsage, "job %s is not live (state %q); nothing to escalate", job, state)
-	}
-	if bound := scalar(record["task_id"]); bound != "" && bound != task {
-		return nil, fail(exitUsage, "job %s is bound to task %s, not %s", job, bound, task)
 	}
 	return record, nil
 }

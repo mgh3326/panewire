@@ -243,22 +243,44 @@ func TestEscalateAuthorCLIRejectsMalformedFindings(t *testing.T) {
 	}
 }
 
-// A job whose record is not live cannot be escalated.
-func TestEscalateAuthorCLIRejectsADeadJob(t *testing.T) {
-	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
-	a.JobStore.(*fakeJobStore).records["job-a"]["state"] = "completed"
-	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
-	if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "not live") {
-		t.Fatalf("want a usage refusal, got %v", err)
-	}
-	if hub.calls != 0 {
-		t.Fatal("nothing must reach the hub")
+// A job whose record ended some other way (lost, escalated) is the hub's to
+// refuse, not the CLI's: only the hub's refusal files a lane event for the
+// owner, and a CLI refusal is an rc 2 no lane ever hears of (hk 5521).
+func TestEscalateAuthorCLISendsADeadJobToTheHubForItsRefusal(t *testing.T) {
+	for _, state := range []string{"lost", "escalated"} {
+		a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+		a.JobStore.(*fakeJobStore).records["job-a"]["state"] = state
+		hub.result = EscalateAuthorResult{Code: "job_not_live", Reason: "the job's record is " + state}
+		err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+		if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "job_not_live") {
+			t.Fatalf("%s: want the hub's refusal code, got %v", state, err)
+		}
+		if hub.calls != 1 {
+			t.Fatalf("%s: the call must reach the hub, calls=%d", state, hub.calls)
+		}
 	}
 }
 
-// A record that this round's ladder step already ended is not a dead job: the
-// hub finishes or re-reports that step, so the replay reaches it. A job lost
-// for another reason, or by another round's step, still does not.
+// An author's first READY completes its hk record, and it goes on fixing the
+// PR's findings in the same pane through every later review round (hk 5521:
+// pw-attempt-grant-5310 completed at 23:55:57 and sent READY for rounds 2-6
+// until 00:38). A completed record is therefore not proof the author is gone:
+// the CLI must send the call, and the hub, which can see the pane, decides.
+func TestEscalateAuthorCLIReachesTheHubForACompletedAuthor(t *testing.T) {
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+	a.JobStore.(*fakeJobStore).records["job-a"]["state"] = "completed"
+	hub.result = EscalateAuthorResult{Job: "job-a-l1", Rung: "sonnet@xhigh"}
+	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+	if err != nil {
+		t.Fatalf("a completed author whose pane works on must reach the hub: %v", err)
+	}
+	if hub.calls != 1 || hub.request.FromProfile != "sonnet" || hub.request.Profile != "sonnet" || hub.request.Effort != "xhigh" {
+		t.Fatalf("calls=%d request=%+v", hub.calls, hub.request)
+	}
+}
+
+// A record that this round's ladder step already ended reaches the hub, which
+// finishes or re-reports that step.
 func TestEscalateAuthorCLIReplaysAStepThatEndedTheJob(t *testing.T) {
 	args := []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)}
 	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
@@ -270,14 +292,6 @@ func TestEscalateAuthorCLIReplaysAStepThatEndedTheJob(t *testing.T) {
 	}
 	if hub.calls != 1 {
 		t.Fatalf("hub calls=%d", hub.calls)
-	}
-	for name, reason := range map[string]string{"another round": LadderStepEndReason(3, "job-a-l1"), "not a ladder step": "quota_stop pool=claude replaced_by=job-a-q1"} {
-		a, hub := escalateCLIFixture(t, "sonnet", "high", true)
-		a.JobStore.(*fakeJobStore).records["job-a"]["state"] = "lost"
-		a.JobStore.(*fakeJobStore).records["job-a"]["end_reason"] = reason
-		if err := a.escalateAuthorCmd(context.Background(), args); exitCode(err) != exitUsage || !strings.Contains(err.Error(), "not live") || hub.calls != 0 {
-			t.Fatalf("%s: want a usage refusal before the hub, got %v (calls %d)", name, err, hub.calls)
-		}
 	}
 }
 
