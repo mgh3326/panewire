@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 type Spawn struct {
@@ -1366,6 +1368,16 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	env = append(env, mockEnv...)
 	env = append(env, "ARBITER_JOB="+s.Job, "ARBITER_RESOURCE="+pool, "ARBITER_KIND=quota_pool", "ARBITER_PROFILE="+seat.gateName(), "HK_TASK_ID="+s.Task)
+	// Bind the attempt: the job's grant epoch on this node at launch, which
+	// the worker's producer calls present and nothing in the tree can change
+	// (docs/producer-attempt-grant.md). A legacy-only id cannot hold a grant.
+	if jobowner.ValidID(s.Job) {
+		epoch, e := jobowner.Epoch(a.Jobs, s.Job)
+		if e != nil {
+			return fail(exitConfig, "job assignment unavailable: %v", e)
+		}
+		env = append(env, jobowner.EpochEnv+"="+strconv.FormatUint(epoch, 10))
+	}
 	// The pane's hub lane is its label (registered below). Naming it here lets
 	// the pane's `panewire inbox` commands default to their own lane.
 	env = append(env, "PANEWIRE_LANE="+s.Label)
