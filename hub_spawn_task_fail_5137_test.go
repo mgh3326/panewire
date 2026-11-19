@@ -474,7 +474,12 @@ func TestSpawnTaskFail5137LostMarkRepostsOnce(t *testing.T) {
 	}
 	// Simulate the lost mark write: the row is unjudged again with hk
 	// already holding the comment.
+	// The mark and the outbox delete are one transaction, so a lost mark
+	// leaves both the unset mark and the outbox row.
 	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET task_fail_notice_ms=0 WHERE request_id=?`, task.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.db.Exec(`INSERT INTO task_fail_notice_outbox(request_id,retry_ms) VALUES(?,0)`, task.Request.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	h.flushSpawnTaskFailNotices(t.Context())
@@ -546,7 +551,7 @@ func TestSpawnTaskFail5137BackoffSkipsUntilDue(t *testing.T) {
 	}
 	// Simulate the delay passing: stamping the row's next attempt in the past
 	// makes it due again, and the next sweep re-attempts the post.
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET task_fail_retry_ms=1 WHERE request_id=?`, task.Request.RequestID); err != nil {
+	if _, err := h.inbox.store.db.Exec(`UPDATE task_fail_notice_outbox SET retry_ms=1 WHERE request_id=?`, task.Request.RequestID); err != nil {
 		t.Fatal(err)
 	}
 	h.flushSpawnTaskFailNotices(t.Context())
