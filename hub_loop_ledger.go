@@ -197,6 +197,14 @@ type loopLedgerState struct {
 	drops map[string]map[selectionDropKey]int64
 }
 
+// spawnNoticeRow is one entry of the daily row's spawn_notices group.
+type spawnNoticeRow struct {
+	Machine  string `json:"machine"`
+	Lane     string `json:"lane"`
+	Cause    string `json:"cause"`
+	Silenced int64  `json:"silenced"`
+}
+
 // selectionDropKey is one selection_drops row: a drop reason on one account.
 type selectionDropKey struct {
 	reason  string
@@ -507,6 +515,29 @@ type loopsRowDoc struct {
 	// SelectionDrops is the selection drops row group: SWE-2 candidates the
 	// placed selections dropped, by reason and account (docs/loops.md).
 	SelectionDrops []selectionDropRow `json:"selection_drops"`
+	// SpawnNotices is the spawn notices row group: owner notices the spawn
+	// notice rules recorded instead of sending, by owner lane and cause
+	// (hk 5360, docs/loops.md).
+	SpawnNotices []spawnNoticeRow `json:"spawn_notices"`
+}
+
+// spawnNoticeRowsForDay returns date's spawn_notices group from the durable
+// decision table (hk 5360): the count decisions of the day, by owner lane and
+// cause. It is read before the ledger lock is taken. A read that fails is logged
+// and the group is empty for this write; the next write rebuilds it from the
+// table.
+func (h *HubServer) spawnNoticeRowsForDay(date string) []spawnNoticeRow {
+	if h.inbox == nil || h.inbox.store == nil {
+		return []spawnNoticeRow{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handoffkeepTimeout)
+	defer cancel()
+	rows, err := h.inbox.store.ownerNoticeCounts(ctx, date)
+	if err != nil {
+		h.logger.Warn("spawn_notices group not read", "date", date, "err", err)
+		return []spawnNoticeRow{}
+	}
+	return rows
 }
 
 // noteSelectionDrops counts the SWE-2 candidates one placed selection dropped
@@ -552,6 +583,7 @@ func selectionDropRowsLocked(st *loopLedgerState, date string) []selectionDropRo
 // row carries its own machine so hk 5117 can append per-node rows beside
 // these.
 func (h *HubServer) loopsRowDocument(date string, now time.Time) loopsRowDoc {
+	spawnNotices := h.spawnNoticeRowsForDay(date)
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -576,7 +608,7 @@ func (h *HubServer) loopsRowDocument(date string, now time.Time) loopsRowDoc {
 		})
 	}
 	rows = append(rows, h.nodeLoopsRowsLocked(st, date)...)
-	return loopsRowDoc{V: loopsRowVersion, At: now.UTC(), Machine: "hub", Rows: rows, SelectionDrops: selectionDropRowsLocked(st, date)}
+	return loopsRowDoc{V: loopsRowVersion, At: now.UTC(), Machine: "hub", Rows: rows, SelectionDrops: selectionDropRowsLocked(st, date), SpawnNotices: spawnNotices}
 }
 
 // nodeLoopsRowsLocked returns the merged per-machine rows for date: each

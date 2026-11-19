@@ -64,7 +64,7 @@ type poolActionData struct {
 func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry poolAction, now time.Time) (bool, error) {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -111,7 +111,7 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	if err != nil {
 		return false, err
 	}
-	if n, err := result.RowsAffected(); err != nil || n != 1 {
+	if n, err := s.dialect.rowsMatched(result); err != nil || n != 1 {
 		return false, errors.New("pool action changed before retry")
 	}
 	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,?)`), retry.ID, retry.Job, retry.Node, retry.Epoch, retry.Phase, string(retryData), poolFinalMS(retry.Phase, now)); err != nil {
@@ -201,7 +201,7 @@ func (s *laneInboxStore) observePoolActionStuck(parent context.Context, id strin
 	if err != nil {
 		return action, err
 	}
-	if n, err := result.RowsAffected(); err != nil || n != 1 {
+	if n, err := s.dialect.rowsMatched(result); err != nil || n != 1 {
 		return action, errors.New("pool action changed while recording stuck time")
 	}
 	return action, nil
@@ -398,7 +398,7 @@ func (s *laneInboxStore) supersedeActionsOf(parent context.Context, job string) 
 func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, next poolAction, now time.Time) error {
 	ctx, cancel := s.op(parent)
 	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -417,7 +417,7 @@ func (s *laneInboxStore) replaceSupersedeAction(parent context.Context, old, nex
 	if err != nil {
 		return err
 	}
-	if n, err := result.RowsAffected(); err != nil || n != 1 {
+	if n, err := s.dialect.rowsMatched(result); err != nil || n != 1 {
 		return errors.New("supersede action changed before retry")
 	}
 	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,?)`), next.ID, next.Job, next.Node, next.Epoch, next.Phase, string(nextData), poolFinalMS(next.Phase, now)); err != nil {
@@ -478,7 +478,7 @@ func (s *laneInboxStore) advanceSupersedeFence(parent context.Context) error {
 	if err != nil {
 		return err
 	}
-	if n, err := result.RowsAffected(); err != nil || n != 1 {
+	if n, err := s.dialect.rowsMatched(result); err != nil || n != 1 {
 		return errors.New("supersede fence missing")
 	}
 	return nil
@@ -488,11 +488,11 @@ func (s *laneInboxStore) advanceSupersedeFence(parent context.Context) error {
 // stores nothing when the fence row is absent, which the caller reads as an
 // error through the row count.
 func (s *laneInboxStore) insertSupersedeLanding(ctx context.Context, db sqlExecer, l supersedeLanding, state string) error {
-	result, err := db.ExecContext(ctx, s.q(`INSERT INTO supersede_landings(request_id,parent,successor,owner,created_ms,tried_ms,generation,state) SELECT ?,?,?,?,?,0,generation,? FROM supersede_fence WHERE singleton=1 ON CONFLICT(request_id) DO NOTHING`), l.RequestID, l.Parent, l.Successor, l.Owner, l.Created, state)
+	result, err := db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO supersede_landings(request_id,parent,successor,owner,created_ms,tried_ms,generation,state) SELECT ?,?,?,?,?,0,generation,? FROM supersede_fence WHERE singleton=1`, "request_id")), l.RequestID, l.Parent, l.Successor, l.Owner, l.Created, state)
 	if err != nil {
 		return err
 	}
-	if n, err := result.RowsAffected(); err != nil {
+	if n, err := s.dialect.rowsMatched(result); err != nil {
 		return err
 	} else if n == 0 {
 		var existing string
@@ -580,7 +580,7 @@ func (s *laneInboxStore) insertSupersedeAction(parent context.Context, action po
 	if err != nil {
 		return err
 	}
-	if n, err := result.RowsAffected(); err != nil || n != 1 {
+	if n, err := s.dialect.rowsMatched(result); err != nil || n != 1 {
 		return errSupersedeFenced
 	}
 	return nil

@@ -51,7 +51,7 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		eventID := fmt.Sprintf("%s:%d:%s", task.Request.RequestID, task.Attempt, spawnOutcomeStatus(result))
 		recorded, err := h.inbox.store.db.ExecContext(ctx, h.inbox.store.q(`UPDATE spawn_notifications SET telemetry_recorded=1 WHERE event_id=? AND telemetry_recorded=0`), eventID)
 		if err == nil {
-			if n, _ := recorded.RowsAffected(); n == 1 {
+			if n, _ := h.inbox.store.dialect.rowsMatched(recorded); n == 1 {
 				reason := spawnTraceReason(result.Reason)
 				hub.CaptureEvent(&sentry.Event{Level: sentry.LevelError, Message: "SPAWN_FAILED " + result.Stage + "/" + reason, Fingerprint: []string{"spawn", result.Stage, reason}, Tags: map[string]string{"stage": result.Stage, "reason": reason, "request": task.Request.RequestID, "attempt": strconv.Itoa(task.Attempt)}})
 			}
@@ -61,7 +61,7 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	if err != nil {
 		return
 	}
-	n, _ := claimed.RowsAffected()
+	n, _ := h.inbox.store.dialect.rowsMatched(claimed)
 	if n != 1 {
 		return
 	}

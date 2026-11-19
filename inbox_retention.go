@@ -36,15 +36,13 @@ func (s *laneInboxStore) prune(now time.Time, policy inboxRetentionPolicy) (int6
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	if s.dialect == laneInboxSQLite {
-		if _, err := tx.ExecContext(ctx, `UPDATE lane_inbox_id_floor SET floor=max(floor,COALESCE((SELECT max(id) FROM lane_inbox),0)) WHERE singleton=1`); err != nil {
-			return 0, err
-		}
+	if err := s.dialect.beforeInboxPrune(ctx, tx); err != nil {
+		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, s.q(`WITH ranked AS (
  SELECT id, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY created_at DESC,id DESC) AS position FROM lane_inbox
@@ -57,7 +55,7 @@ func (s *laneInboxStore) prune(now time.Time, policy inboxRetentionPolicy) (int6
 	if err != nil {
 		return 0, err
 	}
-	count, err := result.RowsAffected()
+	count, err := s.dialect.rowsMatched(result)
 	if err != nil {
 		return 0, err
 	}

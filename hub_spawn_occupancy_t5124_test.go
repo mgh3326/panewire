@@ -64,7 +64,7 @@ func TestPlacedColumnsMigrationAppliesBothDialects_t5124(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if s.dialect == laneInboxPostgres {
+		if s.dialect == dialectPostgres {
 			if _, err := s.db.Exec(`DELETE FROM panewire_schema_migrations WHERE version='0022_spawn_placed_account'`); err != nil {
 				t.Fatal(err)
 			}

@@ -136,7 +136,7 @@ func sameLegacyPlacementRecord(task hubSpawnTask, trace fleet.PlacementTrace, at
 func (s *laneInboxStore) sealReconciledPlacement(parent context.Context, requestID string, attempt int, payload []byte, delivery string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ func (s *laneInboxStore) sealReconciledPlacement(parent context.Context, request
 	if err != nil {
 		return err
 	}
-	if n, err := result.RowsAffected(); err != nil || n == 0 {
+	if n, err := s.dialect.rowsMatched(result); err != nil || n == 0 {
 		if err != nil {
 			return err
 		}

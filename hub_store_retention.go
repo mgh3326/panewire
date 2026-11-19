@@ -103,22 +103,22 @@ func (s *laneInboxStore) pruneHubStore(now time.Time, limit int) (hubStoreRetent
 		return c, err
 	}
 	fenceCut := now.Add(-spawnAttemptFenceRetention).UnixMilli()
-	if c.AttemptGrants, err = s.retentionExec(ctx, `DELETE FROM spawn_attempt_grants WHERE node_id IN (`+retiredSpawnNodes+`)`, fenceCut, limit); err != nil {
+	if c.AttemptGrants, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("spawn_attempt_grants", "node_id", retiredSpawnNodes), fenceCut, limit); err != nil {
 		return c, err
 	}
-	if c.AttemptStartBy, err = s.retentionExec(ctx, `DELETE FROM spawn_attempt_start_by WHERE node_id IN (`+retiredSpawnNodes+`)`, fenceCut, limit); err != nil {
+	if c.AttemptStartBy, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("spawn_attempt_start_by", "node_id", retiredSpawnNodes), fenceCut, limit); err != nil {
 		return c, err
 	}
-	if c.SpawnOperations, err = s.retentionExec(ctx, `DELETE FROM spawn_operations WHERE request_id IN (`+spawnOperationsRetirable+`)`, now.Add(-spawnOperationRetention).UnixMilli(), limit); err != nil {
+	if c.SpawnOperations, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("spawn_operations", "request_id", spawnOperationsRetirable), now.Add(-spawnOperationRetention).UnixMilli(), limit); err != nil {
 		return c, err
 	}
-	if c.Consults, err = s.retentionExec(ctx, `DELETE FROM consult_requests WHERE id IN (SELECT id FROM consult_requests WHERE state NOT IN ('queued','running') AND NOT (state='answered' AND notified=0) AND updated_ms<? ORDER BY updated_ms,id LIMIT ?)`, now.Add(-consultRetention).UnixMilli(), limit); err != nil {
+	if c.Consults, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("consult_requests", "id", `SELECT id FROM consult_requests WHERE state NOT IN ('queued','running') AND NOT (state='answered' AND notified=0) AND updated_ms<? ORDER BY updated_ms,id LIMIT ?`), now.Add(-consultRetention).UnixMilli(), limit); err != nil {
 		return c, err
 	}
 	// A final pool action is the dedupe fence for its job (hasPoolAction,
 	// supersedeActionsOf). It goes only once its window has passed and the job
 	// has no spawn row still in progress.
-	if c.PoolActions, err = s.retentionExec(ctx, `DELETE FROM pool_actions WHERE id IN (SELECT p.id FROM pool_actions p WHERE p.phase IN ('done','refused') AND p.final_ms>0 AND p.final_ms<? AND NOT EXISTS (SELECT 1 FROM spawn_operations so WHERE so.job=p.job AND so.status NOT IN (`+spawnTerminalStatuses+`)) ORDER BY p.final_ms,p.id LIMIT ?)`, now.Add(-poolActionRetention).UnixMilli(), limit); err != nil {
+	if c.PoolActions, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("pool_actions", "id", `SELECT p.id FROM pool_actions p WHERE p.phase IN ('done','refused') AND p.final_ms>0 AND p.final_ms<? AND NOT EXISTS (SELECT 1 FROM spawn_operations so WHERE so.job=p.job AND so.status NOT IN (`+spawnTerminalStatuses+`)) ORDER BY p.final_ms,p.id LIMIT ?`), now.Add(-poolActionRetention).UnixMilli(), limit); err != nil {
 		return c, err
 	}
 	return c, nil
@@ -128,23 +128,23 @@ func (s *laneInboxStore) pruneHubStore(now time.Time, limit int) (hubStoreRetent
 // quarantine rows, in one transaction. The quarantine delete runs first, on
 // the same candidate set the batch delete then uses.
 func (s *laneInboxStore) pruneSentBatches(ctx context.Context, limit int) (batches, quarantine int64, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	q, err := tx.ExecContext(ctx, s.q(`DELETE FROM lane_inbox_batch_quarantine WHERE batch_id IN (`+sentBatchesPrunable+`)`), limit)
+	q, err := tx.ExecContext(ctx, s.q(s.dialect.deleteWhereIn("lane_inbox_batch_quarantine", "batch_id", sentBatchesPrunable)), limit)
 	if err != nil {
 		return 0, 0, err
 	}
-	if quarantine, err = q.RowsAffected(); err != nil {
+	if quarantine, err = s.dialect.rowsMatched(q); err != nil {
 		return 0, 0, err
 	}
-	b, err := tx.ExecContext(ctx, s.q(`DELETE FROM lane_inbox_batches WHERE id IN (`+sentBatchesPrunable+`)`), limit)
+	b, err := tx.ExecContext(ctx, s.q(s.dialect.deleteWhereIn("lane_inbox_batches", "id", sentBatchesPrunable)), limit)
 	if err != nil {
 		return 0, 0, err
 	}
-	if batches, err = b.RowsAffected(); err != nil {
+	if batches, err = s.dialect.rowsMatched(b); err != nil {
 		return 0, 0, err
 	}
 	return batches, quarantine, tx.Commit()
@@ -153,7 +153,7 @@ func (s *laneInboxStore) pruneSentBatches(ctx context.Context, limit int) (batch
 // retentionExec runs one bounded delete in its own transaction and reports the
 // rows it removed.
 func (s *laneInboxStore) retentionExec(ctx context.Context, query string, args ...any) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -162,7 +162,7 @@ func (s *laneInboxStore) retentionExec(ctx context.Context, query string, args .
 	if err != nil {
 		return 0, err
 	}
-	n, err := result.RowsAffected()
+	n, err := s.dialect.rowsMatched(result)
 	if err != nil {
 		return 0, err
 	}

@@ -1126,6 +1126,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /ui", h.handleUI)
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
+	mux.HandleFunc("GET /v1/capabilities", h.handleCapabilities)
 	mux.HandleFunc("GET /v1/lanes", h.handleLanes)
 	mux.HandleFunc("PUT /v1/lanes/{lane}", h.handlePutLane)
 	mux.HandleFunc("DELETE /v1/lanes/{lane}", h.handleDeleteLane)
