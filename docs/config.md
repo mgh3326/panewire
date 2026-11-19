@@ -1322,6 +1322,24 @@ window already used up (a sub-daily window or the blocking share at or above
 pace (pacelever: "pace ranks and warns; it never denies"), so no gate flag
 is passed.
 
+**A pool at its admission cutoff ranks last (`at_admission_cutoff`).** Admission
+refuses a pool once any of its windows reads at or above the pool's cutoff:
+`[pools.<name>].cutoff` in the pacelever config, else 90 for `commandcode` and
+for a `preserve` pool, else 99 (`admissionPolicy.cutoff`, the one function the
+verdict and selection both read). Selection applies the same cutoff to a paid
+pool's reading: a pool at or above it ranks behind every pool admission would
+accept, before band, waste risk and grade, so a request is not held on a pool it
+cannot be admitted to (2026-11-19: codex at 7d 99% ranked first for reviewers
+while commandcode, agy and openai-api had room). The rows of such a pool carry
+`at_admission_cutoff: true` and `admission_cutoff_pct` in the selection record
+(`--explain`), and the rule text names the key. The pool is ranked, not dropped,
+so when every candidate is at its cutoff the order is unchanged and no new "no
+candidate" outcome appears; the admission gate still makes the final refusal on
+fresh evidence. Free-tier rungs and `credit_pools` are not judged by a cutoff.
+A commandcode account at its cutoff is still dropped outright as
+`window_exhausted cutoff=<n>`. The hub's placement orders hosts for the chosen
+account, not pools, so it needs no equivalent rule.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `waste_risk.min_unused_pct` | `20` | Minimum projected unused share (percent) of the longest window at its reset for a paid pool to be at waste risk. `0`–`100`. |

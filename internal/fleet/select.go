@@ -252,6 +252,13 @@ type selCand struct {
 	// its projected unused share at the longest window's reset.
 	risk   bool
 	unused *float64
+	// atCutoff marks a paid pool whose reading of some window is at or above
+	// its admission cutoff (cutoff, from admissionPolicy.pool): admission would
+	// refuse it, so it ranks behind every pool that has room
+	// (at_admission_cutoff). It stays a candidate, because the reading may be
+	// stale and admission remains the authority.
+	atCutoff bool
+	cutoff   float64
 	// creditPool identifies a prepaid pool; credit records its expiry reading.
 	creditPool  bool
 	credit      *creditFinal
@@ -379,8 +386,11 @@ func (p *selPlan) mergeAccountCredit(marks map[string]time.Time) {
 	}
 }
 
+// poolCutoff is the used percentage at which admission refuses a pool. It
+// reads admissionPolicy.cutoff, the function the verdict reads, so selection never
+// keeps a second copy of the 90/99 defaults.
 func (p *selPlan) poolCutoff(pool string) float64 {
-	return p.admPolicy.pool(pool, p.at).Cutoff
+	return p.admPolicy.cutoff(pool, p.at)
 }
 
 func (p *selPlan) runningJob(accountKey string) string {
@@ -1297,10 +1307,11 @@ func selCandComparator(pending []*selCand) func(*selCand, *selCand) int {
 		pool, name         string
 		tier               int
 		risk, behind, fits bool
+		atCutoff           bool
 	}
 	seats := make(map[poolKey]*selCand)
 	key := func(c *selCand) poolKey {
-		return poolKey{c.row.Pool, c.tierName, c.tier, c.risk, c.behindCredit, c.fits()}
+		return poolKey{c.row.Pool, c.tierName, c.tier, c.risk, c.behindCredit, c.fits(), c.atCutoff}
 	}
 	rankedKey := func(k poolKey) bool { return k.name == "ranked" && !k.risk }
 	grouped := func(c *selCand) bool {
@@ -1382,6 +1393,15 @@ func roomOrder(x, y *selCand) int {
 // compareCands is compareSelCands with roomFirst: a non-risk pair is ordered
 // by roomOrder before grade fit instead of after it.
 func compareCands(x, y *selCand, compareGrade, roomFirst bool) int {
+	// A pool at its admission cutoff ranks behind every pool admission would
+	// accept, whatever its band or waste risk. When every candidate is at its
+	// cutoff the key ties and the order is unchanged.
+	if x.atCutoff != y.atCutoff {
+		if y.atCutoff {
+			return -1
+		}
+		return 1
+	}
 	// Waste-risk pools rank ahead of every tier, free included. Stale
 	// dollar-bearing credit ranks behind subscriptions because it no longer
 	// has a usable balance. Inside a tier, candidates whose shortest window
@@ -1561,6 +1581,10 @@ func (p *selPlan) record() map[string]any {
 			row["used_pct"] = *c.blocking
 		}
 		row["waste_risk"] = c.risk
+		if c.atCutoff {
+			row["at_admission_cutoff"] = true
+			row["admission_cutoff_pct"] = c.cutoff
+		}
 		if c.wasteGroup != "" {
 			row["waste_group"] = c.wasteGroup
 		}
@@ -1631,7 +1655,7 @@ func (p *selPlan) record() map[string]any {
 		"outcome_code":   p.outcome,
 		"mode":           "auto",
 		"decision":       fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
-		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, free, credit, then ranked); within risk, free and credit bands pools compete by their lowest fitting seat, with higher rows after that seat; ranked pools compete by their seat (the pool policy's named row for the grade, else the lowest grade >= %s that fits), the pool with the most room (waste urgency) first and ties by lowest grade; credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
+		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk subscription pools rank by waste urgency (unused share per hour until reset), then band (waste, free, credit, then ranked); within risk, free and credit bands pools compete by their lowest fitting seat, with higher rows after that seat; ranked pools compete by their seat (the pool policy's named row for the grade, else the lowest grade >= %s that fits), the pool with the most room (waste urgency) first and ties by lowest grade; credit expiry (dollars at risk per hour, else remaining percent per hour), waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected; a pool whose reading of any window is at or above its admission cutoff (at_admission_cutoff; the cutoff is the admission policy's, shown per row as admission_cutoff_pct) ranks behind every pool admission would accept, before any band", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
 		"waste_risk":     map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
 		"policy_version": p.policy.Version,
 		"policy_source":  p.policy.SourceDoc,

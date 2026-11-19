@@ -453,6 +453,10 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	free := p.policy.isFree(c.row)
 	c.risk, c.unused = p.policy.wasteRisk(c.row, free, v, true)
 	c.paced = p.policy.paced(c.row, free, c.risk, v)
+	if !free {
+		c.cutoff = p.poolCutoff(c.row.Pool)
+		c.atCutoff = v.Blocking != nil && *v.Blocking >= c.cutoff
+	}
 	if free {
 		c.exhausted = v.Projected != nil && *v.Projected >= *p.policy.ExcludeAt
 		// The free tier's own reading decides a limit; the shared paid
@@ -490,9 +494,8 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 					return
 				}
 			}
-			cutoff := p.poolCutoff(c.row.Pool)
-			if v.Blocking != nil && *v.Blocking >= cutoff {
-				c.reason = fmt.Sprintf("window_exhausted cutoff=%g", cutoff)
+			if c.atCutoff {
+				c.reason = fmt.Sprintf("window_exhausted cutoff=%g", c.cutoff)
 			} else {
 				var used7d *float64
 				for _, w := range v.Windows {
