@@ -117,6 +117,37 @@ func TestQuotaStopRetriesAFailedPublication_T5562(t *testing.T) {
 	}
 }
 
+// The hub's placement is told at the first sighting, for every pool and whatever
+// the decision, through a placement-only hold. That includes a stop the manager
+// only observes (a consult in shadow mode): the hold sets cooling and nothing
+// else, so it cannot turn the observation into a close (hk 5562 review).
+func TestQuotaStopHoldsThePoolBandAtTheHub_T5562(t *testing.T) {
+	type held struct {
+		pool  string
+		until time.Time
+	}
+	for _, tc := range []struct{ name, role, screen, pool string }{
+		{"devin free reviewer", "reviewer", "testdata/quota-stop/devin-reset-2min.txt", "devin-free"},
+		{"claude implementer", "implementer", "testdata/quota-stop/claude.txt", "claude"},
+		{"devin free consult, observed only", "consult", "testdata/quota-stop/devin-reset-2h.txt", "devin-free"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newRungOutRig(t, tc.role, tc.screen)
+			got := make(chan held, 4)
+			rig.q.hold = func(pool string, until time.Time) { got <- held{pool, until} }
+			rig.run()
+			select {
+			case h := <-got:
+				if h.pool != tc.pool {
+					t.Fatalf("held %q, want %q", h.pool, tc.pool)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the hub was not told to keep placements off the band")
+			}
+		})
+	}
+}
+
 // A screen that is no stop keeps nothing out.
 func TestQuotaStopKeepsNothingOutForAScreenWithoutAStop_T5562(t *testing.T) {
 	rig := newRungOutRig(t, "reviewer", "testdata/quota-stop/devin-reset-2min.txt")

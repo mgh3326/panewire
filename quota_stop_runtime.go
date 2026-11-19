@@ -44,6 +44,9 @@ type quotaStopManager struct {
 	// PublishLimitObserved, hk 5562). Tests substitute them.
 	recordRung  func(job string, stop quotastop.Stop, now func() time.Time) error
 	publishRung func(ctx context.Context, job string, now func() time.Time) error
+	// hold asks the hub to keep new placements off a pool band until a time (a
+	// placement-only hold, fleetStateKindHold); nil sends none.
+	hold func(pool string, until time.Time)
 	// publishRetry is how long a failed publication waits before it is tried
 	// again; zero is rungPublishRetry.
 	publishRetry time.Duration
@@ -535,6 +538,13 @@ const (
 // refresh that fails (the shared lease held by another host, a store error) is
 // logged and tried again every publishRetry until the reset has passed.
 func (q *quotaStopManager) keepRungOut(ctx context.Context, job string, stop quotastop.Stop, now time.Time) {
+	// The hub's placement is told first and for every pool: it is one small
+	// message, it sets cooling and nothing else (no sweep, so a shadow decision
+	// is never turned into a close), and it does not wait for this node's quota
+	// loop or depend on which pools the node publishes.
+	if q.hold != nil {
+		q.hold(stop.Pool, stop.Reset)
+	}
 	if stop.Pool != "devin-free" || q.recordRung == nil || q.publishRung == nil {
 		return
 	}

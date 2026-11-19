@@ -232,3 +232,7 @@ Reverse order. Each step is independent.
    records the reason.
 3. **Hub.** Redeploy the previous hub build. `/v1/state` returns 404, and
    panewire records `hub_unavailable` and measures directly.
+
+## Hold (hk 5562)
+
+A node publishes a `state` message of kind `hold` when its quota-stop manager sees a provider-limit stop: `key` is the pool band (`devin-free`, `devin-paid`, `claude`, ...), `hold.until` the stop's reset (absent when unreadable, which the hub holds for its default 5 minutes), at most 48 hours ahead. The hub sets that band's pool cooling until `until` and does nothing else: no reading is stored and the exhausted-pool sweep never runs for it, so a hold cannot close or hand over a job. Selection reads the cooling from the hub's snapshot (`pool_cooling`). The cooling is in hub memory, as every pool cooling is.

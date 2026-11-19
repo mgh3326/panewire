@@ -28,6 +28,12 @@ const (
 	// accepts the value and drops it. Remove once every node runs this build.
 	fleetStateKindSpawn     = "spawn"
 	fleetStateKindPublisher = "publisher"
+	// fleetStateKindHold is a placement-only hold on a pool band (hk 5562): the
+	// node saw a provider-limit stop and asks the hub to keep new placements off
+	// the band until the stop's reset. It sets the hub's pool cooling and nothing
+	// else: no reading is stored and no exhausted-pool sweep runs, so a hold
+	// can never close or hand over a job (docs/quota-stop.md).
+	fleetStateKindHold = "hold"
 
 	fleetStateQuotaKeysPerHost = 64
 	fleetStateMaxPublishBytes  = 4 << 10
@@ -158,7 +164,18 @@ type FleetStatePublish struct {
 	ConfirmedAt *time.Time       `json:"confirmed_at,omitempty"`
 	Quota       *FleetStateQuota `json:"quota,omitempty"`
 	Spawn       *FleetStateSpawn `json:"spawn,omitempty"`
+	Hold        *FleetStateHold  `json:"hold,omitempty"`
 }
+
+// FleetStateHold is the value of a hold: the pool band (the publish's key) stays
+// out of new placements until Until. A zero Until is a stop whose reset could not
+// be read; the hub holds it for its default cooling window.
+type FleetStateHold struct {
+	Until time.Time `json:"until,omitzero"`
+}
+
+// fleetStateHoldMax bounds how far ahead a hold may reach.
+const fleetStateHoldMax = 48 * time.Hour
 
 // decodeFleetStatePublish validates a node's state event without knowing the
 // node: the host binding is checked by the caller, which knows the machine.
@@ -179,12 +196,22 @@ func decodeFleetStatePublish(raw []byte) (FleetStatePublish, bool) {
 		return FleetStatePublish{}, false
 	}
 	switch publish.Kind {
+	case fleetStateKindHold:
+		return publish, publish.Quota == nil && publish.Spawn == nil && validFleetStateHold(publish)
 	case fleetStateKindQuota:
-		return publish, publish.Spawn == nil && validFleetStateQuota(publish.Key, publish.Quota)
+		return publish, publish.Spawn == nil && publish.Hold == nil && validFleetStateQuota(publish.Key, publish.Quota)
 	case fleetStateKindSpawn:
 		return publish, publish.Quota == nil && validFleetStateSpawn(publish.Key, publish.Spawn)
 	}
 	return FleetStatePublish{}, false
+}
+
+func validFleetStateHold(publish FleetStatePublish) bool {
+	if publish.Hold == nil || !fleetStateTokenPattern.MatchString(publish.Key) {
+		return false
+	}
+	until := publish.Hold.Until
+	return until.IsZero() || until.After(publish.MeasuredAt) && until.Sub(publish.MeasuredAt) <= fleetStateHoldMax
 }
 
 func validFleetStateQuota(key string, quota *FleetStateQuota) bool {
@@ -426,6 +453,14 @@ func (h *HubServer) publishFleetStateFromNode(machineID string, publish FleetSta
 	if !h.stateStore().allowNode(machineID, received) {
 		h.logger.Warn("fleet state publish over budget dropped", "machine", machineID, "kind", publish.Kind)
 		return false
+	}
+	if publish.Kind == fleetStateKindHold {
+		reason := "quota_stop pool=" + publish.Key
+		if !publish.Hold.Until.IsZero() {
+			reason += " reset_at=" + publish.Hold.Until.UTC().Format(time.RFC3339Nano)
+		}
+		h.observePoolCooling(reason, received)
+		return true
 	}
 	if publish.Kind == fleetStateKindSpawn {
 		if publish.Spawn.Host != "" && publish.Spawn.Host != machineID {

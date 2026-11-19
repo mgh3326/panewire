@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
@@ -325,4 +326,18 @@ func (client *HubClient) fleetQuotaConfirmedAt(ctx context.Context, key string, 
 		return time.Time{}
 	}
 	return o.ConfirmedAt.UTC()
+}
+
+// PublishPoolHold asks the hub to keep new placements off pool's band until
+// until (zero: the stop's reset was unreadable), from the first sighting of a
+// provider-limit stop (hk 5562). It is a placement-only hold: the hub sets its
+// pool cooling and runs no exhausted-pool sweep, so it never closes or hands
+// over a job. It reports whether the message was queued for the hub.
+func (client *HubClient) PublishPoolHold(pool string, until time.Time) bool {
+	now := client.nowUTC().Truncate(time.Millisecond)
+	hold := &FleetStateHold{}
+	if until.After(now) {
+		hold.Until = until.UTC().Truncate(time.Millisecond)
+	}
+	return client.Publish("state", FleetStatePublish{Kind: fleetStateKindHold, Key: fleet.BandKey(pool), MeasuredAt: now, Hold: hold})
 }
