@@ -1264,12 +1264,14 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   hand-over's successor starts at the snapshot commit, which the branch refspec
   does not carry, so the node fetches that ref too. The node fetches,
   then requires the freshly fetched `origin/<branch>` to be exactly `sha` —
-  or, with a fetch, an ancestor of `sha` — and with a fetch that `sha^{commit}`
+  or, with a fetch, an ancestor of `sha` or absent when the snapshotted
+  branch was never pushed — and with a fetch that `sha^{commit}`
   exists (`sha-missing` otherwise):
   someone pushed after the brief and a successor must not start behind it, so
   it refuses `successor_stale` with `reason` `want=<sha> origin=<sha>`
   (`origin=none` when the branch is not on origin) before anything is
-  prepared. A worktree of the clone that already holds the branch refuses
+  prepared. A never-pushed snapshot branch gets no upstream; the first
+  `git push` of it names origin and the branch. A worktree of the clone that already holds the branch refuses
   `branch_in_use` with `reason` `worktree=<dir>`; the branch is never forced or
   stolen. A worktree at `dir` is reused only on that branch, clean, at the
   commit; a local branch behind the commit is fast-forwarded and one ahead or

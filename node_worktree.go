@@ -1219,11 +1219,13 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGit
 // successor continues the branch with a plain `git push` instead of a detached
 // HEAD. With fetch — a snapshot hand-over (hk 5324) — sha is the snapshot
 // commit, fetched under refs/panewire/handover/, and the worktree starts
-// there while still tracking origin/<branch> for a plain `git push`.
+// there; when the branch exists on origin it still tracks it for a plain
+// `git push`.
 //
 // The freshly fetched origin/<branch> must still be that commit — or, for a
-// snapshot, an ancestor of it. Someone pushed after the brief, and a
-// successor must not start behind it:
+// snapshot, an ancestor of it or absent entirely when the branch was never
+// pushed. Someone pushed after the brief, and a successor must not start
+// behind it:
 // `successor_stale want=<sha> origin=<sha>`. The branch is never forced or
 // stolen: a worktree of the clone that already holds it refuses with
 // `branch_in_use worktree=<dir>`. A worktree at dir is reused only on that
@@ -1254,10 +1256,13 @@ func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *node
 		originTip = strings.ToLower(strings.TrimSpace(string(out)))
 	}
 	stale := originTip != want
-	if stale && args.Fetch != "" && originTip != "" {
-		// A snapshot commit carries the pushed tip as an ancestor; a push
-		// after the snapshot is still a stale successor.
-		if _, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", originTip, want); err == nil {
+	if stale && args.Fetch != "" {
+		// A snapshot commit carries the pushed tip as an ancestor — or the
+		// branch was never pushed, and the snapshot is the whole line. A
+		// push after the snapshot is still a stale successor.
+		if originTip == "" {
+			stale = false
+		} else if _, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", originTip, want); err == nil {
 			stale = false
 		}
 	}

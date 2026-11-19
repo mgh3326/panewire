@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -91,5 +92,35 @@ func TestNodePrepareSuccessorSnapshotCommitMissing5324(t *testing.T) {
 	result, code := nodeRun(t, client, nodeCommandWorktreePrepare, args)
 	if code != "" || result["outcome"] != nodePrepareShaMissing {
 		t.Fatalf("prepare outcome=%v code=%q, want %q", result["outcome"], code, nodePrepareShaMissing)
+	}
+}
+
+// A snapshot of a branch that was never pushed: origin has no <branch>, the
+// snapshot commit is the whole line, and the successor starts there with no
+// upstream to set (review r4623417484).
+func TestNodePrepareSuccessorSnapshotOfUnpushedBranch5324(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	client := fixture.client()
+	tmp := filepath.Join(fixture.root, "unpushed-snapshot")
+	nodeGit(t, fixture.root, "clone", "-q", fixture.origin, tmp)
+	nodeGit(t, tmp, "checkout", "-q", "-b", "local-only")
+	nodeGit(t, tmp, "commit", "-q", "--allow-empty", "-m", "never pushed")
+	nodeGit(t, tmp, "commit", "-q", "--allow-empty", "-m", "snapshot")
+	snap := nodeGit(t, tmp, "rev-parse", "HEAD")
+	ref := handoverSnapshotRef("job-a", snap)
+	nodeGit(t, tmp, "push", "-q", "origin", "HEAD:"+ref)
+	dir := filepath.Join(fixture.workRoot, "repo.job")
+	args := fixture.prepareArgs(fleet.HubCheckoutSuccessor, "local-only", snap, ref, "repo.job")
+
+	result, code := nodeRun(t, client, nodeCommandWorktreePrepare, args)
+	if code != "" || result["outcome"] != nodePreparePrepared {
+		t.Fatalf("prepare outcome=%v code=%q", result["outcome"], code)
+	}
+	worktree, _ := result["worktree"].(map[string]any)
+	if worktree["path"] != dir || worktree["branch"] != "local-only" || worktree["head"] != snap {
+		t.Fatalf("worktree=%v, want local-only at the snapshot %s", worktree, snap)
+	}
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "@{u}").CombinedOutput(); err == nil {
+		t.Fatalf("upstream=%s, want none", out)
 	}
 }
