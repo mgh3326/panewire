@@ -112,8 +112,8 @@ func TestQuotaEpochOldReleaseThenNewAcquire_t5294(t *testing.T) {
 	noAmbiguityWarning(t, a)
 }
 
-// A row recorded before epochs existed is released when the job's current
-// attempt has ended here, and never because a grant happens to match.
+// A row recorded before epochs existed is released by the job's current
+// attempt ending, and never because a grant happens to match.
 func TestQuotaEpochLessRowReleasedOnlyByTerminalEnd_t5294(t *testing.T) {
 	legacyJob := func(t *testing.T) *App {
 		a := testApp(t)
@@ -144,12 +144,14 @@ func TestQuotaEpochLessRowReleasedOnlyByTerminalEnd_t5294(t *testing.T) {
 			wantPools(t, a, "j")
 		}
 	})
-	t.Run("a live job's row is not released by a matching grant", func(t *testing.T) {
+	// finishQuotaIntent and finishHubClose release before they write the final
+	// job.lost, so no end event stands yet; the row must still go.
+	t.Run("the current attempt's release before its end event is written", func(t *testing.T) {
 		a := legacyJob(t)
 		if err := a.releaseQuota(t.Context(), snapshot(t, a)); err != nil {
 			t.Fatal(err)
 		}
-		wantPools(t, a, "j", "example")
+		wantPools(t, a, "j")
 	})
 	t.Run("a hub revocation keeps it even with a matching grant", func(t *testing.T) {
 		a := legacyJob(t)
