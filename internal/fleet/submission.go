@@ -558,6 +558,35 @@ type SpawnStatusRecord struct {
 	RC    int    `json:"rc,omitempty"`
 	Stage string `json:"stage,omitempty"`
 	Job   string `json:"job,omitempty"`
+	// Tried lists the candidates an attempt asked and why each was dropped,
+	// for a request that ended without one (hk 5456).
+	Tried []SpawnStatusTried `json:"tried,omitempty"`
+}
+
+// SpawnStatusTried is one candidate a spawn request tried and why it was
+// dropped.
+type SpawnStatusTried struct {
+	Host   string `json:"host,omitempty"`
+	Pool   string `json:"pool,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// String is one tried entry as "pool/host: reason".
+func (t SpawnStatusTried) String() string {
+	where := t.Pool
+	if t.Host != "" {
+		if where != "" {
+			where += "/"
+		}
+		where += t.Host
+	}
+	if where == "" {
+		where = "candidate"
+	}
+	if t.Reason == "" {
+		return where
+	}
+	return where + ": " + t.Reason
 }
 
 // line is the one line `spawn status` prints for the record.
@@ -580,6 +609,13 @@ func (r SpawnStatusRecord) line() string {
 	}
 	if r.Job != "" {
 		line += " job=" + r.Job
+	}
+	if len(r.Tried) != 0 {
+		parts := make([]string, 0, len(r.Tried))
+		for _, tried := range r.Tried {
+			parts = append(parts, tried.String())
+		}
+		line += " tried=[" + strings.Join(parts, "; ") + "]"
 	}
 	return line
 }
@@ -607,9 +643,10 @@ func (c *hubHTTP) ReadSpawnStatus(ctx context.Context, id string) (SpawnStatusRe
 		// may name a path on the executing node, and the wait already prints
 		// only these three.
 		Result struct {
-			RC     int    `json:"rc"`
-			Stage  string `json:"stage"`
-			Reason string `json:"reason"`
+			RC     int                `json:"rc"`
+			Stage  string             `json:"stage"`
+			Reason string             `json:"reason"`
+			Tried  []SpawnStatusTried `json:"tried"`
 		} `json:"result"`
 	}
 	if status != http.StatusOK || json.Unmarshal(raw, &answer) != nil || answer.Status == "" {
@@ -624,6 +661,7 @@ func (c *hubHTTP) ReadSpawnStatus(ctx context.Context, id string) (SpawnStatusRe
 		RC:          answer.Result.RC,
 		Stage:       answer.Result.Stage,
 		Job:         answer.Job,
+		Tried:       answer.Result.Tried,
 	}, nil
 }
 

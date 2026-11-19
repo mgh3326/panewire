@@ -699,8 +699,14 @@ func TestHubQuotaRefreshFairAdmissionAndDeduplication(t *testing.T) {
 		default:
 			return false
 		}
-	}) || extra.host != busy.host || string(extra.message["args"]) != `{"pool":"codex"}` {
+	}) || extra.host != busy.host {
 		t.Fatalf("the second pool did not run after its node became free: %+v", extra)
+	}
+	// The refresh names the account the request waits on (hk 5456); the pool
+	// is what this test is about.
+	var args map[string]string
+	if err := json.Unmarshal(extra.message["args"], &args); err != nil || args["pool"] != "codex" {
+		t.Fatalf("the second pool ran with args %s: %v", extra.message["args"], err)
 	}
 }
 

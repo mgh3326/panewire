@@ -65,13 +65,23 @@ func spawnExpiresAt(task hubSpawnTask) string {
 }
 
 // spawnGivenUpOutcome is the record of a request that reached its limit with
-// no attempt left that could have started.
-func spawnGivenUpOutcome(task hubSpawnTask, host string) hubSpawnOutcome {
+// no attempt left that could have started. It names the candidates the last
+// attempt tried and why each was dropped, or says that none was found, so the
+// requester reads what the budget was spent on and not only that it ran out
+// (hk 5456).
+func spawnGivenUpOutcome(task hubSpawnTask, host string, tried []hubSpawnTried) hubSpawnOutcome {
+	reason := fmt.Sprintf("expires_at %s passed after %d attempt(s)", spawnExpiresAt(task), task.Attempt)
+	if list := spawnTriedText(tried); list != "" {
+		reason += "; no candidate could take it (tried: " + list + ")"
+	} else {
+		reason += "; it never found a candidate that could take it"
+	}
 	return hubSpawnOutcome{
 		RC: 84, Stage: "queue", Host: host,
-		Reason: spawnOutcomeReason("expired", fmt.Sprintf("expires_at %s passed after %d attempt(s)", spawnExpiresAt(task), task.Attempt)),
+		Reason: spawnOutcomeReason("expired", reason),
 		Fix:    "Nothing was started. Submit the spawn again to queue a new request; --expires raises the limit (at most 24h).",
 		E6Arm:  task.Request.E6Arm,
+		Tried:  tried,
 	}
 }
 
@@ -121,7 +131,7 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 		}
 		return true, tx.Commit()
 	}
-	given := spawnGivenUpOutcome(task, outcome.Host)
+	given := spawnGivenUpOutcome(task, outcome.Host, outcome.Tried)
 	raw, err := json.Marshal(given)
 	if err != nil {
 		return false, err

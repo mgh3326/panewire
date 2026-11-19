@@ -58,6 +58,25 @@ not see fail. The request's refresh keys and the last attempt per key are
 stored in the hub database, so both survive a restart; a pass that ends without
 parking on a refresh clears the request's link.
 
+A refresh wait never exceeds what is left of the request (hk 5456). Each queued
+attempt's deadline is the measurement window or the attempt's remaining budget
+less a five-second use margin, whichever is smaller, so it cannot outlive the
+request that asked for it; a request with less budget than that does not start
+the wait at all. A key whose refresh finished without making the reading usable is not waited on
+again by the same request: the seat is dropped for that request and placement
+takes the next candidate, so an unusable reading costs one measurement pass and
+not the whole budget. A failed attempt is not settled that way — it is retried
+while the request stays pending, as before. The wait link keeps every key
+the attempt has asked, not only the last pass's, which is what makes the
+once-per-attempt rule survive the passes in between.
+
+The refresh names the account the request waits on (`account_key` on the
+`quota.refresh` node command). A node that measured another account answers
+`account_mismatch` instead of `refreshed`, so a measurement that could not
+change the waited-on reading is recorded as a failure with that reason rather
+than as a silent success. The account-key argument is optional; a node that
+does not receive one keeps the older behaviour.
+
 Refreshes coalesce by machine and pool. At most four run at once, with at most
 one per node; waiting keys are considered in arrival order while busy nodes are
 skipped. The configured `measure_timeout_s` (default 60 seconds, capped at 60)
@@ -155,7 +174,7 @@ deadline), the request is not over:
 | Attempt ends, start proven absent | Result |
 |---|---|
 | before `expires_at` | the same row, reservation and request id start attempt N+1 as `accepted`, with a fresh wait of 600 s (at most to `expires_at`). No notice. The ended attempt's placement record is sealed first, as a client's replay does. |
-| at or after `expires_at` | `given_up`: terminal, reason `expired: expires_at <t> passed after <n> attempt(s)`, rc 84, stage `queue`. One `SPAWN_FAILED` for the owner (and the submitting lane); the job id and task/role reservation are freed as for `retryable`. |
+| at or after `expires_at` | `given_up`: terminal, reason `expired: expires_at <t> passed after <n> attempt(s); no candidate could take it (tried: <pool/host: reason; …>)`, or `… ; it never found a candidate that could take it` when the attempt recorded none, rc 84, stage `queue`. The tried list names every candidate the attempt asked and why it was dropped (a pool whose refresh could not be used, a host whose quota refusal or readiness check dropped it), and `panewire spawn status` prints it as `tried=[…]` (hk 5456). One `SPAWN_FAILED` for the owner (and the submitting lane); the job id and task/role reservation are freed as for `retryable`. |
 
 A request whose start is **not** proven absent (`dispatching`, `reconciling`,
 `deadline_exceeded`) is never given up, before or after `expires_at`: the limit

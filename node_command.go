@@ -397,7 +397,8 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
 	optionalAck := op == nodeCommandPaneCloseStatus && nodeCloseStatusFields(raw)
 	optionalHandover := op == nodeCommandPaneCloseOp && nodeCommandHasFields(raw, append(append([]string(nil), names...), "handover"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover) {
+	optionalAccountKey := op == nodeCommandQuotaRefresh && nodeCommandHasFields(raw, append(append([]string(nil), names...), "account_key"))
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover && !optionalAccountKey) {
 		return nil, false
 	}
 	switch op {
@@ -500,7 +501,11 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		return args, valid
 	case nodeCommandQuotaRefresh:
 		var args nodeQuotaRefreshArgs
-		return args, decodeNodeCommandStrict(raw, &args) && nodeQuotaPoolPattern.MatchString(args.Pool)
+		valid := decodeNodeCommandStrict(raw, &args) && nodeQuotaPoolPattern.MatchString(args.Pool)
+		if args.AccountKey != "" {
+			valid = valid && fleet.ValidAccountKey(args.AccountKey)
+		}
+		return args, valid
 	case nodeCommandPRStatus:
 		var args nodePRStatusArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodePRStatusArgs(args)

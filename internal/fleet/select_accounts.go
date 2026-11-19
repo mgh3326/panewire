@@ -240,13 +240,38 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 		return acc
 	}
 	if sp.a.ScheduleQuotaRefresh != nil && sp.a.nativeQuotaPool(pool) {
+		// A request with no budget left for the measurement never starts the
+		// wait (hk 5456): the seat is dropped for this request instead, and
+		// placement takes the next candidate.
+		fits := quotaRefreshFits(ctx, sp.a.measureTimeout())
+		queued := false
 		for _, host := range ordered {
-			sp.a.scheduleQuotaRefresh(host.name, pool)
+			if !fits {
+				break
+			}
+			if !sp.a.refreshDue(ctx, host.name, pool) {
+				continue
+			}
+			sp.a.scheduleQuotaRefresh(host.name, pool, key)
+			queued = true
 		}
-		sp.refreshPending = true
-		sp.refreshed[key] = accountRefresh{measured: "pending", err: ErrQuotaRefreshPending}
+		if queued {
+			sp.refreshPending = true
+			sp.refreshed[key] = accountRefresh{measured: measurePending, err: ErrQuotaRefreshPending}
+			acc = SharedAccount{Key: key, Degraded: true}
+			sp.accounts[key] = acc
+			return acc
+		}
+		// Nothing can measure this account for this request: waiting would
+		// only spend the rest of its budget on a reading that cannot arrive
+		// in time, or one its last attempt already failed to make usable.
+		why := fmt.Sprintf("account %s on pool %s needs a shared quota refresh that cannot finish inside this request's remaining budget", key, pool)
+		if fits {
+			why = fmt.Sprintf("account %s on pool %s already waited on a shared quota refresh, and it finished without a usable reading", key, pool)
+		}
+		result := accountRefresh{measured: measureNotDue, host: firstHolder(ordered), err: fail(exitEvictionUnconfirmed, "%s", why)}
 		acc = SharedAccount{Key: key, Degraded: true}
-		sp.accounts[key] = acc
+		sp.refreshed[key], sp.accounts[key] = result, acc
 		return acc
 	}
 	refresh, cancel := context.WithTimeout(ctx, sp.a.placementTTL("measure_timeout_s", 60))
@@ -471,14 +496,11 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 					}
 				}
 				if c.reason == "" {
-					c.reason = p.policy.exhaustReason(v, c.risk)
+					c.reason = p.policy.exhaustReason(v, c.risk, cutoff)
 				}
 			}
 		} else {
-			c.reason = p.policy.exhaustReason(v, c.risk)
-			if c.reason == "" && v.Blocking != nil && *v.Blocking >= 100 {
-				c.reason = "window_exhausted"
-			}
+			c.reason = p.policy.exhaustReason(v, c.risk, p.poolCutoff(c.row.Pool))
 		}
 	}
 	if c.reason != "" {

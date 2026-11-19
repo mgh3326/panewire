@@ -51,7 +51,46 @@ type hubSpawnOutcome struct {
 	// last recorded failure (hub_quota_refresh.go). It is set only when the
 	// deadline expired before any node binding.
 	QuotaRefresh *hubSpawnRefreshOutcome `json:"quota_refresh,omitempty"`
-	StageMS      map[string]int64        `json:"stage_ms,omitempty"`
+	// Tried is what the attempt asked and why each candidate was dropped, so
+	// a request that ends without a candidate says what it tried instead of
+	// only that time ran out (hk 5456).
+	Tried   []hubSpawnTried  `json:"tried,omitempty"`
+	StageMS map[string]int64 `json:"stage_ms,omitempty"`
+}
+
+// hubSpawnTried is one candidate an attempt asked, and why it was dropped. The
+// pool is empty for a placement candidate the fleet layer reports without one.
+type hubSpawnTried struct {
+	Host   string `json:"host,omitempty"`
+	Pool   string `json:"pool,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// String is one list entry: pool and host, then the reason it was dropped.
+func (t hubSpawnTried) String() string {
+	where := t.Pool
+	if t.Host != "" {
+		if where != "" {
+			where += "/"
+		}
+		where += t.Host
+	}
+	if where == "" {
+		where = "candidate"
+	}
+	if t.Reason == "" {
+		return where
+	}
+	return where + ": " + t.Reason
+}
+
+// spawnTriedText is the tried list as one readable list, or "" when empty.
+func spawnTriedText(tried []hubSpawnTried) string {
+	parts := make([]string, 0, len(tried))
+	for _, t := range tried {
+		parts = append(parts, t.String())
+	}
+	return strings.Join(parts, "; ")
 }
 
 // hubSpawnRefreshWait is one shared quota refresh a request is parked on: the

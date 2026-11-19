@@ -277,7 +277,7 @@ func (s *laneInboxStore) releaseWaitingSpawn(parent context.Context, task hubSpa
 func (s *laneInboxStore) giveUpWaitingSpawn(parent context.Context, task hubSpawnTask, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	outcome := spawnGivenUpOutcome(task, spawnPinnedHost(task))
+	outcome := spawnGivenUpOutcome(task, spawnPinnedHost(task), task.Outcome.Tried)
 	raw, err := json.Marshal(outcome)
 	if err != nil {
 		return false, err

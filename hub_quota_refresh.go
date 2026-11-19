@@ -18,6 +18,10 @@ type hubQuotaRefreshKey struct{ machine, pool string }
 type hubQuotaRefreshWork struct {
 	key      hubQuotaRefreshKey
 	deadline time.Time
+	// accountKey is the account the request that queued this attempt waits
+	// on. The node reports the account it measured so a refresh of another
+	// account is never recorded as the one the request needed (hk 5456).
+	accountKey string
 }
 type hubQuotaRefreshResult struct {
 	key     hubQuotaRefreshKey
@@ -43,7 +47,7 @@ type hubQuotaRefreshScheduler struct {
 	completedCount atomic.Uint64
 }
 
-func (h *HubServer) scheduleQuotaRefresh(machine, pool string, timeout time.Duration) {
+func (h *HubServer) scheduleQuotaRefresh(machine, pool, accountKey string, timeout time.Duration) {
 	q := &h.quotaRefresh
 	key := hubQuotaRefreshKey{machine: machine, pool: pool}
 	now := time.Now()
@@ -75,15 +79,21 @@ func (h *HubServer) scheduleQuotaRefresh(machine, pool string, timeout time.Dura
 	}
 	if !q.keys[key] && !now.Before(q.completed[key]) {
 		q.keys[key] = true
-		q.queue = append(q.queue, hubQuotaRefreshWork{key: key, deadline: now.Add(timeout)})
+		q.queue = append(q.queue, hubQuotaRefreshWork{key: key, deadline: now.Add(timeout), accountKey: accountKey})
 	} else if q.keys[key] {
 		// An expired queued attempt retains its position, but it cannot send
 		// until placement asks for that key again with a fresh budget.
 		for i := range q.queue {
-			if q.queue[i].key == key && q.queue[i].deadline.IsZero() {
-				q.queue[i].deadline = now.Add(timeout)
-				break
+			if q.queue[i].key != key {
+				continue
 			}
+			if q.queue[i].accountKey == "" {
+				q.queue[i].accountKey = accountKey
+			}
+			if q.queue[i].deadline.IsZero() {
+				q.queue[i].deadline = now.Add(timeout)
+			}
+			break
 		}
 	}
 	q.mu.Unlock()
@@ -172,7 +182,7 @@ func (h *HubServer) runQuotaRefreshes(ctx context.Context) {
 			go func() {
 				refreshCtx, cancel := context.WithDeadline(ctx, work.deadline)
 				defer cancel()
-				failure := h.refreshQuotaFromNode(refreshCtx, work.key)
+				failure := h.refreshQuotaFromNode(refreshCtx, work.key, work.accountKey)
 				done <- hubQuotaRefreshResult{key: work.key, failure: failure}
 			}()
 		}
@@ -240,8 +250,15 @@ func (h *HubServer) recordQuotaRefreshOutcome(result hubQuotaRefreshResult) {
 	}
 }
 
-func (h *HubServer) refreshQuotaFromNode(ctx context.Context, key hubQuotaRefreshKey) string {
-	args, _ := json.Marshal(map[string]string{"pool": key.pool})
+// refreshQuotaFromNode asks one node to measure the pool. accountKey names the
+// account the requesting attempt waits on, so the node can report when it
+// measured another one instead of the reading the request needs (hk 5456).
+func (h *HubServer) refreshQuotaFromNode(ctx context.Context, key hubQuotaRefreshKey, accountKey string) string {
+	request := map[string]string{"pool": key.pool}
+	if accountKey != "" {
+		request["account_key"] = accountKey
+	}
+	args, _ := json.Marshal(request)
 	pending, id, _, sent := h.sendNodeCommandWithContext(ctx, key.machine, nodeCommandQuotaRefresh, args)
 	if !sent {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -255,10 +272,16 @@ func (h *HubServer) refreshQuotaFromNode(ctx context.Context, key hubQuotaRefres
 	defer h.forgetNodeCommand(id)
 	select {
 	case result := <-pending.done:
-		if result.Error == "node_lost" {
+		switch result.Error {
+		case "":
+		case "node_lost":
 			return "node_lost"
-		}
-		if result.Error != "" {
+		case "account_mismatch":
+			// The node measured a different account: this attempt did not
+			// refresh the reading the request waits on, so it is a failure
+			// and not a silent success (hk 5456).
+			return "account_mismatch"
+		default:
 			return "refresh_failed"
 		}
 	case <-ctx.Done():

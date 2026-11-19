@@ -279,6 +279,10 @@ func (in admissionInputs) gradePools(grade string) []string {
 	return pools
 }
 
+// ValidAccountKey reports whether key has the pool:fp shape of a shared quota
+// account key, the shape the node refresh wire carries.
+func ValidAccountKey(key string) bool { return validAccountKey(key) }
+
 func validAccountKey(key string) bool {
 	pool, fp, ok := strings.Cut(key, ":")
 	return ok && validID(pool) && accountFP.MatchString(fp)
