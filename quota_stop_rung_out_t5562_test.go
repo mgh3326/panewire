@@ -3,6 +3,8 @@ package panewire
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -160,5 +162,43 @@ func TestQuotaStopKeepsNothingOutForAScreenWithoutAStop_T5562(t *testing.T) {
 	}
 	if len(rig.recordedStops()) != 0 {
 		t.Fatal("a screen without a limit was recorded")
+	}
+}
+
+// The stall examination reaches the same recording step as the idle-wake
+// observation: an implementer whose stop it finds first still holds the band at
+// the hub before the policy decides to wait (hk 5562 review).
+func TestStallFoundQuotaStopAlsoHoldsTheBand_T5562(t *testing.T) {
+	rig := newIdleWakeTestRig(t, time.Second)
+	q, err := newQuotaStopManager(rig.store, rig.manager.inboxRoot, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := "## Values\n- default_expected: 1d\n- urgent_priorities: [1, 2]\n- max_waits: 1\n- resume_text: \"continue\"\n"
+	q.hk = quotaStopHKFixture(quotaPolicyAnswer(policy), `{"tasks":[{"priority":3,"expected":"6h","refs":{"job_id":"job-stall"}}]}`, nil)
+	got := make(chan string, 2)
+	q.hold = func(pool string, until time.Time) { got <- pool }
+	now := rig.now
+	c := idleWakeCandidate{EventID: "stall:direct", PaneID: "workspace:pane-9", Label: "worker-stall"}
+	job := HubActiveJob{JobID: "job-stall", AgentLabel: "worker-stall", OwnerLane: "owner", Role: "implementer", StartedAt: now.Add(-time.Hour).UTC().Format(time.RFC3339)}
+	if err := q.actOnQuotaStop(context.Background(), c, job, "", "", quotastop.Stop{Pool: "claude", Reset: now.Add(time.Hour)}, "stall-examination", now); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case pool := <-got:
+		if pool != "claude" {
+			t.Fatalf("held %q", pool)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a stop the stall examination found did not hold its band")
+	}
+	// A repeat of the same wake holds nothing more; a credit rejection holds nothing.
+	_ = q.actOnQuotaStop(context.Background(), c, job, "", "", quotastop.Stop{Pool: "claude", Reset: now.Add(time.Hour)}, "stall-examination", now)
+	credit := idleWakeCandidate{EventID: "stall:credit", PaneID: "workspace:pane-9", Label: "worker-stall"}
+	_ = q.actOnQuotaStop(context.Background(), credit, job, "", "", quotastop.Stop{Pool: "anthropic-api", CreditExhaustedAt: now}, "stall-examination", now)
+	select {
+	case pool := <-got:
+		t.Fatalf("held %q again", pool)
+	case <-time.After(200 * time.Millisecond): // proves nothing more happens
 	}
 }

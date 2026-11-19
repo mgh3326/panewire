@@ -174,8 +174,9 @@ type FleetStateHold struct {
 	Until time.Time `json:"until,omitzero"`
 }
 
-// fleetStateHoldMax bounds how far ahead a hold may reach.
-const fleetStateHoldMax = 48 * time.Hour
+// fleetStateHoldMax bounds how far ahead of the hub's receive time a hold may
+// reach: a provider's weekly window plus a calendar and clock margin.
+const fleetStateHoldMax = 8 * 24 * time.Hour
 
 // decodeFleetStatePublish validates a node's state event without knowing the
 // node: the host binding is checked by the caller, which knows the machine.
@@ -211,7 +212,7 @@ func validFleetStateHold(publish FleetStatePublish) bool {
 		return false
 	}
 	until := publish.Hold.Until
-	return until.IsZero() || until.After(publish.MeasuredAt) && until.Sub(publish.MeasuredAt) <= fleetStateHoldMax
+	return until.IsZero() || until.After(publish.MeasuredAt)
 }
 
 func validFleetStateQuota(key string, quota *FleetStateQuota) bool {
@@ -456,8 +457,18 @@ func (h *HubServer) publishFleetStateFromNode(machineID string, publish FleetSta
 	}
 	if publish.Kind == fleetStateKindHold {
 		reason := "quota_stop pool=" + publish.Key
-		if !publish.Hold.Until.IsZero() {
-			reason += " reset_at=" + publish.Hold.Until.UTC().Format(time.RFC3339Nano)
+		if until := publish.Hold.Until; !until.IsZero() {
+			// A known reset is judged on the hub's clock, not the node's: one
+			// already past holds nothing (it is not an unreadable reset), and
+			// one beyond a provider's longest window is refused.
+			if !until.After(received) {
+				return true
+			}
+			if until.Sub(received) > fleetStateHoldMax {
+				h.logger.Warn("fleet state hold beyond its horizon refused", "machine", machineID, "band", publish.Key)
+				return false
+			}
+			reason += " reset_at=" + until.UTC().Format(time.RFC3339Nano)
 		}
 		h.observePoolCooling(reason, received)
 		return true

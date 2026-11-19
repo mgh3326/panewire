@@ -56,6 +56,9 @@ func parseFleetQuotaPools(raw string) ([]string, bool) {
 func (client *HubClient) resyncFleetState() {
 	client.fleetStateMu.Lock()
 	client.fleetQuotaResync = true
+	for _, hold := range client.poolHolds {
+		hold.pending = true
+	}
 	client.fleetStateMu.Unlock()
 }
 
@@ -328,16 +331,103 @@ func (client *HubClient) fleetQuotaConfirmedAt(ctx context.Context, key string, 
 	return o.ConfirmedAt.UTC()
 }
 
+// poolHold is a hold the node owes the hub: the band's absolute deadline, when
+// it was last sent, and whether the last send failed or a reconnect asks for it
+// again.
+type poolHold struct {
+	until   time.Time
+	sentAt  time.Time
+	pending bool
+}
+
+const (
+	// holdUnknownResetWindow holds a band whose stop showed no readable reset,
+	// anchored at its first observation; a retry never renews it.
+	holdUnknownResetWindow = 5 * time.Minute
+	// holdResendEvery resends a standing hold, so one the hub lost (a socket
+	// write that failed, a restart) is back within this bound.
+	holdResendEvery = 5 * time.Minute
+	holdRetryEvery  = 5 * time.Second
+)
+
 // PublishPoolHold asks the hub to keep new placements off pool's band until
-// until (zero: the stop's reset was unreadable), from the first sighting of a
-// provider-limit stop (hk 5562). It is a placement-only hold: the hub sets its
-// pool cooling and runs no exhausted-pool sweep, so it never closes or hands
-// over a job. It reports whether the message was queued for the hub.
+// until, from the first sighting of a provider-limit stop (hk 5562). It is a
+// placement-only hold: the hub sets its pool cooling and runs no exhausted-pool
+// sweep, so it never closes or hands over a job. The hold is kept until its
+// deadline and sent again until then (runPoolHolds): a full queue, a failed
+// write or a reconnect does not lose it. A known reset that is already past
+// (a banner left on an idle pane) holds nothing; only a reset that could not be
+// read (zero until) gets the fixed window, from the first observation. It
+// reports whether a hold stands for the band.
 func (client *HubClient) PublishPoolHold(pool string, until time.Time) bool {
 	now := client.nowUTC().Truncate(time.Millisecond)
-	hold := &FleetStateHold{}
-	if until.After(now) {
-		hold.Until = until.UTC().Truncate(time.Millisecond)
+	deadline := until.UTC().Truncate(time.Millisecond)
+	if until.IsZero() {
+		deadline = now.Add(holdUnknownResetWindow)
+	} else if !deadline.After(now) {
+		return false
 	}
-	return client.Publish("state", FleetStatePublish{Kind: fleetStateKindHold, Key: fleet.BandKey(pool), MeasuredAt: now, Hold: hold})
+	band := fleet.BandKey(pool)
+	client.fleetStateMu.Lock()
+	if client.poolHolds == nil {
+		client.poolHolds = map[string]*poolHold{}
+	}
+	hold := client.poolHolds[band]
+	if hold == nil || !hold.until.After(now) {
+		hold = &poolHold{}
+		client.poolHolds[band] = hold
+	}
+	if until.IsZero() && hold.until.After(now) {
+		// An unreadable reset never shortens or renews a standing hold.
+		deadline = hold.until
+	}
+	if deadline.After(hold.until) {
+		hold.until, hold.pending = deadline, true
+	}
+	client.fleetStateMu.Unlock()
+	client.sendPoolHolds(now)
+	return true
+}
+
+// sendPoolHolds sends every hold that is pending (new, failed, asked again by a
+// reconnect) or due for its periodic resend, and forgets the expired ones.
+func (client *HubClient) sendPoolHolds(now time.Time) {
+	client.fleetStateMu.Lock()
+	type send struct {
+		band  string
+		until time.Time
+	}
+	var due []send
+	for band, hold := range client.poolHolds {
+		switch {
+		case !hold.until.After(now):
+			delete(client.poolHolds, band)
+		case hold.pending && now.Sub(hold.sentAt) >= holdRetryEvery || hold.pending && hold.sentAt.IsZero() || now.Sub(hold.sentAt) >= holdResendEvery:
+			due = append(due, send{band, hold.until})
+		}
+	}
+	client.fleetStateMu.Unlock()
+	for _, d := range due {
+		ok := client.Publish("state", FleetStatePublish{Kind: fleetStateKindHold, Key: d.band, MeasuredAt: now, Hold: &FleetStateHold{Until: d.until}})
+		client.fleetStateMu.Lock()
+		if hold := client.poolHolds[d.band]; hold != nil {
+			hold.sentAt, hold.pending = now, !ok
+		}
+		client.fleetStateMu.Unlock()
+	}
+}
+
+// runPoolHolds is the daemon-lifetime worker behind PublishPoolHold: it sends
+// the holds a failed send or a reconnect left pending, and resends standing ones.
+func (client *HubClient) runPoolHolds(ctx context.Context) {
+	ticker := time.NewTicker(holdRetryEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			client.sendPoolHolds(client.nowUTC().Truncate(time.Millisecond))
+		}
+	}
 }

@@ -515,13 +515,6 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	if !stop.CreditExhaustedAt.IsZero() {
 		return
 	}
-	// A provider limit is a fact about the account, not the pane: keep the rung
-	// out of new placements until its reset even when this stop is only
-	// observed (a wait, a hold), not at the job's end (hk 5562). The local
-	// record is written before the observation returns, since the wake is
-	// reserved and never read again; only the publication, which can take a
-	// measurement's time, runs beside it.
-	q.keepRungOut(ctx, job.JobID, stop, now)
 	// recordDecisionFor logs a failed write itself; there is nothing more to do here.
 	_ = q.actOnQuotaStop(ctx, c, job, inherited, taskID, stop, basis, now)
 	return false
@@ -726,6 +719,16 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 	}
 	if decided {
 		return nil
+	}
+	// A provider limit is a fact about the account, not the pane: keep the rung
+	// out of new placements until its reset whatever this stop is decided to be
+	// (a wait, a hold, a shadow observation), and whichever path found it: the
+	// idle-wake observation and the stall examination both come here, after the
+	// wake is reserved and deduplicated (hk 5562). The local record is written
+	// before this returns, since the wake is never read again; only the
+	// publication, which can take a measurement's time, runs beside it.
+	if stop.CreditExhaustedAt.IsZero() {
+		q.keepRungOut(ctx, job.JobID, stop, now)
 	}
 	lookupCtx, lookupCancel := context.WithTimeout(ctx, quotaStopLookupBudget)
 	defer lookupCancel()
