@@ -3,6 +3,7 @@ package panewire
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"io/fs"
@@ -220,18 +221,22 @@ func seedCopyFixture(t *testing.T, db *sql.DB, names []string) {
 	t.Helper()
 	ctx := context.Background()
 	for _, name := range names {
-		rows, err := db.QueryContext(ctx, `SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? ORDER BY ORDINAL_POSITION`, name)
+		rows, err := db.QueryContext(ctx, `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? ORDER BY ORDINAL_POSITION`, name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var cols, types []string
+		var emptyOK []bool
 		for rows.Next() {
-			var col, typ string
-			if err := rows.Scan(&col, &typ); err != nil {
+			var col, typ, nullable string
+			if err := rows.Scan(&col, &typ, &nullable); err != nil {
 				t.Fatal(err)
 			}
 			cols = append(cols, col)
 			types = append(types, typ)
+			// Second rows carry "" in every NOT NULL text column, the value
+			// that a nil-for-empty copy turned into NULL (hk 5493).
+			emptyOK = append(emptyOK, nullable == "NO" && (strings.Contains(typ, "char") || strings.HasSuffix(typ, "text")))
 		}
 		if err := rows.Err(); err != nil {
 			t.Fatal(err)
@@ -266,6 +271,11 @@ func seedCopyFixture(t *testing.T, db *sql.DB, names []string) {
 					} else {
 						vals[i] = []byte("key-one")
 					}
+				case col == "cause" && name == "lane_inbox" && n == 1:
+					// The one real SQL NULL: cause is the nullable column.
+					vals[i] = nil
+				case emptyOK[i] && n == 2:
+					vals[i] = ""
 				case strings.Contains(types[i], "int"):
 					vals[i] = n
 				default:
@@ -361,6 +371,47 @@ func TestHubStoreCopySQLiteReadOnly(t *testing.T) {
 	defer tx.Rollback()
 	if _, err = tx.Exec(`INSERT INTO sample VALUES(1)`); err == nil {
 		t.Fatal("source allowed a write")
+	}
+}
+
+// TestHubStoreCopyEmptyStaysNonNULL covers the nil-for-empty loss that broke the
+// MySQL-to-Postgres copy (hk 5493): an empty scanned value must stay a non-nil
+// empty slice, and a real NULL must stay NULL. Restoring
+// append([]byte(nil), b...) makes the empty case come back nil.
+func TestHubStoreCopyEmptyStaysNonNULL(t *testing.T) {
+	empty := storeCopyValue([]byte{})
+	if b, ok := empty.([]byte); !ok || b == nil || len(b) != 0 {
+		t.Fatalf("empty value copied to %#v, want a non-nil empty []byte", empty)
+	}
+	if storeCopyValue(nil) != nil {
+		t.Fatal("a real NULL stopped being an untyped nil")
+	}
+	src := []byte("kept")
+	copied := storeCopyValue(src).([]byte)
+	src[0] = 'X'
+	if string(copied) != "kept" {
+		t.Fatal("copy shares its backing array with the scanned buffer")
+	}
+}
+
+// TestHubStoreCopyChecksumSeparatesNULLFromEmpty checks that the row digest
+// tells NULL, typed nil []byte and an empty value apart. A typed nil is what
+// pgx writes as NULL, so it must not hash like an empty string.
+func TestHubStoreCopyChecksumSeparatesNULLFromEmpty(t *testing.T) {
+	table := storeCopyTable{"sample", "id"}
+	cols := []string{"value"}
+	target := &storeCopyDB{dialect: dialectSQLite, sqlite: true}
+	sum := func(v any) string {
+		h := sha256.New()
+		storeCopyHashRow(h, []any{v}, table, cols, target)
+		return fmt.Sprintf("%x", h.Sum(nil))
+	}
+	null, typedNil, empty := sum(nil), sum([]byte(nil)), sum([]byte{})
+	if null != typedNil {
+		t.Fatal("untyped NULL and typed nil []byte hash differently")
+	}
+	if null == empty {
+		t.Fatal("NULL and an empty value hash the same")
 	}
 }
 
