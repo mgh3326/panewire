@@ -555,6 +555,12 @@ func (e hubInboxEvent) eventTimeAt(modTime time.Time, modTimeOK bool) time.Time 
 	return time.Time{}
 }
 
+// hubFeatureFinalLost is listed in hub.features by a hub that settles a job on
+// a final job.lost (hub_jobs.go observeJobLost, hk 5351). A node sends the
+// final and ended_at fields only to such a hub; any other hub takes the
+// pre-PR payload, whose decoder would otherwise reject the whole record.
+const hubFeatureFinalLost = "final_lost"
+
 // hubJobEndKind reports whether a job event kind ends the job's run. Besides
 // the completion and the revocation, panewire writes these when a job ends
 // without a completion: the quota release closes every run (done, failed

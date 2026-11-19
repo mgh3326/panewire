@@ -59,11 +59,11 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 19 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 20 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" && name != "final" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" && name != "final" && name != "ended_at" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -81,6 +81,17 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 	// (job.lost). Absent it is false, which keeps an older node's end unsettled.
 	if raw, present := fields["final"]; present && json.Unmarshal(raw, &completion.Final) != nil {
 		return hubJobEventPayload{}, nil, false
+	}
+	if raw, present := fields["ended_at"]; present {
+		var endedAt string
+		if json.Unmarshal(raw, &endedAt) != nil {
+			return hubJobEventPayload{}, nil, false
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, endedAt)
+		if err != nil {
+			return hubJobEventPayload{}, nil, false
+		}
+		completion.EndedAt = parsed
 	}
 	// agent_label is the claim metadata a node carries on the terminal record so
 	// the hub can late-register a job it never saw active. It is descriptive
@@ -136,7 +147,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 20 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 21 {
 		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {

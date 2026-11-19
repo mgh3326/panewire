@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +213,9 @@ func TestJobLostFinalFlagCrossesTheRelay(t *testing.T) {
 	if !final.Final {
 		t.Fatal("the node's final flag did not reach the hub")
 	}
+	if final.EndedAt.IsZero() {
+		t.Fatal("the loss time did not reach the hub")
+	}
 	older := relay(t, `{"kind":"job.lost","payload":{"reason":"hub_close","owner_lane":"lane-a","pane_id":"w2:p3"}}`)
 	if older.Final {
 		t.Fatal("an older node's job.lost read as final")
@@ -253,10 +257,24 @@ func TestJobLostBeforeTheHubKnowsTheJobSettlesIt(t *testing.T) {
 // still releases the role once the pool action ends, even with hk unreadable
 // (mergewake: LostSettled must survive a restart).
 func TestJobLostSettleSurvivesRestartWhileActionPending(t *testing.T) {
+	for _, seeded := range []bool{true, false} {
+		t.Run(map[bool]string{true: "seeded", false: "unseeded"}[seeded], func(t *testing.T) {
+			t5351RestartSettle(t, seeded)
+		})
+	}
+}
+
+// t5351RestartSettle settles a job with a pending pool action, restarts the hub
+// (the in-memory record is dropped), and checks the respawn is admitted with hk
+// unreadable. seeded says whether the owner assignment was on disk before the
+// loss; an unseeded job still records its lost end (mergewake: no assignment).
+func t5351RestartSettle(t *testing.T, seeded bool) {
 	hub, server, node, jobs, _ := t5351Settle(t, "lost")
 	hub.ownerTransferDir = t.TempDir()
-	if err := hub.saveOwnerAssignment(hubOwnerAssignment{Job: "test-job", Node: "machine-a", Epoch: 1}, false); err != nil {
-		t.Fatal(err)
+	if seeded {
+		if err := hub.saveOwnerAssignment(hubOwnerAssignment{Job: "test-job", Node: "machine-a", Epoch: 1}, false); err != nil {
+			t.Fatal(err)
+		}
 	}
 	store := hub.inbox.store
 	if _, err := store.db.Exec(store.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,0)`), "pa-5351-restart", "test-job", "machine-a", 1, poolActionPending, "{}"); err != nil {
@@ -279,5 +297,82 @@ func TestJobLostSettleSurvivesRestartWhileActionPending(t *testing.T) {
 	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
 	if result := t14Result(t, response); result.status != http.StatusAccepted {
 		t.Fatalf("respawn after restart: status=%d body=%s", result.status, result.body)
+	}
+}
+
+// A replayed final job.lost is dated by the loss, not by its receipt: a lane
+// route the hub wrote after the loss on the same pane survives, and one written
+// before it is released (mergewake: release cutoff must be the loss time).
+func TestJobLostReplayKeepsALaneRouteWrittenAfterTheLoss(t *testing.T) {
+	hub, _, node, _, _ := t5351Settle(t, "lost")
+	now := time.Now()
+	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-old":{"machine":"machine-a","pane":"`+roleHeldPane+`"},"lane-new":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
+	hub.laneLife.noteWrite("lane-old", now.Add(-2*time.Hour))
+	hub.laneLife.noteWrite("lane-new", now.Add(-30*time.Minute))
+	payload := t5351FinalLost(1)
+	payload["ended_at"] = now.Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	t5351SendJobLost(t, node, payload)
+	eventually(t, 2*time.Second, "the replayed loss releases the old route", func() bool {
+		contents, err := os.ReadFile(hub.reportRelayPath)
+		return err == nil && !strings.Contains(string(contents), `"lane-old"`)
+	})
+	contents, err := os.ReadFile(hub.reportRelayPath)
+	if err != nil || !strings.Contains(string(contents), `"lane-new"`) {
+		t.Fatalf("a route written after the loss was released: %s", contents)
+	}
+}
+
+// A final job.lost is held until the hub's features are known, like a
+// lane.event, so it is never written before the hub says whether it takes the
+// final fields (mergewake: gate final on hub support).
+func TestFinalLostIsHeldUntilTheHubFeaturesAreKnown(t *testing.T) {
+	final := hubClientEvent{Kind: "job.lost", Payload: json.RawMessage(`{"job_id":"test-job","final":true}`), finalLost: true}
+	plain := hubClientEvent{Kind: "job.completed", Payload: json.RawMessage(`{"job_id":"other"}`)}
+	write, held := splitRelayBurst([]hubClientEvent{final, plain}, false)
+	if len(held) != 1 || held[0].Kind != "job.lost" || len(write) != 1 || write[0].Kind != "job.completed" {
+		t.Fatalf("unknown features: write=%+v held=%+v", write, held)
+	}
+	write, held = splitRelayBurst([]hubClientEvent{final, plain}, true)
+	if len(held) != 0 || len(write) != 2 {
+		t.Fatalf("known features: write=%d held=%d", len(write), len(held))
+	}
+}
+
+// The final and ended_at fields go only to a hub that advertised
+// hubFeatureFinalLost; any other hub takes the pre-PR payload.
+func TestFinalLostKeepsItsFieldsOnlyForAHubThatAdvertisesIt(t *testing.T) {
+	event := hubClientEvent{Kind: "job.lost", Payload: json.RawMessage(`{"job_id":"test-job","epoch":1,"reason":"hub_close","final":true,"ended_at":"2026-11-19T02:00:00Z"}`), finalLost: true}
+	wire := func(peer *hubClientConnection) string {
+		t.Helper()
+		raw, err := json.Marshal(peer.relayWire(event))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return string(envelope.Payload)
+	}
+	old := wire(&hubClientConnection{})
+	if strings.Contains(old, `"final"`) || strings.Contains(old, `"ended_at"`) {
+		t.Fatalf("a hub without final_lost got the final fields: %s", old)
+	}
+	if _, valid := decodeHubJobEscalationPayload([]byte(old)); !valid {
+		t.Fatalf("the pre-PR payload is not accepted by the decoder: %s", old)
+	}
+	peer := &hubClientConnection{}
+	peer.acceptsFinalLost.Store(true)
+	if got := wire(peer); !strings.Contains(got, `"final":true`) || !strings.Contains(got, `"ended_at"`) {
+		t.Fatalf("a hub with final_lost lost the final fields: %s", got)
+	}
+}
+
+// The hub names final_lost in hub.features, so a node sends the final fields.
+func TestHubAdvertisesFinalLost(t *testing.T) {
+	if !slices.Contains(hubFeaturesFrame().Features, hubFeatureFinalLost) {
+		t.Fatalf("hub.features=%v lacks %s", hubFeaturesFrame().Features, hubFeatureFinalLost)
 	}
 }

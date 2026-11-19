@@ -98,6 +98,10 @@ type hubClientEvent struct {
 	// senderPane is a lane.event's emitting pane, added to the payload only on
 	// a connection whose hub accepts it (relayWire).
 	senderPane string
+	// finalLost is a job.lost whose hk record is lost: it is held until the
+	// hub's features are known, and its final fields are dropped for a hub
+	// that did not advertise hubFeatureFinalLost (relayWire).
+	finalLost bool
 	// sinkRecord is a lane.event whose producer named a sink (emit --sink). Its
 	// text bound is the sink bound, not the typed-line one (relayWire).
 	sinkRecord bool
@@ -740,7 +744,10 @@ type hubClientConnection struct {
 	acceptsCheckoutPull atomic.Bool
 	// acceptsEndedPanes is the same for hubFeatureEndedPanes
 	// (node_pane_sweep.go): the heartbeat may carry the sweep's open-pane count.
-	acceptsEndedPanes  atomic.Bool
+	acceptsEndedPanes atomic.Bool
+	// acceptsFinalLost is the same for hubFeatureFinalLost (hub_jobs_client.go):
+	// the final and ended_at fields of a job.lost go only to such a hub.
+	acceptsFinalLost   atomic.Bool
 	acceptsLaunchProof atomic.Bool
 	// acceptsCheckoutSparse is the same for hubFeatureCheckoutSparse
 	// (checkout_sparse.go): the spawn result may carry checkout_mode.
@@ -2251,6 +2258,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
 				peer.acceptsEndedPanes.Store(slices.Contains(message.Features, hubFeatureEndedPanes))
+				peer.acceptsFinalLost.Store(slices.Contains(message.Features, hubFeatureFinalLost))
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				peer.acceptsCheckoutSparse.Store(slices.Contains(message.Features, hubFeatureCheckoutSparse))
 				peer.acceptsCheckoutBranch.Store(slices.Contains(message.Features, hubFeatureCheckoutBranch))
@@ -2787,6 +2795,15 @@ func relayEventWireForm(job hubScannedRelayEvent) hubScannedRelayEvent {
 	return job
 }
 
+// finalEndedAt is the loss time a final job.lost carries on the wire, RFC 3339
+// with nanoseconds; empty for any other event or one with no time.
+func finalEndedAt(job hubScannedRelayEvent) string {
+	if !job.Final || job.EventTime.IsZero() {
+		return ""
+	}
+	return job.EventTime.UTC().Format(time.RFC3339Nano)
+}
+
 // relayEventOutboxKeyFor keys the outbox by exactly what leaves the node. A
 // job.completed payload carries no reason field, so the hub can only ever echo
 // an empty reason for it; keying such a row by the record's own reason is a
@@ -2885,13 +2902,14 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			ReportLastLine string `json:"report_last_line,omitempty"`
 			Reason         string `json:"reason"`
 			Final          bool   `json:"final,omitempty"`
+			EndedAt        string `json:"ended_at,omitempty"`
 			Question       string `json:"question,omitempty"`
 			PR             string `json:"pr,omitempty"`
 			Head           string `json:"head,omitempty"`
 			PaneID         string `json:"pane_id,omitempty"`
 			EventID        string `json:"event_id,omitempty"`
 			Replay         bool   `json:"replay,omitempty"`
-		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Final, job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
+		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Final, finalEndedAt(job), job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
 	}
 	if job.Late && job.Kind == "job.completed" {
 		var fields map[string]json.RawMessage
@@ -2903,7 +2921,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	payload = relayPayloadNotifyType(payload, job.NotifyType)
 	payload = relayPayloadOptionalString(payload, "cause", job.Cause)
 	payload = relayPayloadOptionalString(payload, "head", job.Head)
-	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
+	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, finalLost: job.Kind == "job.lost" && job.Final}, true
 }
 
 // suppressPreMigrationRelayEvent retires event files that predate this node's

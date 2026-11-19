@@ -237,8 +237,20 @@ func (h *HubServer) endOwnerAssignmentAs(job, node string, epoch uint64, lost bo
 		return nil
 	}
 	assignment, found, err := h.ownerAssignment(job)
-	if err != nil || !found || assignment.Node != node || assignment.Epoch != epoch {
+	if err != nil {
 		return err
+	}
+	if !found {
+		if !lost {
+			return nil
+		}
+		// A final loss the hub accepted with no assignment on disk (a job it
+		// learned from a heartbeat before the seed landed) still records its
+		// end, so the lost end outlives a restart (hk 5351).
+		return h.saveOwnerAssignment(hubOwnerAssignment{Job: job, Node: node, Epoch: epoch, Ended: true, Lost: true}, false)
+	}
+	if assignment.Node != node || assignment.Epoch != epoch {
+		return nil
 	}
 	if assignment.Ended && (assignment.Lost || !lost) {
 		return nil

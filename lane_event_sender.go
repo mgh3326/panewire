@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 )
 
@@ -40,13 +41,14 @@ func (peer *hubClientConnection) laneEventsKnown(acked bool) bool {
 }
 
 // splitRelayBurst divides a burst into the events to write now and the
-// lane.event records to hold until the hub's feature state is known.
+// lane.event and final job.lost records to hold until the hub's feature state
+// is known: a final loss needs hubFeatureFinalLost to be sent whole.
 func splitRelayBurst(events []hubClientEvent, laneKnown bool) (write, held []hubClientEvent) {
 	if laneKnown {
 		return events, nil
 	}
 	for _, event := range events {
-		if event.Kind == "lane.event" {
+		if event.Kind == "lane.event" || event.finalLost {
 			held = append(held, event)
 			continue
 		}
@@ -74,6 +76,11 @@ func (peer *hubClientConnection) relayWire(event hubClientEvent) any {
 	// over its own bound, so the cut form is sent to it (lane_event_long.go).
 	if event.Kind == "lane.event" && !peer.acceptsLaneEventLong.Load() {
 		event.Payload = laneEventPayloadForOldHub(event.Payload, event.sinkRecord)
+	}
+	// A hub without hubFeatureFinalLost takes the job.lost without its final
+	// and ended_at fields, as an older node sends it (hk 5351).
+	if event.finalLost && !peer.acceptsFinalLost.Load() {
+		event.Payload = finalLostPayloadForOldHub(event.Payload)
 	}
 	return hubClientWireEvent(event)
 }
@@ -107,4 +114,21 @@ func (h *HubServer) laneEventFromWorker(machine, pane, lane string) bool {
 		}
 	}
 	return false
+}
+
+// finalLostPayloadForOldHub is a final job.lost without its final and ended_at
+// fields: the pre-PR payload a hub that did not advertise hubFeatureFinalLost
+// decodes. An unreadable payload is sent as it is.
+func finalLostPayloadForOldHub(payload json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return payload
+	}
+	delete(fields, "final")
+	delete(fields, "ended_at")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return payload
+	}
+	return out
 }
