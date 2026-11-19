@@ -31,3 +31,24 @@ if ! grep -q 'replay: id=' "$probe_tmp/result.log"; then
   exit 1
 fi
 echo 'original-only lookup mutant was caught by digest replay'
+# A lookup that checks only the original form must fail after replay succeeds.
+git -C "$probe_dir" restore lane_inbox_store.go
+python3 - "$probe_dir/lane_inbox_store.go" <<'PY'
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+old = 'if s.dialect == dialectPostgres && len(key) > mysqlEventKeyMax {'
+assert source.count(old) == 2
+path.write_text(source.replace(old, 'if false && s.dialect == dialectPostgres && len(key) > mysqlEventKeyMax {', 1))
+PY
+if (cd "$probe_dir" && go test -count=1 -run '^TestLaneInboxStorePostgresCopyBackLongKey/digest$' .) >"$probe_tmp/result.log" 2>&1; then
+  echo 'original-only accessor mutant unexpectedly passed'
+  exit 1
+fi
+if ! grep -q 'holds: false' "$probe_tmp/result.log"; then
+  cat "$probe_tmp/result.log"
+  echo 'mutant did not fail on the digest accessor assertion'
+  exit 1
+fi
+echo 'original-only accessor mutant was caught by holds'
