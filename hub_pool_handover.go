@@ -489,7 +489,7 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 			// between the claim and the flag the replay finds the same row.
 			// The old job's task role passes to the successor in the same
 			// transaction, so no other spawn takes the task between them.
-			if _, _, err := h.inbox.store.claimHandoverSuccessor(ctx, handover.Successor, handover.Job, action.Data.Owner, action.Data.SpawnRequest, h.now().UTC()); err != nil {
+			if _, _, err := h.inbox.store.claimHandoverSuccessor(ctx, handover.Successor, handover.Job, action.Data.Owner, action.Data.SpawnRequest, action.Job, h.now().UTC()); err != nil {
 				if _, invalid := fleet.ValidateSubmission(handover.Successor); invalid != nil {
 					handover.Outcome, handover.Reason = handoverFailed, "invalid_successor"
 					break

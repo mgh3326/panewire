@@ -360,8 +360,9 @@ func (s *laneInboxStore) poolActionsOf(parent context.Context, job string) ([]po
 // with the same request id answers the existing row (claimSpawn). On the
 // first claim the old job's task role, still reserved for it while its row
 // owns the job, passes to the successor in the same transaction, so no other
-// spawn for the task is admitted between the two (hk 4633).
-func (s *laneInboxStore) claimHandoverSuccessor(parent context.Context, request fleet.Submission, job, owner, oldRequest string, now time.Time) (hubSpawnTask, bool, error) {
+// spawn for the task is admitted between the two (hk 4633). The successor is
+// a quota-stop successor of oldJob (hk 5300: replaced_from).
+func (s *laneInboxStore) claimHandoverSuccessor(parent context.Context, request fleet.Submission, job, owner, oldRequest, oldJob string, now time.Time) (hubSpawnTask, bool, error) {
 	ctx, cancel := s.op(parent)
 	var role sql.NullString
 	err := s.db.QueryRowContext(ctx, s.q(`SELECT task_role FROM spawn_reservations WHERE request_id=?`), oldRequest).Scan(&role)
@@ -370,9 +371,9 @@ func (s *laneInboxStore) claimHandoverSuccessor(parent context.Context, request 
 		return hubSpawnTask{}, false, err
 	}
 	if !role.Valid || role.String == "" {
-		return s.claimSpawn(parent, request, job, owner, now)
+		return s.claimSpawnFrom(parent, request, job, owner, now, oldJob)
 	}
-	return s.claimSpawnReplacing(parent, request, job, owner, now, oldRequest, role.String, "accepted")
+	return s.claimSpawnReplacing(parent, request, job, owner, now, oldRequest, role.String, "accepted", oldJob)
 }
 
 // supersedeActionsOf lists the supersede_close rows of job, any phase: one row

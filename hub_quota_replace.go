@@ -327,7 +327,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 			_ = store.releaseCompletedSpawnRole(ctx, priorID, prior.RoleKey())
 		}
 	}
-	if _, _, err := store.claimSpawn(ctx, request, newJob, next.Owner, h.now().UTC()); err != nil {
+	if _, _, err := store.claimSpawnFrom(ctx, request, newJob, next.Owner, h.now().UTC(), event.JobID); err != nil {
 		return skip("claim_refused", "error", err.Error())
 	}
 	select {
@@ -470,8 +470,7 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	written := 0
 	for _, successor := range successors {
-		m := quotaSuccessorJob.FindStringSubmatch(successor.Job)
-		if m == nil || !spawnMayStillRun(successor) && successor.Status != "succeeded" {
+		if !spawnMayStillRun(successor) && successor.Status != "succeeded" {
 			continue
 		}
 		// A replacement younger than its own budget is still being finished by
@@ -479,7 +478,7 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 		if h.now().Sub(successor.Created) < quotaReplaceBudget {
 			continue
 		}
-		old := m[1]
+		old := successor.ReplacedFrom
 		if h.reconcileQuotaReplacement(ctx, app, successor, old) {
 			written++
 			h.loopNoteDone(loopQuotaLadder, successor.Job)

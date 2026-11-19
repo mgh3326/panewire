@@ -1195,7 +1195,7 @@ func TestPoolHandoverSiblingClaimIsTheSameSuccessor(t *testing.T) {
 	action := readOnlyPoolAction(t, f.hub)
 	sibling := action.Data.Handover.Successor
 	sibling.Brief += "\nanother note\n"
-	if _, _, err := f.hub.inbox.store.claimHandoverSuccessor(t.Context(), sibling, next, action.Data.Owner, action.Data.SpawnRequest, time.Now()); err != nil {
+	if _, _, err := f.hub.inbox.store.claimHandoverSuccessor(t.Context(), sibling, next, action.Data.Owner, action.Data.SpawnRequest, action.Job, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	placeSuccessor(t, f, next)

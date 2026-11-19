@@ -264,7 +264,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		if _, err := fleet.ValidateSubmission(next); err != nil {
 			return h.escalateAuthorRefusal(ctx, request, owner, "successor_invalid", err.Error(), false)
 		}
-		prior, _, err = h.inbox.store.claimSpawnReplacing(ctx, next, newJob, owner, h.now().UTC(), holder.Request.RequestID, spawn.RoleKey(), "staged")
+		prior, _, err = h.inbox.store.claimSpawnReplacing(ctx, next, newJob, owner, h.now().UTC(), holder.Request.RequestID, spawn.RoleKey(), "staged", "")
 		if err != nil {
 			return h.escalateAuthorRefusal(ctx, request, owner, "claim_refused", err.Error(), false)
 		}

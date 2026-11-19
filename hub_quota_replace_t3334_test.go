@@ -684,7 +684,7 @@ func TestQuotaReplacementIsReconciledAfterAHubRestart(t *testing.T) {
 	if err := f.hub.inbox.store.releaseCompletedSpawnRole(t.Context(), f.holder.Request.RequestID, "42:reviewer:p1"); err != nil {
 		t.Fatal(err)
 	}
-	task, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, "mwr-12-p1-q1", "parent", old)
+	task, _, err := f.hub.inbox.store.claimSpawnFrom(t.Context(), request, "mwr-12-p1-q1", "parent", old, "mwr-12-p1")
 	if err != nil {
 		t.Fatal(err)
 	}
