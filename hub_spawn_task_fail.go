@@ -15,9 +15,12 @@
 // (finishUnownedSpawn or otherwise), the failed post fires then, once.
 //
 // The single hook is the sweep below, run by the spawn coordinator next to
-// the notification flush. It finds final-failure rows whose mark is unset,
-// posts each through the hub's handoffkeep client, and records the posted-at
-// mark (task_fail_notice_ms) on the operation. The mark is what makes the
+// the notification flush. The transaction that ends an operation as failed or
+// refused also writes its task_fail_notice_outbox row (hk 5299,
+// hub_spawn_queue.go), so the sweep reads that small outbox and never scans
+// spawn_operations. It posts each due row through the hub's handoffkeep
+// client, then records the posted-at mark (task_fail_notice_ms) on the
+// operation and deletes the outbox row in one transaction. The mark is what makes the
 // post idempotent across restarts: a row the hub stopped after posting keeps
 // its repost suppressed only once the mark write lands, so the guarantee is
 // exactly-once per mark write and at-least-once across a crash (or an hk
@@ -28,7 +31,7 @@
 // final under this hub always post: rows that were already terminal when the
 // mark column landed are stamped judged once at migration time and never
 // post. A failed post keeps its mark unset and retries on a later sweep with
-// a growing per-row delay persisted on the operation (30s doubling to 10m):
+// a growing per-row delay persisted on the outbox row (30s doubling to 10m):
 // each due row costs one hk attempt per sweep, and not-due rows are skipped
 // without an hk call, so an hk outage costs one bounded sweep and cheap skips
 // instead of stalling scheduling. The mark and the retry delay are written
@@ -42,6 +45,8 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -71,17 +76,18 @@ func spawnTaskFailText(requestID string, outcome hubSpawnOutcome) string {
 	return "spawn failed request=" + requestID + " rc=" + strconv.Itoa(outcome.RC) + " stage=" + outcome.Stage + " reason=" + outcome.Reason
 }
 
-// pendingSpawnTaskFailNoticeIDs lists the oldest operations whose final
-// failure still owes its hk task comment: a failed or refused row the sweep
-// has not judged yet whose retry delay has passed. deadline_exceeded is not
-// final and never appears here; if such a row is later finished as failed,
-// that failed row is listed then. The due filter runs in the query, before
-// LIMIT, so backed-off rows never monopolize the page and starve newer
-// failures.
+// pendingSpawnTaskFailNoticeIDs lists the outbox rows whose retry delay has
+// passed: the final failures that still owe their hk task comment (hk 5299).
+// The outbox holds only failed and refused operations the sweep has not
+// judged, so the read is as large as that backlog, not the operation history.
+// deadline_exceeded is not final and never has a row; if such an operation is
+// later finished as failed, its row is written then. The due filter runs in
+// the query, before LIMIT, so backed-off rows never monopolize the page and
+// starve newer failures.
 func (s *laneInboxStore) pendingSpawnTaskFailNoticeIDs(parent context.Context, now time.Time, limit int) ([]string, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0 AND (task_fail_retry_ms=0 OR task_fail_retry_ms<=?) ORDER BY created_ms LIMIT ?`), now.UnixMilli(), limit)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id FROM task_fail_notice_outbox WHERE retry_ms<=? ORDER BY retry_ms,request_id LIMIT ?`), now.UnixMilli(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -98,30 +104,55 @@ func (s *laneInboxStore) pendingSpawnTaskFailNoticeIDs(parent context.Context, n
 }
 
 // markSpawnTaskFailNotice records that the sweep judged a final failure:
-// posted its hk task comment, or found nothing owed. It answers whether this
-// call set the mark, so a concurrent sweep cannot post the same failure
-// twice. The write runs under context.WithoutCancel: a mark whose post
-// already succeeded must still land when the sweep budget is spent or the
-// coordinator is shutting down; the store's own op timeout still bounds it.
+// posted its hk task comment, or found nothing owed. It stamps the mark on the
+// operation and deletes the outbox row in one transaction, and answers
+// whether this call set the mark, so a concurrent sweep cannot post the same
+// failure twice. The write runs under context.WithoutCancel: a mark whose
+// post already succeeded must still land when the sweep budget is spent or
+// the coordinator is shutting down; the store's own op timeout still bounds
+// it.
 func (s *laneInboxStore) markSpawnTaskFailNotice(parent context.Context, requestID string, now time.Time) (bool, error) {
 	ctx, done := s.op(context.WithoutCancel(parent))
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE request_id=? AND task_fail_notice_ms=0`), now.UnixMilli(), requestID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE request_id=? AND task_fail_notice_ms=0`), now.UnixMilli(), requestID)
 	if err != nil {
 		return false, err
 	}
 	n, err := result.RowsAffected()
-	return n == 1, err
+	if err != nil {
+		return false, err
+	}
+	// The row goes whether or not this call set the mark: a mark another
+	// sweep set already judged it.
+	if _, err = tx.ExecContext(ctx, s.q(`DELETE FROM task_fail_notice_outbox WHERE request_id=?`), requestID); err != nil {
+		return false, err
+	}
+	return n == 1, tx.Commit()
+}
+
+// dropSpawnTaskFailNotice deletes a request's outbox row without marking
+// anything, for a row whose operation no longer exists.
+func (s *laneInboxStore) dropSpawnTaskFailNotice(parent context.Context, requestID string) error {
+	ctx, done := s.op(context.WithoutCancel(parent))
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM task_fail_notice_outbox WHERE request_id=?`), requestID)
+	return err
 }
 
 // deferSpawnTaskFailNotice records a row's next attempt after hk did not take
-// its comment. The sweep's due filter keeps the row out of later pages until
-// then, so backed-off rows never starve newer failures. Like the mark, it
-// runs under context.WithoutCancel so a spent sweep budget cannot lose it.
+// its comment, on the outbox row. The sweep's due filter keeps the row out of
+// later pages until then, so backed-off rows never starve newer failures.
+// Like the mark, it runs under context.WithoutCancel so a spent sweep budget
+// cannot lose it. It answers whether a row was still owed.
 func (s *laneInboxStore) deferSpawnTaskFailNotice(parent context.Context, requestID string, next time.Time) (bool, error) {
 	ctx, done := s.op(context.WithoutCancel(parent))
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_retry_ms=? WHERE request_id=? AND task_fail_notice_ms=0`), next.UnixMilli(), requestID)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE task_fail_notice_outbox SET retry_ms=? WHERE request_id=?`), next.UnixMilli(), requestID)
 	if err != nil {
 		return false, err
 	}
@@ -137,11 +168,23 @@ func (s *laneInboxStore) deferSpawnTaskFailNotice(parent context.Context, reques
 func (s *laneInboxStore) judgeSpawnTaskFailBacklog(parent context.Context, now time.Time) (int64, error) {
 	ctx, done := s.op(context.WithoutCancel(parent))
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused')`), now.UnixMilli())
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused')`), now.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	judged, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM task_fail_notice_outbox`); err != nil {
+		return 0, err
+	}
+	return judged, tx.Commit()
 }
 
 // backfillSpawnTaskFailNotices stamps failed and refused rows that predate
@@ -168,6 +211,10 @@ func (s *laneInboxStore) backfillSpawnTaskFailNotices(parent context.Context, no
 	}
 	if n, _ := marked.RowsAffected(); n == 1 {
 		if _, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused')`), now.UnixMilli()); err != nil {
+			return err
+		}
+		// A judged failure owes nothing: drop any outbox row it already has.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM task_fail_notice_outbox WHERE request_id IN (SELECT request_id FROM spawn_operations WHERE task_fail_notice_ms<>0)`); err != nil {
 			return err
 		}
 	}
@@ -257,6 +304,11 @@ func (h *HubServer) postSpawnTaskFailNotice(ctx context.Context, requestID strin
 	defer h.spawnActions.end(requestID)
 	task, err := h.inbox.store.spawnTask(ctx, requestID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Retention removed the operation (hk 5297) before its comment
+			// went out: nothing is left to tell, so the row goes too.
+			_ = h.inbox.store.dropSpawnTaskFailNotice(ctx, requestID)
+		}
 		return
 	}
 	if task.Status != "failed" && task.Status != "refused" {

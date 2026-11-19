@@ -291,12 +291,22 @@ func (h *HubServer) wakeParkedSpawns(ctx context.Context, ticked bool) {
 func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt int, reason string, next, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_since_ms=CASE WHEN park_since_ms=0 THEN CAST(? AS BIGINT) ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), reason, next.UnixMilli(), next.UnixMilli(), now.UnixMilli(), id, attempt)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
-	n, _ := result.RowsAffected()
-	return n == 1, nil
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_since_ms=CASE WHEN park_since_ms=0 THEN CAST(? AS BIGINT) ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), reason, next.UnixMilli(), next.UnixMilli(), now.UnixMilli(), id, attempt)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return false, nil
+	}
+	if err = s.syncSpawnQueueNextCheck(ctx, tx, id); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // wakeParkedSpawns makes at most limit parked rows with one of reasons due
@@ -311,12 +321,24 @@ func (s *laneInboxStore) wakeParkedSpawns(parent context.Context, reasons []stri
 		args = append(args, "%,"+reason+",%")
 	}
 	args = append(args, limit)
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET next_check_ms=? WHERE request_id IN (SELECT request_id FROM spawn_operations WHERE status='accepted' AND node_id IS NULL AND next_check_ms>? AND (`+marks+`) ORDER BY next_check_ms,request_id LIMIT ?)`), args...)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET next_check_ms=? WHERE request_id IN (SELECT request_id FROM spawn_operations WHERE status='accepted' AND node_id IS NULL AND next_check_ms>? AND (`+marks+`) ORDER BY next_check_ms,request_id LIMIT ?)`), args...)
 	if err != nil {
 		return 0, err
 	}
 	n, _ := result.RowsAffected()
-	return int(n), nil
+	if n > 0 {
+		// The woken rows are the queue rows whose due time now differs from
+		// the operation's: the queue is the small table, so this reads it only.
+		if err = s.syncSpawnQueueNextChecks(ctx, tx); err != nil {
+			return 0, err
+		}
+	}
+	return int(n), tx.Commit()
 }
 
 // spawnRetryAt is when a request whose failures-th attempt just failed may

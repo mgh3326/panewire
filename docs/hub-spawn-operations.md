@@ -1363,11 +1363,14 @@ The comment posts once per request id in every path the hub can observe: the
 operation carries a posted-at mark (`task_fail_notice_ms`, migration
 `0023_spawn_task_fail_notice.sql`) that survives a hub restart, and failed
 and refused rows that predate the mark are stamped judged at migration time
-and never post. A post hk refuses for good is dropped loudly, while any other
+and never post. The transaction that ends an operation as failed or refused
+also writes its `task_fail_notice_outbox` row; the sweep reads only that
+outbox, and recording the mark deletes the row. A post hk refuses for good is dropped loudly, while any other
 failure stays pending and retries on later sweeps: one hk attempt per due
-row per sweep, then a growing per-row delay persisted on the operation
-(`task_fail_retry_ms`, migration `0024_spawn_task_fail_retry.sql`; 30s
-doubling to 10m), so an outage costs one bounded sweep and cheap skips
+row per sweep, then a growing per-row delay persisted on the row's
+`task_fail_notice_outbox` entry (`retry_ms`, migration
+`0030_spawn_queue_outbox.sql`; 30s doubling to 10m; the older
+`task_fail_retry_ms` column is no longer written), so an outage costs one bounded sweep and cheap skips
 instead of stalling scheduling (one warn per failure streak). The mark and
 the retry delay are written detached from the sweep budget, so a spent
 budget cannot lose bookkeeping for a post that already succeeded. If the hub
@@ -1446,6 +1449,39 @@ the spawn workers stop. Briefs, argv, pane capture, stderr, checkout paths
 and credentials are excluded. Export failure never authorizes a retry or changes
 the committed business outcome. `TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized`
 uses a fake transport and also checks that ordinary HTTP traffic is untraced.
+
+## Spawn queue and the terminal transitions (hk 5299)
+
+`spawn_queue(request_id, next_check_ms)` holds one row per non-terminal
+operation, so the coordinator's scans (`pendingSpawns`, `pendingSpawnPage`)
+read the work still to do and not the whole of `spawn_operations`. The row is
+inserted in the transaction that inserts the operation and deleted in the
+transaction that ends it; `next_check_ms` mirrors the operation's parked wake
+time and every writer of that column copies it across in the same
+transaction. Migration `0030_spawn_queue_outbox.sql` copies the operations that
+predate the tables on Postgres. On both dialects, every start also runs
+`reconcileSpawnQueue`: it queues each non-terminal operation, refreshes the
+queued `next_check_ms`, drops queue rows of terminal or removed operations, adds
+an outbox row for each unjudged failed or refused operation, and drops outbox
+rows whose operation is judged. That is what takes in a rollback: an older hub
+binary writes operations without touching these tables, and the first start
+after returning to this release makes them equal the operations again.
+
+Terminal statuses are `succeeded`, `failed`, `refused`, `given_up` and
+`cancelled`; `retryable`, `deadline_exceeded` and the `*_grant` refinements
+are not. Every write of a terminal status calls `endSpawnQueue` (directly, or
+through `releaseEndedSpawn`) in the same transaction, which also writes the
+`task_fail_notice_outbox` row for `failed` and `refused`:
+
+| Writer | Terminal status | Queue exit |
+|---|---|---|
+| `completeSpawn` | `succeeded`, `failed` | `endSpawnQueue` |
+| `endUnstartedAttempt` (expiry) | `given_up` | `releaseEndedSpawn` |
+| `giveUpWaitingSpawn` | `given_up` | `releaseEndedSpawn` |
+| `endWaitingSpawn` | `refused`, `cancelled` | `releaseEndedSpawn` |
+| `cancelStagedSpawn`, `discardStagedSpawn` | row deleted | `dequeueSpawn` |
+
+A new writer of a terminal status must use one of these.
 
 ### Outboxes
 
