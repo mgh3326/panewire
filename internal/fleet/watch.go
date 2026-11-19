@@ -29,6 +29,15 @@ var laneTerminalMarker = regexp.MustCompile(`^(\[[^\]]*\]\s*)?(READY|DONE)\b`)
 // a stand-in.
 var watchExecutable = os.Executable
 
+// SetWatcherExecutable points detached watchers at exe until the returned
+// restore runs. A test in another package uses it so a watcher never re-execs
+// that test binary, which would run the whole suite as the watcher (hk 5343).
+func SetWatcherExecutable(exe func() (string, error)) (restore func()) {
+	old := watchExecutable
+	watchExecutable = exe
+	return func() { watchExecutable = old }
+}
+
 func (a *App) startWatch(job string) error {
 	return a.startWatchMode(job, false)
 }
