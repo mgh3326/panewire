@@ -17,6 +17,7 @@ const hubRelayIngressMaxBodyBytes = 64 << 10
 type hubRelayIngressRequest struct {
 	DeliveryClass string `json:"delivery_class,omitempty"`
 	NotifyType    string `json:"notify_type,omitempty"`
+	Priority      string `json:"priority,omitempty"`
 	Kind          string `json:"kind"`
 	Lane          string `json:"lane"`
 	EventID       string `json:"event_id"`
@@ -58,7 +59,7 @@ func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Requ
 	if !machineIDPattern.MatchString(body.Host) {
 		return hubRelayIngressRequest{}, false
 	}
-	if !validDeliveryClass(body.DeliveryClass) || !validNotifyType(body.NotifyType) || (body.Deliver != "" && !validRelayDeliver(body.Deliver)) {
+	if !validDeliveryClass(body.DeliveryClass) || !validNotifyType(body.NotifyType) || !validOrderPriority(body.Priority) || (body.Priority != "" && body.NotifyType != "order") || (body.Deliver != "" && !validRelayDeliver(body.Deliver)) {
 		return hubRelayIngressRequest{}, false
 	}
 	return body, true
@@ -86,6 +87,7 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 		DeliverPolicy: body.Deliver,
 		DeliveryClass: body.DeliveryClass,
 		NotifyType:    body.NotifyType,
+		Priority:      body.Priority,
 
 		operatorIngress: true,
 	}

@@ -650,11 +650,32 @@ policy-wide block supplies defaults, and a lane block replaces it. The existing
 Old nodes without working-state reports deliver as before.
 
 READY, FINDINGS, BLOCKED and MERGED interrupt notices can be held. The READY tag
-still selects the interrupt class, but does not bypass this hold. Types `decision`
-and `order`, kinds `job.escalate`, `job.lost`, `job.revoked`,
+still selects the interrupt class, but does not bypass this hold. Type `decision`,
+kinds `job.escalate`, `job.lost`, `job.revoked`,
 and whole-word BLOCKER/URGENT/ESC tags always bypass the queue. BOUNCE and
-needs_decision tags also bypass it. Original IDs and must-ack requirements remain
-available through `inbox list` and `inbox ack`.
+needs_decision tags also bypass it. An `order` bypasses it too unless its sender
+marked it `--priority normal` or `low` (next section). Original IDs and must-ack
+requirements remain available through `inbox list` and `inbox ack`.
+
+### Order priority
+
+`panewire emit --kind lane.event --lane <lane> --type order --priority <p>`
+declares how soon an order must reach the pane (hk 4269). `<p>` is `stop`,
+`hold`, `urgent`, `normal` or `low`; the flag is refused on anything but a
+lane.event order, and the hub rejects a priority on any other event.
+
+| Priority | Delivery |
+|---|---|
+| none (unmarked), `stop`, `hold`, `urgent` | an interrupt, as before: injected at once |
+| `normal`, `low` | held while the pane works, then delivered in the lane's one digest batch at its next idle moment, or at `max_hold` |
+
+A `normal` or `low` order is also exempt from the worker-directive rule, which
+otherwise injects an order for a worker lane at once. It is held only on a lane
+that opted into `hold_while_working`; elsewhere it is an interrupt like any
+order. A held order is an ordinary held item: it survives a hub restart, and when
+its lane is retired it stays in the lane's inbox (`inbox list`), never dropped.
+An order whose text carries a must-act tag (BLOCKER, URGENT, ESC, BOUNCE,
+needs_decision) still interrupts whatever its priority.
 
 One release produces one injection with a first-line count such as
 `[batch 7: BLOCKED 1, FINDINGS 1, MERGED 2, READY 3]`. Producer retries reuse the

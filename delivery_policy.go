@@ -58,6 +58,22 @@ func validNotifyType(value string) bool {
 	return value == "" || hubNotifyTypes[value]
 }
 
+// orderPriorities is the closed vocabulary a sender gives an order with
+// `panewire emit --type order --priority` (hk 4269, operator decision 151).
+// stop, hold and urgent interrupt as an unmarked order does; normal and low
+// are held for the lane's next digest (digestOrder).
+var orderPriorities = map[string]bool{"stop": true, "hold": true, "urgent": true, "normal": true, "low": true}
+
+func validOrderPriority(value string) bool {
+	return value == "" || orderPriorities[value]
+}
+
+// digestOrder reports whether e is an order that may wait for the receiving
+// lane's next idle moment. An unmarked order and stop, hold and urgent never do.
+func digestOrder(e hubJobEventPayload) bool {
+	return e.NotifyType == "order" && (e.Priority == "normal" || e.Priority == "low")
+}
+
 type deliveryRule struct {
 	Match  string   `yaml:"match"`
 	Tags   []string `yaml:"tags"`
@@ -634,6 +650,15 @@ func decodeDeliveryClass(fields map[string]json.RawMessage, event *hubJobEventPa
 	return !ok || (json.Unmarshal(raw, &event.DeliveryClass) == nil && validDeliveryClass(event.DeliveryClass))
 }
 
+// decodePriority reads the optional order priority. Only an order carries one.
+func decodePriority(fields map[string]json.RawMessage, event *hubJobEventPayload) bool {
+	raw, ok := fields["priority"]
+	if !ok {
+		return true
+	}
+	return json.Unmarshal(raw, &event.Priority) == nil && event.Priority != "" && validOrderPriority(event.Priority) && event.NotifyType == "order"
+}
+
 func decodeNotifyType(fields map[string]json.RawMessage, event *hubJobEventPayload) bool {
 	raw, ok := fields["notify_type"]
 	return !ok || (json.Unmarshal(raw, &event.NotifyType) == nil && validNotifyType(event.NotifyType))
@@ -654,7 +679,7 @@ func (p *deliveryPolicy) holdPolicy(lane string) *deliveryHoldPolicy {
 var neverHoldTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|URGENT|ESC|BOUNCE|needs_decision)\b`)
 
 func holdableEvent(kind string, e hubJobEventPayload) bool {
-	return !e.noDigest && e.NotifyType != "decision" && e.NotifyType != "order" &&
+	return !e.noDigest && e.NotifyType != "decision" && (e.NotifyType != "order" || digestOrder(e)) &&
 		kind != "job.escalate" && kind != "job.lost" && kind != "job.revoked" &&
 		!neverHoldTags.MatchString(deliveryEventText(e))
 }

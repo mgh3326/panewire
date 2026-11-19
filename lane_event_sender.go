@@ -16,6 +16,12 @@ import (
 // sends pane_id only on a connection whose hub advertised this.
 const hubFeatureLaneEventPane = "lane_event_pane"
 
+// hubFeatureLaneEventPriority: an older hub refuses a lane.event payload with
+// the order priority key the same way, so a node sends priority only on a
+// connection whose hub advertised this. To an older hub the order goes
+// unmarked and interrupts as it always did (hk 4269).
+const hubFeatureLaneEventPriority = "lane_event_priority"
+
 // stallNoticeEventIDPrefix opens the event id of a stall notice
 // (stallDetectManager.sendNotification).
 const stallNoticeEventIDPrefix = "stall:"
@@ -78,6 +84,9 @@ func (client *HubClient) writeRelayBurst(ctx context.Context, peer *hubClientCon
 func (peer *hubClientConnection) relayWire(event hubClientEvent) any {
 	if event.senderPane != "" && peer.acceptsLaneEventPane.Load() {
 		event.Payload = relayPayloadOptionalString(event.Payload, "pane_id", event.senderPane)
+	}
+	if event.orderPriority != "" && peer.acceptsLaneEventPriority.Load() {
+		event.Payload = relayPayloadOptionalString(event.Payload, "priority", event.orderPriority)
 	}
 	// Gate: a hub that did not advertise hubFeatureLaneEventLong refuses text
 	// over its own bound, so the cut form is sent to it (lane_event_long.go).

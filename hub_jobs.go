@@ -171,16 +171,16 @@ func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
 // heartbeat, completion, late registration, or orphan-sweep candidate.
 func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 12 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 13 {
 		return hubJobEventPayload{}, false
 	}
 	for name := range fields {
-		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "cause" && name != "head" && name != "pr" && name != "pane_id" {
+		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "priority" && name != "cause" && name != "head" && name != "pr" && name != "pane_id" {
 			return hubJobEventPayload{}, false
 		}
 	}
 	var event hubJobEventPayload
-	if !decodeDeliveryClass(fields, &event) || !decodeNotifyType(fields, &event) {
+	if !decodeDeliveryClass(fields, &event) || !decodeNotifyType(fields, &event) || !decodePriority(fields, &event) {
 		return hubJobEventPayload{}, false
 	}
 	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !validLaneReference(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) {
