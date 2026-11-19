@@ -268,10 +268,9 @@ func (h *HubServer) flushSpawnTaskFailNotices(ctx context.Context) readResult {
 	if err != nil {
 		return readResult{failed: true}
 	}
-	now := h.now().UTC()
-	if next > 0 && next <= now.UnixMilli() {
+	if next > 0 && next <= h.now().UnixMilli() {
 		// Still owed and due: a page limit, a spent budget or a busy request.
-		next = h.retryAt(spawnTaskFailRetry)
+		return readResult{found: len(ids) > 0, retry: spawnTaskFailRetry}
 	}
 	return readResult{found: len(ids) > 0, due: next}
 }

@@ -543,7 +543,7 @@ func (h *HubServer) reconcileConsults(ctx context.Context) readResult {
 	h.loopClearSilent("hub_consults.go:activeConsults")
 	result := readResult{found: len(active) > 0}
 	if result.found {
-		result.due = h.retryAt(consultPollInterval)
+		result.retry = consultPollInterval
 	}
 	var app *fleet.App
 	for _, c := range active {

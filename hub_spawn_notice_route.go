@@ -65,6 +65,9 @@ const (
 // notification is unsettled: the cadence it always had (hk 5302).
 const spawnNoticeRetry = 2 * time.Second
 
+// spawnNoticePage is how many outbox rows one read takes.
+const spawnNoticePage = 32
+
 // flushSpawnNotifications routes the outbox and reports what the coordinator's
 // gate needs: a row it read is looked at again after spawnNoticeRetry (it may
 // still be owed, and an empty read settles it), and a held row is looked at
@@ -86,12 +89,13 @@ func (h *HubServer) flushSpawnNotifications(ctx context.Context) readResult {
 		h.routeSpawnNotification(ctx, n)
 	}
 	if len(pending) > 0 {
-		result.due = h.retryAt(spawnNoticeRetry)
+		result.retry = spawnNoticeRetry
 	}
 	held := h.flushHeldSpawnNotifications(ctx)
 	result.found = result.found || held.found
 	result.failed = result.failed || held.failed
 	result.due = earliestDue(result.due, held.due)
+	result.retry = minRetry(result.retry, held.retry)
 	return result
 }
 
@@ -99,7 +103,7 @@ func (h *HubServer) readSpawnNotifications(ctx context.Context, state int) ([]sp
 	store := h.inbox.store
 	op, done := store.op(ctx)
 	defer done()
-	rows, err := store.db.QueryContext(op, store.q(`SELECT n.event_id,n.request_id,n.job,n.owner,n.result,n.created_ms FROM spawn_notice_outbox o JOIN spawn_notifications n ON n.event_id=o.event_id WHERE n.delivered=? ORDER BY n.created_ms,n.event_id LIMIT 32`), state)
+	rows, err := store.db.QueryContext(op, store.q(`SELECT n.event_id,n.request_id,n.job,n.owner,n.result,n.created_ms FROM spawn_notice_outbox o JOIN spawn_notifications n ON n.event_id=o.event_id WHERE n.delivered=? ORDER BY n.created_ms,n.event_id LIMIT `+strconv.Itoa(spawnNoticePage)), state)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +243,7 @@ func (h *HubServer) flushHeldSpawnNotifications(ctx context.Context) readResult 
 	}
 	if len(publishing) > 0 {
 		// A publish that failed returns the row to held: read it again.
-		result.found, result.due = true, h.retryAt(spawnNoticeRetry)
+		result.found, result.retry = true, spawnNoticeRetry
 	}
 	held, err := h.readSpawnNotifications(ctx, spawnNoticeHeld)
 	if err != nil {
@@ -248,7 +252,7 @@ func (h *HubServer) flushHeldSpawnNotifications(ctx context.Context) readResult 
 	for _, n := range held {
 		task, err := h.inbox.store.spawnTask(ctx, n.request)
 		if err != nil {
-			result.due = earliestDue(result.due, h.retryAt(spawnNoticeRetry))
+			result.retry = spawnNoticeRetry
 			continue
 		}
 		attempt := spawnNoticeAttempt(n.id)
@@ -267,7 +271,12 @@ func (h *HubServer) flushHeldSpawnNotifications(ctx context.Context) readResult 
 			h.publishHeldSpawnNotification(ctx, n)
 		}
 		result.found = true
-		result.due = earliestDue(result.due, h.retryAt(spawnNoticeRetry))
+		result.retry = spawnNoticeRetry
+	}
+	if len(held) == spawnNoticePage {
+		// A full page was consumed (claimed, superseded or unreadable): rows
+		// past it were not examined, so read again rather than wait for a kick.
+		result.retry = spawnNoticeRetry
 	}
 	return result
 }

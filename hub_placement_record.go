@@ -1043,14 +1043,19 @@ func (h *HubServer) placementRecordApp(delivery string) (*fleet.App, error) {
 
 // pendingPlacementRecords reports whether any attempt's snapshot still waits
 // for its record. The flush checks this cheap row before paying for the
-// delivery App; it reads the outbox, which is empty when nothing is owed.
-func (h *HubServer) pendingPlacementRecords(ctx context.Context) bool {
+// delivery App; it reads the outbox, which is empty when nothing is owed. An
+// empty outbox is false with no error; any other failure is returned, so the
+// probe's gate retries instead of recording an empty pass (hk 5302).
+func (h *HubServer) pendingPlacementRecords(ctx context.Context) (bool, error) {
 	if h.inbox == nil {
-		return false
+		return false, nil
 	}
 	var one int
 	err := h.inbox.store.db.QueryRowContext(ctx, `SELECT 1 FROM placement_record_outbox LIMIT 1`).Scan(&one)
-	return err == nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // flushPlacementRecords retries records still spooled from before a restart.
@@ -1067,13 +1072,24 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) readResult {
 		return readResult{}
 	}
 	h.loopTick(loopPlacementRecords)
-	if !h.pendingPlacementRecords(ctx) && !h.hasDeferredTraceSaves() {
+	owed, err := h.pendingPlacementRecords(ctx)
+	if err != nil {
+		h.loopNoteSilentError(loopPlacementRecords, "hub_placement_record.go:pendingPlacementRecords", err)
+		return readResult{failed: true}
+	}
+	if !owed && !h.hasDeferredTraceSaves() {
 		return readResult{}
 	}
 	// Deferred saves retry first: a landed row turns an orphaned spooled
 	// record back into a pending one the reconciliation below can seal.
 	h.retryDeferredTraceSaves()
-	if !h.pendingPlacementRecords(ctx) {
+	owed, err = h.pendingPlacementRecords(ctx)
+	if err != nil {
+		h.loopNoteSilentError(loopPlacementRecords, "hub_placement_record.go:pendingPlacementRecords", err)
+		return readResult{failed: true}
+	}
+	h.loopClearSilent("hub_placement_record.go:pendingPlacementRecords")
+	if !owed {
 		return h.placementRecordIdle()
 	}
 	pending, err := h.inbox.store.pendingPlacementSnapshots(h.closeCtx)
@@ -1099,7 +1115,7 @@ func (h *HubServer) flushPlacementRecords(ctx context.Context) readResult {
 		if !row.attemptOver() {
 			continue
 		}
-		result.found, result.due = true, h.retryAt(placementRecordRetry)
+		result.found, result.retry = true, placementRecordRetry
 		app, err := h.placementRecordApp(row.Delivery)
 		if err != nil {
 			h.notePlacementStall(row.RequestID, row.Job, row.Attempt, "delivery_app_unavailable")
@@ -1161,7 +1177,7 @@ const placementRecordRetry = 2 * time.Second
 // nothing to look at, unless a deferred trace save is still waiting to land.
 func (h *HubServer) placementRecordIdle() readResult {
 	if h.hasDeferredTraceSaves() {
-		return readResult{due: h.retryAt(placementRecordRetry)}
+		return readResult{retry: placementRecordRetry}
 	}
 	return readResult{}
 }

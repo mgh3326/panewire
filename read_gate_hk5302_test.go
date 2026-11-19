@@ -520,3 +520,96 @@ func TestSpawnScanStaleProbeDueTime(t *testing.T) {
 		t.Fatalf("at the back-off's end the coordinator was handed %v, want %s", got, task.Request.RequestID)
 	}
 }
+
+// TestRetryIsCountedFromThePassStart guards the retry cadence: the loops wake
+// on tickers anchored before their pass, so a retry counted from the pass's end
+// would skip the next tick and run at twice its period.
+func TestRetryIsCountedFromThePassStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	now := time.Now().UTC()
+	h, _ := readGateHub(t, path, &now, nil)
+	start := now
+	ran := 0
+	pass := func() readResult {
+		ran++
+		now = now.Add(50 * time.Millisecond) // the pass itself takes time
+		return readResult{found: true, retry: 2 * time.Second}
+	}
+	h.gatedRead(readConsult, "", pass)
+	now = start.Add(2 * time.Second) // the next tick of a 2 s ticker
+	h.gatedRead(readConsult, "", pass)
+	if ran != 2 {
+		t.Fatalf("the retry ran %d times by the next 2 s tick, want 2", ran)
+	}
+	now = start.Add(2*time.Second + time.Second)
+	h.gatedRead(readConsult, "", func() readResult { ran++; return readResult{} })
+	if ran != 2 {
+		t.Fatal("a retry ran a second early")
+	}
+}
+
+// TestPlacementProbeRetriesAFailedRead guards the probe against a store error
+// on its outbox read: it is a failed pass, not an empty one, so the next tick
+// reads again instead of waiting for the backstop.
+func TestPlacementProbeRetriesAFailedRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	now := time.Now().UTC()
+	h, _ := readGateHub(t, path, &now, nil)
+	steps := newReadGateSteps(t, h)
+	steps.all()
+	store := h.inbox.store
+	if _, err := store.db.Exec(`ALTER TABLE placement_record_outbox RENAME TO placement_record_outbox_away`); err != nil {
+		t.Fatal(err)
+	}
+	store.noteWork(readPlacementRecord) // a committed snapshot kicks the probe
+	h.stepPlacementRecords(t.Context()) // the read fails
+	if _, err := store.db.Exec(`ALTER TABLE placement_record_outbox_away RENAME TO placement_record_outbox`); err != nil {
+		t.Fatal(err)
+	}
+	calls := countStoreCalls(t, h, path)
+	h.stepPlacementRecords(t.Context()) // same clock, no new write
+	if calls.Load() == 0 {
+		t.Fatal("a failed outbox read was recorded as an empty pass")
+	}
+}
+
+// TestHeldNoticePageIsReadAgain guards the held-notice page: a full page that
+// is all superseded leaves later rows unexamined, so the flush reads again at
+// its cadence instead of waiting for a kick.
+func TestHeldNoticePageIsReadAgain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	now := time.Now().UTC()
+	h, _ := readGateHub(t, path, &now, nil)
+	steps := newReadGateSteps(t, h)
+	steps.all()
+	store := h.inbox.store
+	total := spawnNoticePage + 1
+	for i := range total {
+		task := gateClaim(t, h, 100+i)
+		id := fmt.Sprintf("%s:1:retryable", task.Request.RequestID)
+		// The operation is accepted, not retryable: the held notice is superseded.
+		if _, err := store.db.Exec(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered) VALUES(?,?,?,?,?,?,2)`, id, task.Request.RequestID, task.Job, "parent", `{"rc":1}`, now.UnixMilli()+int64(i)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`INSERT INTO spawn_notice_outbox(event_id) VALUES(?)`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.noteWork(readSpawnNotice)
+	steps.all()
+	open := func() int {
+		var n int
+		if err := store.db.QueryRow(`SELECT count(*) FROM spawn_notice_outbox`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if got := open(); got != 1 {
+		t.Fatalf("outbox rows after the first page = %d, want the 1 past the page", got)
+	}
+	now = now.Add(spawnNoticeRetry)
+	steps.all()
+	if got := open(); got != 0 {
+		t.Fatalf("outbox rows after the retry = %d, want 0: the row past the page was never examined", got)
+	}
+}

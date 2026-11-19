@@ -122,10 +122,20 @@ type readTicket struct {
 // loop idle. found says the pass saw work, for the backstop log. failed
 // leaves the gate unprimed, so the next tick reads again.
 type readResult struct {
-	found  bool
-	due    int64
+	found bool
+	due   int64
+	// retry asks to read again after this long, counted from the start of the
+	// pass (gatedRead): the loop's old cadence while work is in flight.
+	retry  time.Duration
 	failed bool
 }
+
+// readRetrySlack is taken off a retry's deadline. The loops wake on tickers
+// anchored before their pass, so a deadline counted from the pass's own start
+// would fall just after the next ticker event, skip it, and double the cadence
+// (a 2 s retry would run at 4 s). Counting from the pass start less this slack
+// makes the next tick of the same period read.
+const readRetrySlack = 250 * time.Millisecond
 
 // begin reports whether the loop reads at now.
 func (g *readGate) begin(now time.Time) (readTicket, bool) {
@@ -194,14 +204,22 @@ func (h *HubServer) gatedRead(k readKind, mech loopMechanism, pass func() readRe
 		}
 		return false
 	}
+	start := h.now()
 	result := pass()
+	if result.retry > 0 {
+		result.due = earliestDue(result.due, start.Add(result.retry-readRetrySlack).UnixMilli())
+	}
 	g.end(ticket, h.now(), result, h.logger)
 	return true
 }
 
-// retryAt is the due time of a pass that left work to look at again after
-// delay: the loop's old cadence while work is in flight.
-func (h *HubServer) retryAt(delay time.Duration) int64 { return h.now().Add(delay).UnixMilli() }
+// minRetry is the shorter of two retry delays, treating 0 as none.
+func minRetry(a, b time.Duration) time.Duration {
+	if a <= 0 || (b > 0 && b < a) {
+		return b
+	}
+	return a
+}
 
 // commitNoting commits tx and, only if the commit succeeded, notes the loops
 // its writes gave work. The mark follows the commit: a loop that took it

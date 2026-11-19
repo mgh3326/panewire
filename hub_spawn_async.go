@@ -539,7 +539,7 @@ func (h *HubServer) spawnScanPass(ctx context.Context, schedule func(hubSpawnTas
 	}
 	if found {
 		// Rows are in flight or waiting for a slot: read again at the old cadence.
-		return readResult{found: true, due: h.retryAt(spawnScanRetry)}
+		return readResult{found: true, retry: spawnScanRetry}
 	}
 	now := h.now().UTC()
 	wake, err := h.inbox.store.spawnQueueWake(ctx, now)
