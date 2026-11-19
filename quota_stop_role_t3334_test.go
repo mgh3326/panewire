@@ -23,7 +23,9 @@ type roleStopRig struct {
 	sends     int
 	announce  []quotastop.Stop
 	announced []string
-	owner     []hubScannedRelayEvent
+	// ended is each reviewer stop the manager handed to the watcher (hk 5355).
+	ended []quotastop.Stop
+	owner []hubScannedRelayEvent
 }
 
 func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task string) *roleStopRig {
@@ -81,6 +83,10 @@ func newRoleStopRigScreen(t *testing.T, role string, startedAgo time.Duration, t
 	q.announce = func(_ context.Context, job, pane, _ string, stop quotastop.Stop) error {
 		rig.announce = append(rig.announce, stop)
 		rig.announced = append(rig.announced, job+" "+pane)
+		return nil
+	}
+	q.endReviewer = func(_ context.Context, _, _ string, stop quotastop.Stop) error {
+		rig.ended = append(rig.ended, stop)
 		return nil
 	}
 	return rig
@@ -169,11 +175,11 @@ func TestQuotaStopWorkerBeyondExpectedIsHandedOver(t *testing.T) {
 	}
 }
 
-// Other roles stay observe-only in shadow mode: no input, no hand-over. The
-// claim says worker for every spawned job; the spawn receipt's role decides
-// (a reviewer is not resumed like a worker).
+// Consults stay observe-only in shadow mode: no input, no hand-over. The claim
+// says worker for every spawned job; the spawn receipt's role decides. A
+// reviewer is acted on since hk 5355 (quota_stop_reviewer_t5355_test.go).
 func TestQuotaStopOtherRolesStayShadow(t *testing.T) {
-	for _, role := range []string{"reviewer", "consult"} {
+	for _, role := range []string{"consult"} {
 		t.Run("role="+role, func(t *testing.T) {
 			rig := newRoleStopRig(t, role, 5*time.Hour, roleStopTask)
 			rig.run()

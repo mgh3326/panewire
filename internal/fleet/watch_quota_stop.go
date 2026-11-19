@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -592,6 +593,100 @@ type quotaIntent struct {
 	reason string
 	pane   string
 }
+
+// reviewerQuotaHold is a reviewer's quota stop the watcher holds for the
+// manager's resume (hk 5355): the stop, when the hold ends if the pane is still
+// on it, and the pane state it was read in.
+type reviewerQuotaHold struct {
+	active bool
+	stop   quotastop.Stop
+	until  time.Time
+	seq    *int64
+}
+
+// unchanged reports whether the pane is still idle on the stop the hold was read
+// in. A pane that went back to work, or whose state changed, is no longer held.
+func (h reviewerQuotaHold) unchanged(ag Agent) bool {
+	if ag.Status != "idle" && ag.Status != "done" {
+		return false
+	}
+	return h.seq == nil || ag.StateChangeSeq == nil || *h.seq == *ag.StateChangeSeq
+}
+
+// QuotaReviewerWait is the longest reset a reviewer's quota stop may have and
+// still be waited out (hk 5355): the quota-stop manager resumes the pane once at
+// the reset. The manager applies the same bound and the policy's max_wait; the
+// watcher uses it only to decide, at once, whether to hold the job.
+const QuotaReviewerWait = 10 * time.Minute
+
+// QuotaReviewerWaitGrace is how long past its reset a held reviewer stays
+// unended before the watcher ends it: the manager's resume lands at the reset,
+// so a stop still shown after this grace was not resumed.
+const QuotaReviewerWaitGrace = 5 * time.Minute
+
+// quotaWaitKind is the job event the watcher records when it holds a
+// reviewer's quota stop for the manager's resume. A job holds at most one wait:
+// a second stop after it ends the job at once (hk 5355).
+const quotaWaitKind = "job.quota_stop_wait"
+
+// reviewerWaitUntil reports whether the watcher holds reviewer j's quota stop
+// for the manager (hk 5355) and, if so, until when. Only a known reset within
+// QuotaReviewerWait (a passed one included) on a stop that is not a choice dialog
+// is held, and only once per job. Every other stop is ended at once, as before.
+// The manager's policy check (max_wait, the review deadline, the resume limit)
+// decides after the hold and can still end it through the intent path.
+func reviewerWaitUntil(j Job, stop quotastop.Stop, now time.Time) (time.Time, bool) {
+	if stop.Choice || stop.Reset.IsZero() || stop.Reset.Sub(now) > QuotaReviewerWait {
+		return time.Time{}, false
+	}
+	for _, ev := range j.Events {
+		if ev.Kind == quotaWaitKind {
+			return time.Time{}, false
+		}
+	}
+	at := stop.Reset
+	if at.Before(now) {
+		at = now
+	}
+	return at.Add(QuotaReviewerWaitGrace), true
+}
+
+// reviewerWaitResume is the hold a restarted watcher inherits (hk 5355): the
+// newest durable wait, while its until is still ahead and the stop on the pane
+// is the one it recorded. The watcher that wrote it held the job in memory
+// only, so a restart inside the wait would otherwise end the job while the
+// manager's resume is pending.
+//
+// The same stop is recognised by its pool and its remaining duration, not by
+// its reset time: a relative limit ("reset in 2 minutes") is read again as
+// now + duration, so its absolute reset drifts with each read, while the
+// duration stays the same for the same screen. A stop with another duration (a
+// second stop after the resume) is not inherited and is ended at once.
+func reviewerWaitResume(j Job, stop quotastop.Stop, now time.Time) (time.Time, bool) {
+	var wait map[string]any
+	for _, ev := range j.Events {
+		if ev.Kind == quotaWaitKind {
+			wait = ev.Payload
+		}
+	}
+	if wait == nil || str(wait, "pool") != stop.Pool {
+		return time.Time{}, false
+	}
+	until, err := time.Parse(time.RFC3339, str(wait, "until"))
+	if err != nil || !until.After(now) {
+		return time.Time{}, false
+	}
+	recorded, ok := wait["remaining_s"].(float64)
+	if !ok || math.Abs(stop.Reset.Sub(now).Seconds()-recorded) > reviewerWaitSameStopSlack.Seconds() {
+		return time.Time{}, false
+	}
+	return until, true
+}
+
+// reviewerWaitSameStopSlack is how far the remaining duration of a stop may
+// move between two reads and still be the same stop (whole-second rounding in
+// the record, the read's own clock).
+const reviewerWaitSameStopSlack = 2 * time.Second
 
 // pendingQuotaIntent returns the job's open close intent: the newest intent not
 // followed by a cancellation, an end, a re-prompt or a new claim or spawn.

@@ -67,6 +67,18 @@ func devinStopScreen(t *testing.T) string {
 	return string(b)
 }
 
+// devinLongStopScreen is devinStopScreen with its reset two hours away: beyond
+// the reviewer wait (hk 5355), so the watcher ends the reviewer at once. The
+// five-minute screen is a short reset the watcher holds for the manager.
+func devinLongStopScreen(t *testing.T) string {
+	t.Helper()
+	screen := strings.Replace(devinStopScreen(t), "reset in 5 minutes", "reset in 2 hours", 1)
+	if !strings.Contains(screen, "reset in 2 hours") {
+		t.Fatal("devin fixture has no five-minute reset to lengthen")
+	}
+	return screen
+}
+
 func lostPayload(t *testing.T, a *App) map[string]any {
 	t.Helper()
 	evs, e := a.events("j")
@@ -88,8 +100,8 @@ func lostPayload(t *testing.T, a *App) map[string]any {
 func TestWatcherQuotaStopEndsIdleJobAsLost(t *testing.T) {
 	for _, role := range []string{"reviewer"} {
 		t.Run(role, func(t *testing.T) {
-			a, f, h, _ := quotaStopFixture(t, role, "idle", devinStopScreen(t))
-			reset := a.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339)
+			a, f, h, _ := quotaStopFixture(t, role, "idle", devinLongStopScreen(t))
+			reset := a.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
 			if e := a.watch(context.Background(), []string{"j"}); e != nil {
 				t.Fatal(e)
 			}
@@ -594,7 +606,7 @@ func TestWatcherQuotaIntentSurvivesHerdrErrors(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+			a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
 			t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
 			h.mu.Lock()
 			h.down = true
@@ -722,7 +734,7 @@ func TestWatcherQuotaIntentCancelledWhenThePaneMovedOn(t *testing.T) {
 // path must not end the job (a bare lost write, a job.lost without quota_stop,
 // the intent closed by that event). The intent settles against hk first.
 func TestWatcherQuotaIntentBlocksTheMissingPaneFallback(t *testing.T) {
-	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
 	h.mu.Lock()
 	h.down = true
@@ -764,7 +776,7 @@ func TestWatcherQuotaIntentBlocksTheMissingPaneFallback(t *testing.T) {
 // could not be settled (hk unreadable): the report must not complete the job
 // locally; the intent is settled against hk first.
 func TestWatcherQuotaIntentBlocksReportCompletion(t *testing.T) {
-	a, f, h, report := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a, f, h, report := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
 	h.mu.Lock()
 	h.down = true

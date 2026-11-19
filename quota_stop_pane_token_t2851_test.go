@@ -98,7 +98,8 @@ func TestQuotaStopPaneTokenRefreshesCappedWait(t *testing.T) {
 		report bool
 	}{
 		{"implementer wait inside the maximum TTL", false, "implementer", 5 * time.Minute, 1, true},
-		{"reviewer wait in shadow mode", false, "reviewer", 5 * time.Minute, 0, false},
+		// hk 5355: a reviewer wait is waited out in shadow mode too, so it shows the token.
+		{"reviewer wait in shadow mode", false, "reviewer", 5 * time.Minute, 1, true},
 		{"act flag waits for every role", true, "reviewer", 5 * time.Minute, 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

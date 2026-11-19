@@ -252,6 +252,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	latePoll := false
 	var screenRead quotaStopWatch
 	var handOff quotaHandOff
+	var reviewerHold reviewerQuotaHold
+	// holdTaken: this watcher process has taken a reviewer hold (hk 5355), so a
+	// stop after it is ended, not held again.
+	holdTaken := false
 	var creditAttempts int
 	quotaRetry := false
 	var lastCredit time.Time
@@ -311,6 +315,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if mark := view.Attempt; mark != watchedAttempt {
 			if watchedAttempt != "" {
 				handOff = quotaHandOff{}
+				reviewerHold = reviewerQuotaHold{}
 				deadline, latePoll = a.Now().Add(timeout), false
 				pending, size, modified = false, -1, time.Time{}
 				missing, seen, wasWaiting = 0, false, false
@@ -554,6 +559,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// across read errors, herdr outages and restarts. Only a successful
 		// contradictory look at the pane cancels it.
 		// Not while a hand-off is active: its stop is already announced.
+		// A held reviewer stop (hk 5355) ends with its hold when the pane is gone,
+		// has written a report, or moved on: the next look decides afresh.
+		if reviewerHold.active && (!present || pending || !reviewerHold.unchanged(paneAgent)) {
+			reviewerHold = reviewerQuotaHold{}
+		}
 		if !handOff.active && j.QuotaRole() != "consult" {
 			if hasIntent {
 				var out quotaIntentOutcome
@@ -574,15 +584,50 @@ func (a *App) watch(ctx context.Context, args []string) error {
 					quotaRetry = false
 				}
 			} else if present && !pending {
-				if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
-					if err := a.recordQuotaIntent(ctx, j, stop); errors.Is(err, errQuotaStopSuperseded) {
-						// The hub ended the job on its posted result.
-						return nil
-					} else if err != nil {
-						return err
+				if reviewerHold.active {
+					// The wait ran out with the pane still on the stop: end the
+					// job as hk 4507 does (hk 5355).
+					if !a.Now().Before(reviewerHold.until) {
+						if err := a.recordQuotaIntent(ctx, j, reviewerHold.stop); errors.Is(err, errQuotaStopSuperseded) {
+							return nil
+						} else if err != nil {
+							return err
+						}
+						reviewerHold = reviewerQuotaHold{}
+						quotaRetry = true
 					}
-					// The next poll reconciles it with a fresh look.
-					quotaRetry = true
+				} else if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
+					resumed, resumable := reviewerWaitResume(j, stop, a.Now())
+					if until, ok := reviewerWaitUntil(j, stop, a.Now()); ok && !holdTaken && !resumable {
+						// A short reset: hold the job for the manager's resume
+						// (hk 5355). The wait is recorded once, so a second stop
+						// after it ends the job at once; the deadline is extended
+						// by the wait.
+						if err := a.event(ctx, id, quotaWaitKind, map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "reset_at": stop.Reset.UTC().Format(time.RFC3339), "remaining_s": int64(stop.Reset.Sub(a.Now()).Round(time.Second) / time.Second), "until": until.UTC().Format(time.RFC3339)}); err != nil {
+							return err
+						}
+						reviewerHold = reviewerQuotaHold{active: true, stop: stop, until: until, seq: paneAgent.StateChangeSeq}
+						holdTaken = true
+						deadline = deadline.Add(until.Sub(a.Now()))
+						fmt.Fprintln(a.Err, "quota-stop reviewer held for its reset")
+					} else if resumable && !holdTaken {
+						// A restarted watcher inherits the hold the earlier one wrote
+						// (hk 5355): the durable wait still stands, so the job lives
+						// until its manager's resume or the wait's end.
+						reviewerHold = reviewerQuotaHold{active: true, stop: stop, until: resumed, seq: paneAgent.StateChangeSeq}
+						holdTaken = true
+						deadline = deadline.Add(resumed.Sub(a.Now()))
+						fmt.Fprintln(a.Err, "quota-stop reviewer hold re-armed after restart")
+					} else {
+						if err := a.recordQuotaIntent(ctx, j, stop); errors.Is(err, errQuotaStopSuperseded) {
+							// The hub ended the job on its posted result.
+							return nil
+						} else if err != nil {
+							return err
+						}
+						// The next poll reconciles it with a fresh look.
+						quotaRetry = true
+					}
 				}
 			}
 		}
