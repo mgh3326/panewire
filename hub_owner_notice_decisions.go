@@ -43,7 +43,7 @@ func (s *laneInboxStore) ownerNoticeDecision(parent context.Context, key string)
 func (s *laneInboxStore) recordOwnerNoticeDecision(parent context.Context, key, lane, cause, decision string, now time.Time) (string, error) {
 	op, done := s.op(parent)
 	defer done()
-	if _, err := s.db.ExecContext(op, s.q(`INSERT INTO owner_notice_decisions(event_key,lane,cause,decision,day,at_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), key, lane, cause, decision, loopDateOf(now), now.UnixMilli()); err != nil {
+	if _, err := s.db.ExecContext(op, s.q(s.dialect.insertIgnore(`INSERT INTO owner_notice_decisions(event_key,lane,cause,decision,day,at_ms) VALUES(?,?,?,?,?,?)`, "")), key, lane, cause, decision, loopDateOf(now), now.UnixMilli()); err != nil {
 		return "", err
 	}
 	var stored string
