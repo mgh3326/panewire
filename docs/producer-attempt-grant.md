@@ -45,6 +45,16 @@ leaves A's grant file at 1: the bound epoch still equals the file, so the
 revocation (a hub marker above the grant) is checked as well. A later A/3 grant
 supersedes it.
 
+The check is repeated under the job's events lock (the lock `Assign` and
+`Revoke` take) just before the record is written, so a regrant or revocation
+that lands during the call, for instance while the report uploads, stops it.
+For `escalate` and `joined` the lock is taken only when the job's lock file
+already exists: a job that never had a grant or revocation has none, and the
+frozen record golden does not include one. A completion is a duplicate of an
+earlier one only when it has the same report digest *and* the same epoch, so an
+epoch 1 record never turns the epoch 3 call into an OK with no record of its
+own.
+
 A refusal exits 2, names the reason and the two epochs on stderr, and writes no
 event file and sends no socket push. `--epoch` cannot lift a bound worker to a
 newer grant: a bound call that also passes a different `--epoch` is refused.

@@ -422,3 +422,78 @@ func TestDaemonResolvesOneRootForProducerPushes_t5310(t *testing.T) {
 		}
 	}
 }
+
+// A completion recorded at one attempt's epoch is not a duplicate of the same
+// report at another: the A/1 record cannot close the A/3 assignment, so A/3's
+// call must write and push its own (mergewake outside-diff findings on #720).
+func TestJobDoneDuplicateSuppressionIsScopedToTheEpoch_t5310(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		bound bool
+		flag  []string
+	}{
+		{name: "bound attempt", bound: true},
+		{name: "operator recovery", flag: []string{"--epoch", "3"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newProducerFixture(t, 1)
+			if rc, stderr := f.produce(t, "done"); rc != ExitOK {
+				t.Fatalf("epoch 1 done: rc=%d stderr=%q", rc, stderr)
+			}
+			f.pushes.await(t, 1)
+			// The same report, completed again at the same epoch, is still a duplicate.
+			if rc, stderr := f.produce(t, "done"); rc != ExitOK || !strings.Contains(stderr, "suppressed duplicate") {
+				t.Fatalf("same-epoch repeat: rc=%d stderr=%q", rc, stderr)
+			}
+			if err := jobowner.Assign(f.jobs, producerJob, 3); err != nil {
+				t.Fatal(err)
+			}
+			if tc.bound {
+				bindAttempt(t, producerJob, 3)
+			}
+			rc, stderr := f.produce(t, "done", tc.flag...)
+			if rc != ExitOK || strings.Contains(stderr, "suppressed duplicate") {
+				t.Fatalf("epoch 3 done: rc=%d stderr=%q, want a record of its own", rc, stderr)
+			}
+			pushed := f.pushes.await(t, 2)
+			if pushed[1].Epoch != 3 {
+				t.Fatalf("second push epoch=%d, want 3", pushed[1].Epoch)
+			}
+			completions := 0
+			for _, name := range f.eventFiles(t) {
+				if strings.HasSuffix(name, "-job.completed.json") {
+					completions++
+				}
+			}
+			if completions != 2 {
+				t.Fatalf("completion records=%d, want one per epoch", completions)
+			}
+		})
+	}
+}
+
+// A regrant that lands after the first check and before the record is written
+// must stop the call: the check is repeated under the events lock.
+func TestProducerCallRechecksTheAttemptUnderTheLock_t5310(t *testing.T) {
+	for _, command := range []string{"done", "escalate", "joined"} {
+		t.Run(command, func(t *testing.T) {
+			f := newProducerFixture(t, 1)
+			bindAttempt(t, producerJob, 1)
+			// A/1 -> B/2 -> A/3 in the window: the grant file now reads 3.
+			jobBeforeRecordWrite = func() {
+				if err := jobowner.Assign(f.jobs, producerJob, 3); err != nil {
+					t.Error(err)
+				}
+			}
+			t.Cleanup(func() { jobBeforeRecordWrite = nil })
+			before := f.eventFiles(t)
+			rc, stderr := f.produce(t, command)
+			if rc == ExitOK || !strings.Contains(stderr, "stale attempt") {
+				t.Fatalf("rc=%d stderr=%q, want the old attempt refused", rc, stderr)
+			}
+			if after := f.eventFiles(t); strings.Join(after, ",") != strings.Join(before, ",") || f.pushCount() != 0 {
+				t.Fatalf("a refused call wrote %v and pushed %d", after, f.pushCount())
+			}
+		})
+	}
+}

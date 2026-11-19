@@ -46,6 +46,11 @@ var jobBash = "bash"
 
 const jobEmitTimeout = 2 * time.Second
 
+// jobBeforeRecordWrite runs after the attempt was first checked and before the
+// record is written under the events lock. Only tests set it, to land a regrant
+// in that window.
+var jobBeforeRecordWrite func()
+
 type jobCLI struct {
 	stdout, stderr io.Writer
 	socket         string
@@ -54,6 +59,8 @@ type jobCLI struct {
 	// explicitEpoch is --epoch, the attempt an operator or parent call names
 	// when its environment carries no launch binding (0: none).
 	explicitEpoch uint64
+	// refusal is why completionEvent refused under the events lock.
+	refusal error
 }
 
 func jobRecordEpoch(jobsRoot, job string) (uint64, error) {
@@ -78,6 +85,38 @@ func (c *jobCLI) captureOwnerEpoch(jobsRoot, job string) error {
 	}
 	c.ownerEpoch = epoch
 	return nil
+}
+
+// revalidateAttempt re-checks the attempt under the job's events lock, the lock
+// Assign and Revoke take. captureOwnerEpoch ran before the report upload and
+// before the record is written; a regrant or revocation that lands in between
+// must not be overtaken by a record written at the old epoch.
+func (c *jobCLI) revalidateAttempt(jobsRoot, job string) error {
+	epoch, err := producerEpoch(jobsRoot, job, c.explicitEpoch)
+	if producerRefusal(err) {
+		return jobDie("refused: %v", err)
+	}
+	if err != nil {
+		return fmt.Errorf("job assignment unavailable: %w", err)
+	}
+	if epoch != c.recordEpoch() {
+		return jobDie("refused: the job's grant changed during the call (epoch %d, now %d)", c.recordEpoch(), epoch)
+	}
+	return nil
+}
+
+// priorCompletionEpoch is the epoch a recorded completion carries; a record
+// from before epochs existed is epoch 1.
+func priorCompletionEpoch(record map[string]any) uint64 {
+	number, ok := record["epoch"].(json.Number)
+	if !ok {
+		return 1
+	}
+	epoch, err := strconv.ParseUint(number.String(), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return epoch
 }
 
 // epochFlag parses the value of --epoch for done, escalate and joined.
@@ -271,6 +310,9 @@ func (c *jobCLI) done(args []string) int {
 	suffix := c.uploadReportDocument(job, report)
 	host := jobHost()
 	status := c.completionEvent(jobsRoot, job, owner, label, pane, host, report, suffix)
+	if status == "refused" {
+		return c.exit(c.refusal)
+	}
 	if status == "failed" {
 		// The contract's `completion_status="$(completion_event ...)"` carries the
 		// failing script's status out of the substitution, and `set -e` ends
@@ -812,6 +854,9 @@ func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report
 		sum := sha256.Sum256(contents)
 		digest = hex.EncodeToString(sum[:])
 	}
+	if jobBeforeRecordWrite != nil {
+		jobBeforeRecordWrite()
+	}
 	lock, err := os.OpenFile(filepath.Join(posixDirname(eventsDir), ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		c.warn("completion record not written: %v", err)
@@ -825,6 +870,10 @@ func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report
 		return "failed"
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	if err := c.revalidateAttempt(jobsRoot, job); err != nil {
+		c.refusal = err
+		return "refused"
+	}
 	if digest != "" {
 		entries, err := os.ReadDir(eventsDir)
 		if err != nil {
@@ -856,8 +905,11 @@ func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report
 			if kind, _ := prior["kind"].(string); kind != "job.completed" {
 				continue
 			}
-			// A record without content identity is never a suppression basis.
-			if priorDigest, ok := prior["report_sha256"].(string); ok && priorDigest == digest {
+			// A record without content identity is never a suppression basis,
+			// and neither is one from another attempt: an A/1 completion cannot
+			// close the A/3 assignment, so it must not turn A/3's call into
+			// an OK with no record of its own (a record without an epoch is 1).
+			if priorDigest, ok := prior["report_sha256"].(string); ok && priorDigest == digest && priorCompletionEpoch(prior) == c.recordEpoch() {
 				return "duplicate"
 			}
 		}
@@ -905,6 +957,23 @@ func (c *jobCLI) builderFlatEvent(jobsRoot, job, owner, label, pane, parent, hos
 	}
 	if head != "" {
 		fields = append(fields, jobField{"head", head})
+	}
+	// Take the lock Assign and Revoke take, when it exists, and re-check the
+	// attempt under it. The lock file is not created here: a job that never
+	// had a grant or revocation has none, and this record's bytes (the frozen
+	// golden) do not include one.
+	if jobBeforeRecordWrite != nil {
+		jobBeforeRecordWrite()
+	}
+	if lock, err := os.OpenFile(filepath.Join(jobsRoot, job, ".wrk-events.lock"), os.O_RDWR, 0); err == nil {
+		defer lock.Close()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			return &jobExit{code: 1, message: err.Error()}
+		}
+		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	}
+	if err := c.revalidateAttempt(jobsRoot, job); err != nil {
+		return err
 	}
 	if err := writeJobRecord(eventsDir, kind, fields); err != nil {
 		return &jobExit{code: 1, message: err.Error()}
