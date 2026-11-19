@@ -924,7 +924,9 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		return
 	} // The node result owns completion and cleanup facts.
 	if errors.Is(err, fleet.ErrHubPlacementDeferred) {
-		h.clearSpawnRefreshWaits(task)
+		// The attempt continues: a later pass places it. The demand history
+		// stays with the row, or the next pass would wait again on an attempt
+		// this request already settled (hk 5456).
 		h.releasePlacementCount(task.Job)
 		return
 	}
