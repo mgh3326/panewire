@@ -1166,12 +1166,16 @@ func relayComposer(harness, screen string) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		text := lines[row]
+		// The composer is the glyph row and its wrap continuations below it. The
+		// hint is drawn only on the glyph row, and only while the composer is
+		// empty, so it is cut from that row alone.
+		first := lines[row]
 		if adapter.composerHint != "" {
-			if cut := strings.Index(text, adapter.composerHint); cut >= 0 {
-				text = text[:cut]
+			if cut := strings.Index(first, adapter.composerHint); cut >= 0 {
+				first = first[:cut]
 			}
 		}
+		text := strings.Join(append([]string{first}, lines[row+1:]...), "\n")
 		return strings.TrimPrefix(compactWhitespace(text), adapter.composerGlyph), true
 	}
 	if adapter.composerEdge == nil {

@@ -1,0 +1,35 @@
+
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.14.2
+
+                       Tip: Turn on `/advisor` to attach a second model that reviews every turn
+                                              and quietly injects advice
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 19.0.0 is available. Run: omp update
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+ [r5413L1] [mergewake] findings for the worker: fix the failing check in relay_harness_adapter.go by reading the
+ composer row as the last non-blank row, and add a test that a long directive of several hundred characters, with its
+ nonce at the head, is located and submitted exactly once; the text must not be clipped at pane width and must not be
+ read as a fragment; reply with Fixed in the sha when the test fails on the previous head and passes on the new one,
+ and name the test in the reply. Also check that a wrapped composer keeps its corner glyph on the last row.
+
+
+ Error: No model selected.
+
+ Use /login, set an API key environment variable, or create
+ <HOME>/.omp/agent/agent.db
+
+ Then use /model to select a model.
+
+ π > ⬢ no-model > 📁 ~/work > ◫ 7.7K/? ⟲ ▶─────────────────────────────────────────────────────────────────────────────
+╰─                                                                                         ⇧⇥ to change thinking effort

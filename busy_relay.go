@@ -1390,12 +1390,13 @@ func relayRetriesOnce(result relayInjectResult) bool {
 	case relayInjectRetryable:
 		return true
 	case relayInjectMaybeInPane:
-		// hk 5413: omp retries only an empty composer with no echo after a
-		// send. Its composer is located, so the composer state is the proof of
-		// absence. Any other unproven verdict (composer unlocated, text held
-		// in it, or a return already spent) may already hold the message.
-		if strings.EqualFold(result.Harness, "omp") && !strings.HasPrefix(result.Evidence, "presend:") {
-			return result.Evidence == "unproven:composer_empty"
+		// hk 5413: omp retries only two verdicts, both proving nothing is in
+		// the pane: an empty composer with no echo after a send (no return was
+		// spent), and a presend read that failed before anything was typed.
+		// Every other verdict, presend-prefixed or after_return, may already
+		// hold the message, or a return was already spent on it.
+		if strings.EqualFold(result.Harness, "omp") {
+			return result.Evidence == "unproven:composer_empty" || result.Evidence == "presend:unproven:read_failed"
 		}
 		// "unproven:..." (also behind a "presend:" prefix) is the reads
 		// showing nothing: no adapter, an unreadable pane, an empty or

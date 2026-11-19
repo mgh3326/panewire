@@ -169,6 +169,12 @@ func TestOmpRetryPolicyNeverRetriesWhenTextMayBeInPane_5413(t *testing.T) {
 		"unproven:composer_unlocated":          false,
 		"after_return:unproven:composer_empty": false,
 		"presend:composer_pending":             false,
+		// A presend-prefixed post-return verdict spent the one return on this
+		// text: it must not be retyped (mergewake 734, busy_relay.go:1397).
+		"presend:after_return:unproven:composer_empty":     false,
+		"presend:after_return:unproven:composer_pending":   false,
+		"presend:after_return:unproven:composer_unlocated": false,
+		"presend:unproven:read_failed":                     true,
 	} {
 		got := relayRetriesOnce(relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: "omp", Evidence: evidence})
 		if got != want {

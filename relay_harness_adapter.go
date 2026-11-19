@@ -118,15 +118,29 @@ const ompComposerGlyph = "╰─"
 // omp 18.14.2. Typed text replaces it.
 const ompComposerHint = "⇧⇥ to change thinking effort"
 
-// relayOmpComposerRow locates omp's composer. It is the screen's last non-blank
-// row when that row opens with ompComposerGlyph; any other screen has no
-// locatable composer, so nothing in it can be read as the composer's text.
+// relayOmpComposerRow locates omp's composer and returns the index of its first
+// row. A composer wider than the pane wraps onto continuation rows, each indented
+// by the three-space wrap indent (testdata/relay_omp, long-*), so the composer is
+// the row that opens with ompComposerGlyph plus every row below it, which must
+// all be indented or blank. A screen whose rows below the glyph are not wrap
+// continuations, or that has no glyph row, has no locatable composer, so nothing
+// in it can be read as the composer's text. A composer taller than the visible
+// read has its glyph row out of the read, and is unlocated the same way.
 func relayOmpComposerRow(lines []string) (int, bool) {
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) == "" {
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	for i := end - 1; i >= 0; i-- {
+		if !strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), ompComposerGlyph) {
 			continue
 		}
-		return i, strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), ompComposerGlyph)
+		for _, below := range lines[i+1 : end] {
+			if !strings.HasPrefix(below, "   ") {
+				return 0, false
+			}
+		}
+		return i, true
 	}
 	return 0, false
 }
