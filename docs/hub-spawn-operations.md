@@ -256,6 +256,7 @@ has a limit (`expires_ms>0`), the request is parked instead of ending
 | a node did not connect / is not connected (`hub_node_unavailable`) | `node_disconnected` | a node connect |
 | rc 81: no awake host admitted / no host admitted / no candidate accepted | `host_full` | a node connect, a job leaving a node |
 | `role_no_candidate` (no profile passes), `NO_ELIGIBLE_HOST` | `no_eligible_host` | a node connect |
+| a free limit ended by a time that fits the request's limit (see [A full quota](#a-full-quota-moves-an-automatic-request-on)) | `quota_reset` | its timer only (the limit's end) |
 
 Any other refusal ends the request as before. A row with no limit is never
 parked. A parked row stays `status='accepted'`, unbound and holding its
@@ -312,6 +313,7 @@ increments `failed_attempts` and parks the request `launch_backoff` for
 maximum again, and never past `expires_at`. The spread is drawn from
 `HubServer.spawnRand` (tests inject it) and the times are on the hub clock.
 A later pass that finds no other candidate never shortens a running back-off.
+
 An attempt the hub never sent (the queue timeout) is not a failure and starts
 the next attempt at once. The per-host `launch_backoff` of hk 4380
 ([placement.md](placement.md)) is separate and counts host faults only.
@@ -327,6 +329,62 @@ The numbers are `placement.json` keys (0 or absent: the defaults, unmeasured,
 design §9a and §9b Q2): `{"spawn_backoff_seconds": 30,
 "spawn_backoff_max_seconds": 600, "spawn_wake_batch": 8,
 "spawn_park_notice_seconds": 1800}`.
+
+### A full quota moves an automatic request on
+
+hk 5358, operator decisions 433, 434 and 435. A node's quota gate can refuse the
+seat selection chose even though the hub's selection admitted it: the hub reads
+the account's quota from the shared store at selection, the node reads the store
+plus its own free-limit record at the gate (the two differ while a limit is
+recorded on the node and not yet published, or while the store is ahead of the
+hub's read). Until hk 5358 that refusal (`spawn_failed`, rc 3,
+`quota gate: free limit exceeded until <T>`, status `retryable`) ended the
+request and the requester replayed it.
+
+The refusal now has its own code, `quota_full` (reason `spawn_failed:quota_full`;
+the gate's three full-quota reasons: `free limit exceeded until`,
+`quota exhausted window=` and `credit_exhausted balance=`; an unmeasured reading
+or a policy refusal is not one). For an **automatic** request (`-m auto`,
+`--host auto`) that refuses before the job claim (stage empty, `placement` or
+`checkout`) the hub keeps the request: the same request id, job and attempt stay,
+and `nextHostAfterRefusal` (`hub_spawn_quota_full.go`) unbinds the attempt,
+records an exclusion, and wakes placement. The requester sees one success. A
+**pinned `-m`**, a pinned `--host`, a refusal after the claim and a refusal the
+node marks not retryable keep today's behaviour: the refusal is the answer.
+
+| The limit's end | What the hub does |
+|---|---|
+| ends inside the request's time limit (`--expires`, the requester's time for the job) less `spawnQuotaStartMargin` (1 min) | holds the request, park reason `quota_reset`, until the end (+1 s). Timer-only: no event wakes it, so it does not start on another pool first. At the end the same pool is selected again. The wait never passes `expires_at`. |
+| ends later, names no end (a window or a credit balance), or the request has no time limit | moves on at once: no back-off, the refused seat (host and profile) recorded in the exclusion with the account it ran on, so the next candidate that fits the grade, role and tags is chosen inside the same request. For the SWE-2 free rungs the next attempt also adds `--exclude-pool devin-free`. |
+
+The budget is the request's own `--expires`; no new flag. A requester that wants
+a 25-minute budget for a review pass passes `--expires 25m` (the default is 1 h
+for a reviewer, 6 h for an implementer). The refusal's end time is used at once:
+the refused node records and publishes it (`panewire quota refresh devin`
+merges the host's `devin-free-limit.json` over the account's shared reading,
+[quota stop](quota-stop.md)), and the hub cools the free band in memory until
+the end for every other request. The shared reading is the copy that survives a
+hub restart. Cooling is by band (`devin-free`), as the exhausted-pool sweep does it. Only the
+free band is excluded as a pool: it is the one Devin account's shared free
+bucket. Every other pool holds several accounts and a refusal describes only the
+selected one, so it excludes the seat and carries the account key, never the pool
+(a CommandCode `credit_exhausted` also sets the hub's durable account mark, hk
+5138, so selection skips that account alone). The exclusion is for this request
+only; a refusal that names no end excludes the seat for the request's life. A
+refusal of such a pool therefore moves on to the next host or account, and
+reaches another pool only through the refreshed reading, until selection takes an
+account exclusion of its own (not in hk 5358).
+
+When no candidate is left the request ends with the placement's own refusal
+plus one note per refused seat (host, profile, pool or account, the reset): a
+`no candidate` answer caused by the request's own full-quota refusals is not
+parked as a lack of hosts. It names every candidate tried and why it was dropped
+(`hub_quota_full` for each refused seat). The refusal is not a launch fault: it does not count toward the
+host's `launch_backoff`. Measure: the day's `spawn_failed:quota_full`
+outcomes in the hub's spawn records are the refusals that still reached a
+requester (before hk 5358 the same refusal read plain `spawn_failed` with the
+`quota gate:` text); the continuations are the hub log's
+`hub spawn refused by node; trying next candidate` lines with that reason.
 
 ### Parked notice
 

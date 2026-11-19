@@ -22,6 +22,11 @@ const (
 	spawnParkHostFull         = "host_full"
 	spawnParkNoEligibleHost   = "no_eligible_host"
 	spawnParkNodeDisconnected = "node_disconnected"
+	// spawnParkQuotaReset holds a request until a free limit's end time, which
+	// fits inside the request's time limit (hk 5358). Like launch_backoff it is
+	// timer-only: an event that wakes quota parks must not start the request on
+	// another pool before the wait it chose has run.
+	spawnParkQuotaReset = "quota_reset"
 )
 
 // The hub's spawn-queue defaults (design §9a, unmeasured). placement.json
@@ -220,10 +225,10 @@ func (h *HubServer) noteSpawnWake(reasons ...string) {
 
 // markSpawnWakeLocked notes reason pending under spawnWakeMu, counting it as
 // an event when event is set; the pending set and the counts change
-// together, so a park can never miss a drained wake. launch_backoff is
-// timer-only: no event wakes it.
+// together, so a park can never miss a drained wake. launch_backoff and
+// quota_reset are timer-only: no event wakes them.
 func (h *HubServer) markSpawnWakeLocked(event bool, reason string) {
-	if reason == spawnParkLaunchBackoff {
+	if reason == spawnParkLaunchBackoff || reason == spawnParkQuotaReset {
 		return
 	}
 	if h.spawnWakes == nil {
