@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/mgh3326/panewire/internal/hkcred"
@@ -336,6 +337,12 @@ func jobGoldenComparable(dump string) string {
 }
 
 func TestJobGolden(t *testing.T) {
+	// The goldens record file modes as a umask 022 shell leaves them (0644
+	// files, 0600 job records). The cases run in this process, so pin the
+	// umask for the run: a 077 or 002 shell would otherwise change every
+	// recorded mode and fail cases that are not related to the change.
+	previousUmask := syscall.Umask(0o022)
+	defer syscall.Umask(previousUmask)
 	cases := loadJobGoldenCases(t)
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
