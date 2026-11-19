@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/daemonop"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 const (
@@ -954,6 +955,28 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	epoch := req.Epoch
 	if epoch == 0 {
 		epoch = 1
+	}
+	if req.Kind != "lane.event" {
+		// The CLI refuses a superseded attempt before it writes anything; this
+		// is the node's own fence for a client that talks to the socket
+		// directly. It applies the CLI's rule to the submitted epoch: it must
+		// equal the persisted grant, and a revoked grant is refused, so a
+		// future epoch the node has not persisted cannot pass either
+		// (docs/producer-attempt-grant.md).
+		// The grant lives in the daemon's own namespace. With none configured,
+		// emitNamespaceMatches accepts any request root, and the request's own
+		// root is client-chosen, so there is no authoritative grant to check:
+		// refuse rather than read a relative path under the working directory.
+		root := d.emitNamespaceRoot()
+		if root == "" {
+			return &codedError{ExitUsage, fmt.Errorf("invalid emit request: no inbox namespace configured to check the attempt epoch")}
+		}
+		if _, err := jobowner.ProducerEpoch(filepath.Join(root, "jobs"), req.JobID, 0, epoch); err != nil {
+			if producerRefusal(err) {
+				return &codedError{ExitUsage, err}
+			}
+			return &codedError{ExitInternal, fmt.Errorf("job assignment unavailable")}
+		}
 	}
 	if d.cfg.Hub.Client == nil {
 		return &codedError{ExitDaemonUnavailable, fmt.Errorf("hub client unavailable")}
