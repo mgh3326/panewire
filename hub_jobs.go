@@ -59,11 +59,11 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 20 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 19 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" && name != "final" && name != "ended_at" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" && name != "final" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -81,17 +81,6 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 	// (job.lost). Absent it is false, which keeps an older node's end unsettled.
 	if raw, present := fields["final"]; present && json.Unmarshal(raw, &completion.Final) != nil {
 		return hubJobEventPayload{}, nil, false
-	}
-	if raw, present := fields["ended_at"]; present {
-		var endedAt string
-		if json.Unmarshal(raw, &endedAt) != nil {
-			return hubJobEventPayload{}, nil, false
-		}
-		parsed, err := time.Parse(time.RFC3339Nano, endedAt)
-		if err != nil {
-			return hubJobEventPayload{}, nil, false
-		}
-		completion.EndedAt = parsed
 	}
 	// agent_label is the claim metadata a node carries on the terminal record so
 	// the hub can late-register a job it never saw active. It is descriptive
@@ -147,7 +136,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 21 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 20 {
 		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {
@@ -523,18 +512,19 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 // the current node and epoch only, the owner assignment ended on disk), and
 // then releases the holder's task role unless a pool action still owns the
 // job (I1/I2, #669). A pool action that owns the job keeps the role until
-// admission finds the settle (releaseSettledSpawnRole).
-func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, received time.Time) bool {
+// admission finds the settle (releaseSettledSpawnRole). first reports whether
+// this loss is the one that ends the job; a repeat of an ended job is not.
+func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, received time.Time) (ended, first bool) {
 	unlock, ok := h.lockEndingAssignmentAs(machineID, event, true)
 	if !ok {
-		return false
+		return false, false
 	}
 	defer unlock()
 	h.mu.Lock()
 	job := h.jobs[event.JobID]
 	if job == nil || job.Reassigning || job.Epoch != event.Epoch || job.Node != machineID {
 		h.mu.Unlock()
-		return false
+		return false, false
 	}
 	alreadyClosed := job.Completed
 	job.Completed, job.LostSettled, job.Orphaned, job.LastSeen = true, true, false, received
@@ -543,7 +533,7 @@ func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, r
 	}
 	h.mu.Unlock()
 	h.releaseEndedJobRole(h.closeCtx, event.JobID)
-	return true
+	return true, !alreadyClosed
 }
 
 // releaseEndedJobRole frees the task role of a job the node settled lost. It

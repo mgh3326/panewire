@@ -746,7 +746,7 @@ type hubClientConnection struct {
 	// (node_pane_sweep.go): the heartbeat may carry the sweep's open-pane count.
 	acceptsEndedPanes atomic.Bool
 	// acceptsFinalLost is the same for hubFeatureFinalLost (hub_jobs_client.go):
-	// the final and ended_at fields of a job.lost go only to such a hub.
+	// the final field of a job.lost goes only to such a hub.
 	acceptsFinalLost   atomic.Bool
 	acceptsLaunchProof atomic.Bool
 	// acceptsCheckoutSparse is the same for hubFeatureCheckoutSparse
@@ -2363,7 +2363,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}
 			helloAck.Reset(client.helloAckTimeoutOrDefault())
 		case event := <-client.events:
-			if event.Kind == "lane.event" && !peer.laneEventsKnown(acked) {
+			if relayHeldForFeatures(event) && !peer.laneEventsKnown(acked) {
 				heldLane = append(heldLane, event)
 				continue
 			}
@@ -2795,15 +2795,6 @@ func relayEventWireForm(job hubScannedRelayEvent) hubScannedRelayEvent {
 	return job
 }
 
-// finalEndedAt is the loss time a final job.lost carries on the wire, RFC 3339
-// with nanoseconds; empty for any other event or one with no time.
-func finalEndedAt(job hubScannedRelayEvent) string {
-	if !job.Final || job.EventTime.IsZero() {
-		return ""
-	}
-	return job.EventTime.UTC().Format(time.RFC3339Nano)
-}
-
 // relayEventOutboxKeyFor keys the outbox by exactly what leaves the node. A
 // job.completed payload carries no reason field, so the hub can only ever echo
 // an empty reason for it; keying such a row by the record's own reason is a
@@ -2902,14 +2893,13 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			ReportLastLine string `json:"report_last_line,omitempty"`
 			Reason         string `json:"reason"`
 			Final          bool   `json:"final,omitempty"`
-			EndedAt        string `json:"ended_at,omitempty"`
 			Question       string `json:"question,omitempty"`
 			PR             string `json:"pr,omitempty"`
 			Head           string `json:"head,omitempty"`
 			PaneID         string `json:"pane_id,omitempty"`
 			EventID        string `json:"event_id,omitempty"`
 			Replay         bool   `json:"replay,omitempty"`
-		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Final, finalEndedAt(job), job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
+		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Final, job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
 	}
 	if job.Late && job.Kind == "job.completed" {
 		var fields map[string]json.RawMessage

@@ -213,9 +213,6 @@ func TestJobLostFinalFlagCrossesTheRelay(t *testing.T) {
 	if !final.Final {
 		t.Fatal("the node's final flag did not reach the hub")
 	}
-	if final.EndedAt.IsZero() {
-		t.Fatal("the loss time did not reach the hub")
-	}
 	older := relay(t, `{"kind":"job.lost","payload":{"reason":"hub_close","owner_lane":"lane-a","pane_id":"w2:p3"}}`)
 	if older.Final {
 		t.Fatal("an older node's job.lost read as final")
@@ -300,33 +297,60 @@ func t5351RestartSettle(t *testing.T, seeded bool) {
 	}
 }
 
-// A replayed final job.lost is dated by the loss, not by its receipt: a lane
-// route the hub wrote after the loss on the same pane survives, and one written
-// before it is released (mergewake: release cutoff must be the loss time).
-func TestJobLostReplayKeepsALaneRouteWrittenAfterTheLoss(t *testing.T) {
+// A replayed final job.lost releases no lane route: a replay can arrive after a
+// new job reused the pane, so the hub cannot tell which route is stale.
+func TestJobLostReplayReleasesNoLaneRoute(t *testing.T) {
 	hub, _, node, _, _ := t5351Settle(t, "lost")
 	now := time.Now()
-	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-old":{"machine":"machine-a","pane":"`+roleHeldPane+`"},"lane-new":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
-	hub.laneLife.noteWrite("lane-old", now.Add(-2*time.Hour))
-	hub.laneLife.noteWrite("lane-new", now.Add(-30*time.Minute))
+	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
+	hub.laneLife.noteWrite("lane-a", now.Add(-2*time.Hour))
 	payload := t5351FinalLost(1)
-	payload["ended_at"] = now.Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	payload["replay"] = true
 	t5351SendJobLost(t, node, payload)
-	eventually(t, 2*time.Second, "the replayed loss releases the old route", func() bool {
+	eventually(t, 2*time.Second, "the replayed loss settles the job", func() bool { return t5351JobSettled(hub) })
+	// Proves nothing more happens: the lane release follows the settle in the
+	// same handler, so this window lets a release that would happen land first.
+	time.Sleep(300 * time.Millisecond)
+	contents, err := os.ReadFile(hub.reportRelayPath)
+	if err != nil || !strings.Contains(string(contents), `"lane-a"`) {
+		t.Fatalf("a replayed loss released a lane route: %s", contents)
+	}
+}
+
+// A repeat of a final job.lost for a job already ended releases no lane route:
+// only the settle that first ends the job releases its pane's rows, so a route
+// written after that settle survives the repeat.
+func TestJobLostRepeatedSettleReleasesNoLaneRoute(t *testing.T) {
+	hub, _, node, _, _ := t5351Settle(t, "lost")
+	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	eventually(t, 2*time.Second, "the first loss releases the old route", func() bool {
 		contents, err := os.ReadFile(hub.reportRelayPath)
-		return err == nil && !strings.Contains(string(contents), `"lane-old"`)
+		return err == nil && !strings.Contains(string(contents), `"lane-a"`)
 	})
+	if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"lane-new":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hub.laneLife.noteWrite("lane-new", time.Now())
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	// Proves nothing more happens: the repeat is ingested asynchronously, so this
+	// window lets a release that would happen land before the check.
+	time.Sleep(300 * time.Millisecond)
 	contents, err := os.ReadFile(hub.reportRelayPath)
 	if err != nil || !strings.Contains(string(contents), `"lane-new"`) {
-		t.Fatalf("a route written after the loss was released: %s", contents)
+		t.Fatalf("a repeated settle released a route written after the first: %s", contents)
 	}
 }
 
 // A final job.lost is held until the hub's features are known, like a
 // lane.event, so it is never written before the hub says whether it takes the
-// final fields (mergewake: gate final on hub support).
+// final field. The scan burst and the immediate emit path both use the one
+// predicate (mergewake: the immediate path must hold too).
 func TestFinalLostIsHeldUntilTheHubFeaturesAreKnown(t *testing.T) {
 	final := hubClientEvent{Kind: "job.lost", Payload: json.RawMessage(`{"job_id":"test-job","final":true}`), finalLost: true}
+	if !relayHeldForFeatures(final) || relayHeldForFeatures(hubClientEvent{Kind: "job.completed"}) || !relayHeldForFeatures(hubClientEvent{Kind: "lane.event"}) {
+		t.Fatal("the held set is not a final job.lost and a lane.event")
+	}
 	plain := hubClientEvent{Kind: "job.completed", Payload: json.RawMessage(`{"job_id":"other"}`)}
 	write, held := splitRelayBurst([]hubClientEvent{final, plain}, false)
 	if len(held) != 1 || held[0].Kind != "job.lost" || len(write) != 1 || write[0].Kind != "job.completed" {
@@ -338,10 +362,10 @@ func TestFinalLostIsHeldUntilTheHubFeaturesAreKnown(t *testing.T) {
 	}
 }
 
-// The final and ended_at fields go only to a hub that advertised
+// The final field goes only to a hub that advertised
 // hubFeatureFinalLost; any other hub takes the pre-PR payload.
 func TestFinalLostKeepsItsFieldsOnlyForAHubThatAdvertisesIt(t *testing.T) {
-	event := hubClientEvent{Kind: "job.lost", Payload: json.RawMessage(`{"job_id":"test-job","epoch":1,"reason":"hub_close","final":true,"ended_at":"2026-11-19T02:00:00Z"}`), finalLost: true}
+	event := hubClientEvent{Kind: "job.lost", Payload: json.RawMessage(`{"job_id":"test-job","epoch":1,"reason":"hub_close","final":true}`), finalLost: true}
 	wire := func(peer *hubClientConnection) string {
 		t.Helper()
 		raw, err := json.Marshal(peer.relayWire(event))
@@ -357,7 +381,7 @@ func TestFinalLostKeepsItsFieldsOnlyForAHubThatAdvertisesIt(t *testing.T) {
 		return string(envelope.Payload)
 	}
 	old := wire(&hubClientConnection{})
-	if strings.Contains(old, `"final"`) || strings.Contains(old, `"ended_at"`) {
+	if strings.Contains(old, `"final"`) {
 		t.Fatalf("a hub without final_lost got the final fields: %s", old)
 	}
 	if _, valid := decodeHubJobEscalationPayload([]byte(old)); !valid {
@@ -365,7 +389,7 @@ func TestFinalLostKeepsItsFieldsOnlyForAHubThatAdvertisesIt(t *testing.T) {
 	}
 	peer := &hubClientConnection{}
 	peer.acceptsFinalLost.Store(true)
-	if got := wire(peer); !strings.Contains(got, `"final":true`) || !strings.Contains(got, `"ended_at"`) {
+	if got := wire(peer); !strings.Contains(got, `"final":true`) {
 		t.Fatalf("a hub with final_lost lost the final fields: %s", got)
 	}
 }

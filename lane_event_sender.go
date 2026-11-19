@@ -40,15 +40,22 @@ func (peer *hubClientConnection) laneEventsKnown(acked bool) bool {
 	return acked || peer.featuresKnown.Load()
 }
 
-// splitRelayBurst divides a burst into the events to write now and the
-// lane.event and final job.lost records to hold until the hub's feature state
-// is known: a final loss needs hubFeatureFinalLost to be sent whole.
+// relayHeldForFeatures reports whether a relay event waits for the hub's feature
+// state: a lane.event, and a final job.lost, which hubFeatureFinalLost must
+// take whole. Both the scan burst and the immediate `panewire emit` path hold
+// the same set (hk 5351).
+func relayHeldForFeatures(event hubClientEvent) bool {
+	return event.Kind == "lane.event" || event.finalLost
+}
+
+// splitRelayBurst divides a burst into the events to write now and the events
+// relayHeldForFeatures holds until the hub's feature state is known.
 func splitRelayBurst(events []hubClientEvent, laneKnown bool) (write, held []hubClientEvent) {
 	if laneKnown {
 		return events, nil
 	}
 	for _, event := range events {
-		if event.Kind == "lane.event" || event.finalLost {
+		if relayHeldForFeatures(event) {
 			held = append(held, event)
 			continue
 		}
@@ -78,7 +85,7 @@ func (peer *hubClientConnection) relayWire(event hubClientEvent) any {
 		event.Payload = laneEventPayloadForOldHub(event.Payload, event.sinkRecord)
 	}
 	// A hub without hubFeatureFinalLost takes the job.lost without its final
-	// and ended_at fields, as an older node sends it (hk 5351).
+	// field, as an older node sends it (hk 5351).
 	if event.finalLost && !peer.acceptsFinalLost.Load() {
 		event.Payload = finalLostPayloadForOldHub(event.Payload)
 	}
@@ -116,8 +123,8 @@ func (h *HubServer) laneEventFromWorker(machine, pane, lane string) bool {
 	return false
 }
 
-// finalLostPayloadForOldHub is a final job.lost without its final and ended_at
-// fields: the pre-PR payload a hub that did not advertise hubFeatureFinalLost
+// finalLostPayloadForOldHub is a final job.lost without its final field: the
+// pre-PR payload a hub that did not advertise hubFeatureFinalLost
 // decodes. An unreadable payload is sent as it is.
 func finalLostPayloadForOldHub(payload json.RawMessage) json.RawMessage {
 	var fields map[string]json.RawMessage
@@ -125,7 +132,6 @@ func finalLostPayloadForOldHub(payload json.RawMessage) json.RawMessage {
 		return payload
 	}
 	delete(fields, "final")
-	delete(fields, "ended_at")
 	out, err := json.Marshal(fields)
 	if err != nil {
 		return payload

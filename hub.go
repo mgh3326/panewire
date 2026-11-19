@@ -339,16 +339,6 @@ type hubJobReassignment struct {
 	At    time.Time
 }
 
-// laneReleaseCutoff is the time before which a lane route on the lost job's
-// pane is stale. A replayed loss is dated by its own EndedAt, never later than
-// receipt, so a route the hub wrote after the loss survives (hk 5351).
-func laneReleaseCutoff(event hubJobEventPayload, received time.Time) time.Time {
-	if event.EndedAt.IsZero() || event.EndedAt.After(received) {
-		return received
-	}
-	return event.EndedAt
-}
-
 type hubJobEventPayload struct {
 	Late          bool   `json:"late,omitempty"`
 	DeliveryClass string `json:"delivery_class,omitempty"`
@@ -381,9 +371,6 @@ type hubJobEventPayload struct {
 	// Final is a job.lost whose hk record the node wrote lost (a node that
 	// predates the field sends none, so the job is never settled by it).
 	Final bool `json:"final,omitempty"`
-	// EndedAt is when the node recorded the loss. A replayed loss releases lane
-	// rows only for routes the hub wrote before this time (hk 5351).
-	EndedAt time.Time `json:"ended_at,omitempty"`
 
 	Question string `json:"question,omitempty"`
 	PR       string `json:"pr,omitempty"`
@@ -1668,10 +1655,15 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			}
 			if message.Kind == "job.lost" && event.Final {
 				// A final job.lost ends the job: the node has written its hk
-				// record lost (hk 5351). Its lane rows point at the job's pane,
-				// which the settle no longer routes to.
-				if (h.observeJobLost(machineID, event, received) || h.lateRegisterJobEnd(machineID, event, received, true)) && event.PaneID != "" {
-					h.releasePaneLanes(machineID, event.PaneID, laneReleaseCutoff(event, received))
+				// record lost (hk 5351). Only the settle that first ends the job
+				// releases the lane rows on its pane, and never a replay: a
+				// replayed loss can arrive after a new job reused the pane.
+				ended, first := h.observeJobLost(machineID, event, received)
+				if !ended && h.lateRegisterJobEnd(machineID, event, received, true) {
+					ended, first = true, true
+				}
+				if ended && first && !event.Replay && event.PaneID != "" {
+					h.releasePaneLanes(machineID, event.PaneID, received)
 				}
 			}
 			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validLaneReference(event.OwnerLane) {
