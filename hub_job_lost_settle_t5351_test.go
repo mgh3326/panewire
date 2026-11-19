@@ -1,0 +1,231 @@
+package panewire
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+)
+
+// hk 5351: a node's final job.lost ends the job on the hub, and the hub releases
+// the task role the job held. The incident was a final job.lost followed by a
+// respawn on the same task, refused task_role_claimed.
+
+// t5351Settle is a holder that succeeded on machine-a with its hk job already
+// lost (what a node's final job.lost means), a connected node, and the hub's
+// job record for test-job owned by machine-a at epoch 1.
+func t5351Settle(t *testing.T, hkState string) (*HubServer, *httptest.Server, *websocket.Conn, *roleJobs, hubSpawnTask) {
+	t.Helper()
+	hub, server, jobs, held := roleHolderHub(t, hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane}, hkState, "succeeded")
+	node := t14Node(t, hub, server, true)
+	hub.mu.Lock()
+	hub.jobs["test-job"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "test-job", OwnerLane: "lane-a", Epoch: 1}, Node: "machine-a", FencedNodes: map[string]uint64{}}
+	hub.mu.Unlock()
+	return hub, server, node, jobs, held
+}
+
+// t5351SendJobLost sends one job.lost frame over the node's websocket.
+func t5351SendJobLost(t *testing.T, node *websocket.Conn, payload map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(t.Context(), node, hubClientWireEvent(hubClientEvent{Kind: "job.lost", Payload: raw})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func t5351FinalLost(epoch uint64) map[string]any {
+	return map[string]any{"job_id": "test-job", "epoch": epoch, "owner_lane": "lane-a", "reason": "hub_close", "final": true, "pane_id": roleHeldPane}
+}
+
+// t5351JobSettled reports whether the hub settled test-job as lost.
+func t5351JobSettled(hub *HubServer) bool {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	job := hub.jobs["test-job"]
+	return job != nil && job.Completed && job.LostSettled
+}
+
+// t5351Held reports whether a reservation still holds the (task, role) for request.
+func t5351Held(t *testing.T, hub *HubServer, request string) bool {
+	t.Helper()
+	return t5351HeldBy(t, hub, request)
+}
+
+// t5351HeldBy reports whether the (task, role) reservation belongs to request.
+func t5351HeldBy(t *testing.T, hub *HubServer, request string) bool {
+	t.Helper()
+	owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
+	return err == nil && owner == request
+}
+
+// t5351Reserved reports whether any reservation holds the (task, role).
+func t5351Reserved(t *testing.T, hub *HubServer) bool {
+	t.Helper()
+	_, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:implementer")
+	return err == nil
+}
+
+// The incident: a node's final job.lost, then a respawn on the same task. The
+// settle releases the role, so the respawn is admitted.
+func TestJobLostFinalSettlesTheJobAndReleasesItsRole(t *testing.T) {
+	hub, server, node, _, _ := t5351Settle(t, "lost")
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	eventually(t, 2*time.Second, "the final job.lost settles the job", func() bool { return t5351JobSettled(hub) })
+	eventually(t, 2*time.Second, "the settle releases the task role", func() bool { return !t5351Reserved(t, hub) })
+	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
+	if result := t14Result(t, response); result.status != http.StatusAccepted {
+		t.Fatalf("respawn status=%d body=%s", result.status, result.body)
+	}
+	if !t5351HeldBy(t, hub, roleSecondRequest().RequestID) {
+		t.Fatal("the respawn did not take the role")
+	}
+}
+
+// Admission takes the settle when hk cannot be read: the node's final job.lost
+// already proves the record lost, so the hold is not kept on a read error.
+func TestJobLostAdmissionTrustsTheSettleWhenHKIsUnreadable(t *testing.T) {
+	hub, server, node, jobs, held := t5351Settle(t, "lost")
+	store := hub.inbox.store
+	if _, err := store.db.Exec(store.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,0)`), "pa-5351-read", "test-job", "machine-a", 1, poolActionPending, "{}"); err != nil {
+		t.Fatal(err)
+	}
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	eventually(t, 2*time.Second, "the final job.lost settles the job", func() bool { return t5351JobSettled(hub) })
+	if !t5351HeldBy(t, hub, held.Request.RequestID) {
+		t.Fatal("a non-final pool action released the role")
+	}
+	jobs.getErr = map[string]error{"test-job": errors.New("hk unavailable")}
+	if _, err := store.db.Exec(store.q(`UPDATE pool_actions SET phase=? WHERE id=?`), poolActionDone, "pa-5351-read"); err != nil {
+		t.Fatal(err)
+	}
+	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
+	if result := t14Result(t, response); result.status != http.StatusAccepted {
+		t.Fatalf("respawn with hk unreadable: status=%d body=%s", result.status, result.body)
+	}
+}
+
+// A pool action that owns the job keeps the role after the settle (I1/I2,
+// #669). Admission still refuses until the action is final, then releases the
+// role on the settle the hub already holds.
+func TestJobLostSettleKeepsRoleWhilePoolActionOwnsJob(t *testing.T) {
+	hub, server, node, _, held := t5351Settle(t, "lost")
+	store := hub.inbox.store
+	if _, err := store.db.Exec(store.q(`INSERT INTO pool_actions(id,job,node,epoch,phase,data,final_ms) VALUES(?,?,?,?,?,?,0)`), "pa-5351", "test-job", "machine-a", 1, poolActionPending, "{}"); err != nil {
+		t.Fatal(err)
+	}
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	eventually(t, 2*time.Second, "the final job.lost settles the job", func() bool { return t5351JobSettled(hub) })
+	if !t5351Held(t, hub, held.Request.RequestID) {
+		t.Fatal("a non-final pool action released the role")
+	}
+	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
+	if result := t14Result(t, response); result.status != http.StatusConflict || !strings.Contains(string(result.body), "task_role_claimed") {
+		t.Fatalf("status=%d body=%s", result.status, result.body)
+	}
+	if _, err := store.db.Exec(store.q(`UPDATE pool_actions SET phase=? WHERE id=?`), poolActionDone, "pa-5351"); err != nil {
+		t.Fatal(err)
+	}
+	// Admission finds the settle once the action is final and takes the role.
+	response = t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
+	if result := t14Result(t, response); result.status != http.StatusAccepted {
+		t.Fatalf("respawn after the pool action ended: status=%d body=%s", result.status, result.body)
+	}
+	if !t5351HeldBy(t, hub, roleSecondRequest().RequestID) {
+		t.Fatal("the respawn did not take the role")
+	}
+}
+
+// An announced quota stop that is not final (hk still claimed) does not settle:
+// the successor pointer may still come (hk 3334).
+func TestJobLostAnnouncementDoesNotSettle(t *testing.T) {
+	hub, _, node, _, held := t5351Settle(t, "claimed")
+	payload := t5351FinalLost(1)
+	delete(payload, "final")
+	t5351SendJobLost(t, node, payload)
+	// Proves nothing more happens: the hub ingests the frame asynchronously, so
+	// this window lets a settle that would happen land before the check.
+	time.Sleep(300 * time.Millisecond)
+	if t5351JobSettled(hub) {
+		t.Fatal("a non-final job.lost settled the job")
+	}
+	if !t5351Held(t, hub, held.Request.RequestID) {
+		t.Fatal("a non-final job.lost released the role")
+	}
+}
+
+// A final job.lost from an older epoch than the hub's current one is fenced.
+func TestJobLostFromStaleEpochDoesNotSettle(t *testing.T) {
+	hub, _, node, _, held := t5351Settle(t, "lost")
+	hub.mu.Lock()
+	hub.jobs["test-job"].Epoch = 2
+	hub.mu.Unlock()
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	// Proves nothing more happens: the stale frame must not settle the job.
+	time.Sleep(300 * time.Millisecond)
+	if t5351JobSettled(hub) {
+		t.Fatal("a stale-epoch final job.lost settled the job")
+	}
+	if !t5351Held(t, hub, held.Request.RequestID) {
+		t.Fatal("a stale-epoch final job.lost released the role")
+	}
+}
+
+// The node's final flag reaches the hub through the relay, and an older node's
+// job.lost (no field) reads as not final.
+func TestJobLostFinalFlagCrossesTheRelay(t *testing.T) {
+	relay := func(t *testing.T, payload string) hubJobEventPayload {
+		t.Helper()
+		root := t.TempDir()
+		dir := filepath.Join(root, "jobs", "test-job", "events")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "00001-job.lost.json"), []byte(payload), 0600); err != nil {
+			t.Fatal(err)
+		}
+		events := scanHubRelayEvents(root)
+		if len(events) != 1 {
+			t.Fatalf("events: %+v", events)
+		}
+		wire, ok := (&HubClient{}).relayEventForSend(events[0])
+		if !ok {
+			t.Fatal("job.lost was not queued")
+		}
+		decoded, valid := decodeHubJobEscalationPayload(wire.Payload)
+		if !valid {
+			t.Fatalf("invalid hub payload: %s", wire.Payload)
+		}
+		return decoded
+	}
+	final := relay(t, `{"kind":"job.lost","payload":{"reason":"hub_close","final":true,"owner_lane":"lane-a","pane_id":"w2:p3"}}`)
+	if !final.Final {
+		t.Fatal("the node's final flag did not reach the hub")
+	}
+	older := relay(t, `{"kind":"job.lost","payload":{"reason":"hub_close","owner_lane":"lane-a","pane_id":"w2:p3"}}`)
+	if older.Final {
+		t.Fatal("an older node's job.lost read as final")
+	}
+}
+
+// The settle also releases the lane row that points at the job's pane, as a
+// closed pane does (releasePaneLanes).
+func TestJobLostFinalReleasesThePaneLaneRow(t *testing.T) {
+	hub, _, node, _, _ := t5351Settle(t, "lost")
+	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	eventually(t, 2*time.Second, "the settle releases the lane row", func() bool {
+		contents, err := os.ReadFile(hub.reportRelayPath)
+		return err == nil && !strings.Contains(string(contents), `"lane-a"`)
+	})
+}

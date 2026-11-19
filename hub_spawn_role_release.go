@@ -410,6 +410,26 @@ func spawnRoleHeldBody(code, task, role string, holder hubSpawnTask, pane heldPa
 	return body
 }
 
+// releaseSettledSpawnRole frees the role of a holder whose job the node settled
+// lost (observeJobLost, hk 5351). It takes the job's pool-action lock, so a
+// pool action that still owns the job keeps the hold (I1/I2), and it checks the
+// settle under that lock. The holder's node must be the one that settled it.
+func (h *HubServer) releaseSettledSpawnRole(ctx context.Context, holder hubSpawnTask, roleKey string) bool {
+	unlock, free := h.lockWithoutPoolAction(ctx, holder.Job)
+	if !free {
+		return false
+	}
+	defer unlock()
+	h.mu.Lock()
+	job := h.jobs[holder.Job]
+	settled := job != nil && job.LostSettled && job.Node == spawnHolderHost(holder)
+	h.mu.Unlock()
+	if !settled {
+		return false
+	}
+	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil
+}
+
 // reclaimSpawnRole retries claimSpawn after a role collision when the holder is
 // finished: its hk job is completed, escalated or lost, or it failed or
 // succeeded and its pane is verifiably gone (a succeeded holder with no hk
@@ -437,7 +457,17 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 	if holderErr == nil {
 		trace.branch = "holder_not_finished"
 	}
-	if holderErr == nil && (priorStatus == "succeeded" || priorStatus == "failed") {
+	if settled := holderErr == nil && (priorStatus == "succeeded" || priorStatus == "failed") && h.releaseSettledSpawnRole(ctx, holder, roleKey); settled {
+		// The node settled the holder's job lost (hk 5351): its hk record is
+		// lost and no pool action owns the job, so the role is free without
+		// reading hk again.
+		trace.branch, trace.hk = "job_settled", "settled"
+		task, _, err = h.inbox.store.claimSpawn(ctx, request, spawn.Job, owner, h.now().UTC())
+		if !errors.Is(err, errSpawnClaimed) {
+			return task, nil, err
+		}
+		trace.branch = "claim_raced"
+	} else if holderErr == nil && (priorStatus == "succeeded" || priorStatus == "failed") {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		record, exists, readErr := app.ExistingJob(readCtx, priorJob)
 		cancel()

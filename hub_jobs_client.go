@@ -188,7 +188,10 @@ type hubScannedRelayEvent struct {
 	Cause         string
 	Kind          string
 	HubActiveJob
-	Reason    string
+	Reason string
+	// Final marks a job.lost whose hk record the node already wrote lost. Only
+	// a final end settles the hub's job record (observeJobLost).
+	Final     bool
 	Question  string
 	PR        string
 	Head      string
@@ -333,7 +336,7 @@ func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job 
 		// The event file name is the job event's durable identity: it is
 		// unique per emission, stable across node restarts, and shared by
 		// `panewire emit`, which derives the same value for its file.
-		events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: job.id, Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: reason, Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: indexed.name, EventTime: eventTime})
+		events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: job.id, Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: reason, Final: kind == "job.lost" && event.Payload.Final, Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: indexed.name, EventTime: eventTime})
 	}
 	return events
 }
@@ -453,6 +456,7 @@ type hubInboxEvent struct {
 		ReportPath     string `json:"report_path"`
 		ReportLastLine string `json:"report_last_line"`
 		Reason         string `json:"reason"`
+		Final          bool   `json:"final,omitempty"`
 		Pool           string `json:"pool"`
 		ResetAt        string `json:"reset_at"`
 		Question       string `json:"question"`

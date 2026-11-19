@@ -2884,13 +2884,14 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			ReportPath     string `json:"report_path,omitempty"`
 			ReportLastLine string `json:"report_last_line,omitempty"`
 			Reason         string `json:"reason"`
+			Final          bool   `json:"final,omitempty"`
 			Question       string `json:"question,omitempty"`
 			PR             string `json:"pr,omitempty"`
 			Head           string `json:"head,omitempty"`
 			PaneID         string `json:"pane_id,omitempty"`
 			EventID        string `json:"event_id,omitempty"`
 			Replay         bool   `json:"replay,omitempty"`
-		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
+		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Final, job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
 	}
 	if job.Late && job.Kind == "job.completed" {
 		var fields map[string]json.RawMessage
