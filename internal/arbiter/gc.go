@@ -474,6 +474,9 @@ func (s *Store) GCWithJobs(ctx context.Context, agents AgentSourceForJobs) (GCRe
 			if _, err = c.exec("DELETE FROM quota_pool_records WHERE job_id = ? AND pool = ?", d.quota.job, d.quota.pool); err != nil {
 				return sqlErr(err)
 			}
+			if err = dropQuotaEpoch(c, d.quota.job, d.quota.pool); err != nil {
+				return err
+			}
 			if _, err = s.recordEvent(ctx, c, d.job, "quota_pool.stale_cleanup", map[string]any{
 				"job_id": d.job, "pool": d.quota.pool, "profile": d.quota.profile, "started_at": d.quota.started,
 				"agent_label": d.label, "reason": reason, "herdr_status": nonNil(d.statuses),

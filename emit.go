@@ -132,7 +132,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	sink := fs.Bool("sink", false, "sink lane.event text: at most 8192 bytes, cut to that at emit (otherwise text up to 16 KiB is kept whole in the lane inbox)")
 	report := fs.String("report", "", "report path")
 	ownerLane := fs.String("owner-lane", "", "owning lane")
-	epoch := fs.Uint64("epoch", 0, "job epoch (defaults to the local grant)")
+	epoch := fs.Uint64("epoch", 0, "attempt epoch: required above grant epoch 1 unless the launch environment binds one (docs/producer-attempt-grant.md)")
 	label := fs.String("label", "", "agent label for the relay note")
 	host := fs.String("host", "", "originating host label")
 	pane := fs.String("pane", "", "originating pane id")
@@ -280,16 +280,20 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 		fmt.Fprintln(stderr, "emit: --report is required")
 		return ExitUsage
 	}
-	if record.Epoch == 0 {
-		// Capture the grant in the event, before the scanner or a later grant
-		// can change which attempt produced it.
-		epoch, err := jobRecordEpoch(filepath.Join(root, "jobs"), record.JobID)
-		if err != nil {
-			fmt.Fprintln(stderr, "emit: job assignment unavailable")
-			return ExitInternal
-		}
-		record.Epoch = epoch
+	// The epoch is fixed before the event file exists: the attempt the caller
+	// was launched as (or --epoch) must be the node's current grant, so neither
+	// the scanner nor a later grant changes which attempt produced the record
+	// (docs/producer-attempt-grant.md).
+	epoch, err := producerEpoch(filepath.Join(root, "jobs"), record.JobID, record.Epoch)
+	if producerRefusal(err) {
+		fmt.Fprintln(stderr, "emit: refused:", err)
+		return ExitUsage
 	}
+	if err != nil {
+		fmt.Fprintln(stderr, "emit: job assignment unavailable")
+		return ExitInternal
+	}
+	record.Epoch = epoch
 	if !hubAgentLabelPattern.MatchString(record.AgentLabel) {
 		record.AgentLabel = ""
 	}

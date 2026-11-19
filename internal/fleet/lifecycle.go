@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
-	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 func (a *App) lifecycle(ctx context.Context, kind string, args []string) error {
@@ -292,39 +291,46 @@ func canonicalJSON(v any) (string, bool) {
 	return string(b), true
 }
 
-// releaseQuota releases the captured attempt's quota, but never quota acquired
-// after this node received a newer assignment for the same job.
+// releaseQuota releases the quota rows the captured attempt acquired: each row
+// records the grant epoch it was acquired under (hk 5294), and only a row of
+// j's epoch is released, whichever grant the job holds now. After A1→B2→A3 the
+// epoch-1 attempt's release leaves the epoch-3 attempt's row alone, and the
+// other way round.
+//
+// A row with no epoch was written before epochs were recorded and cannot be
+// told apart from a newer attempt's. Every caller is ending its attempt, some
+// before the final end event is written (a close intent, a hub close), so the
+// row is released when j is still the job's current attempt and no revocation
+// stands; a delayed watcher of an older attempt, for a job that has since
+// started again, leaves it.
 func (a *App) releaseQuota(ctx context.Context, j Job) error {
 	pools, err := a.ledger().QuotaPools(ctx, j.ID)
 	if err != nil {
 		return ledgerFail(err, "status")
 	}
+	if len(pools) == 0 {
+		return nil
+	}
 	epoch := j.OwnerEpoch
 	if epoch == 0 {
 		epoch = 1
 	}
-	changed := errors.New("job assignment changed")
+	// Asked only for a row with no epoch. A ledger that cannot be read does not
+	// prove the job ended: the row is kept for gc.
+	terminal := func() bool {
+		current, err := a.job(j.ID)
+		if err != nil {
+			a.warn("quota without a recorded epoch retained for job %s: ledger unreadable: %v", j.ID, err)
+			return false
+		}
+		ending, now := viewLedger(j.Events), viewLedger(current.Events)
+		return ending.Attempt == now.Attempt && !now.Revoked
+	}
 	for _, pool := range pools {
 		if pool == "" {
 			return fail(exitStateConflict, "invalid quota record")
 		}
-		var currentEpoch uint64
-		err := a.ledger().ReleaseQuotaPoolIf(ctx, j.ID, pool, false, func() error {
-			current, err := jobowner.Epoch(a.Jobs, j.ID)
-			if err != nil {
-				return err
-			}
-			currentEpoch = current
-			if current != epoch {
-				return changed
-			}
-			return nil
-		})
-		if errors.Is(err, changed) {
-			a.warn("quota retained for job %s pool %s: captured epoch %d, current epoch %d", j.ID, pool, epoch, currentEpoch)
-			continue
-		}
-		if err != nil {
+		if _, err := a.ledger().ReleaseQuotaPoolEpoch(ctx, j.ID, pool, epoch, terminal); err != nil {
 			return ledgerFail(err, "release")
 		}
 	}

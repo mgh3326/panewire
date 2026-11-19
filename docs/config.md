@@ -2192,6 +2192,20 @@ Behaviour differences from the script:
   record or lease leaves the job `leased` while it still has another record or
   an unexpired lease (the script marked it released at once), so it cannot be
   reclaimed while a pool is still consumed. An expired lease holds nothing.
+- **A quota record carries the epoch that acquired it** (hk 5294). The
+  schema stays version 2 and `quota_pool_records` is unchanged; the epoch lives
+  in the side table `quota_pool_epochs (job_id, pool, epoch, started_at)`,
+  created with `CREATE TABLE IF NOT EXISTS` on panewire's first write. The
+  script and older binaries check only `meta.schema_version` and name the
+  columns they read, so they open the file as before and never see the table.
+  A side row counts only while its `started_at` equals the quota row's, so a
+  row the script or an older binary deleted and recorded again has no epoch.
+  An attempt's release removes the row of its own epoch and no other, whatever
+  grant the job holds by then; a later epoch's record of the same pool takes
+  over the row of a lower one (the hub revoked that attempt). A row with no
+  epoch (one written before this, or by the script) is released only when the job
+  ends here with no hub revocation standing, and `gc` stale cleanup still
+  removes it.
 - **A new ledger is owner-only** (state directory 0700, `state.db` and its
   `-wal`/`-shm` 0600) because the database holds the full fencing tokens. A
   ledger that already exists keeps its modes; tighten it with `chmod 700` on

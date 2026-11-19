@@ -227,7 +227,7 @@ func TestR20T4JoinedMatchesScannerWithAndWithoutReport(t *testing.T) {
 func TestR20T4EmptyReportEscalationReachesRelayTextWithEventPath(t *testing.T) {
 	inbox := t.TempDir()
 	client := &HubClient{events: make(chan hubClientEvent, 4), completedJobs: map[string]uint64{}, completedReports: map[string]struct{}{}, assignedJobs: map[string]uint64{}}
-	daemon := NewDaemon(Config{Hub: HubDaemonConfig{Enabled: true, Client: client}})
+	daemon := NewDaemon(Config{InboxRoot: inbox, Hub: HubDaemonConfig{Enabled: true, Client: client}})
 	var emitErr error
 	var mu sync.Mutex
 	socket := r20t4Socket(t, func(request localRequest) {

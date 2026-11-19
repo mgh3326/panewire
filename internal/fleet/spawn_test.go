@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
+	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
 type fakeQuota struct {
@@ -429,4 +430,51 @@ func TestSpawnPaneEnvironmentNamesItsLane(t *testing.T) {
 		return
 	}
 	t.Fatal("no tab created")
+}
+
+// hk 5310: the launched pane carries the job's grant epoch at launch, which is
+// the attempt its producer calls present.
+func TestSpawnPaneEnvironmentBindsTheGrantEpoch_t5310(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		grant uint64
+		want  string
+	}{
+		{name: "initial", want: "1"},
+		{name: "regranted", grant: 3, want: "3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, s, f, _ := cmdFixture(t)
+			if tc.grant > 0 {
+				if e := jobowner.Assign(a.Jobs, s.Job, tc.grant); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if e := a.Spawn(context.Background(), s); e != nil {
+				t.Fatal(e)
+			}
+			for _, c := range f.Calls {
+				if !strings.HasPrefix(strings.Join(c.Args, " "), "tab create") {
+					continue
+				}
+				var jobs, epochs []string
+				for i, arg := range c.Args {
+					if i == 0 || c.Args[i-1] != "--env" {
+						continue
+					}
+					if strings.HasPrefix(arg, "ARBITER_JOB=") {
+						jobs = append(jobs, arg)
+					}
+					if strings.HasPrefix(arg, "ARBITER_JOB_EPOCH=") {
+						epochs = append(epochs, arg)
+					}
+				}
+				if len(jobs) != 1 || jobs[0] != "ARBITER_JOB="+s.Job || len(epochs) != 1 || epochs[0] != "ARBITER_JOB_EPOCH="+tc.want {
+					t.Fatalf("pane env %v %v, want ARBITER_JOB=%s ARBITER_JOB_EPOCH=%s", jobs, epochs, s.Job, tc.want)
+				}
+				return
+			}
+			t.Fatal("no tab created")
+		})
+	}
 }

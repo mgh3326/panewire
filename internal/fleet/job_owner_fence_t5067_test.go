@@ -59,8 +59,10 @@ func TestJobOwnerFenceRelayUsesProducingEpoch_t5067(t *testing.T) {
 	t.Fatalf("relay lost producing epoch: %v", args)
 }
 
-// The local quota ledger is exercised by CI, including the guard's transaction.
-func TestJobOwnerFenceWatcherReleasesOnlyOldGrantQuota_t5067(t *testing.T) {
+// The local quota ledger is exercised by CI, including the release transaction.
+// The quota rows record the epoch that acquired them (hk 5294), so the watcher
+// releases its own attempt's rows whether or not a newer grant has arrived.
+func TestJobOwnerFenceWatcherReleasesItsOwnEpochQuota_t5067(t *testing.T) {
 	for _, regrant := range []bool{false, true} {
 		name := "no newer local grant"
 		if regrant {
@@ -71,7 +73,7 @@ func TestJobOwnerFenceWatcherReleasesOnlyOldGrantQuota_t5067(t *testing.T) {
 			ledgerRunner(t, a)
 			seedJob(t, a, "j", "implementer")
 			seedLedger(t, a, "j")
-			if _, err := a.ledger().RecordQuotaPool(t.Context(), arbiter.QuotaRun{Job: "j", Profile: "fixture", Gate: arbiter.Gate{Pool: "second"}}); err != nil {
+			if _, err := a.ledger().RecordQuotaPool(t.Context(), arbiter.QuotaRun{Job: "j", Profile: "fixture", Gate: arbiter.Gate{Pool: "second"}, Epoch: 1}); err != nil {
 				t.Fatal(err)
 			}
 			base := a.JobStore.(*fakeJobStore)
@@ -90,41 +92,11 @@ func TestJobOwnerFenceWatcherReleasesOnlyOldGrantQuota_t5067(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, pools := ledgerState(t, a, "j")
-			if got := len(pools); got != 0 && !regrant || got != 2 && regrant {
-				t.Fatalf("regrant=%v: quota pools=%v", regrant, pools)
+			if len(pools) != 0 {
+				t.Fatalf("regrant=%v: quota pools=%v, want the epoch-1 attempt's rows released", regrant, pools)
 			}
-			if regrant {
-				warning := a.Err.(*bytes.Buffer).String()
-				if !strings.Contains(warning, "job j pool example") || !strings.Contains(warning, "job j pool second") || strings.Count(warning, "captured epoch 1, current epoch 3") != 2 {
-					t.Fatalf("retained quota warning=%q", warning)
-				}
-			}
-		})
-	}
-}
-
-// CI exercises the local quota database and the shared release transaction.
-func TestJobOwnerFenceSharedQuotaReleaseUsesCapturedGrant_t5067(t *testing.T) {
-	for _, regrant := range []bool{false, true} {
-		t.Run(strconv.FormatBool(regrant), func(t *testing.T) {
-			a := testApp(t)
-			ledgerRunner(t, a)
-			seedLedger(t, a, "j")
-			j := Job{ID: "j", OwnerEpoch: 1}
-			if regrant {
-				if err := jobowner.Assign(a.Jobs, "j", 3); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := a.releaseQuota(t.Context(), j); err != nil {
-				t.Fatal(err)
-			}
-			_, pools := ledgerState(t, a, "j")
-			if !regrant && len(pools) != 0 || regrant && (len(pools) != 1 || pools[0] != "example") {
-				t.Fatalf("regrant=%v quota pools=%v", regrant, pools)
-			}
-			if regrant && !strings.Contains(a.Err.(*bytes.Buffer).String(), "job j pool example: captured epoch 1, current epoch 3") {
-				t.Fatalf("retained quota warning=%q", a.Err.(*bytes.Buffer).String())
+			if warning := a.Err.(*bytes.Buffer).String(); strings.Contains(warning, "quota retained") {
+				t.Fatalf("a quota row was retained: %q", warning)
 			}
 		})
 	}
