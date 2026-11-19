@@ -89,6 +89,14 @@ type JobDirTTL struct {
 	// is renamed to its tombstone; tests only.
 	beforeRename func(job string)
 	afterRename  func(job, tombstone string)
+	// RelayOwed reports whether the node still owes the hub a relay row of
+	// the job. When set, the TTL pass and the at-end pass both keep a dir it
+	// owes. The at-end pass needs it set: nil keeps every at-end dir
+	// (job_dir_end.go). The node sets it on both loops.
+	RelayOwed func(ctx context.Context, job string) (bool, error)
+	// atEnd marks the at-end pass: no age wait, and the job's own end and
+	// its relay rows must be settled (hk 3704).
+	atEnd bool
 }
 
 // JobDirTTLSummary counts one pass: dirs deleted (or, in a dry run, that
@@ -288,7 +296,8 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	if open, _ := hubCloseOpenRead(a, id); open {
 		return keep("hub-close-open")
 	}
-	if a.Now().Sub(newest) < p.TTL {
+	// The at-end pass has no age wait: the job ended just now (hk 3704).
+	if !p.atEnd && a.Now().Sub(newest) < p.TTL {
 		return keep("too-young")
 	}
 	// A leftover has no receipt, so its pane is named only by the hk job
@@ -327,6 +336,28 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	}
 	if reason = a.jobDirArtifacts(ctx, root, path, j, rec, recorded); reason != "" {
 		return keep(reason)
+	}
+	if p.atEnd {
+		// hk 3704: the at-end delete also needs the job's end on record in
+		// its own ledger, and a relay reader to prove the relay settled.
+		if !j.Reaped {
+			return keep("not-reaped")
+		}
+		if p.RelayOwed == nil {
+			return keep("relay-unknown")
+		}
+	}
+	if p.RelayOwed != nil {
+		// hk 3704: no relay row of the job still owed to the hub, for the
+		// TTL pass too. The relay's own window is what bounds the answer, so a
+		// relay hold longer than the TTL floor cannot outlive the dir.
+		owed, err := p.RelayOwed(ctx, id)
+		if err != nil {
+			return keep("relay-unreadable")
+		}
+		if owed {
+			return keep("relay-owed")
+		}
 	}
 	v.remove, v.reason = true, "confirmed"
 	if submitter {

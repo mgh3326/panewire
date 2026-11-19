@@ -427,6 +427,13 @@ type TaskPaneSweeper struct {
 	// (report_republish.go).
 	reportPins map[string]reportPinState
 	reportPass int
+	// RelayOwed reports whether the node still owes the hub a relay row of a
+	// job (hk 3704). The at-end job dir delete reads it, and a nil reader
+	// means no at-end delete. The node's own sweeper sets it.
+	RelayOwed func(ctx context.Context, job string) (bool, error)
+	// endedDirs holds the jobs whose at-end dir delete is still owed, by job
+	// id, with the time the end was recorded (job_dir_end.go).
+	endedDirs map[string]time.Time
 }
 
 func (s *TaskPaneSweeper) info(message string, attrs ...any) {
@@ -524,6 +531,7 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 // closes early. It returns the panes it closed.
 func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Duration) ([]SweptPane, error) {
 	s.retryDeferredFailures(ctx, a)
+	s.expireEndedJobDirs(ctx, a)
 	entries, err := os.ReadDir(a.Jobs)
 	if errors.Is(err, os.ErrNotExist) {
 		clear(s.idleSince)
@@ -1300,6 +1308,10 @@ func (s *TaskPaneSweeper) reapSweptPaneHeld(ctx context.Context, a *App, latest,
 	}
 	if err := a.event(ctx, j.ID, "job.reaped", map[string]any{"pane_id": j.Pane, "reason": end.reason}); err != nil {
 		a.warn("job.reaped not recorded: %v", err)
+	} else {
+		// hk 3704: the end is on record, so the dir may go at job end.
+		// expireEndedJobDirs makes the attempt on this pass and later ones.
+		s.queueEndedJobDir(j.ID, a.Now())
 	}
 	if successor := paneSweepReplacedBy(latest); successor != "" {
 		// The successor owns the worktree, the PR and the task: none of them

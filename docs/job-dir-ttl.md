@@ -186,6 +186,35 @@ them; the operator decides:
 A submitter-side directory skips the pane check, so the first two never
 apply to it.
 
+## At job end
+
+A job whose end the node records does not wait for the TTL (hk 3704). The
+task pane sweep's reap writes `job.reaped` in `reapSweptPaneHeld`
+(`internal/fleet/pane_sweep.go`), and right after that write queues the job's
+dir (`queueEndedJobDir`, `internal/fleet/job_dir_end.go`). Each sweep pass
+then makes one at-end attempt per queued dir (`expireEndedJobDirs`, called
+from `pass` in `internal/fleet/pane_sweep.go`). The attempt is `ExpireEnded`,
+the TTL pass's own `decide` and `expire`, with two differences:
+
+- **no age wait**: the job ended just now, so (d) is skipped;
+- **two more gates**, after the artifacts check: the job's own ledger holds
+  `job.reaped` (`not-reaped`), and the relay owes the hub no row of the job
+  (`relay-owed`, `relay-unknown` without a reader, `relay-unreadable` on an
+  outbox error). The node's reader (`jobRelayOwed`, `node_pane_sweep.go`)
+  walks the relay scan and asks the outbox for each row's state, with the key
+  `relayEventForSend` sends. `job.reaped` is itself a relay row, so the first
+  attempt almost always finds it owed. The retry on the later passes is what
+  lets the relay catch up.
+
+The pane check (c), the lock, the tombstone and the re-check are the TTL
+pass's own, so a live pane still keeps the dir (`pane-live`). A queued dir
+is dropped after `MinJobDirTTL` (24 h, the relay hold ceiling); from then the
+TTL pass owns it. A queue lost to a restart leaves the dir to the TTL pass.
+A sweeper with no relay reader queues nothing.
+
+The at-end delete runs on the node's sweeper only. `panewire reap` on the CLI
+has no node outbox, so it never queues one and its dirs wait for the TTL.
+
 ## Deletion
 
 Right before a delete the pass takes the job's `.panewire-operation.lock`
