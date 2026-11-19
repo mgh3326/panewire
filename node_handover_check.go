@@ -73,9 +73,9 @@ type nodeHandoverPrepared struct {
 	top, tip, receiptCwd string
 }
 
-// handoverPrepare does the network read and validates the receipt's worktree
-// before the final pane look. Nothing here writes the checkout.
-func (client *HubClient) handoverPrepare(ctx context.Context, args nodeHandoverCheckArgs, target *nodeCloseTarget) (nodeHandoverPrepared, string) {
+// handoverIdentity validates the worktree root, branch, origin and the
+// receipt's worktree, with local reads only. Nothing here writes the checkout.
+func (client *HubClient) handoverIdentity(ctx context.Context, args nodeHandoverCheckArgs, target *nodeCloseTarget) (nodeHandoverPrepared, string) {
 	git := client.nodeGitRunner()
 	read := func(dir string, gitArgs ...string) (string, bool) {
 		out, err := git(ctx, append([]string{"-C", dir}, gitArgs...)...)
@@ -107,11 +107,22 @@ func (client *HubClient) handoverPrepare(ctx context.Context, args nodeHandoverC
 		}
 		prepared.receiptCwd = target.cwd
 	}
-	remote, ok := read(top, "ls-remote", "origin", "refs/heads/"+args.Branch)
-	if !ok {
+	return prepared, ""
+}
+
+// handoverPrepare does the identity checks and the network read before the
+// final pane look.
+func (client *HubClient) handoverPrepare(ctx context.Context, args nodeHandoverCheckArgs, target *nodeCloseTarget) (nodeHandoverPrepared, string) {
+	prepared, reason := client.handoverIdentity(ctx, args, target)
+	if reason != "" {
+		return nodeHandoverPrepared{}, reason
+	}
+	git := client.nodeGitRunner()
+	out, err := git(ctx, "-C", prepared.top, "ls-remote", "origin", "refs/heads/"+args.Branch)
+	if err != nil || ctx.Err() != nil {
 		return nodeHandoverPrepared{}, handoverGitFailed
 	}
-	fields := strings.Fields(remote)
+	fields := strings.Fields(string(out))
 	if len(fields) != 2 || fields[1] != "refs/heads/"+args.Branch || !nodeShaPattern.MatchString(fields[0]) {
 		return nodeHandoverPrepared{}, handoverUnpushed
 	}

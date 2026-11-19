@@ -81,7 +81,7 @@ func knownNodeCommandOp(op string) bool {
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
 		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
-		nodeCommandCheckoutSweep, nodeCommandHandoverCheck:
+		nodeCommandCheckoutSweep, nodeCommandHandoverCheck, nodeCommandHandoverSnapshot:
 		return true
 	}
 	return false
@@ -91,7 +91,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed", "journal_failed", "record_unavailable", "close_in_progress", "watcher_incompatible", "close_ops_not_ready":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "reap_failed", "result_too_large", "sweep_failed", "journal_failed", "record_unavailable", "close_in_progress", "watcher_incompatible", "close_ops_not_ready", "snapshot_failed":
 		return true
 	}
 	return false
@@ -252,6 +252,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneCloseStatus:  {"request_id", "job"},
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
 	nodeCommandHandoverCheck:    {"job", "cwd", "origin", "branch"},
+	nodeCommandHandoverSnapshot: {"job", "epoch", "cwd", "origin", "branch"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -513,6 +514,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandHandoverCheck:
 		var args nodeHandoverCheckArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeHandoverCheckArgs(args)
+	case nodeCommandHandoverSnapshot:
+		var args nodeHandoverSnapshotArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeHandoverSnapshotArgs(args)
 	}
 	return nil, false
 }
@@ -642,6 +646,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandHandoverCheck:
 		var result nodeHandoverCheckResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeHandoverCheckResult(result)
+		target = result
+	case nodeCommandHandoverSnapshot:
+		var result nodeHandoverSnapshotResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeHandoverSnapshotResult(result)
 		target = result
 	}
 	if !valid {
@@ -896,6 +904,9 @@ func nodeCommandRunBudget(op string) time.Duration {
 	if op == nodeCommandCheckoutSweep {
 		return nodeCheckoutSweepRunTimeout
 	}
+	if op == nodeCommandHandoverSnapshot {
+		return nodeHandoverSnapshotRunTimeout + time.Second
+	}
 	return nodeCommandRunTimeout
 }
 
@@ -1020,6 +1031,12 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return nodeWorktreeList(ctx, client.nodeGitRunner(), args)
 	case nodeHandoverCheckArgs:
 		return client.nodeHandoverCheck(ctx, args)
+	case nodeHandoverSnapshotArgs:
+		// A git push and a ref write: one acting command at a time, so the
+		// snapshot never interleaves with a close.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeHandoverSnapshot(ctx, args)
 	case nodeWorktreePrepareArgs:
 		return client.nodeWorktreePrepare(ctx, args)
 	case nodeWorktreeRemoveArgs:

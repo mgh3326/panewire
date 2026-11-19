@@ -1045,6 +1045,53 @@ and its reason are journalled, so status and replay retain them across
 restart. A writer racing the close itself is handled by the ordinary
 worktree and abandoned-worktree patch lifecycle.
 
+### `worktree.handover_snapshot`
+
+Saves a dirty or unpushed implementer worktree as a ref on origin, before the
+hub closes its pane (hk 5259; the hub side is hk 5324;
+[quota-stop.md](quota-stop.md#an-exhausted-pool)). A node that advertises
+`close_ops_v1` also advertises `handover_snapshot_v1`. Arguments are `job`,
+`epoch` (the hub's ownership epoch; a positive integer), `cwd`, `origin` and
+`branch`; all are required and nothing else is accepted.
+
+The node takes the acting lock, then refuses a request whose `epoch` is older
+than the job's owner (`epoch_mismatch`) and one whose worktree root, branch or
+origin differs from the arguments or from the job's spawn receipt
+(`branch_mismatch`, `git_failed`; `not-a-job` when the job has no directory).
+It then:
+
+1. reads HEAD once; that commit is the snapshot's parent;
+2. builds a tree in a temporary index read from that commit, with the user's
+   index untouched: staged deletions are removed, staged new files are seeded
+   from the index entry by literal name, and `git add -u` takes the current
+   content of every tracked path. It never runs `add -A`, so an untracked file
+   cannot enter the tree, and it cannot be named by a pathspec pattern;
+3. commits it with `commit-tree` on that parent and pushes it, without force
+   and without hooks, to `refs/panewire/handover/<job>/<commit>`;
+4. reads the ref back with `ls-remote origin` and answers `ok` only when it
+   names exactly that commit.
+
+An edit under an assume-unchanged flag is captured, because the temporary
+index carries no flags. A skip-worktree path absent from the worktree keeps its
+index entry (it is not a deletion); a skip-worktree path present on disk is
+refused. A submodule that is moved, dirty, has any flagged entry or has a new
+staged gitlink is refused, and so is an unmerged index. Refusals answer
+`outcome: "snapshot_refused"` with `reason` one of `submodule_changes`,
+`staged_gitlink`, `skip_worktree_file` or `unmerged_index`; nothing is pushed.
+
+An `ok` result is `{outcome, top, branch, ref, commit, tree, parent,
+untracked, untracked_more}`. `untracked` names the untracked, non-ignored paths
+and intent-to-add entries the snapshot does not hold, at most 50 paths and 8 KiB
+of names; `untracked_more` counts the rest and any path that cannot be printed.
+Those files, and ignored files, stay in the old worktree and are never pushed.
+To restore: `git fetch origin <ref>` then `git checkout --detach FETCH_HEAD`.
+
+Other outcomes carry nothing else: `push_failed` (origin refused or could not
+be reached; no ref was made) and `origin_mismatch` (the push returned but
+origin does not hold the commit). The whole command has a 25-second budget,
+under the hub's 30-second wait; on expiry the node answers the error
+`snapshot_failed` and the hub treats it as no snapshot.
+
 ### `worktree.inspect`
 
 `args: {cwd, expected_dir?, verify_branch?}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git

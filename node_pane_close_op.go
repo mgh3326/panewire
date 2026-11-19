@@ -54,7 +54,7 @@ func (client *HubClient) spawnHelloCapabilities(ctx context.Context) []string {
 	client.closeOpsAdvertised.Store(ready)
 	capabilities := slices.Clone(hubSpawnCapabilities)
 	if ready {
-		capabilities = append(capabilities, hubCapabilityCloseOps, hubCapabilityHandoverCheck, hubCapabilityCloseMissing)
+		capabilities = append(capabilities, hubCapabilityCloseOps, hubCapabilityHandoverCheck, hubCapabilityCloseMissing, hubCapabilityHandoverSnapshot)
 	}
 	if client.checkoutSparseReady(ctx) {
 		capabilities = append(capabilities, hubCapabilityCheckoutSparse)
