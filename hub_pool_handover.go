@@ -466,7 +466,7 @@ func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude, hos
 	dir := fleet.CheckoutWorktreeName(newJob)
 	checkout := &fleet.HubCheckout{Origin: old.Repository.Checkout.Origin, Mode: fleet.HubCheckoutSuccessor, Branch: read.Branch, Sha: read.Pushed, Dir: dir}
 	next.Repository = fleet.Repository{Name: old.Repository.Name, Origin: checkout.Origin, Worktree: dir, Checkout: checkout}
-	next.Brief = strings.TrimRight(old.Brief, "\n") + fmt.Sprintf("\n\n## Hand-over from %s\nThe hub handed over this job because pool %s ran out (%s). Continue branch %s from its pushed commit %s. The old worktree is %s:%s; work written after the final check is there or in the old job's abandoned-worktree.patch. Write the report to the --report path (relative to the node's jobs directory: %s).\n", oldJob, exhaustion.Pool, exhaustion.Cause, read.Branch, read.Pushed, host, read.Top, hubSpawnArg(next.Args, "--report-relative"))
+	next.Brief = strings.TrimRight(old.Brief, "\n") + fmt.Sprintf("\n\n## Hand-over from %s\nThe hub handed over this job because pool %s ran out (%s). Continue branch %s from its pushed commit %s. The old worktree may still be at %s:%s until cleanup. If cleanup removes it, non-ignored untracked files and work written after the final check are saved in %s:jobs/%s/abandoned-worktree.patch (relative to the node inbox root). Ignored files are not preserved. Write the report to the --report path (relative to the node's jobs directory: %s).\n", oldJob, exhaustion.Pool, exhaustion.Cause, read.Branch, read.Pushed, host, read.Top, host, oldJob, hubSpawnArg(next.Args, "--report-relative"))
 	return next, nil
 }
 
