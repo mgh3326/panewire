@@ -79,6 +79,8 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session, checkoutMo
 	if err != nil {
 		fmt.Fprintln(errout, err)
 		fmt.Fprintln(errout, "Fix:", spawnRefusalFix(err))
+		// A refusal on a free limit teaches every host its end time (hk 5358).
+		a.recordRefusedFreeLimit(ctx, s.Job, err)
 	}
 	return result
 }

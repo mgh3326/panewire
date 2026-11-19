@@ -105,6 +105,7 @@ type spawnRefusal struct {
 const (
 	spawnWorkspaceHint = "Run herdr workspace list on the executing host; configure the workspace label (workspace = \"workers\") so spawn can recreate it when herdr has deleted it, or pass the exact -w WORKSPACE_ID for an ambiguous label."
 	spawnBriefHint     = "Pass -p with a readable nonempty brief file; for presets, save it under jobs/JOB/brief.md or override -p."
+	quotaFullHint      = "The chosen seat's quota is full. An automatic request moves on to the next candidate by itself and reaches here only when none is left: read the tried list for each candidate's reason, wait for the earliest reset it names (or panewire quota refresh POOL after a reset), then replay the saved request. A pinned profile is not moved; pick another seat."
 	spawnPreflightHint = "Run panewire preflight --json to identify the failing host check; fix that check or pass an eligible --host with --override-reason."
 )
 
@@ -113,6 +114,14 @@ const (
 // then the remaining exit statuses. Codes match ^[a-z0-9_]+$ and are at most 40
 // bytes.
 var spawnRefusals = []spawnRefusal{
+	// A full quota at the node's gate (hk 5358). The hub moves an automatic
+	// request on to its next candidate; the refusal reaches the requester only
+	// when none is left, or for a pinned profile. The text names the gate's own
+	// reasons (QuotaFullRefusal), never the broader "quota gate:" prefix, so an
+	// unmeasured or policy refusal keeps its own row.
+	{match: quotaGateRefusalPrefix + freeLimitReason, code: "quota_full", hint: quotaFullHint},
+	{match: quotaGateRefusalPrefix + "quota exhausted window=", code: "quota_full", hint: quotaFullHint},
+	{match: quotaGateRefusalPrefix + "credit_exhausted balance=", code: "quota_full", hint: quotaFullHint},
 	// Same status as the trust prompt, so this text row must come first.
 	{match: "HOOKS_REVIEW_REQUIRED", code: "hooks_review", hint: "The host owner reviews the hooks in Codex on the executing host (the executing CODEX_HOME), then repeat the same command; the brief was withheld and panewire never answers the screen."},
 	// The real refusal names a path and the word "trust", so the status decides.

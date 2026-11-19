@@ -81,6 +81,7 @@ var spawnParkWakes = map[string]string{
 	spawnParkLaunchBackoff:    "its back-off timer",
 	spawnParkPoolCap:          "a job leaving a node's active set",
 	spawnParkQuota:            "a finished quota refresh with capacity",
+	spawnParkQuotaReset:       "the limit's end time",
 	spawnParkHostFull:         "a node connecting or a job leaving a node's active set",
 	spawnParkNoEligibleHost:   "a node connecting with a profile that passes the role rules",
 	spawnParkNodeDisconnected: "the node reconnecting",

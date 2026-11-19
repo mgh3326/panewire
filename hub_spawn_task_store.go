@@ -152,6 +152,12 @@ type hubSpawnExclusion struct {
 	// host out, in Unix milliseconds. Zero rules it out for the request's life.
 	// It is stored with the row, so the expiry survives a hub restart (hk 5214).
 	ExpiresMS int64 `json:"expires_ms,omitempty"`
+	// Pool is the quota band a full-quota refusal ruled out (devin-free,
+	// claude, ...). The request's next attempt excludes it from selection
+	// (--exclude-pool) until the exclusion expires: the refusal's reset, or
+	// the request's life when the refusal names none (hk 5358). Empty for
+	// every other refusal.
+	Pool string `json:"pool,omitempty"`
 }
 
 // liveAt reports whether the exclusion still rules its host (or profile) out
@@ -833,6 +839,22 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 // The refusal is a failed attempt: the request is parked launch_backoff until
 // its back-off passes (hk 4661).
 func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpawnTask, exclusion hubSpawnExclusion, claimed *hubSpawnOutcome, now time.Time) (hubSpawnTask, error) {
+	return s.unbindRefusedSpawnParked(parent, task, exclusion, claimed, nil, now)
+}
+
+// spawnUnbindPark replaces the re-placement back-off of an unbind. An empty
+// reason places the request again at once; a reason holds it until `until`,
+// capped at the request's limit. A full quota that moves a request on needs no
+// back-off: its exclusion already keeps the refused seat out of the next
+// selection, and the wait for a limit's end is a timer of its own (hk 5358).
+type spawnUnbindPark struct {
+	reason string
+	until  time.Time
+}
+
+// unbindRefusedSpawnParked is unbindRefusedSpawn with an optional park; nil
+// keeps the back-off.
+func (s *laneInboxStore) unbindRefusedSpawnParked(parent context.Context, task hubSpawnTask, exclusion hubSpawnExclusion, claimed *hubSpawnOutcome, park *spawnUnbindPark, now time.Time) (hubSpawnTask, error) {
 	if task.Node == nil || (task.Status != "dispatching" && task.Status != "reconciling") {
 		return hubSpawnTask{}, errSpawnClaimed
 	}
@@ -864,7 +886,12 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 	// that host, and a park that ran into expires_at would give the request
 	// up with the claim still held. It retries at once as before.
 	parkReason, retryAt := "", int64(0)
-	if claimed == nil {
+	switch {
+	case claimed != nil:
+	case park != nil && park.reason != "":
+		parkReason, retryAt = park.reason, spawnParkUntil(task, park.until).UnixMilli()
+	case park != nil:
+	default:
 		parkReason, retryAt = spawnBackoffPark(s.spawnRetryAt(task, task.FailedAttempts+1, now))
 	}
 	ctx, done := s.op(parent)
