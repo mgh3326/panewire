@@ -21,7 +21,8 @@ func (s *laneInboxStore) settled(key string) (bool, error) {
 	ctx, done := s.op(s.life)
 	defer done()
 	var settled bool
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxSettled+` FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&settled)
+	where, args := s.eventKeyPredicate(key)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxSettled+` FROM lane_inbox WHERE `+where), args...).Scan(&settled)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -92,7 +93,9 @@ func (h *HubServer) pruneInbox() {
 func (s *laneInboxStore) recordDelivery(key, machine, pane string, now time.Time) error {
 	ctx, done := s.op(s.life)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET delivered_at=CASE WHEN delivered_at=0 THEN ? ELSE delivered_at END,delivery_stage=?,delivery_reason='',delivery_machine=?,delivery_pane=?,delivery_at=? WHERE event_key=?`), now.UnixMilli(), laneInboxStageDelivered, machine, pane, now.UnixMilli(), s.storedKey(key))
+	where, keys := s.eventKeyPredicate(key)
+	args := append([]any{now.UnixMilli(), laneInboxStageDelivered, machine, pane, now.UnixMilli()}, keys...)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET delivered_at=CASE WHEN delivered_at=0 THEN ? ELSE delivered_at END,delivery_stage=?,delivery_reason='',delivery_machine=?,delivery_pane=?,delivery_at=? WHERE `+where), args...)
 	return err
 }
 
@@ -105,7 +108,10 @@ func (s *laneInboxStore) recordStage(key, stage, reason, machine, pane string, n
 	}
 	ctx, done := s.op(s.life)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET delivery_stage=?,delivery_reason=?,delivery_machine=?,delivery_pane=?,delivery_at=? WHERE event_key=? AND delivery_stage<>?`), stage, reason, machine, pane, now.UnixMilli(), s.storedKey(key), laneInboxStageDelivered)
+	where, keys := s.eventKeyPredicate(key)
+	args := append([]any{stage, reason, machine, pane, now.UnixMilli()}, keys...)
+	args = append(args, laneInboxStageDelivered)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET delivery_stage=?,delivery_reason=?,delivery_machine=?,delivery_pane=?,delivery_at=? WHERE `+where+` AND delivery_stage<>?`), args...)
 	return err
 }
 
@@ -129,7 +135,9 @@ func (s *laneInboxStore) linkRelayID(key string, relayID int64) error {
 	}
 	ctx, done := s.op(s.life)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET relay_id=? WHERE event_key=? AND relay_id=0`), relayID, s.storedKey(key))
+	where, keys := s.eventKeyPredicate(key)
+	args := append([]any{relayID}, keys...)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET relay_id=? WHERE `+where+` AND relay_id=0`), args...)
 	return err
 }
 
@@ -139,7 +147,8 @@ func (s *laneInboxStore) holds(key string) (bool, error) {
 	ctx, done := s.op(s.life)
 	defer done()
 	var n int
-	if err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&n); err != nil {
+	where, args := s.eventKeyPredicate(key)
+	if err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox WHERE `+where), args...).Scan(&n); err != nil {
 		return false, err
 	}
 	return n > 0, nil

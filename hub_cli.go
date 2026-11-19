@@ -367,6 +367,9 @@ func parseHubAlertNodes(raw string, tokens map[string]string) (map[string]struct
 }
 
 func runHubCLI(args []string) int {
+	if len(args) > 0 && args[0] == "store-copy" {
+		return runHubStoreCopyCLI(args[1:], os.Stdout, os.Stderr)
+	}
 	if len(args) > 0 && args[0] == "spawn" {
 		return runHubSpawnCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}

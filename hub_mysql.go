@@ -210,6 +210,8 @@ func (mysqlDialect) storedKey(key string) any {
 	return []byte(key)
 }
 
+func (d mysqlDialect) storedKeys(key string) []any { return []any{d.storedKey(key)} }
+
 func (mysqlDialect) ownsSchema() bool { return false }
 
 // batchOrder is the AUTO_INCREMENT column MySQL needs in place of a rowid.

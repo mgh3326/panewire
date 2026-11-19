@@ -286,6 +286,16 @@ func (s *laneInboxStore) storedKey(key string) any {
 	return s.dialect.storedKey(key)
 }
 
+// eventKeyPredicate matches both representations found after a MySQL
+// copy-back, while preserving the original PostgreSQL form for older rows.
+func (s *laneInboxStore) eventKeyPredicate(key string) (string, []any) {
+	keys := s.dialect.storedKeys(key)
+	if len(keys) > 1 {
+		return "event_key IN (?,?)", keys
+	}
+	return "event_key=?", keys
+}
+
 // close ends every in-flight call, then closes the database.
 func (s *laneInboxStore) close() error {
 	s.abort()
@@ -642,6 +652,20 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	defer tx.Rollback()
 	if e.Cause != "" {
 		if err := s.dialect.lockLaneCause(ctx, tx, lane, e.Cause); err != nil {
+			return laneInboxItem{}, err
+		}
+	}
+	// MySQL stores oversized keys as digests. A copied-back PostgreSQL
+	// store may therefore contain the digest while older PostgreSQL rows
+	// retain their original hex-encoded keys. See docs/hub-mysql.md.
+	keys := s.dialect.storedKeys(key)
+	if len(keys) > 1 {
+		digest := keys[1]
+		item, err := scanLaneInbox(tx.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), digest))
+		if err == nil {
+			return item, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			return laneInboxItem{}, err
 		}
 	}

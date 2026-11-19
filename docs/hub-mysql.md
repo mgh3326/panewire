@@ -137,7 +137,7 @@ their partial indexes are not translated one for one:
   columns its predicate filtered on.
 - `TestHubMySQLMigrationsCoverThePostgresSchema` compares every table and
   column with the Postgres migrations, so a column added on one side fails
-  until the other has it. `supersede_lane_cause` is the one table MySQL adds.
+  until the other has it. `supersede_lane_cause` is used for locking by MySQL; Postgres retains its rows for copy-back and uses advisory locks.
 
 ## Tests
 
@@ -175,3 +175,46 @@ on Postgres. The copier and the rehearsal are phase 2 and the cutover is
 phase 3 (hk 4898); Postgres support is removed after the cutover's rollback
 window. Setting a `mysql://` URL on a live hub before then is the operator's
 cutover step, not a configuration option.
+
+When a store has been copied back from MySQL to Postgres, run the cutover
+release or newer. Do not roll the hub binary back below the copier release
+while that copied-back store is in use: oversized event keys may be stored as
+digests, and older binaries cannot deduplicate them.
+
+## Cutover and rollback
+
+Before the freeze, run the cutover release on the source so its schema is
+current. The copier refuses unmatched source and target columns. Stop the hub
+and keep it stopped throughout the final copy and verification.
+Take and retain the normal database backups. Use the CA-pinned MySQL URL shown
+above; both URLs contain credentials, so supply them from the operator's secure
+runtime without writing them into a script, shell history, or the report. Use
+`--from-env` and `--to-env` with environment variable names so the URLs are not
+exposed in command-line arguments. Literal `--from` and `--to` remain available
+for non-secret local URLs.
+
+1. Run `panewire hub store-copy --from-env POSTGRES_URL --to-env MYSQL_URL`.
+   The command migrates the target and refuses existing target rows. For a
+   deliberate repeat into a previously populated target, add `--replace`;
+   it replaces the selected tables. `--tables` accepts comma-separated table
+   names for a scoped repair, not an initial full cutover.
+2. Run the same command with `--verify-only` and check every table's count and
+   SHA-256. A mismatch returns a nonzero exit and names the table. The report
+   also counts oversized inbox event keys stored as digests.
+3. Change `PANEWIRE_HUB_DATABASE_URL` to the CA-pinned MySQL URL, start the hub,
+   and verify nodes, inbox delivery, a spawn, and a consult. Keep PostgreSQL
+   fenced read-only for the 48-hour rollback window.
+4. For rollback, stop the hub again and keep all other PostgreSQL writers
+   stopped. Lift the read-only fence so the copier has a writable PostgreSQL
+   target. Run
+   `panewire hub store-copy --from-env MYSQL_URL --to-env POSTGRES_URL --replace`,
+   then run `panewire hub store-copy --from-env MYSQL_URL --to-env POSTGRES_URL --verify-only`.
+   Keep the hub and other writers stopped until verification succeeds. Switch
+   the URL to PostgreSQL, start the cutover release or newer, and verify nodes,
+   inbox, a spawn, and a consult. Never use an older
+   binary against the copied-back store: it cannot deduplicate digest-form keys.
+
+The copier uses a single read-only snapshot and one connection per database.
+Stop all writers, including other hub processes, before using `--replace` or
+verifying. A failed copy must be investigated before changing the URL; if a
+failure happens after the target transaction commits, rerun with `--replace`.
