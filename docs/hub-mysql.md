@@ -183,7 +183,9 @@ digests, and older binaries cannot deduplicate them.
 
 ## Cutover and rollback
 
-Stop the hub and keep it stopped throughout the final copy and verification.
+Before the freeze, run the cutover release on the source so its schema is
+current. The copier refuses unmatched source and target columns. Stop the hub
+and keep it stopped throughout the final copy and verification.
 Take and retain the normal database backups. Use the CA-pinned MySQL URL shown
 above; both URLs contain credentials, so supply them from the operator's secure
 runtime without writing them into a script, shell history, or the report.
