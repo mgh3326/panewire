@@ -174,6 +174,9 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		// at every start (hk 5298).
 		ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 		defer done()
+		if err := s.reconcileSpawnQueue(ctx); err != nil {
+			return err
+		}
 		return s.reconcileSpawnOutboxes(ctx)
 	}
 	ctx, done := s.op(s.life)
@@ -186,6 +189,10 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		spawnAttemptStartByTable,
 		`CREATE TABLE IF NOT EXISTS spawn_placement_snapshots (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,payload TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,delivery TEXT NOT NULL DEFAULT '',PRIMARY KEY(request_id,attempt))`,
 		`CREATE TABLE IF NOT EXISTS quota_refresh_attempts (machine TEXT NOT NULL,pool TEXT NOT NULL,outcome TEXT NOT NULL,seen_ms BIGINT NOT NULL,PRIMARY KEY(machine,pool))`,
+		spawnQueueTable,
+		spawnQueueNextCheckIndex,
+		taskFailNoticeOutboxTable,
+		taskFailNoticeOutboxIndex,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
@@ -268,6 +275,14 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// write lands; a hub that stops between the hk post and the mark reposts
 	// on the next sweep, so the guarantee is at-least-once across that window.
 	if err := s.backfillSpawnTaskFailNotices(ctx, time.Now().UTC()); err != nil {
+		return err
+	}
+	// spawn_queue and task_fail_notice_outbox are hk 5299's (postgres: 0030).
+	// They reconcile with the operations at every start, after the stamp
+	// above: a failure that backfill judged has its mark set and is not owed
+	// again. Like the outboxes below, the reconcile takes the startup deadline
+	// from the store's life.
+	if err := s.reconcileSpawnQueueWithin(s.life); err != nil {
 		return err
 	}
 	// The placement-record and notice outboxes (hk 5298; postgres: 0028). They
@@ -368,6 +383,9 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
+	if err = s.enqueueSpawn(ctx, tx, request.RequestID); err != nil {
+		return hubSpawnTask{}, false, err
+	}
 	accepted := hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, Created: now, Deadline: deadline, Expires: expires, Attempt: 1}
 	// A successor that may owe its parent's close is armed with the fence
 	// generation current when it is accepted, in the same transaction: a
@@ -420,6 +438,9 @@ func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousI
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errSpawnClaimed
 	}
+	if err = s.dequeueSpawn(ctx, tx, id); err != nil {
+		return err
+	}
 	result, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE request_id=? AND task_role=?`), id, roleKey)
 	if err != nil {
 		return err
@@ -453,6 +474,9 @@ func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey 
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errSpawnClaimed
+	}
+	if err = s.dequeueSpawn(ctx, tx, id); err != nil {
+		return err
 	}
 	result, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE request_id=? AND task_role=?`), id, roleKey)
 	if err != nil {
@@ -577,6 +601,13 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if spawnTerminalStatus(status) {
 		// The retention clock starts at the terminal write (hk 5297).
 		if _, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET terminal_ms=? WHERE request_id=? AND attempt=? AND terminal_ms=0`), now.UnixMilli(), task.Request.RequestID, task.Attempt); err != nil {
+			return false, err
+		}
+		// The status UPDATE above and the queue row move together: a terminal
+		// status leaves the queue (and, failed, owes its hk task comment) in
+		// this transaction, so no crash leaves an ended operation queued or
+		// an unqueued one running (hk 5299).
+		if err = s.endSpawnQueue(ctx, tx, task.Request.RequestID, status); err != nil {
 			return false, err
 		}
 	}
@@ -797,12 +828,23 @@ func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, task hubSpaw
 	}
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN CAST(? AS BIGINT) ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return hubSpawnTask{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN CAST(? AS BIGINT) ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
 		return hubSpawnTask{}, errSpawnClaimed
+	}
+	if err = s.syncSpawnQueueNextCheck(ctx, tx, task.Request.RequestID); err != nil {
+		return hubSpawnTask{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return hubSpawnTask{}, err
 	}
 	return s.spawnTask(parent, task.Request.RequestID)
 }
@@ -823,6 +865,16 @@ func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt 
 		return hubSpawnTask{}, errSpawnClaimed
 	}
 	return s.spawnTask(parent, id)
+}
+
+// spawnTaskColumnsOf is spawnTaskColumns qualified by a table alias, for a
+// read that joins spawn_operations.
+func spawnTaskColumnsOf(alias string) string {
+	columns := strings.Split(spawnTaskColumns, ",")
+	for i, column := range columns {
+		columns[i] = alias + "." + column
+	}
+	return strings.Join(columns, ",")
 }
 
 const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,park_since_ms,park_priority,park_notice_ms,park_judged_reason,park_priority_failures,placed_account_key,placed_attempt`
@@ -905,11 +957,11 @@ func (s *laneInboxStore) boundSpawnsSince(parent context.Context, since time.Tim
 func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tasks, err := s.queryPendingSpawns(ctx, fmt.Sprintf(`status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND (status<>'accepted' OR next_check_ms<=%d) ORDER BY last_run_ms,created_ms LIMIT 32`, now.UnixMilli()))
+	tasks, err := s.queryPendingSpawns(ctx, fmt.Sprintf(`o.status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND (o.status<>'accepted' OR q.next_check_ms<=%d) ORDER BY o.last_run_ms,o.created_ms LIMIT 32`, now.UnixMilli()))
 	if err != nil {
 		return nil, err
 	}
-	stale, err := s.queryPendingSpawns(ctx, `status IN ('deadline_exceeded','deadline_exceeded_grant') ORDER BY last_run_ms,created_ms LIMIT 256`)
+	stale, err := s.queryPendingSpawns(ctx, `o.status IN ('deadline_exceeded','deadline_exceeded_grant') ORDER BY o.last_run_ms,o.created_ms LIMIT 256`)
 	if err != nil {
 		return nil, err
 	}
@@ -923,8 +975,12 @@ func (s *laneInboxStore) pendingSpawns(parent context.Context, now time.Time) ([
 	return tasks, nil
 }
 
+// queryPendingSpawns reads the queue joined to its operations: the queue is
+// only the work still to do, so the read is as large as that work and not the
+// history in spawn_operations. The status test stays on the operation, which
+// owns it.
 func (s *laneInboxStore) queryPendingSpawns(ctx context.Context, where string) ([]hubSpawnTask, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE `+where)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+spawnTaskColumnsOf("o")+` FROM spawn_queue q JOIN spawn_operations o ON o.request_id=q.request_id WHERE `+where)
 	if err != nil {
 		return nil, err
 	}
@@ -952,13 +1008,13 @@ type spawnScanPosition struct {
 func (s *laneInboxStore) pendingSpawnPage(parent context.Context, after spawnScanPosition, now time.Time) ([]hubSpawnTask, spawnScanPosition, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND (status<>'accepted' OR next_check_ms<=?)`
+	query := `SELECT ` + spawnTaskColumnsOf("o") + ` FROM spawn_queue q JOIN spawn_operations o ON o.request_id=q.request_id WHERE o.status IN ('accepted','bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') AND (o.status<>'accepted' OR q.next_check_ms<=?)`
 	args := []any{now.UnixMilli()}
 	if after.valid {
-		query += ` AND (last_run_ms>? OR (last_run_ms=? AND (created_ms>? OR (created_ms=? AND request_id>?))))`
+		query += ` AND (o.last_run_ms>? OR (o.last_run_ms=? AND (o.created_ms>? OR (o.created_ms=? AND o.request_id>?))))`
 		args = append(args, after.lastRun, after.lastRun, after.created, after.created, after.id)
 	}
-	query += ` ORDER BY last_run_ms,created_ms,request_id LIMIT 32`
+	query += ` ORDER BY o.last_run_ms,o.created_ms,o.request_id LIMIT 32`
 	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
 		return nil, after, err
