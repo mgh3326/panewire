@@ -3,6 +3,7 @@ package panewire
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -84,6 +85,31 @@ func (client *HubClient) runJobDirTTL(ctx context.Context) {
 	}
 }
 
+// jobRelayOwed reports whether the node still owes the hub a relay row of job:
+// a job event the relay scan offers whose outbox row is neither persisted nor
+// suppressed. It uses the scan and the key relayEventForSend sends with, so the
+// at-end job dir delete (fleet job_dir_end.go, hk 3704) waits for exactly the
+// rows the job's events directory still backs. No outbox, or an unreadable
+// one, answers owed with an error, which keeps the dir.
+func (client *HubClient) jobRelayOwed(ctx context.Context, job string) (bool, error) {
+	if client.outbox == nil {
+		return true, errors.New("relay outbox unavailable")
+	}
+	for _, event := range scanHubRelayEventsWithin(client.jobsInboxRoot, relayOutboxMaxAge()) {
+		if event.JobID != job {
+			continue
+		}
+		state, err := client.outbox.RelayOutboxState(ctx, relayEventOutboxKeyFor(relayEventWireForm(event)))
+		if err != nil {
+			return true, err
+		}
+		if !state.Persisted && !state.Suppressed {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // nodeTaskPaneSweeper is the node's one TaskPaneSweeper. The local pass and the
 // hub's pane.sweep command share it: its deferred failure reps and idle times
 // live on it, so both must reach this instance under taskPaneSweepMu.
@@ -92,6 +118,9 @@ func (client *HubClient) nodeTaskPaneSweeper() *fleet.TaskPaneSweeper {
 		client.taskPaneSweeper = &fleet.TaskPaneSweeper{
 			Grace: client.taskPaneSweepGrace,
 			Info:  slog.Info,
+			// The at-end job dir delete waits for the relay rows it owes
+			// (job_dir_end.go, hk 3704).
+			RelayOwed: client.jobRelayOwed,
 			Exclusive: func() func() {
 				client.nodeCommandMu.Lock()
 				return client.nodeCommandMu.Unlock
