@@ -712,8 +712,8 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			h.logger.Warn("hub spawn deadline elapsed with ownership unresolved", "request_id", task.Request.RequestID, "job", task.Job, "host", spawnTaskHost(task))
 		}
 		outcome := hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: unsent}
-		// A parked attempt's tried list is its last pass's answer; the refresh
-		// link adds the keys it waited on (hk 5456).
+		// What this request tried: the candidates a parked pass stored and the
+		// refreshes it waited on (hk 5456).
 		outcome.Tried = mergeTried(task.Tried, h.spawnTriedRefreshWaits(task))
 		if refreshWait {
 			outcome.QuotaRefresh = failure
@@ -746,10 +746,9 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			return
 		}
 	}
-	// The previous pass's link stays until this pass decides: a crash between
-	// the reads and the write that replaces it must not leave the row without
-	// the only durable copy of the attempts it already settled (hk 5456). Every
-	// end that records no wait clears it below.
+	// This pass now decides placement: drop the link the previous pass left so
+	// a pass that ends for another reason cannot name a stale machine/pool.
+	h.clearSpawnRefreshWaits(task)
 	ctx, cancel := context.WithDeadline(parent, task.Deadline)
 	defer cancel()
 	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), probeWait: spawnNotStartedProbe, requireSnapshot: task.Node == nil}
@@ -831,29 +830,37 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// asks it to refresh so a timeout can name the machine and pool.
 	var refreshMu sync.Mutex
 	var refreshWaits []hubSpawnRefreshWait
-	rememberRefreshWait := func(machine, pool, accountKey, attempt string) {
+	rememberRefreshWait := func(machine, pool string, started time.Time) {
 		refreshMu.Lock()
 		defer refreshMu.Unlock()
 		for _, wait := range refreshWaits {
-			if wait.Machine == machine && wait.Pool == pool && wait.AccountKey == accountKey {
+			if wait.Machine == machine && wait.Pool == pool {
 				return
 			}
 		}
-		refreshWaits = append(refreshWaits, hubSpawnRefreshWait{Machine: machine, Pool: pool, AccountKey: accountKey, Attempt: attempt, At: h.now().UTC()})
+		refreshWaits = append(refreshWaits, hubSpawnRefreshWait{Machine: machine, Pool: pool, StartedAt: started})
 	}
-	// The scheduler admits or refuses the work and returns the attempt ID the
-	// request will wait on; only an admitted or joined attempt leaves this
-	// request pending (hk 5456).
-	app.ScheduleQuotaRefresh = func(machine, pool, accountKey string, window time.Duration) (string, fleet.QuotaRefreshAdmission) {
-		attempt, admission := h.scheduleQuotaRefresh(machine, pool, accountKey, window, task.Deadline)
-		if admission != fleet.QuotaRefreshAdmitted {
-			return attempt, admission
+	app.ScheduleQuotaRefresh = func(machine, pool string, timeout time.Duration) bool {
+		// A refresh never outlives what is left of the request's attempt
+		// (hk 5456): its queue deadline is this request's budget too, and with
+		// none left nothing is queued, so the caller drops that seat instead of
+		// waiting on a measurement it never asked for.
+		budget := spawnQuotaRefreshBudget(task, timeout, h.now())
+		if budget <= 0 {
+			return false
 		}
-		rememberRefreshWait(machine, pool, accountKey, attempt)
-		return attempt, admission
-	}
-	app.QuotaRefreshSettled = func(machine, pool, accountKey string) (string, bool) {
-		return h.spawnRefreshSettled(task, machine, pool, accountKey)
+		// Read before the schedule call: a refresh that finishes at once is
+		// recorded no earlier than this, so it is never mistaken for a stale one.
+		started := h.now()
+		if h.scheduleQuotaRefresh(machine, pool, budget) {
+			rememberRefreshWait(machine, pool, started)
+			return true
+		}
+		// Inside the post-completion cooldown: after a failed measurement it
+		// may be transient, so the request keeps waiting for the retry a later
+		// pass admits. After a success the reading is current now, and the seat
+		// drops instead (hk 5456).
+		return h.quotaRefreshFailed(machine, pool)
 	}
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host, hubSpawnArg(task.Request.Args, "-l")) }
 	app.PlacementGate = h.placementGate.acquire
@@ -924,9 +931,6 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		return
 	} // The node result owns completion and cleanup facts.
 	if errors.Is(err, fleet.ErrHubPlacementDeferred) {
-		// The attempt continues: a later pass places it. The demand history
-		// stays with the row, or the next pass would wait again on an attempt
-		// this request already settled (hk 5456).
 		h.releasePlacementCount(task.Job)
 		return
 	}
@@ -937,11 +941,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		refreshMu.Lock()
 		waits := append([]hubSpawnRefreshWait(nil), refreshWaits...)
 		refreshMu.Unlock()
-		// The link carries every key this attempt has waited on, not only
-		// this pass's: a finished attempt that did not make the reading
-		// usable is not waited on again, so dropping the key here would let
-		// the next pass start a second wait for it (hk 5456).
-		task.RefreshWaits = h.noteSpawnRefreshWaits(task, mergeSpawnRefreshWaits(task.RefreshWaits, waits))
+		task.RefreshWaits = h.noteSpawnRefreshWaits(task, waits)
 		if ctx.Err() == nil {
 			h.releasePlacementCount(task.Job)
 			return
@@ -962,17 +962,13 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			// A recognised no-candidate refusal never ends the request: a
 			// failed or ambiguous park write leaves it accepted for the next
 			// pass to park again.
-			refreshMu.Lock()
-			passWaits := append([]hubSpawnRefreshWait(nil), refreshWaits...)
-			refreshMu.Unlock()
-			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), spawnParkTried(currentCandidates(), err), mergeSpawnRefreshWaits(task.RefreshWaits, passWaits), wakeBefore); parkErr != nil {
+			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), spawnParkTried(currentCandidates(), err), wakeBefore); parkErr != nil {
 				h.logger.Warn("hub spawn park not stored; retried next pass", "request_id", task.Request.RequestID, "reason", reason, "error", parkErr)
 			}
 			h.releasePlacementCount(task.Job)
 			return
 		}
 	}
-	h.clearSpawnRefreshWaits(task)
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
 	outcome.Tried = spawnTriedCandidates(currentCandidates())
@@ -1049,27 +1045,6 @@ func (h *HubServer) noteSpawnRefreshWaits(task hubSpawnTask, waits []hubSpawnRef
 	return waits
 }
 
-// mergeSpawnRefreshWaits is the link a parked pass stores: every demand the
-// attempt has asked, in first-seen order. A demand this pass was admitted for
-// again (a retry after a transient failure) replaces its earlier entry, so the
-// link always names the attempt the request is currently waiting on (hk 5456).
-func mergeSpawnRefreshWaits(previous, current []hubSpawnRefreshWait) []hubSpawnRefreshWait {
-	merged := append([]hubSpawnRefreshWait(nil), previous...)
-	for _, wait := range current {
-		replaced := false
-		for i := range merged {
-			if merged[i].Machine == wait.Machine && merged[i].Pool == wait.Pool && merged[i].AccountKey == wait.AccountKey {
-				merged[i], replaced = wait, true
-				break
-			}
-		}
-		if !replaced {
-			merged = append(merged, wait)
-		}
-	}
-	return merged
-}
-
 // clearSpawnRefreshWaits drops the link a previous pass recorded before this
 // pass decides anything, so a pass that ends without parking on a refresh (a
 // deferred placement, say) cannot leave a stale machine/pool for the timeout.
@@ -1080,6 +1055,23 @@ func (h *HubServer) clearSpawnRefreshWaits(task hubSpawnTask) {
 	if err := h.inbox.store.clearSpawnRefreshWaits(h.closeCtx, task.Request.RequestID, task.Attempt); err != nil {
 		h.logger.Warn("spawn quota refresh link not cleared", "request_id", task.Request.RequestID, "attempt", task.Attempt, "error", err)
 	}
+}
+
+// spawnRefreshAttempt reads the last finished attempt for a refresh a request
+// waited on. An attempt seen before the request asked for that refresh is a
+// stale one, so it reads as not finished (found false).
+func (h *HubServer) spawnRefreshAttempt(wait hubSpawnRefreshWait) (string, time.Time, bool) {
+	outcome, seen, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, wait.Machine, wait.Pool)
+	if err != nil {
+		h.logger.Warn("spawn quota refresh attempt not read", "machine", wait.Machine, "pool", wait.Pool, "error", err)
+		return "", time.Time{}, false
+	}
+	// seen is stored in milliseconds, so compare at that precision: a refresh
+	// that finished within the millisecond the wait began is not an older one.
+	if !found || seen.Before(wait.StartedAt.Truncate(time.Millisecond)) {
+		return "", time.Time{}, false
+	}
+	return outcome, seen, true
 }
 
 // spawnRefreshWaitOutcome reports whether an unbound request's timeout expired
@@ -1098,11 +1090,7 @@ func (h *HubServer) spawnRefreshWaitOutcome(task hubSpawnTask) (hubSpawnRefreshW
 	var failure, success *hubSpawnRefreshOutcome
 	var failedAt, succeededAt time.Time
 	for _, candidate := range task.RefreshWaits {
-		outcome, seen, found, err := h.spawnRefreshResultFor(candidate)
-		if err != nil {
-			h.logger.Warn("spawn quota refresh attempt not read", "machine", candidate.Machine, "pool", candidate.Pool, "attempt", candidate.Attempt, "error", err)
-			continue
-		}
+		outcome, seen, found := h.spawnRefreshAttempt(candidate)
 		if !found {
 			continue
 		}
@@ -1132,96 +1120,29 @@ func (h *HubServer) spawnRefreshWaitOutcome(task hubSpawnTask) (hubSpawnRefreshW
 	return wait, nil, true
 }
 
-// spawnRefreshSettled reports whether this attempt's own wait on a shared
-// refresh for machine/pool is over and cannot supply the reading the request
-// selects, with the sentence the dropped seat records (hk 5456). Settled means
-// the attempt finished without a usable reading, or the node measured another
-// account and will keep doing so. A transient failure is not settled: it may
-// be retried while the request is pending, and one still running is coalesced
-// by the scheduler. A completion recorded before this attempt asked (an older
-// request's refresh) never counts.
-func (h *HubServer) spawnRefreshSettled(task hubSpawnTask, machine, pool, accountKey string) (string, bool) {
-	wait, waited := spawnRefreshWait(task.RefreshWaits, machine, pool, accountKey)
-	// A wait recorded before attempts had IDs is uncorrelated: its own
-	// attempt cannot be identified, so nothing settles it (hk 5456).
-	if !waited || wait.Attempt == "" || h.inbox == nil {
-		return "", false
+// spawnQuotaRefreshBudget bounds one shared quota refresh by what is left of
+// the attempt (hk 5456): a refresh the request would not wait past its own
+// deadline is never started, so it cannot outlive the request that asked for
+// it. The use margin leaves room for the store write and the placement pass
+// that reads the measurement. Zero means no budget to wait on a refresh.
+func spawnQuotaRefreshBudget(task hubSpawnTask, timeout time.Duration, now time.Time) time.Duration {
+	if task.Deadline.IsZero() {
+		return timeout
 	}
-	outcome, _, _, found, err := h.inbox.store.quotaRefreshResult(h.closeCtx, wait.Attempt)
-	if err != nil || !found {
-		return "", false
+	remaining := task.Deadline.Sub(now) - spawnQuotaRefreshUseMargin
+	if remaining <= 0 {
+		return 0
 	}
-	switch outcome {
-	case "":
-		return "its shared quota refresh finished without a usable reading", true
-	case "account_mismatch":
-		return "its shared quota refresh measured another account on " + machine + ", so waiting again cannot supply the selected one", true
+	if timeout <= 0 || remaining < timeout {
+		return remaining
 	}
-	return "", false
+	return timeout
 }
 
-// spawnRefreshResultFor reads the finished result of the attempt a wait names.
-// A wait recorded before attempts had IDs falls back to the last finished
-// attempt for its machine and pool: uncorrelated, so only a diagnostic uses
-// it, never settlement.
-func (h *HubServer) spawnRefreshResultFor(wait hubSpawnRefreshWait) (string, time.Time, bool, error) {
-	if wait.Attempt != "" {
-		outcome, _, seen, found, err := h.inbox.store.quotaRefreshResult(h.closeCtx, wait.Attempt)
-		return outcome, seen, found, err
-	}
-	return h.inbox.store.quotaRefreshAttempt(h.closeCtx, wait.Machine, wait.Pool)
-}
-
-// spawnRefreshWait finds the wait this request recorded for one demand.
-func spawnRefreshWait(waits []hubSpawnRefreshWait, machine, pool, accountKey string) (hubSpawnRefreshWait, bool) {
-	for _, wait := range waits {
-		if wait.Machine == machine && wait.Pool == pool && wait.AccountKey == accountKey {
-			return wait, true
-		}
-	}
-	return hubSpawnRefreshWait{}, false
-}
-
-// spawnRefreshResultReason is what the attempt a wait names recorded: a
-// failure code, a finished attempt without a usable reading, or that nothing
-// finished. A wait recorded before attempts had IDs reads the last finished
-// attempt for its machine and pool, which is the most a diagnostic can say.
-func (h *HubServer) spawnRefreshResultReason(wait hubSpawnRefreshWait) string {
-	if h.inbox == nil {
-		return "no refresh attempt finished"
-	}
-	if wait.Attempt != "" {
-		outcome, _, _, found, err := h.inbox.store.quotaRefreshResult(h.closeCtx, wait.Attempt)
-		if err != nil || !found {
-			return "no refresh attempt finished"
-		}
-		if outcome != "" {
-			return "refresh failed: " + outcome
-		}
-		return "refresh finished without a usable reading"
-	}
-	outcome, _, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, wait.Machine, wait.Pool)
-	if err != nil || !found {
-		return "no refresh attempt finished"
-	}
-	if outcome != "" {
-		return "refresh failed: " + outcome
-	}
-	return "refresh finished without a usable reading"
-}
-
-// spawnTriedRefreshWaits is the tried list a timeout records for the shared
-// refreshes this attempt waited on: each key and what its last attempt did.
-func (h *HubServer) spawnTriedRefreshWaits(task hubSpawnTask) []hubSpawnTried {
-	if task.Node != nil || len(task.RefreshWaits) == 0 {
-		return nil
-	}
-	tried := make([]hubSpawnTried, 0, len(task.RefreshWaits))
-	for _, wait := range task.RefreshWaits {
-		tried = append(tried, hubSpawnTried{Host: wait.Machine, Pool: wait.Pool, AccountKey: wait.AccountKey, Reason: h.spawnRefreshResultReason(wait)})
-	}
-	return tried
-}
+// spawnQuotaRefreshUseMargin is the part of a request's budget a completed
+// refresh needs to be worth waiting for: the attempt is not spent on one whose
+// reading cannot be placed before the deadline.
+const spawnQuotaRefreshUseMargin = 5 * time.Second
 
 // spawnParkTried is what a parked pass records: the candidates it asked and
 // why each dropped, or, when the pass never reached a host, the refusal that
@@ -1253,6 +1174,29 @@ func spawnTriedCandidates(candidates []fleet.PlacementCandidateRecord) []hubSpaw
 	return tried
 }
 
+// spawnTriedRefreshWaits is the tried list a timeout records for the shared
+// refreshes this attempt waited on: each key and what its last attempt did.
+func (h *HubServer) spawnTriedRefreshWaits(task hubSpawnTask) []hubSpawnTried {
+	if task.Node != nil || len(task.RefreshWaits) == 0 {
+		return nil
+	}
+	tried := make([]hubSpawnTried, 0, len(task.RefreshWaits))
+	for _, wait := range task.RefreshWaits {
+		reason := "no refresh attempt finished"
+		if h.inbox != nil {
+			if outcome, _, found := h.spawnRefreshAttempt(wait); found {
+				if outcome != "" {
+					reason = "refresh failed: " + outcome
+				} else {
+					reason = "refresh finished without a usable reading"
+				}
+			}
+		}
+		tried = append(tried, hubSpawnTried{Host: wait.Machine, Pool: wait.Pool, Reason: reason})
+	}
+	return tried
+}
+
 // spawnRefreshFailureText is the operator sentence for a recorded refresh
 // failure (refreshQuotaFromNode's reason codes).
 func spawnRefreshFailureText(reason string) string {
@@ -1265,8 +1209,6 @@ func spawnRefreshFailureText(reason string) string {
 		return "the node's connection dropped"
 	case "refresh_failed":
 		return "the node's measurement failed"
-	case "account_mismatch":
-		return "the host measured a different account than the one this request waits on; check that the host still holds it"
 	default:
 		return "the refresh failed"
 	}

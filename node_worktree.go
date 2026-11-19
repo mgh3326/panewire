@@ -103,12 +103,8 @@ type nodeWorktreeRemoveArgs struct {
 	Disposable  []string `json:"disposable,omitempty"`
 }
 
-// nodeQuotaRefreshArgs asks one node to measure a pool. AccountKey, when set,
-// names the account a request waits on: the node reports account_mismatch
-// instead of success when it measured a different account (hk 5456).
 type nodeQuotaRefreshArgs struct {
-	Pool       string `json:"pool"`
-	AccountKey string `json:"account_key,omitempty"`
+	Pool string `json:"pool"`
 }
 
 // Results stay close to worktree.inspect: the inspected worktree rides along
@@ -1791,20 +1787,6 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 	readings, measuredHere, err := source.RefreshAccounts(ctx)
 	if err != nil {
 		return nil, "refresh_failed"
-	}
-	measured := args.AccountKey == ""
-	for _, reading := range readings {
-		if reading.Key == args.AccountKey {
-			measured = true
-			break
-		}
-	}
-	if !measured {
-		// This host measured a different account than the request waits on.
-		// Reporting success here is what left the hub waiting on a reading
-		// that no refresh on this host could change (hk 5456).
-		client.warnMessage("quota.refresh: this host measured no reading for " + args.AccountKey)
-		return nil, "account_mismatch"
 	}
 	if measuredHere {
 		client.noteOwnQuotaMeasurement(args.Pool, started)

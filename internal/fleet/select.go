@@ -1121,7 +1121,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			x.windows = acc.windows()
 			if why := sharedReason(binding.key, acc); why != "" || acc.Quota == nil {
 				x.code = pres.accountFailureCode(binding.key)
-				x.reason = strings.ToLower(x.code)
+				x.reason = pres.accountDropReason(binding.key)
 				x.outcome = "dropped:" + x.reason
 				x.judgments = []quotaJudgment{pres.unknownJudgment(binding, why)}
 				continue
@@ -1136,7 +1136,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 					p.classifyRung(&x, acc.Quota)
 				} else {
 					x.code = pres.accountFailureCode(binding.key)
-					x.reason, x.outcome = strings.ToLower(x.code), "dropped:"+strings.ToLower(x.code)
+					x.reason, x.outcome = pres.accountDropReason(binding.key), "dropped:"+pres.accountDropReason(binding.key)
 				}
 			}
 			if x.reason == "" && IsFreeRung(x.row.Profile) {
