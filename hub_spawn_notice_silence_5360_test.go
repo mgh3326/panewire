@@ -37,6 +37,30 @@ func s5360Spawn(t *testing.T, h *HubServer, job string, extra []string, outcome 
 	return task
 }
 
+// s5360GiveUp ends task's attempt given_up the way the expiry does: the
+// operation is marked, and its given-up notice is queued in the same transaction.
+func s5360GiveUp(t *testing.T, h *HubServer, task hubSpawnTask, now time.Time) {
+	t.Helper()
+	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='given_up' WHERE request_id=? AND attempt=?`, task.Request.RequestID, task.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(hubSpawnOutcome{RC: 84, Stage: "queue", Reason: "expired: expires_at passed", Retryable: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := h.inbox.store.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = queueSpawnNotifications(t.Context(), h.inbox.store, tx, task, "given_up", string(raw), now, false); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // s5360Flush routes every pending notice, twice, so a settled row and its
 // follow-on state are both read.
 func s5360Flush(t *testing.T, h *HubServer) {
@@ -158,9 +182,7 @@ func TestTerminalAndGivenUpFailuresAreTold_5360(t *testing.T) {
 	h, _ := s5360Hub(t, &now)
 	s5360Spawn(t, h, "pw-5360-terminal", nil, s5360Terminal("spawn_failed"))
 	given := s5360Spawn(t, h, "pw-5360-given-up", nil, s5360Retryable("checkout_refused:locked"))
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='given_up' WHERE request_id=? AND attempt=?`, given.Request.RequestID, given.Attempt); err != nil {
-		t.Fatal(err)
-	}
+	s5360GiveUp(t, h, given, now)
 	s5360Flush(t, h)
 	items := t4270Items(t, h, s5360Owner)
 	if len(items) != 2 {
@@ -226,9 +248,7 @@ func TestOwnerNotifyFinalSendsOnlyTerminalNotice_5360(t *testing.T) {
 	s5360Spawn(t, h, "pw-5360-final-unregistered", final, lane)
 	s5360Spawn(t, h, "pw-5360-final-terminal", final, s5360Terminal("spawn_failed"))
 	given := s5360Spawn(t, h, "pw-5360-final-given-up", final, s5360Retryable("checkout_refused:locked"))
-	if _, err := h.inbox.store.db.Exec(`UPDATE spawn_operations SET status='given_up' WHERE request_id=? AND attempt=?`, given.Request.RequestID, given.Attempt); err != nil {
-		t.Fatal(err)
-	}
+	s5360GiveUp(t, h, given, now)
 	s5360Flush(t, h)
 
 	items := t4270Items(t, h, s5360Owner)
@@ -433,5 +453,47 @@ func TestDesignRequesterCopyOfRetryableFailureIsDelivered_5360(t *testing.T) {
 	items := t4270Items(t, h, "mergewake-design")
 	if len(items) != 1 || !strings.Contains(items[0].Event.Text, "checkout_refused:locked") {
 		t.Fatalf("design requester items=%+v, want its own copy of the failure it replays", items)
+	}
+}
+
+// A retryable owner row that a later outcome overtook is settled without a
+// notice or a count, even though the request now reads given_up: the owner hears
+// the given-up notice, once, and not the stale retryable failure beside it
+// (mergewake review of PR 732). Runs under the default rules and under final.
+func TestStaleRetryableOwnerRowIsSettledAfterGiveUp_5360(t *testing.T) {
+	for _, extra := range [][]string{nil, {fleet.OwnerNotifyArg, fleet.OwnerNotifyFinal}} {
+		t.Run(fmt.Sprintf("args=%v", extra), func(t *testing.T) {
+			now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+			h, destination := s5360Hub(t, &now)
+			const job = "pw-5360-stale-retryable"
+			req := t4270Request(job, s5360Owner, s5360Requester, "implementer")
+			req.Args = append(req.Args, extra...)
+			task, _, err := h.inbox.store.claimSpawn(t.Context(), req, job, s5360Owner, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = h.inbox.store.completeSpawn(t.Context(), task, s5360Retryable("checkout_refused:locked"), now); err != nil {
+				t.Fatal(err)
+			}
+			// The request's limit passes before the outbox routes the retryable
+			// rows: the attempt ends given_up, and its given-up notice is queued.
+			s5360GiveUp(t, h, task, now)
+
+			s5360Flush(t, h)
+			items := t4270Items(t, h, s5360Owner)
+			if len(items) != 1 || !strings.Contains(items[0].Event.Text, "replay=no") || !strings.Contains(items[0].Event.Text, "expired") {
+				t.Fatalf("owner items=%+v, want exactly the given-up notice", items)
+			}
+			if got := spawnFailedInjections(destination); len(got) == 0 {
+				t.Fatal("the requester got no copy of its failure")
+			}
+			if n := s5360OwnerSilenced(t, h, now); n != 0 {
+				t.Fatalf("a superseded row was counted (%d)", n)
+			}
+			var open int
+			if err := h.inbox.store.db.QueryRow(`SELECT COUNT(*) FROM spawn_notifications WHERE delivered<>1`).Scan(&open); err != nil || open != 0 {
+				t.Fatalf("outbox rows still pending=%d err=%v", open, err)
+			}
+		})
 	}
 }

@@ -61,6 +61,9 @@ const (
 	// spawnNoticeCount settles a row silently: nothing is sent to the owner, and
 	// the outcome is counted by cause in the daily loops row (hk 5360).
 	spawnNoticeCount
+	// spawnNoticeSettle settles a row that a later outcome overtook: nothing is
+	// sent and nothing is counted (hk 5360 review).
+	spawnNoticeSettle
 )
 
 // spawnNoticeRetry is how soon the flush reads the outbox again while a
@@ -181,7 +184,7 @@ func (h *HubServer) spawnNoticeFor(ctx context.Context, n spawnNotification, res
 		if n.owner != task.Owner {
 			return spawnNoticeDeliver // the requester's own copy reaches it at once
 		}
-		return h.ownerModeNoticeAction(task, result, mode)
+		return h.ownerModeNoticeAction(n, task, result, mode)
 	}
 	if !h.inbox.policy.designLane(n.owner) {
 		return spawnNoticeDeliver
@@ -213,6 +216,8 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 	switch h.spawnNoticeFor(ctx, n, result) {
 	case spawnNoticeCount:
 		h.countSilencedSpawnNotice(n.id, n.owner, spawnNoticeOutcomeCause(result))
+		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
+	case spawnNoticeSettle:
 		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
 	case spawnNoticeFile:
 		switch _, filed, ok := h.fileFilteredInHK(ctx, "lane.event", event, event.Host, filteredReasonReviewerLifecycle); {

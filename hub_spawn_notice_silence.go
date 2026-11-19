@@ -193,14 +193,35 @@ func (p *deliveryPolicy) spawnNoticeMustFix(cause string) bool {
 	return false
 }
 
+// spawnNoticeStatus is the status an outbox row's event id names
+// (<request>:<attempt>:<status>[:<lane>]). A row is judged by its own status:
+// the request's current status can be later than the row's (hk 5360 review).
+func spawnNoticeStatus(id string) string {
+	parts := strings.SplitN(id, ":", 4)
+	if len(parts) < 3 {
+		return ""
+	}
+	return parts[2]
+}
+
+// spawnNoticeSuperseded reports whether a retryable failure row has been
+// overtaken: the request moved to a later attempt, or its current attempt ended
+// with another outcome. Such a row is settled without a notice or a count; the
+// outcome that overtook it is what the owner hears.
+func spawnNoticeSuperseded(n spawnNotification, task hubSpawnTask) bool {
+	return spawnNoticeStatus(n.id) == "retryable" && (task.Attempt > spawnNoticeAttempt(n.id) || task.Status != "retryable")
+}
+
 // spawnFailureNoticeAction decides a failure's notice for a design owner when
 // the spawn names no --owner-notify mode: the cause rules.
 func (h *HubServer) spawnFailureNoticeAction(n spawnNotification, task hubSpawnTask, result hubSpawnOutcome) spawnNoticeAction {
 	cause := spawnNoticeCause(result.Reason)
 	switch {
+	case spawnNoticeSuperseded(n, task):
+		return spawnNoticeSettle
 	case !result.Retryable:
 		return spawnNoticeDeliver // replay=no: nothing the requester can replay
-	case task.Status == "given_up":
+	case spawnNoticeStatus(n.id) == "given_up":
 		return spawnNoticeDeliver
 	case n.owner == task.Owner && !hasDistinctRequester(task):
 		return spawnNoticeDeliver // the owner's copy is the only notice it can act on
@@ -215,16 +236,19 @@ func (h *HubServer) spawnFailureNoticeAction(n spawnNotification, task hubSpawnT
 // ownerModeNoticeAction decides a notice for the owner lane of a spawn that
 // names --owner-notify. A requester's copy is not decided here: it always
 // reaches the requester, which replays from it.
-func (h *HubServer) ownerModeNoticeAction(task hubSpawnTask, result hubSpawnOutcome, mode string) spawnNoticeAction {
+func (h *HubServer) ownerModeNoticeAction(n spawnNotification, task hubSpawnTask, result hubSpawnOutcome, mode string) spawnNoticeAction {
 	if result.RC == 0 {
 		// SPAWNED and LANE_UNREGISTERED are not terminal: neither mode sends them.
 		return spawnNoticeCount
+	}
+	if spawnNoticeSuperseded(n, task) {
+		return spawnNoticeSettle
 	}
 	if mode == fleet.OwnerNotifyNever {
 		return spawnNoticeCount
 	}
 	// final: only a failure that cannot be replayed, or a given-up request.
-	if !result.Retryable || task.Status == "given_up" {
+	if !result.Retryable || spawnNoticeStatus(n.id) == "given_up" {
 		return spawnNoticeDeliver
 	}
 	return spawnNoticeCount
