@@ -512,19 +512,18 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 // the current node and epoch only, the owner assignment ended on disk), and
 // then releases the holder's task role unless a pool action still owns the
 // job (I1/I2, #669). A pool action that owns the job keeps the role until
-// admission finds the settle (releaseSettledSpawnRole). first reports whether
-// this loss is the one that ends the job; a repeat of an ended job is not.
-func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, received time.Time) (ended, first bool) {
+// admission finds the settle (releaseSettledSpawnRole).
+func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, received time.Time) bool {
 	unlock, ok := h.lockEndingAssignmentAs(machineID, event, true)
 	if !ok {
-		return false, false
+		return false
 	}
 	defer unlock()
 	h.mu.Lock()
 	job := h.jobs[event.JobID]
 	if job == nil || job.Reassigning || job.Epoch != event.Epoch || job.Node != machineID {
 		h.mu.Unlock()
-		return false, false
+		return false
 	}
 	alreadyClosed := job.Completed
 	job.Completed, job.LostSettled, job.Orphaned, job.LastSeen = true, true, false, received
@@ -533,7 +532,7 @@ func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, r
 	}
 	h.mu.Unlock()
 	h.releaseEndedJobRole(h.closeCtx, event.JobID)
-	return true, !alreadyClosed
+	return true
 }
 
 // releaseEndedJobRole frees the task role of a job the node settled lost. It

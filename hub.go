@@ -1654,16 +1654,12 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				}
 			}
 			if message.Kind == "job.lost" && event.Final {
-				// A final job.lost ends the job: the node has written its hk
-				// record lost (hk 5351). Only the settle that first ends the job
-				// releases the lane rows on its pane, and never a replay: a
-				// replayed loss can arrive after a new job reused the pane.
-				ended, first := h.observeJobLost(machineID, event, received)
-				if !ended && h.lateRegisterJobEnd(machineID, event, received, true) {
-					ended, first = true, true
-				}
-				if ended && first && !event.Replay && event.PaneID != "" {
-					h.releasePaneLanes(machineID, event.PaneID, received)
+				// A final job.lost ends the job and frees its task role (hk 5351).
+				// It does not delete routes on the pane: pane-close and the
+				// fresh-snapshot lane sweep retire those, so a successor's route
+				// survives a delayed or replayed loss.
+				if !h.observeJobLost(machineID, event, received) {
+					h.lateRegisterJobEnd(machineID, event, received, true)
 				}
 			}
 			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validLaneReference(event.OwnerLane) {

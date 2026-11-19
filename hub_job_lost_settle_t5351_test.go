@@ -219,18 +219,6 @@ func TestJobLostFinalFlagCrossesTheRelay(t *testing.T) {
 	}
 }
 
-// The settle also releases the lane row that points at the job's pane, as a
-// closed pane does (releasePaneLanes).
-func TestJobLostFinalReleasesThePaneLaneRow(t *testing.T) {
-	hub, _, node, _, _ := t5351Settle(t, "lost")
-	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
-	t5351SendJobLost(t, node, t5351FinalLost(1))
-	eventually(t, 2*time.Second, "the settle releases the lane row", func() bool {
-		contents, err := os.ReadFile(hub.reportRelayPath)
-		return err == nil && !strings.Contains(string(contents), `"lane-a"`)
-	})
-}
-
 // A final job.lost that reaches a hub which has not registered the job yet
 // (a restart before the first heartbeat) is late-registered and settled, not
 // discarded (mergewake: late registration of final losses).
@@ -297,51 +285,6 @@ func t5351RestartSettle(t *testing.T, seeded bool) {
 	}
 }
 
-// A replayed final job.lost releases no lane route: a replay can arrive after a
-// new job reused the pane, so the hub cannot tell which route is stale.
-func TestJobLostReplayReleasesNoLaneRoute(t *testing.T) {
-	hub, _, node, _, _ := t5351Settle(t, "lost")
-	now := time.Now()
-	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
-	hub.laneLife.noteWrite("lane-a", now.Add(-2*time.Hour))
-	payload := t5351FinalLost(1)
-	payload["replay"] = true
-	t5351SendJobLost(t, node, payload)
-	eventually(t, 2*time.Second, "the replayed loss settles the job", func() bool { return t5351JobSettled(hub) })
-	// Proves nothing more happens: the lane release follows the settle in the
-	// same handler, so this window lets a release that would happen land first.
-	time.Sleep(300 * time.Millisecond)
-	contents, err := os.ReadFile(hub.reportRelayPath)
-	if err != nil || !strings.Contains(string(contents), `"lane-a"`) {
-		t.Fatalf("a replayed loss released a lane route: %s", contents)
-	}
-}
-
-// A repeat of a final job.lost for a job already ended releases no lane route:
-// only the settle that first ends the job releases its pane's rows, so a route
-// written after that settle survives the repeat.
-func TestJobLostRepeatedSettleReleasesNoLaneRoute(t *testing.T) {
-	hub, _, node, _, _ := t5351Settle(t, "lost")
-	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
-	t5351SendJobLost(t, node, t5351FinalLost(1))
-	eventually(t, 2*time.Second, "the first loss releases the old route", func() bool {
-		contents, err := os.ReadFile(hub.reportRelayPath)
-		return err == nil && !strings.Contains(string(contents), `"lane-a"`)
-	})
-	if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"lane-new":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	hub.laneLife.noteWrite("lane-new", time.Now())
-	t5351SendJobLost(t, node, t5351FinalLost(1))
-	// Proves nothing more happens: the repeat is ingested asynchronously, so this
-	// window lets a release that would happen land before the check.
-	time.Sleep(300 * time.Millisecond)
-	contents, err := os.ReadFile(hub.reportRelayPath)
-	if err != nil || !strings.Contains(string(contents), `"lane-new"`) {
-		t.Fatalf("a repeated settle released a route written after the first: %s", contents)
-	}
-}
-
 // A final job.lost is held until the hub's features are known, like a
 // lane.event, so it is never written before the hub says whether it takes the
 // final field. The scan burst and the immediate emit path both use the one
@@ -398,5 +341,50 @@ func TestFinalLostKeepsItsFieldsOnlyForAHubThatAdvertisesIt(t *testing.T) {
 func TestHubAdvertisesFinalLost(t *testing.T) {
 	if !slices.Contains(hubFeaturesFrame().Features, hubFeatureFinalLost) {
 		t.Fatalf("hub.features=%v lacks %s", hubFeaturesFrame().Features, hubFeatureFinalLost)
+	}
+}
+
+// A final job.lost does not delete routes on its pane: a successor's route
+// written on the reused pane survives the loss (hk 5351, the eager deletion is
+// cut from this PR).
+func TestJobLostLeavesTheLaneRouteOnItsPane(t *testing.T) {
+	hub, _, node, _, _ := t5351Settle(t, "lost")
+	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-new":{"machine":"machine-a","pane":"`+roleHeldPane+`"}}}`)
+	t5351SendJobLost(t, node, t5351FinalLost(1))
+	eventually(t, 2*time.Second, "the final loss settles the job", func() bool { return t5351JobSettled(hub) })
+	// Proves nothing more happens: a deletion would follow the settle in the same
+	// handler, so this window lets it land before the check.
+	time.Sleep(300 * time.Millisecond)
+	contents, err := os.ReadFile(hub.reportRelayPath)
+	if err != nil || !strings.Contains(string(contents), `"lane-new"`) {
+		t.Fatalf("a final loss deleted a route on its pane: %s", contents)
+	}
+}
+
+// The immediate emit path reads finality from the durable event file it names,
+// and never from the request, so a plain emit cannot retire a final row.
+func TestLedgerFinalLostReadsTheDurableEventFile(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "jobs", "test-job", "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.lost.json"), []byte(`{"kind":"job.lost","payload":{"reason":"hub_close","final":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "00002-job.lost.json"), []byte(`{"kind":"job.lost","payload":{"reason":"quota_stop"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	job := func(id string) hubScannedRelayEvent {
+		return hubScannedRelayEvent{Kind: "job.lost", HubActiveJob: HubActiveJob{JobID: "test-job", Epoch: 1}, EventID: id}
+	}
+	if !ledgerFinalLost(root, job("00001-job.lost.json")) {
+		t.Fatal("the final file was not read as final")
+	}
+	if ledgerFinalLost(root, job("00002-job.lost.json")) {
+		t.Fatal("a plain file was read as final")
+	}
+	if ledgerFinalLost(root, job("../00001-job.lost.json")) {
+		t.Fatal("an event id with a path was accepted")
 	}
 }

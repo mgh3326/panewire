@@ -599,11 +599,14 @@ on `job.lost`; a node that predates the field sends none, so its end settles
 nothing. On a final `job.lost` from the job's current node and epoch, the hub
 marks the job ended (the same owner and epoch fence as a revocation, I1/I2 and
 the #703 owner fence included) and releases the (task, role) reservation of the
-job's holder and the lane rows that point at the job's pane. A non-final pool
-action that still owns the job keeps the reservation until it ends; admission
-then takes the settle, even when hk cannot be read, so a respawn on the same task
-is not refused `task_role_claimed`. `job.reaped` is a pane fact the node keeps:
-it does not end the job.
+job's holder. It deletes no routes on the job's pane: pane-close and the
+fresh-snapshot lane sweep retire those. A non-final pool action that still owns
+the job keeps the reservation until it ends; admission then takes the settle
+(the durable `Lost` receipt survives a restart), even when hk cannot be read, so
+a respawn on the same task is not refused `task_role_claimed`. `job.reaped` is a
+pane fact the node keeps: it does not end the job. The immediate `panewire emit`
+path reads finality from the event file it names, so it sends the same payload
+under the same outbox key as the scan.
 
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's

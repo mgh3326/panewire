@@ -2253,7 +2253,6 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				peer.acceptsLaneEventLong.Store(slices.Contains(message.Features, hubFeatureLaneEventLong))
-				peer.featuresKnown.Store(true)
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
@@ -2263,6 +2262,10 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsCheckoutSparse.Store(slices.Contains(message.Features, hubFeatureCheckoutSparse))
 				peer.acceptsCheckoutBranch.Store(slices.Contains(message.Features, hubFeatureCheckoutBranch))
 				peer.acceptsNodeLoops.Store(slices.Contains(message.Features, hubFeatureNodeLoops))
+				// Published last: a reader that sees featuresKnown must also see
+				// every accept bit above, or a held final loss could be written
+				// before acceptsFinalLost is set (mergewake, hk 5351).
+				peer.featuresKnown.Store(true)
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
@@ -3069,6 +3072,12 @@ func (client *HubClient) recordRelayPersisted(message hubOutboundMessage) {
 // EnqueueRelayEvent is the immediate-send path behind `panewire emit`. It
 // bypasses the ten-second scan without bypassing the outbox gate.
 func (client *HubClient) EnqueueRelayEvent(job hubScannedRelayEvent) bool {
+	// The emit request does not carry the final flag. The durable event file
+	// it names does, so the immediate path sends the same payload under the
+	// same outbox key as the scan (hk 5351).
+	if ledgerFinalLost(client.jobsInboxRoot, job) {
+		job.Final = true
+	}
 	event, ok := client.relayEventForSend(job)
 	if !ok {
 		return false
@@ -3436,3 +3445,22 @@ func (peer *hubClientConnection) write(ctx context.Context, value any) error {
 // relayPersistedKinds bounds the hub-originated acknowledgement to the
 // relay record kinds. It is a closed set, not a passthrough.
 var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true, "lane.event": true}
+
+// ledgerFinalLost reports whether the durable event file a job.lost names
+// records a final loss. The file is read the same way the scan reads it, so an
+// immediate emit and the scan agree on finality (hk 5351).
+func ledgerFinalLost(inboxRoot string, job hubScannedRelayEvent) bool {
+	if job.Kind != "job.lost" || inboxRoot == "" || !hubJobIDPattern.MatchString(job.JobID) || job.EventID == "" || filepath.Base(job.EventID) != job.EventID {
+		return false
+	}
+	contents, err := os.ReadFile(filepath.Join(inboxRoot, "jobs", job.JobID, "events", job.EventID))
+	if err != nil {
+		return false
+	}
+	var event struct {
+		Payload struct {
+			Final bool `json:"final"`
+		} `json:"payload"`
+	}
+	return json.Unmarshal(contents, &event) == nil && event.Payload.Final
+}
