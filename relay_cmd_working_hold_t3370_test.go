@@ -148,14 +148,15 @@ func TestWorkingClaudeDirectiveStillTypedAtOnce_t3370(t *testing.T) {
 	}
 }
 
-// Only cmd cannot prove a directive typed into a working pane.
+// Only cmd and omp cannot prove a directive typed into a working pane (omp
+// since hk 5413: no capture shows a message typed into a working omp pane).
 func TestOnlyCmdIsWorkingUnprovable_t3370(t *testing.T) {
-	for _, harness := range []string{"claude", "codex", "devin", "grok", "omp", "", "some-future-harness"} {
+	for _, harness := range []string{"claude", "codex", "devin", "grok", "", "some-future-harness"} {
 		if relayHarnessWorkingUnprovable(harness) {
 			t.Errorf("%q holds a directive while working, want it typed at once", harness)
 		}
 	}
-	for _, harness := range []string{"cmd", " CMD "} {
+	for _, harness := range []string{"cmd", " CMD ", "omp"} {
 		if !relayHarnessWorkingUnprovable(harness) {
 			t.Errorf("%q does not hold a directive while working", harness)
 		}

@@ -106,23 +106,27 @@ func t3276Harnesses() map[string]t3276Screens {
 			pending:   func(typed string) string { return "grok ready\n> " + typed },
 			delivered: "nonce_echo+status_working",
 		},
+		// omp's screens are the captures in testdata/relay_omp (hk 5413), with
+		// the marker replaced by the relay's own text: an idle empty composer, the
+		// text typed and unsent, and the text submitted and echoed above it.
 		"omp-idle": {
-			harness: "omp", preStatus: "idle", postStatus: "working",
-			pre:       func(string) string { return "omp ready\n$ " },
-			echo:      func(typed string) string { return "user: " + typed + "\nomp is working\n$ " },
-			pending:   func(typed string) string { return "omp ready\n$ " + typed },
-			delivered: "nonce_echo+status_working",
+			harness: "omp", preStatus: "idle", postStatus: "idle",
+			pre:       func(typed string) string { return ompScreen("idle-empty-visible.txt", typed) },
+			echo:      func(typed string) string { return ompScreen("submitted-visible.txt", typed) },
+			pending:   func(typed string) string { return ompScreen("typed-unsent-visible.txt", typed) },
+			delivered: "nonce_echo",
 		},
 	}
 }
 
-// t3276WorkingUnprovable are the working grok and omp panes. The directive is
-// typed at once, but with no captured screen the only rule they have needs the
-// pane idle or done before the send, so nothing can prove it landed.
+// t3276WorkingUnprovable are the working grok panes. The directive is typed at
+// once, but with no captured screen the only rule they have needs the pane idle
+// or done before the send, so nothing can prove it landed. omp is held instead
+// while working (TestOmpDirectiveHeldWhileWorking_5413).
 func t3276WorkingUnprovable() map[string]t3276Screens {
 	out := map[string]t3276Screens{}
 	for name, sc := range t3276Harnesses() {
-		if sc.harness == "grok" || sc.harness == "omp" {
+		if sc.harness == "grok" {
 			sc.preStatus, sc.postStatus = "working", "working"
 			out[sc.harness+"-working"] = sc
 		}
@@ -502,9 +506,6 @@ func TestWorkingGrokAndOmpAreInjectedThenEscalated_t3276(t *testing.T) {
 			rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
 
 			wantPrompts := 2
-			if sc.harness == "omp" {
-				wantPrompts = 1
-			}
 			if got := pane.calls(t, "prompt"); got != wantPrompts {
 				t.Fatalf("a working %s pane got %d prompts, want %d", sc.harness, got, wantPrompts)
 			}

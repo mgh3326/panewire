@@ -1422,6 +1422,52 @@ host. The terminal checkout refusals that remain retryable (`dirty`,
 `sha-missing`, `work_root_unset`, `git_too_old`) name a fix that ends in replay;
 `spawnRefusalReplayable` holds that classification.
 
+## Owner notices by cause
+
+hk 5360 (operator decision 433; split agreed with mergewake-design). A
+retryable spawn failure that the requester replays by itself (`replay=yes`) is
+recorded and counted by cause, and not sent to a design owner's inbox. The
+owner hears it only when:
+
+- the request is given up (`given_up`), or the failure cannot be replayed
+  (`replay=no`);
+- the same cause repeats for the same owner three times within 30 minutes: the
+  third occurrence notifies once, and the window starts over;
+- the cause is on `relay.spawn_notice_must_fix` (`delivery-policy.yaml`;
+  default `workspace_unresolved`, `auth_unavailable`, `report_path`,
+  `brief_upload`, `identity_unproven`). An explicit empty list has none.
+
+Each notice's decision (deliver, file, count, repeat, settle) is made once, from
+its inputs at first routing, and recorded in `owner_notice_decisions` before it
+takes effect (hk 5360, packet `handoff/2026-11-19/panewire-design-hk5360-root-cause`).
+Counts and the repeat window are read from those rows, so a hub restart keeps
+both. A notice without an event id is never withheld.
+
+A requester's own copy of a failure is never silenced, because the requester
+replays from it. A design owner's own spawn, with no separate requester, keeps
+its copy at once. The rules apply to design-lane owners; other lanes are
+unchanged. Each silenced notice is counted in the daily loops row
+(`spawn_notices`, [docs/loops.md](loops.md#spawn-notices-group)).
+
+A requester can say what its owner hears with `--owner-notify final|never`
+(`owner_notify_v1`: node and hub capabilities, `panewire version --json`, and
+`GET /v1/capabilities`). The mode is read from the saved request and applies to
+the owner lane of that spawn, whatever the owner's lane class:
+
+- `never`: the owner gets none of the spawn's notices (`SPAWN_FAILED`,
+  `SPAWNED`, `LANE_UNREGISTERED`, `job.completed`, `delivery-unconfirmed`).
+  Each is recorded and counted, whatever its cause, must-fix included.
+- `final`: the owner gets only a terminal notice: a failure with `replay=no`,
+  or a given-up request. Every other notice is recorded and counted.
+- absent: the rules above decide.
+
+A `job.completed` withheld by a mode is filed in hk as `filtered:owner-notify:<event id>`:
+its own record per event, since hk's idempotency key covers the record's reason.
+A node that predates `owner_notify_v1` refuses the flag, so the hub strips it
+before sending the spawn; the saved request keeps it. An `--owner-notify` value
+other than `final` or `never` is a usage error. Code:
+`hub_spawn_notice_silence.go`, `internal/fleet/owner_notify.go`.
+
 ## Notifications and telemetry
 
 State changes and notification records commit in one database transaction.
@@ -1542,7 +1588,8 @@ Sentry event for it.
 The hub derives `<code>` from the refusal text and exit status it already has, so
 the node-to-hub wire still carries bare `spawn_failed`. Nodes and the hub deploy
 at different times, and an older hub rejects any other error value. Status, retry
-and notification decisions never read the code.
+and retry decisions never read the code. A notification decision reads it only
+for the owner-notice rules in [Owner notices by cause](#owner-notices-by-cause).
 
 A private Sentry client records one always-sampled `runtug.spawn` transaction per
 spawn attempt (the established telemetry name survives the CLI rename). Only this

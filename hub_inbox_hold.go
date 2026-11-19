@@ -23,7 +23,7 @@ func (h *HubServer) makeHeldBatches() (int64, []string, error) {
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, nil, err
 	}

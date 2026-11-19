@@ -123,7 +123,7 @@ func (s *laneInboxStore) fileUnread(now time.Time, where string, args ...any) ([
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}

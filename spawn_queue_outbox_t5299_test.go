@@ -546,7 +546,7 @@ func TestSpawnQueueMigrationBackfills_t5299(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s.dialect == laneInboxPostgres {
+		if s.dialect == dialectPostgres {
 			if _, err := s.db.Exec(`DELETE FROM panewire_schema_migrations WHERE version='0030_spawn_queue_outbox'`); err != nil {
 				t.Fatal(err)
 			}
@@ -557,7 +557,7 @@ func TestSpawnQueueMigrationBackfills_t5299(t *testing.T) {
 		}
 		checkBackfilled(t, s, queued, owed, judged)
 		// Running the migration again copies nothing twice.
-		if s.dialect != laneInboxPostgres {
+		if s.dialect != dialectPostgres {
 			if _, err := s.db.Exec(string(body)); err != nil {
 				t.Fatal(err)
 			}

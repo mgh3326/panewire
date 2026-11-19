@@ -106,6 +106,28 @@ closed `rows` list above; an unreadable account reads as `unknown`.
 Code: `internal/fleet/selection_drops.go`, `hub_loop_ledger.go`
 (`selectionDropRowsLocked`).
 
+### Spawn notices group
+
+The document carries a `spawn_notices` group after `selection_drops`: one entry
+per owner lane and cause, counting the owner notices the spawn notice rules
+recorded instead of sending that UTC day (hk 5360, operator decision 433):
+
+```json
+"spawn_notices":[{"machine":"hub","lane":"mergewake-design","cause":"checkout_refused:locked","silenced":2}]
+```
+
+A cause is the refusal code after `spawn_failed:` (`checkout_refused:locked`,
+`role_escalate`, …), or `spawned`, `lane_unregistered`, `job_completed` or
+`delivery_unconfirmed` for the other notices a `--owner-notify` spawn withholds.
+A retryable failure that a requester replays by itself is counted here and
+never reaches a design lane's inbox, unless its cause is on
+`relay.spawn_notice_must_fix`, its third repeat in 30 minutes, or its request
+is given up. A requester's own copy is never counted. Code:
+`hub_spawn_notice_silence.go`, `hub_owner_notice_decisions.go`, `hub_loop_ledger.go` (`spawnNoticeRowsForDay`).
+The group is read from the durable `owner_notice_decisions` table (hk 5360,
+packet `handoff/2026-11-19/panewire-design-hk5360-root-cause`), so a hub restart
+keeps the day's counts. A count is its decision row, written once per notice.
+
 One document per date: already written is never rewritten (an existing
 document counts as written), and each date's bucket is dropped after its
 row is written. A failed write or an unreadable row counts against

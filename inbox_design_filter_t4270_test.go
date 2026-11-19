@@ -214,9 +214,11 @@ func TestReviewerSpawnFailureReachesDesignLaneOncePerRequest_t4270(t *testing.T)
 	}
 }
 
-// A requester that never replays cannot leave the failure unreported: once the
-// hold ends the design lane is told, with the failure's own text.
-func TestHeldReviewerSpawnFailureIsDeliveredWhenHoldEnds_t4270(t *testing.T) {
+// A retryable reviewer failure whose requester never replays is not told when
+// the old hold would have ended (hk 5360 replaced the hold with the cause rules):
+// the owner hears it only when the request is given up, repeats, or names a
+// must-fix cause (TestRetryableSpawnNoticeIsNotHeld_5360). Its count is kept.
+func TestReviewerSpawnFailureStaysSilentPastHold_t4270(t *testing.T) {
 	h, _, _ := spawnNotifyHubLanes(t, "", "mergewake-design", "mergewake-daemon")
 	now := time.Now()
 	h.now = func() time.Time { return now }
@@ -229,16 +231,10 @@ func TestHeldReviewerSpawnFailureIsDeliveredWhenHoldEnds_t4270(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.flushSpawnNotifications(t.Context())
-	now = now.Add(h.quietTimings.spawnFailureHold - time.Minute)
+	now = now.Add(h.quietTimings.spawnFailureHold + time.Minute)
 	h.flushSpawnNotifications(t.Context())
 	if items := t4270Items(t, h, "mergewake-design"); len(items) != 0 {
-		t.Fatalf("delivered before the hold ended: %+v", items)
-	}
-	now = now.Add(2 * time.Minute)
-	h.flushSpawnNotifications(t.Context())
-	items := t4270Items(t, h, "mergewake-design")
-	if len(items) != 1 || !strings.Contains(items[0].Event.Text, "checkout_refused:locked") {
-		t.Fatalf("design lane items after the hold=%+v, want the held SPAWN_FAILED", items)
+		t.Fatalf("the owner was told a failure its requester can replay: %+v", items)
 	}
 }
 
@@ -359,7 +355,11 @@ func TestHeldSpawnNoticeClaimLosesToReplay_t4270(t *testing.T) {
 	if _, err = h.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 81, Stage: "checkout", Reason: "checkout_refused:locked", Retryable: true}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	h.flushSpawnNotifications(t.Context())
+	// hk 5360 no longer holds a new retryable failure. A row held before then
+	// still drains by this rule, so the row is put in that state directly.
+	if _, err = h.inbox.store.db.Exec(`UPDATE spawn_notifications SET delivered=? WHERE request_id=? AND owner=? AND delivered=?`, spawnNoticeHeld, task.Request.RequestID, task.Owner, spawnNoticePending); err != nil {
+		t.Fatal(err)
+	}
 	held, _ := h.readSpawnNotifications(t.Context(), spawnNoticeHeld)
 	if len(held) != 1 {
 		t.Fatalf("held rows=%d, want 1", len(held))

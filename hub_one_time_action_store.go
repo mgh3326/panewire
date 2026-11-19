@@ -64,7 +64,7 @@ func (h *HubServer) loadOneTimeActions() {
 func (s *laneInboxStore) putOneTimeAction(parent context.Context, key oneTimeActionKey, state oneTimeActionState) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO one_time_action_notices(machine,kind,need,told_ms,gone_ms) VALUES(?,?,?,?,?) ON CONFLICT(machine,kind,need) DO UPDATE SET told_ms=excluded.told_ms, gone_ms=excluded.gone_ms`),
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO one_time_action_notices(machine,kind,need,told_ms,gone_ms) VALUES(?,?,?,?,?)`, "machine,kind,need", s.dialect.assignIncoming("told_ms", "gone_ms"))),
 		key.machine, key.kind, key.need, state.ToldAt.UnixMilli(), goneMilli(state.GoneSince))
 	return err
 }

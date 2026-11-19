@@ -59,7 +59,7 @@ func (s *laneInboxStore) unsurfacedInbox(lane string) ([]laneInboxItem, error) {
 func (s *laneInboxStore) saveInboxSummary(key, lane, line string, through int64) (string, error) {
 	ctx, cancel := s.op(s.life)
 	defer cancel()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_surfaces(delivery_key,lane,through_id,summary) VALUES(?,?,?,?) ON CONFLICT(delivery_key) DO NOTHING`), inboxSurfaceKey(key), lane, through, line)
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO lane_inbox_surfaces(delivery_key,lane,through_id,summary) VALUES(?,?,?,?)`, "delivery_key")), inboxSurfaceKey(key), lane, through, line)
 	if err != nil {
 		return "", err
 	}

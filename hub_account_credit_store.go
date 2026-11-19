@@ -26,7 +26,7 @@ type accountCreditMark struct {
 func (s *laneInboxStore) putAccountCreditMark(parent context.Context, account string, mark accountCreditMark) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO account_credit_marks(account_key,pool,marked_ms) VALUES(?,?,?) ON CONFLICT(account_key) DO UPDATE SET pool=excluded.pool, marked_ms=excluded.marked_ms`),
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO account_credit_marks(account_key,pool,marked_ms) VALUES(?,?,?)`, "account_key", s.dialect.assignIncoming("pool", "marked_ms"))),
 		account, mark.Pool, mark.Marked.UnixMilli())
 	return err
 }
