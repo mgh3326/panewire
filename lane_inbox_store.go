@@ -282,7 +282,7 @@ func (s *laneInboxStore) beginTx(ctx context.Context) (*sql.Tx, error) {
 }
 
 // storedKey is the event_key column's form of key (sqlDialect.storedKey).
-func (s *laneInboxStore) storedKey(key string) string {
+func (s *laneInboxStore) storedKey(key string) any {
 	return s.dialect.storedKey(key)
 }
 
@@ -505,6 +505,23 @@ type laneInboxExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// insertOnce runs a single-row INSERT and reports whether this call stored the
+// row: false when a row with the same key was already there. It is for the
+// callers that act on the difference (a fresh event, a claimed reservation);
+// where the count is not read, the statement is insertIgnore. The dialect
+// decides how a duplicate shows (sqlDialect.insertOnce).
+func (s *laneInboxStore) insertOnce(ctx context.Context, db laneInboxExecer, insert, target string, args ...any) (bool, error) {
+	result, err := db.ExecContext(ctx, s.q(s.dialect.insertOnce(insert, target)), args...)
+	if err != nil {
+		if s.dialect.duplicateKey(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	n, err := s.dialect.rowsMatched(result)
+	return n == 1, err
+}
+
 // updateIDs runs update (a SET clause, its args first) on the rows named by
 // ids, laneInboxClaimChunk ids per statement.
 func (s *laneInboxStore) updateIDs(ctx context.Context, db laneInboxExecer, update string, args []any, ids []int64) error {
@@ -618,7 +635,6 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	if class == "inbox" {
 		stage = laneInboxStageInboxOnly
 	}
-	query := s.dialect.insertIgnore(s.dialect.laneInboxInsert(), "event_key")
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return laneInboxItem{}, err
@@ -629,13 +645,12 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 			return laneInboxItem{}, err
 		}
 	}
-	insert, err := tx.ExecContext(ctx, s.q(query), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil, sender, eventID, nullableCause(e.Cause), stage, now.UnixMilli())
+	fresh, err := s.insertOnce(ctx, tx, s.dialect.laneInboxInsert(), "event_key", s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil, sender, eventID, nullableCause(e.Cause), stage, now.UnixMilli())
 	if err != nil {
 		return laneInboxItem{}, err
 	}
 	item, err := scanLaneInbox(tx.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), s.storedKey(key)))
-	n, _ := s.dialect.rowsMatched(insert)
-	item.Fresh = n == 1
+	item.Fresh = fresh
 	if err != nil {
 		return item, err
 	}
@@ -653,11 +668,11 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 		// that batch; note it only after the commit the page can see.
 		s.noteBatchesChanged()
 	}
-	if n == 1 {
+	if fresh {
 		// A new row can carry a hold, a digest window or a deadline.
 		s.noteWorkChanged()
 	}
-	if n == 1 && (class == "inbox" || mustAck) {
+	if fresh && (class == "inbox" || mustAck) {
 		close(s.notify)
 		s.notify = make(chan struct{})
 	}

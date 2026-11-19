@@ -45,6 +45,6 @@ for VCS stamping. Every `actions/checkout` in `image.yml` therefore sets
   (`hubListenAddress`), so the container needs the host's network namespace
   (`--network host`) to be reachable as today.
 - The inbox store needs persistent storage: either set
-  `PANEWIRE_HUB_DATABASE_URL` (see [hub inbox on Postgres](hub-postgres.md)) or
+  `PANEWIRE_HUB_DATABASE_URL` (see [hub inbox on Postgres](hub-postgres.md) and [hub store on MySQL](hub-mysql.md)) or
   mount a volume at the `--inbox-store` path. The default path inside the
   container's home is not persistent.

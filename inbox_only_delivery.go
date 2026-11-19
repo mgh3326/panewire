@@ -148,7 +148,7 @@ func (s *laneInboxStore) fileUnread(now time.Time, where string, args ...any) ([
 	if err != nil {
 		return nil, err
 	}
-	if err := s.updateIDs(ctx, tx, `UPDATE lane_inbox SET class='inbox',read_at=CASE WHEN must_ack=0 AND class<>'inbox' THEN 0 ELSE read_at END,due_at=0,digest_at=0,hold_until=0,delivery_stage=?,delivery_at=?`, []any{laneInboxStageInboxOnly, now.UnixMilli()}, ids); err != nil {
+	if err := s.updateIDs(ctx, tx, `UPDATE lane_inbox SET read_at=CASE WHEN must_ack=0 AND class<>'inbox' THEN 0 ELSE read_at END,class='inbox',due_at=0,digest_at=0,hold_until=0,delivery_stage=?,delivery_at=?`, []any{laneInboxStageInboxOnly, now.UnixMilli()}, ids); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

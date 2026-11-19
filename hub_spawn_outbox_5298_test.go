@@ -385,13 +385,13 @@ func TestSpawnOutboxReconcileRunsUnderTheStartupDeadline_t5298(t *testing.T) {
 // 10 s connect timeout (review of hk 5298). This checks the bound the open path
 // gives the run; the migration itself runs in the CI postgres job.
 func TestHubPostgresMigrationRunsUnderTheStartupBudget_t5298(t *testing.T) {
-	ctx, cancel := hubPostgresMigrationContext(context.Background())
+	ctx, cancel := hubMigrationContext(context.Background())
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		t.Fatal("migration context has no deadline")
 	}
-	if remaining := time.Until(deadline); remaining <= hubPostgresConnectTimeout {
-		t.Fatalf("migration deadline in %v, want the start-up budget (more than %v)", remaining, hubPostgresConnectTimeout)
+	if remaining := time.Until(deadline); remaining <= hubConnectTimeout {
+		t.Fatalf("migration deadline in %v, want the start-up budget (more than %v)", remaining, hubConnectTimeout)
 	}
 }

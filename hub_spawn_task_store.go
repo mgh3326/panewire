@@ -392,12 +392,11 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 		}
 		taskRole = roleKey
 	}
-	claimed, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`, "")), job, request.RequestID, taskRole)
+	claimed, err := s.insertOnce(ctx, tx, `INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`, "", job, request.RequestID, taskRole)
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
-	n, _ := s.dialect.rowsMatched(claimed)
-	if n != 1 {
+	if !claimed {
 		tx.Rollback()
 		prior, lookupErr := s.spawnTask(parent, request.RequestID)
 		if lookupErr == nil && prior.Owner == owner {
@@ -908,7 +907,7 @@ func (s *laneInboxStore) unbindRefusedSpawnParked(parent context.Context, task h
 		return hubSpawnTask{}, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -1166,12 +1165,11 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	if spawn.HoldsTaskRole() {
 		taskRole = spawn.RoleKey()
 	}
-	result, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`, "")), task.Job, task.Request.RequestID, taskRole)
+	claimed, err := s.insertOnce(ctx, tx, `INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?)`, "", task.Job, task.Request.RequestID, taskRole)
 	if err != nil {
 		return task, err
 	}
-	n, _ := s.dialect.rowsMatched(result)
-	if n != 1 {
+	if !claimed {
 		return task, errSpawnClaimed
 	}
 	// A deliberate repeat asks for the request again, so its time limit
@@ -1179,11 +1177,11 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	// the placed columns clear in this same write (hk 5124). The outcome
 	// stays the attempt's terminal record.
 	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, task.Request.ExpiresSeconds))
-	result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}
-	n, _ = s.dialect.rowsMatched(result)
+	n, _ := s.dialect.rowsMatched(result)
 	if n != 1 {
 		return task, errSpawnClaimed
 	}

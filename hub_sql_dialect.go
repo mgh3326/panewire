@@ -13,9 +13,9 @@ import (
 // needs one of these forms asks the dialect for it and never spells it inline:
 // TestHubStoreQueriesGoThroughTheDialectSeam fails on a statement that does.
 //
-// SQLite and Postgres implement it today; the MySQL dialect of hk 4898 is a
-// third implementation, not a third copy of every query. Each method's comment
-// names the form the other implementations may not share.
+// SQLite, Postgres and MySQL (hub_mysql.go) implement it; the MySQL dialect of
+// hk 4898 is a third implementation, not a third copy of every query. Each
+// method's comment names the form the other implementations may not share.
 type sqlDialect interface {
 	// rebind rewrites a statement written with ?-placeholders. No hub
 	// statement carries a literal '?', so a positional rewrite is exact.
@@ -29,6 +29,16 @@ type sqlDialect interface {
 	// insertIgnore is insert, made a no-op when a row with the same target key
 	// exists. An empty target means any unique key.
 	insertIgnore(insert, target string) string
+	// insertOnce is the insert for a caller that reads rowsMatched as "this
+	// call stored the row". Where insertIgnore's duplicate no-op would also
+	// count as a matched row (MySQL with clientFoundRows counts an unchanged
+	// duplicate as 1), insertOnce is the plain insert, and duplicateKey names
+	// the error that stands for the duplicate.
+	insertOnce(insert, target string) string
+	// duplicateKey is true for the error a plain insert returns when a unique
+	// key already holds the row. A dialect whose insertOnce is insertIgnore
+	// never returns one.
+	duplicateKey(err error) bool
 	// upsert is insert, with assignments applied when a row with the same
 	// target key exists. An assignment reads the proposed row through incoming.
 	upsert(insert, target string, assignments ...string) string
@@ -61,8 +71,12 @@ type sqlDialect interface {
 	deleteWhereIn(table, key, selected string) string
 
 	// lockMigration serializes schema migration across hubs sharing a
-	// database, for the life of tx.
-	lockMigration(ctx context.Context, tx *sql.Tx) error
+	// database. x is the one connection or transaction the migration runs on:
+	// a lock tied to a transaction lasts as long as it, and a session lock
+	// (MySQL GET_LOCK) is held by x's connection until release runs, so x must
+	// be pinned. release is never nil when the error is nil, and reports
+	// whether the lock was given back.
+	lockMigration(ctx context.Context, x sqlExecer) (release func() error, err error)
 	// lockLaneCause serializes the supersede of one (lane, cause) pair, for
 	// the life of tx. Where the writer lock already does so it does nothing.
 	lockLaneCause(ctx context.Context, tx *sql.Tx, lane, cause string) error
@@ -73,10 +87,11 @@ type sqlDialect interface {
 	// counts matched ones.
 	rowsMatched(result sql.Result) (int64, error)
 
-	// storedKey is the event_key column's form of a hub key. Keys join their
-	// parts with NUL and producer parts need not be UTF-8; where the column
-	// cannot hold that, the key is hex-encoded.
-	storedKey(key string) string
+	// storedKey is the event_key column's form of a hub key, as a bound
+	// argument. Keys join their parts with NUL and producer parts need not be
+	// UTF-8; where the column cannot hold that, the key is hex-encoded, and
+	// where the column holds raw bytes it is bound as bytes.
+	storedKey(key string) any
 
 	// ownsSchema is true when the store builds its own schema at open (SQLite)
 	// and false when numbered migration files do.
@@ -96,6 +111,7 @@ type sqlDialect interface {
 var (
 	dialectSQLite   sqlDialect = sqliteDialect{}
 	dialectPostgres sqlDialect = postgresDialect{}
+	dialectMySQL    sqlDialect = mysqlDialect{}
 )
 
 // onConflict is the clause SQLite and Postgres share: the target key in
@@ -113,6 +129,12 @@ type conflictDialect struct{}
 func (conflictDialect) insertIgnore(insert, target string) string {
 	return insert + onConflict(target) + " DO NOTHING"
 }
+
+func (conflictDialect) insertOnce(insert, target string) string {
+	return conflictDialect{}.insertIgnore(insert, target)
+}
+
+func (conflictDialect) duplicateKey(error) bool { return false }
 
 func (conflictDialect) upsert(insert, target string, assignments ...string) string {
 	return insert + onConflict(target) + " DO UPDATE SET " + strings.Join(assignments, ",")
@@ -164,13 +186,15 @@ func (sqliteDialect) begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 
 // lockMigration does nothing: the SQLite schema is built in Go at open, under
 // the file's own write lock.
-func (sqliteDialect) lockMigration(context.Context, *sql.Tx) error { return nil }
+func (sqliteDialect) lockMigration(context.Context, sqlExecer) (func() error, error) {
+	return func() error { return nil }, nil
+}
 
 // lockLaneCause does nothing: the store's mutex and SQLite's single writer
 // already serialize a supersede.
 func (sqliteDialect) lockLaneCause(context.Context, *sql.Tx, string, string) error { return nil }
 
-func (sqliteDialect) storedKey(key string) string { return key }
+func (sqliteDialect) storedKey(key string) any { return key }
 
 func (sqliteDialect) ownsSchema() bool { return true }
 
@@ -215,9 +239,13 @@ func (postgresDialect) begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	return db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 }
 
-func (postgresDialect) lockMigration(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(hubPostgresMigrationLock))
-	return err
+// lockMigration takes the transaction-scoped lock: it ends with x's
+// transaction, so release has nothing to give back.
+func (postgresDialect) lockMigration(ctx context.Context, x sqlExecer) (func() error, error) {
+	if _, err := x.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(hubPostgresMigrationLock)); err != nil {
+		return nil, err
+	}
+	return func() error { return nil }, nil
 }
 
 func (d postgresDialect) lockLaneCause(ctx context.Context, tx *sql.Tx, lane, cause string) error {
@@ -226,7 +254,7 @@ func (d postgresDialect) lockLaneCause(ctx context.Context, tx *sql.Tx, lane, ca
 }
 
 // storedKey hex-encodes: Postgres text holds neither NUL nor non-UTF-8.
-func (postgresDialect) storedKey(key string) string { return hex.EncodeToString([]byte(key)) }
+func (postgresDialect) storedKey(key string) any { return hex.EncodeToString([]byte(key)) }
 
 func (postgresDialect) ownsSchema() bool { return false }
 
