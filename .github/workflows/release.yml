@@ -167,7 +167,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-go-cached
       - run: go vet ./...
-      - run: go test -timeout 25m ./...  # the root package outgrew the 10 m default (hk 5408); sharding is the follow-up
+      - run: go test ./... -timeout 25m  # the root package outgrew the 10 m default (hk 5408); sharding is the follow-up
 
   publish:
     needs: [gate, build, test]
