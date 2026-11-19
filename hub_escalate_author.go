@@ -256,6 +256,17 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			}
 			return h.escalateAuthorParentEnded(ctx, request, owner), nil
 		}
+		// The pane probe may have waited while the task was rebound or closed:
+		// read the binding again before a marked stage is activated. A moved or
+		// closed task releases the stage; an unreadable one keeps it pending.
+		if result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner); stop {
+			if result.Code == "job_mismatch" || result.Code == "task_closed" {
+				if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+					return hubEscalateAuthorResult{}, err
+				}
+			}
+			return result, nil
+		}
 	}
 	if staged {
 		next = prior.Request

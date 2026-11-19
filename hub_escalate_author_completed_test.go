@@ -372,3 +372,36 @@ func TestEscalateAuthorUnreadableTaskBeforeCloseFilesNoRefusal(t *testing.T) {
 		t.Fatalf("a retryable read must file no event: %v", texts)
 	}
 }
+
+// The replay of a marked stage whose completed author's pane is gone reads the
+// task again after the pane probe, before it activates (CodeRabbit on #750): a
+// task that moved on during the probe releases the stage, an unreadable one
+// keeps it pending.
+func TestEscalateAuthorReplayRechecksTheTaskAfterThePaneProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		set        func(f *escalateFixture)
+		wantCode   string
+		wantStaged bool
+	}{
+		{name: "rebound during the probe", set: func(f *escalateFixture) { f.rebindTo, f.rebindAfterReads = "pw-task-74-q1", 1 }, wantCode: "job_mismatch"},
+		{name: "closed during the probe", set: func(f *escalateFixture) { f.taskState = "merged" }, wantCode: "task_closed"},
+		{name: "unreadable after the probe", set: func(f *escalateFixture) { f.taskFailAfter = 1 }, wantCode: "pending", wantStaged: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEscalateFixture(t, "pw-task-74")
+			f.completeAuthorRecord(t)
+			f.stageCompletedSuccessor(t, true)
+			f.paneAbsent = true
+			tc.set(f)
+			result, _ := f.escalate(t, nil)
+			if result.Code != tc.wantCode {
+				t.Fatalf("result=%+v", result)
+			}
+			successor, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+			if tc.wantStaged != (err == nil) || err == nil && successor.Status != "staged" {
+				t.Fatalf("successor=%+v err=%v", successor, err)
+			}
+		})
+	}
+}
