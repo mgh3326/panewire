@@ -184,9 +184,10 @@ func Main(ctx context.Context, args []string, out, errout io.Writer) int {
 	}
 	if e != nil {
 		fmt.Fprintln(errout, "panewire:", e)
-		// `spawn status` reports a request's state; it is not a spawn attempt,
-		// so the refusal table's repair hint does not apply to its exits.
-		if len(args) > 0 && (args[0] == "work" || args[0] == "spawn" && !spawnStatusCommand(args[1:])) {
+		// `spawn status` reports a request's state and `spawn withdraw` ends one;
+		// neither is a spawn attempt, so the refusal table's repair hint does not
+		// apply to their exits.
+		if len(args) > 0 && (args[0] == "work" || args[0] == "spawn" && !spawnStatusCommand(args[1:]) && !spawnWithdrawCommand(args[1:])) {
 			fmt.Fprintln(errout, "Fix:", spawnRefusalFix(e))
 		}
 		var x *ExitError
@@ -360,6 +361,9 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		if spawnStatusCommand(args[1:]) {
 			return a.spawnStatusCmd(ctx, args[2:])
 		}
+		if spawnWithdrawCommand(args[1:]) {
+			return a.spawnWithdrawCmd(ctx, args[2:])
+		}
 		s, e := parseSpawn(args[1:])
 		if e != nil {
 			return e
@@ -403,6 +407,7 @@ func (a *App) help(cmd string) error {
 	case "spawn":
 		fmt.Fprintln(a.Out, "Usage: panewire spawn (-c CWD | --checkout-origin URL --checkout-commit SHA --checkout-ref REF) [-m PROFILE|auto] -p BRIEF|hk:doc/KEY -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role implementer|reviewer|consult] [--review-pass 1..9 (reviewer only)] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--exclude-pool P,P] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--checkout-exclude PATTERN]... [--checkout-include PATH]... [--expires DUR] [--dry-run] (--expires: the request time limit, 1m to 24h, default 6h implementer / 1h reviewer and consult; pins require --containment hk:ID or --operator-request REF; --checkout-* names the worktree for a hub spawn instead of -c)")
 		fmt.Fprintln(a.Out, spawnStatusUsage)
+		fmt.Fprintln(a.Out, spawnWithdrawUsage)
 	case "done":
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":

@@ -1329,6 +1329,45 @@ withdrawn answers 409 `spawn_not_pending`. The CLI exits 5 on a refusal. Abandon
 spawn the node may still be running before its pane exists; use it for a
 request whose node has restarted or whose deadline has passed.
 
+## Withdrawing a request
+
+`panewire spawn withdraw REQUEST_ID --reason TEXT [--requested-by LANE]` (hk
+5429) lets the lane that submitted a pending request end it itself. `LANE`
+defaults to `PANEWIRE_LANE`. The CLI sends `POST /v1/spawns/<request_id>/withdraw`
+with `{"reason": TEXT, "requester": LANE}` under the operator credential, which
+is the credential a submitter holds (submission needs it). The hub advertises
+the route as the feature `spawn_withdraw_v1` in `GET /v1/spawns/features`; the
+CLI checks that feature first and refuses on an older hub before it sends
+anything.
+
+- **Scope.** The requester must be the lane that submitted the request: its
+  `--requested-by`, else `--parent`, else its owner lane. Any other lane gets
+  403 `not_requester`, and the request's state is not read for that answer.
+- **Parked or unbound** (no node has bound it, including a request parked by
+  `quota_reset` or `launch_backoff`): it ends `cancelled` at once with reason
+  `requester_withdrawn: <TEXT>`. There is no pane probe, and the owner lane and
+  the submitter each get one notice.
+- **Bound and possibly sent:** the abandon rule applies unchanged. The request
+  ends only when its node lists no pane bearing the job label. A live labelled
+  pane answers 409 `spawn_abandon_refused` with `reason: pane_present:<pane>`
+  and the request stays with its host. Otherwise the hk job is marked lost with
+  `end_reason` `requester_withdrawn` before the request ends `cancelled` and its
+  (task, role) reservation is released.
+- **Already ended or landed:** 409 `spawn_not_pending`. A landed request keeps
+  its result.
+- **Credential:** only the operator credential may withdraw. A node credential
+  gets 401 for every withdrawal. The unbound owner-lane withdrawal over a node
+  credential (hk 5214, `abandon`) is unchanged.
+- **Exit codes:** 0 withdrawn (the CLI prints `WITHDRAWN request=… job=… status=cancelled`);
+  2 usage, or the lane is not the requester; 75 the hub kept the request or it
+  had already ended. A transport failure after the send is reported as
+  unconfirmed: read the request with `panewire spawn status REQUEST_ID`, where a
+  withdrawn request exits 84.
+- **Limit.** The operator credential is shared by the submitters on a host, so
+  the requester check stops a lane from withdrawing another lane's request by
+  mistake. It does not stop a holder of the operator credential, who can already
+  run `abandon`.
+
 A request still pending 30 minutes past its deadline warns once per attempt:
 one Sentry warning `SPAWN_OWNERSHIP_STUCK <status>` fingerprinted
 `spawn-ownership-stuck` (tags job, host, status, request, attempt), one fleet

@@ -182,7 +182,7 @@ func spawnTraceReason(reason string) string {
 	}
 	reason = code
 	switch reason {
-	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "parent_job_not_found", "quota_unconfirmed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required", spawnOrphanedReason, spawnAbandonedReason, spawnUnresolvedReason:
+	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "parent_job_not_found", "quota_unconfirmed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required", spawnOrphanedReason, spawnAbandonedReason, spawnWithdrawnReason, spawnUnresolvedReason:
 		return reason
 	}
 	if code, ok := strings.CutPrefix(reason, "spawn_failed:"); ok && fleet.IsSpawnRefusalCode(code) {
