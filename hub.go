@@ -708,6 +708,11 @@ type HubServer struct {
 	// cannot announce the same retire twice (#658).
 	replayRetired      map[int64]struct{}
 	replayRetiredOrder lruIndex[int64]
+	// replayUnrouted remembers the undelivered rows a replay walk already found
+	// unroutable and announced, so every later walk stays quiet about them
+	// (relay_unrouted_replay.go, hk 5307).
+	replayUnrouted      map[int64]struct{}
+	replayUnroutedOrder lruIndex[int64]
 	// quietTimings are the time limits of the design-lane filters
 	// (inbox_design_filter.go).
 	quietTimings designQuietTimings

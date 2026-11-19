@@ -261,7 +261,7 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	route, agent, routed := h.resolveRelayRoute(record.Kind, event)
 	if !routed || (record.Kind == "lane.event" && route.Sink) {
 		h.forgetRelayEvent(key)
-		h.broadcastRelayUnrouted(event)
+		h.announceUnroutedReplay(record.ID, event)
 		return
 	}
 	// The listing page is stale the moment it is read: another walk — or a
