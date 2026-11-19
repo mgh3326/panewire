@@ -64,6 +64,15 @@ spans; the next failure after a success counts and logs again):
 - `hub_pool_triggers.go`: the catalog read (`Debug` became `Warn`)
 - `hub_inbox.go`: the `persistDisabled` latch, and the batch listing
 
+## Ticks and store reads (hk 5302)
+
+`interval_s` is how often a loop wakes, and `ticks` counts those wakes, not
+store reads. The spawn coordinator (2 s), the placement-record probe (2 s) and
+the consult loop (5 s) keep ticking while idle; each reads its store only on a
+kick, at a due time, or at the 60 s backstop (`read_gate.go`,
+`hub-spawn-operations.md` "Read gates"). `made` is counted at a read, so a row
+is first seen when its kick or due time opens the loop, not at the next tick.
+
 ## Daily row
 
 At the first tick after each UTC midnight the hub writes the previous

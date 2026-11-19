@@ -268,6 +268,18 @@ func (h *HubServer) readParkedSpawnPriority(ctx context.Context, task hubSpawnTa
 	return priority, false, nil
 }
 
+// parkedNoticePollAt is when the next parked-notice sweep may run: the poll
+// after the last one, or now when none has run (hk 5302 gates the coordinator
+// on it while rows are parked).
+func (h *HubServer) parkedNoticePollAt(now time.Time) time.Time {
+	h.parkNoticeMu.Lock()
+	defer h.parkNoticeMu.Unlock()
+	if h.parkNoticeCheckedAt.IsZero() {
+		return now
+	}
+	return h.parkNoticeCheckedAt.Add(spawnParkNoticePoll)
+}
+
 // beginParkedSpawnNoticeCheck records this pass's time and returns the candidate
 // cursor, or false when the poll gate holds this tick.
 func (h *HubServer) beginParkedSpawnNoticeCheck(now time.Time) (spawnParkNoticeCursor, bool) {

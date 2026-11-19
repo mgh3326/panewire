@@ -50,6 +50,9 @@ type laneInboxStore struct {
 	// earliest known due time passes, or the safety fallback lapses
 	// (inbox_work_gate.go).
 	workGen atomic.Uint64
+	// reads gates the hub's polling loops on writes and due times, one gate
+	// per loop (read_gate.go, hk 5302).
+	reads [readKinds]readGate
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration
@@ -252,7 +255,11 @@ const laneInboxClaimChunk = 500
 
 func newLaneInboxStore(db *sql.DB, dialect laneInboxDialect) *laneInboxStore {
 	life, abort := context.WithCancel(context.Background())
-	return &laneInboxStore{db: db, dialect: dialect, life: life, abort: abort, notify: make(chan struct{})}
+	s := &laneInboxStore{db: db, dialect: dialect, life: life, abort: abort, notify: make(chan struct{})}
+	for k := range s.reads {
+		s.reads[k].init(readKindNames[k])
+	}
+	return s
 }
 
 // op returns the context for one store call: parent's deadline capped at

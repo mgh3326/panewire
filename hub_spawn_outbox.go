@@ -67,7 +67,7 @@ func (s *laneInboxStore) saveSpawnNotice(ctx context.Context, eventID string, ta
 	if err := s.enqueueSpawnNotice(ctx, tx, eventID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitNoting(tx, readSpawnNotice)
 }
 
 // dequeueDeliveredSpawnNotice removes a notification from the outbox once its

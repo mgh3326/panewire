@@ -28,6 +28,7 @@ package panewire
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 // spawnQueueTable is the SQLite form; the Postgres form is migration 0030.
@@ -148,4 +149,44 @@ func (s *laneInboxStore) reconcileSpawnQueueWithin(parent context.Context) error
 	ctx, done := s.opWithin(parent, laneInboxStartupTimeout)
 	defer done()
 	return s.reconcileSpawnQueue(ctx)
+}
+
+// spawnQueueWake is what the coordinator's gate needs from the queue once a
+// scan found nothing to run: when the queue next needs a look, and whether
+// waiting or parked rows keep a poll of their own alive (hk 5302).
+type spawnQueueWake struct {
+	// next is the earliest unix ms a parked, unbound accepted row comes due;
+	// 0 means none.
+	next int64
+	// stale are the deadline_exceeded rows' probe inputs (deadline, last run).
+	stale []hubSpawnTask
+	// waiting counts rows held by start conditions; parked counts accepted
+	// rows that carry a park reason.
+	waiting, parked int
+}
+
+// spawnQueueWake reads the queue, joined to the operations for the status test
+// the queue leaves to its owner. The queue is the work still to do, so the read
+// is as large as that work. now splits the accepted rows into due ones (the
+// scan just ran, so none is expected) and later ones.
+func (s *laneInboxStore) spawnQueueWake(parent context.Context, now time.Time) (spawnQueueWake, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var wake spawnQueueWake
+	var next sql.NullInt64
+	var stale int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT min(CASE WHEN o.status='accepted' AND q.next_check_ms>? THEN q.next_check_ms END),count(CASE WHEN o.status='waiting' THEN 1 END),count(CASE WHEN o.status='accepted' AND o.park_reason<>'' THEN 1 END),count(CASE WHEN o.status IN ('deadline_exceeded','deadline_exceeded_grant') THEN 1 END) FROM spawn_queue q JOIN spawn_operations o ON o.request_id=q.request_id`), now.UnixMilli()).Scan(&next, &wake.waiting, &wake.parked, &stale)
+	if err != nil {
+		return wake, err
+	}
+	if next.Valid {
+		wake.next = next.Int64
+	}
+	if stale == 0 {
+		return wake, nil
+	}
+	// The probe interval is a function of each row's age, so the earliest probe
+	// is worked out from the rows the coordinator itself reads.
+	wake.stale, err = s.queryPendingSpawns(ctx, `o.status IN ('deadline_exceeded','deadline_exceeded_grant') ORDER BY o.last_run_ms,o.created_ms LIMIT 256`)
+	return wake, err
 }

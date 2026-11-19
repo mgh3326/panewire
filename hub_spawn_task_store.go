@@ -423,7 +423,7 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 			}
 		}
 	}
-	if err = tx.Commit(); err != nil {
+	if err = s.commitNoting(tx, readSpawnScan); err != nil {
 		return hubSpawnTask{}, false, err
 	}
 	return accepted, true, nil
@@ -443,6 +443,7 @@ func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, 
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errSpawnClaimed
 	}
+	s.noteWork(readSpawnScan)
 	return nil
 }
 
@@ -575,6 +576,19 @@ func (s *laneInboxStore) beginSpawnSend(parent context.Context, task hubSpawnTas
 // Unknown observations retain the reservation. Only a definitive result may
 // release it, and only when the executing node has attested complete cleanup.
 func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) (bool, error) {
+	changed, err := s.writeSpawnOutcome(parent, task, outcome, now)
+	if changed && err == nil {
+		// The write may have ended the operation (its notice, task comment and
+		// placement record are owed), returned it to the queue (an unstarted
+		// attempt) or moved it between in-flight states: each loop reads.
+		s.noteWork(spawnEndedReads...)
+	}
+	return changed, err
+}
+
+// writeSpawnOutcome is completeSpawn's transaction; the caller notes the
+// loops its commit gave work.
+func (s *laneInboxStore) writeSpawnOutcome(parent context.Context, task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	if outcome.Host == "" {
@@ -1139,7 +1153,9 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	if n != 1 {
 		return task, errSpawnClaimed
 	}
-	if err = tx.Commit(); err != nil {
+	// The request is runnable again, and a notice held for its requester is
+	// superseded by this replay.
+	if err = s.commitNoting(tx, readSpawnScan, readSpawnNotice); err != nil {
 		return task, err
 	}
 	return s.spawnTask(parent, task.Request.RequestID)

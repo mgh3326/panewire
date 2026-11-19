@@ -187,14 +187,14 @@ func TestSpawnOutboxProbeReadsTheOutboxNotTheSnapshots_t5298(t *testing.T) {
 	if _, err := store.db.Exec(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,recorded,delivery) VALUES('req-history',1,'{}',0,'')`); err != nil {
 		t.Fatal(err)
 	}
-	if h.pendingPlacementRecords(t.Context()) {
-		t.Fatal("probe read an unsealed snapshot the outbox does not name")
+	if owed, err := h.pendingPlacementRecords(t.Context()); err != nil || owed {
+		t.Fatalf("probe read an unsealed snapshot the outbox does not name (owed=%v err=%v)", owed, err)
 	}
 	if _, err := store.db.Exec(`INSERT INTO placement_record_outbox(request_id,attempt) VALUES('req-history',1)`); err != nil {
 		t.Fatal(err)
 	}
-	if !h.pendingPlacementRecords(t.Context()) {
-		t.Fatal("probe missed an outbox row")
+	if owed, err := h.pendingPlacementRecords(t.Context()); err != nil || !owed {
+		t.Fatalf("probe missed an outbox row (owed=%v err=%v)", owed, err)
 	}
 }
 
@@ -233,8 +233,8 @@ func TestSpawnOutboxPlacementRecordFinishesAfterRestart_t5298(t *testing.T) {
 		t.Fatalf("records after the restart = %d, want exactly one", n)
 	}
 	wantKeys(t, "outbox after delivery", placementOutboxKeys(t, h2.inbox.store))
-	if h2.pendingPlacementRecords(t.Context()) {
-		t.Fatal("probe still sees work after the record was delivered")
+	if owed, err := h2.pendingPlacementRecords(t.Context()); err != nil || owed {
+		t.Fatalf("probe still sees work after the record was delivered (owed=%v err=%v)", owed, err)
 	}
 }
 
