@@ -347,12 +347,25 @@ func TestHubStoreCopyCLIEnvironmentURLs(t *testing.T) {
 	t.Setenv("PANEWIRE_COPY_TEST_TARGET", "mysql://secret-user:secret-password@127.0.0.1:1/db")
 	var out, stderr bytes.Buffer
 	rc := runHubStoreCopyCLI([]string{"--from-env", "PANEWIRE_COPY_TEST_SOURCE", "--to-env", "PANEWIRE_COPY_TEST_TARGET"}, &out, &stderr)
-	if rc == 0 || strings.Contains(stderr.String(), "secret") {
+	if rc == 0 || !strings.Contains(stderr.String(), "open source failed") || strings.Contains(stderr.String(), "secret") {
 		t.Fatalf("rc=%d stderr=%q", rc, stderr.String())
 	}
 	stderr.Reset()
 	rc = runHubStoreCopyCLI([]string{"--from", "sqlite:///x", "--from-env", "PANEWIRE_COPY_TEST_SOURCE", "--to-env", "PANEWIRE_COPY_TEST_TARGET"}, &out, &stderr)
 	if rc != ExitConditionInvalid {
 		t.Fatalf("conflicting source options: rc=%d", rc)
+	}
+}
+
+func TestHubStoreCopyMySQLFreshStats(t *testing.T) {
+	_, sourceURL := hubMySQLTestDatabase(t)
+	source, err := openStoreCopyDB(t.Context(), sourceURL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.db.Close()
+	var expiry int64
+	if err := source.db.QueryRowContext(t.Context(), `SELECT @@SESSION.information_schema_stats_expiry`).Scan(&expiry); err != nil || expiry != 0 {
+		t.Fatalf("source statistics expiry=%d: %v", expiry, err)
 	}
 }
