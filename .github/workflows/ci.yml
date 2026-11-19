@@ -267,7 +267,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -count=1 -v -run '^TestHubStoreCopyRoundTrips$' . 2>&1 | tee "$RUNNER_TEMP/store-copy.log"
+          go test -count=1 -v -run '^TestHubStoreCopy(RoundTrips|MySQLFreshStats)$' . 2>&1 | tee "$RUNNER_TEMP/store-copy.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/store-copy.log"; then
             echo "store copy integration skipped"; exit 1
           fi
