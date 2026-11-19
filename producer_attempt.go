@@ -49,6 +49,6 @@ func producerEpoch(jobsRoot, job string, explicit uint64) (uint64, error) {
 // identity, as opposed to an unreadable grant.
 func producerRefusal(err error) bool {
 	return errors.Is(err, jobowner.ErrStaleAttempt) || errors.Is(err, jobowner.ErrAttemptAhead) ||
-		errors.Is(err, jobowner.ErrIdentityRequired) || errors.Is(err, jobowner.ErrEpochConflict) ||
+		errors.Is(err, jobowner.ErrIdentityRequired) || errors.Is(err, jobowner.ErrRevoked) || errors.Is(err, jobowner.ErrEpochConflict) ||
 		errors.Is(err, errMalformedAttemptBinding)
 }

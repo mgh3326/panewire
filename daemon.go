@@ -967,6 +967,15 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		if epoch < current {
 			return &codedError{ExitUsage, fmt.Errorf("%w: attempt epoch %d, current grant %d", jobowner.ErrStaleAttempt, epoch, current)}
 		}
+		// A revocation leaves the grant file at the old epoch, so the grant
+		// alone would admit the attempt that just lost the job.
+		revoked, err := jobowner.Revoked(filepath.Join(d.emitNamespaceRoot(), "jobs"), req.JobID)
+		if err != nil {
+			return &codedError{ExitInternal, fmt.Errorf("job assignment unavailable")}
+		}
+		if epoch < revoked {
+			return &codedError{ExitUsage, fmt.Errorf("%w: attempt epoch %d, the hub revoked it at epoch %d", jobowner.ErrRevoked, epoch, revoked)}
+		}
 	}
 	if d.cfg.Hub.Client == nil {
 		return &codedError{ExitDaemonUnavailable, fmt.Errorf("hub client unavailable")}

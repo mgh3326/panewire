@@ -161,7 +161,48 @@ var (
 	ErrAttemptAhead     = errors.New("attempt epoch ahead of the node's grant")
 	ErrIdentityRequired = errors.New("attempt identity required")
 	ErrEpochConflict    = errors.New("--epoch conflicts with the epoch bound at launch")
+	ErrRevoked          = errors.New("attempt revoked")
 )
+
+// Revoked returns the highest hub revocation recorded for the job, or 0. A
+// revocation at epoch R takes the job away from the attempt granted below R,
+// but Revoke leaves that grant file as it was, so the grant alone cannot say
+// the attempt lost ownership. A later Assign at R or above supersedes it.
+func Revoked(jobs, id string) (uint64, error) {
+	if jobs == "" || !ValidID(id) {
+		return 0, errors.New("invalid job assignment")
+	}
+	events := filepath.Join(jobs, id, "events")
+	entries, err := os.ReadDir(events)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var highest uint64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "-job.revoked.json") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(events, entry.Name()))
+		if err != nil {
+			return 0, err
+		}
+		var marker struct {
+			Type  string `json:"type"`
+			Epoch uint64 `json:"epoch"`
+		}
+		if json.Unmarshal(body, &marker) != nil {
+			return 0, errors.New("invalid job revocation")
+		}
+		// A local end also writes job.revoked, with a kind and no epoch.
+		if marker.Type == "job.revoked" && marker.Epoch > highest {
+			highest = marker.Epoch
+		}
+	}
+	return highest, nil
+}
 
 // ProducerEpoch resolves the epoch a producer call (job done|escalate|joined,
 // emit) may record for job id, from the epoch bound into the caller's launch
@@ -171,7 +212,9 @@ var (
 // worker from a superseded attempt (A1→B2→A3 leaves the A/1 worker alive), a
 // newer one names a grant this node has not persisted. With no identity at
 // all the call is accepted only while the grant is still the initial epoch 1,
-// so a regrant never lets an unidentified caller pick up the new epoch.
+// so a regrant never lets an unidentified caller pick up the new epoch. A grant
+// the hub has revoked (A/1 → B/2 leaves A's file at 1) is refused whatever is
+// presented, until a newer grant supersedes the revocation.
 func ProducerEpoch(jobs, id string, bound, explicit uint64) (uint64, error) {
 	if bound != 0 && explicit != 0 && bound != explicit {
 		return 0, fmt.Errorf("%w: bound %d, --epoch %d", ErrEpochConflict, bound, explicit)
@@ -183,6 +226,13 @@ func ProducerEpoch(jobs, id string, bound, explicit uint64) (uint64, error) {
 	current, err := Epoch(jobs, id)
 	if err != nil {
 		return 0, err
+	}
+	revoked, err := Revoked(jobs, id)
+	if err != nil {
+		return 0, err
+	}
+	if revoked > current {
+		return 0, fmt.Errorf("%w: the hub revoked this attempt at epoch %d (grant %d)", ErrRevoked, revoked, current)
 	}
 	switch {
 	case presented == 0 && current == 1:

@@ -81,3 +81,32 @@ func TestProducerEpoch(t *testing.T) {
 		})
 	}
 }
+
+func TestProducerEpochRefusesARevokedGrantUntilSuperseded(t *testing.T) {
+	jobs := filepath.Join(t.TempDir(), "jobs")
+	if err := Revoke(jobs, "job-a", 2); err != nil {
+		t.Fatal(err)
+	}
+	for _, bound := range []uint64{0, 1} {
+		if _, err := ProducerEpoch(jobs, "job-a", bound, 0); !errors.Is(err, ErrRevoked) {
+			t.Fatalf("bound %d: err=%v, want ErrRevoked", bound, err)
+		}
+	}
+	if err := Assign(jobs, "job-a", 3); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ProducerEpoch(jobs, "job-a", 3, 0); err != nil || got != 3 {
+		t.Fatalf("after regrant: %d, %v", got, err)
+	}
+	// A local end writes job.revoked with a kind and no epoch; it is not a hub revocation.
+	local := filepath.Join(jobs, "job-b", "events")
+	if err := os.MkdirAll(local, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(local, "00001-job.revoked.json"), []byte(`{"kind":"job.revoked","job_id":"job-b"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ProducerEpoch(jobs, "job-b", 0, 0); err != nil || got != 1 {
+		t.Fatalf("local revocation: %d, %v", got, err)
+	}
+}

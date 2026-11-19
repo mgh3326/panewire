@@ -257,3 +257,58 @@ func TestDaemonRefusesSupersededProducerPush_t5310(t *testing.T) {
 		t.Fatalf("epoch 3 under grant 3: err=%v", err)
 	}
 }
+
+// A/1 -> B/2 leaves A's grant file at 1 and appends a revocation marker. The
+// still-running A/1 worker must be refused even though its bound epoch equals
+// the grant file, and the regranted A/3 worker accepted (mergewake finding on
+// #720).
+func TestProducerCallsRefuseRevokedAttempt_t5310(t *testing.T) {
+	for _, command := range []string{"done", "escalate", "joined", "emit"} {
+		t.Run(command, func(t *testing.T) {
+			f := newProducerFixture(t, 1)
+			if err := jobowner.Revoke(f.jobs, producerJob, 2); err != nil {
+				t.Fatal(err)
+			}
+			before := f.eventFiles(t)
+			for _, bound := range []uint64{1, 0} {
+				if bound != 0 {
+					bindAttempt(t, producerJob, bound)
+				} else {
+					t.Setenv(jobowner.JobEnv, "")
+					t.Setenv(jobowner.EpochEnv, "")
+				}
+				rc, stderr := f.produce(t, command)
+				if rc == ExitOK || !strings.Contains(stderr, "attempt revoked") {
+					t.Fatalf("bound %d: rc=%d stderr=%q, want a refusal naming the revocation", bound, rc, stderr)
+				}
+			}
+			if after := f.eventFiles(t); strings.Join(after, ",") != strings.Join(before, ",") || f.pushCount() != 0 {
+				t.Fatalf("a refused call wrote %v and pushed %d", after, f.pushCount())
+			}
+			if err := jobowner.Assign(f.jobs, producerJob, 3); err != nil {
+				t.Fatal(err)
+			}
+			bindAttempt(t, producerJob, 3)
+			if rc, stderr := f.produce(t, command); rc != ExitOK {
+				t.Fatalf("regranted attempt: rc=%d stderr=%q", rc, stderr)
+			}
+		})
+	}
+}
+
+func TestDaemonRefusesRevokedProducerPush_t5310(t *testing.T) {
+	root := t.TempDir()
+	jobs := filepath.Join(root, "jobs")
+	if err := jobowner.Revoke(jobs, producerJob, 2); err != nil {
+		t.Fatal(err)
+	}
+	daemon := t22NamespaceDaemon(root, &bytes.Buffer{})
+	request := localRequest{Op: "emit", Kind: "job.completed", JobID: producerJob, ReportPath: "report.md", OwnerLane: "lane-a", InboxRoot: root, Epoch: 1}
+	if err := daemon.emitRelayEvent(request); err == nil || !strings.Contains(err.Error(), "attempt revoked") {
+		t.Fatalf("epoch 1 after revocation at 2: err=%v", err)
+	}
+	request.Epoch = 2
+	if err := daemon.emitRelayEvent(request); err != nil && strings.Contains(err.Error(), "attempt revoked") {
+		t.Fatalf("epoch 2: err=%v", err)
+	}
+}

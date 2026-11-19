@@ -36,8 +36,14 @@ the node's current grant before anything is written:
 | bound or `--epoch N` | older than N | refused: `attempt epoch ahead of the node's grant` (retry once the node has persisted the grant) |
 | nothing | 1 | accepted as epoch 1 |
 | nothing | above 1 | refused: `attempt identity required` |
+| anything, including nothing at 1 | the hub revoked the grant | refused: `attempt revoked` until a newer grant supersedes the revocation |
 | `--epoch N` with a different bound epoch | any | refused: `--epoch conflicts with the epoch bound at launch` |
 | `ARBITER_JOB_EPOCH` set but not a positive integer | any | refused: `malformed attempt binding` |
+
+A revocation matters because A/1 → B/2 only appends a `job.revoked` marker and
+leaves A's grant file at 1: the bound epoch still equals the file, so the
+revocation (a hub marker above the grant) is checked as well. A later A/3 grant
+supersedes it.
 
 A refusal exits 2, names the reason and the two epochs on stderr, and writes no
 event file and sends no socket push. `--epoch` cannot lift a bound worker to a
