@@ -287,6 +287,16 @@ func (s *laneInboxStore) storedKey(key string) any {
 	return s.dialect.storedKey(key)
 }
 
+// eventKeyPredicate matches both representations found after a MySQL
+// copy-back, while preserving the original PostgreSQL form for older rows.
+func (s *laneInboxStore) eventKeyPredicate(key string) (string, []any) {
+	original := s.storedKey(key)
+	if s.dialect == dialectPostgres && len(key) > mysqlEventKeyMax {
+		return "event_key IN (?,?)", []any{original, hex.EncodeToString(dialectMySQL.storedKey(key).([]byte))}
+	}
+	return "event_key=?", []any{original}
+}
+
 // close ends every in-flight call, then closes the database.
 func (s *laneInboxStore) close() error {
 	s.abort()

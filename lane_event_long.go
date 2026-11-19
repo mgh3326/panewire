@@ -62,7 +62,8 @@ func (s *laneInboxStore) rowIDForKey(key string) (int64, error) {
 	ctx, done := s.op(s.life)
 	defer done()
 	var id int64
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&id)
+	where, args := s.eventKeyPredicate(key)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id FROM lane_inbox WHERE `+where), args...).Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}

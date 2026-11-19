@@ -110,7 +110,8 @@ func (s *laneInboxStore) fileEventUnread(key, lane, kind string, event hubJobEve
 	if item.Fresh {
 		return []laneInboxItem{item}, nil
 	}
-	return s.fileUnread(now, `event_key=?`, s.storedKey(key))
+	where, args := s.eventKeyPredicate(key)
+	return s.fileUnread(now, where, args...)
 }
 
 // fileUnread turns the rows matching where -- those the receiver does not

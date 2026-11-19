@@ -21,14 +21,6 @@ start = source.index('\t// MySQL stores oversized keys as digests.')
 end = source.index('\tfresh, err := s.insertOnce(', start)
 path.write_text(source[:start] + source[end:])
 PY
-# Removing the lookup also makes encoding/hex unused.
-python3 - "$probe_dir/lane_inbox_store.go" <<'PY'
-import pathlib
-import sys
-path = pathlib.Path(sys.argv[1])
-source = path.read_text().replace('\t"encoding/hex"\n', '')
-path.write_text(source)
-PY
 if (cd "$probe_dir" && go test -count=1 -run '^TestLaneInboxStorePostgresCopyBackLongKey/digest$' .) >"$probe_tmp/result.log" 2>&1; then
   echo 'original-only lookup mutant unexpectedly passed'
   exit 1
