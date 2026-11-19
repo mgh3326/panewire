@@ -375,3 +375,50 @@ func TestDaemonRefusesProducerPushWithoutNamespace_t5310(t *testing.T) {
 		}
 	}
 }
+
+// The daemon's configuration supplies the ledger to trust and the request only
+// names a namespace to validate: an omitted root inherits the configured one,
+// and an unconfigured daemon refuses with the queue left empty (consult 5310).
+func TestDaemonResolvesOneRootForProducerPushes_t5310(t *testing.T) {
+	root := t.TempDir()
+	if err := jobowner.Assign(filepath.Join(root, "jobs"), producerJob, 3); err != nil {
+		t.Fatal(err)
+	}
+	push := func(daemon *Daemon, requestRoot string, epoch uint64) (error, int) {
+		request := localRequest{Op: "emit", Kind: "job.completed", JobID: producerJob, ReportPath: "report.md", OwnerLane: "lane-a", InboxRoot: requestRoot, Epoch: epoch}
+		err := daemon.emitRelayEvent(request)
+		return err, len(daemon.cfg.Hub.Client.events)
+	}
+	fallback := func() *Daemon { // the hub client names no jobs root: the inbox root is the namespace
+		daemon := t22NamespaceDaemon("", &bytes.Buffer{})
+		daemon.cfg.InboxRoot = root
+		return daemon
+	}
+	for _, tc := range []struct {
+		name   string
+		daemon func() *Daemon
+		root   string
+	}{
+		{"configured, matching root", func() *Daemon { return t22NamespaceDaemon(root, &bytes.Buffer{}) }, root},
+		{"configured, omitted root", func() *Daemon { return t22NamespaceDaemon(root, &bytes.Buffer{}) }, ""},
+		{"inbox-root fallback, matching root", fallback, root},
+		{"inbox-root fallback, omitted root", fallback, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A stale epoch is refused from the configured ledger and queues nothing.
+			if err, queued := push(tc.daemon(), tc.root, 1); err == nil || !strings.Contains(err.Error(), "stale attempt") || queued != 0 {
+				t.Fatalf("epoch 1 under grant 3: err=%v queued=%d", err, queued)
+			}
+			// The current grant is admitted and queued.
+			if err, queued := push(tc.daemon(), tc.root, 3); err != nil || queued != 1 {
+				t.Fatalf("epoch 3 under grant 3: err=%v queued=%d", err, queued)
+			}
+		})
+	}
+	for _, requestRoot := range []string{root, ""} {
+		daemon := t22NamespaceDaemon("", &bytes.Buffer{})
+		if err, queued := push(daemon, requestRoot, 3); err == nil || !strings.Contains(err.Error(), "no inbox namespace configured") || queued != 0 {
+			t.Fatalf("unconfigured daemon, request root %q: err=%v queued=%d", requestRoot, err, queued)
+		}
+	}
+}
