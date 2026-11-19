@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Prove the copied-back digest replay test catches an original-only lookup.
 set -eu
-probe_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/pw-copy-key-mutant.XXXXXX")
+probe_tmp=$(mktemp -d "${RUNNER_TEMP:-/tmp}/pw-copy-key-mutant.XXXXXX")
+probe_dir="$probe_tmp/worktree"
 cleanup() {
-  git worktree remove --force "$probe_dir" >/dev/null 2>&1 || true
+  git -C "$probe_dir" restore lane_inbox_store.go >/dev/null 2>&1 || true
+  git -C "$probe_dir" diff --exit-code >/dev/null 2>&1 || return 1
+  git worktree remove "$probe_dir" >/dev/null 2>&1 || return 1
+  rm -- "$probe_tmp/result.log"
+  rmdir "$probe_tmp"
 }
 trap cleanup EXIT
 git worktree add --detach "$probe_dir" HEAD >/dev/null
@@ -24,12 +29,12 @@ path = pathlib.Path(sys.argv[1])
 source = path.read_text().replace('\t"encoding/hex"\n', '')
 path.write_text(source)
 PY
-if (cd "$probe_dir" && go test -count=1 -run '^TestLaneInboxStorePostgresCopyBackLongKey/digest$' .) >"$probe_dir/result.log" 2>&1; then
+if (cd "$probe_dir" && go test -count=1 -run '^TestLaneInboxStorePostgresCopyBackLongKey/digest$' .) >"$probe_tmp/result.log" 2>&1; then
   echo 'original-only lookup mutant unexpectedly passed'
   exit 1
 fi
-if ! grep -q 'replay: id=' "$probe_dir/result.log"; then
-  cat "$probe_dir/result.log"
+if ! grep -q 'replay: id=' "$probe_tmp/result.log"; then
+  cat "$probe_tmp/result.log"
   echo 'mutant did not fail on the digest replay assertion'
   exit 1
 fi
