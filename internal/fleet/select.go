@@ -655,20 +655,13 @@ func (p PoolPolicy) wasteRisk(row CatalogRow, free bool, v PoolView, ok bool) (b
 }
 
 // exhaustReason names why a non-free candidate's pool excludes it, or "".
-// A window at or above the pool's cutoff excludes the pool for this request
-// (hk 5456): commandcode refuses from 90 and every other pool from 99, the
-// same cutoff the admission gate refuses at, so a nearly spent pool is not
-// selected and then waited on for a refresh that can only confirm it. A
-// sub-daily window excludes a pool only when it is used up.
-// A pool merely on pace to use up its
+// Only a window already used up excludes a pool: a sub-daily window or the
+// blocking share at or above 100%. A pool merely on pace to use up its
 // longest window stays a candidate and ranks behind credit (paced, credit
 // pacing); sub-daily windows never project. A waste-risk pool is also
 // excluded once its longest window projects to the exclusion threshold.
-func (p PoolPolicy) exhaustReason(v PoolView, risk bool, cutoff float64) string {
-	if cutoff <= 0 || cutoff > 100 {
-		cutoff = 100
-	}
-	if v.ShortUsed != nil && *v.ShortUsed >= 100 || v.Blocking != nil && *v.Blocking >= cutoff {
+func (p PoolPolicy) exhaustReason(v PoolView, risk bool) string {
+	if v.ShortUsed != nil && *v.ShortUsed >= 100 || v.Blocking != nil && *v.Blocking >= 100 {
 		return "window_exhausted"
 	}
 	if !risk {

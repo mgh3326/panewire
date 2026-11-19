@@ -482,7 +482,7 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 			// A free rung is excluded only by an observed free limit, never by
 			// its shared pool's used or projected share.
 			if c.reason == "" && !free && !policy.isCredit(row.Pool) && v.Class != "credit" {
-				c.reason = policy.exhaustReason(v, c.risk, p.poolCutoff(row.Pool))
+				c.reason = policy.exhaustReason(v, c.risk)
 			}
 		}
 		if c.reason != "" {

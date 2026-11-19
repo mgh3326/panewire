@@ -58,39 +58,46 @@ not see fail. The request's refresh keys and the last attempt per key are
 stored in the hub database, so both survive a restart; a pass that ends without
 parking on a refresh clears the request's link.
 
-A refresh wait never exceeds what is left of the request (hk 5456). Each queued
-attempt's deadline is the measurement window or the attempt's remaining budget
-less a five-second use margin, whichever is smaller, so it cannot outlive the
-request that asked for it; a request with less budget than that does not start
-the wait at all. The hub reports whether it queued the measurement, and a caller
-it did not queue one for never stays pending on it.
-
-A wait is tied to the attempt that asked for it (the link stores when it was
-asked), so a completion an earlier request recorded never settles this one. A
-key whose own refresh finished without making the reading usable, or whose node
-measured another account, is not waited on again by the same request: the seat
-is dropped for that request with that reason and placement takes the next
-candidate, so an unusable reading costs one measurement pass and not the whole
-budget. A failed attempt is not settled that way — it is retried while the
-request stays pending, as before. The wait link keeps every key the attempt has
-asked, not only the last pass's, which is what makes the settled-key rule
-survive the passes in between.
+A refresh is one *attempt* with an opaque ID, admitted once by the hub's
+scheduler for one logical demand — machine, pool and the account the request
+waits on, with "no account named" its own value (hk 5456). Admission uses the
+request's effective deadline, the configured measurement window and a five
+second use margin: a demand whose measurement could only finish at or past the
+caller's deadline is refused and selection moves to the next candidate; a live
+compatible demand is joined and its ID returned; another account on the same
+machine and pool is a different attempt, so one account's completion never
+answers for another's. Inside the post-completion cooldown a demand is refused
+after a success (the reading it produced can be read now) and held after a
+failure (the caller stays pending and a later pass asks again). The request
+stores the attempt ID and account it waits on, and only that attempt's finished
+result can settle it, diagnose its timeout, or name it in its tried list; a
+wait recorded before attempts had IDs is uncorrelated and only feeds display
+text. A finished attempt's result is kept by ID, so a completion that lands
+after the wait was recorded, or in the same millisecond, is still that
+attempt's. A wait whose attempt finished without making the reading usable, or
+whose node measured another account, is not repeated for that request: the seat
+is dropped with that reason and placement takes the next candidate. A failed
+attempt is retried while the request stays pending. The wait link keeps every
+demand the attempt has asked, not only the last pass's, which is what makes the
+settled rule survive the passes in between.
 
 The refresh names the account the request waits on (`account_key` on the
-`quota.refresh` node command). A node that measured another account answers
-`account_mismatch` instead of `refreshed`, so a measurement that could not
-change the waited-on reading is recorded as a failure with that reason rather
-than as a silent success. The account-key argument is optional; a node that
-does not receive one keeps the older behaviour.
+`quota.refresh` node command) only for a connection that advertised
+`quota_refresh_account_v1`. A node built before the field receives the
+pool-only request its strict argument decoder accepts, and its success is an
+ordinary read of the account by the next placement pass. A node that received
+the field and measured another account answers `account_mismatch` instead of
+`refreshed`, so a measurement that could not change the waited-on reading is
+recorded as a named failure rather than a silent success.
 
-Refreshes coalesce by machine and pool. At most four run at once, with at most
-one per node; waiting keys are considered in arrival order while busy nodes are
+Refreshes coalesce by demand. At most four run at once, with at most one per
+node; waiting attempts are considered in arrival order while busy nodes are
 skipped. The configured `measure_timeout_s` (default 60 seconds, capped at 60)
-starts when a key is queued and covers queueing, writer admission, the socket
-write and the response. After writer admission, the socket write also has the
-same five-second maximum as other hub node writes. An expired queued attempt
-retains its place, but is sent only if a later placement pass requests it with a
-new budget. On shutdown the hub cancels refreshes; accepted requests and their
+starts when an attempt is queued and covers queueing, writer admission, the
+socket write and the response. After writer admission, the socket write also has
+the same five-second maximum as other hub node writes. An expired queued attempt
+keeps its place and its ID, but is sent only if a later placement pass asks for
+that demand again with a new budget; placement is woken meanwhile. On shutdown the hub cancels refreshes; accepted requests and their
 reservations survive restart. Local, non-hub spawns keep their synchronous
 refresh behavior. See [Quota service boundary](placement.md#quota-service-boundary).
 

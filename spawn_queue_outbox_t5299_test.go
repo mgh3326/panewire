@@ -314,7 +314,7 @@ func TestSpawnQueueNextCheckMirrorsTheOperation_t5299(t *testing.T) {
 			return len(tasks) == 1
 		}
 		next := now.Add(10 * time.Minute)
-		if ok, err := s.parkSpawn(t.Context(), id, task.Attempt, spawnParkLaunchBackoff, next, now); err != nil || !ok {
+		if ok, err := s.parkSpawn(t.Context(), id, task.Attempt, spawnParkLaunchBackoff, nil, next, now); err != nil || !ok {
 			t.Fatalf("park: %v %v", ok, err)
 		}
 		if got := queueRows(t, s)[id]; got != next.UnixMilli() {
@@ -379,7 +379,7 @@ func seedBackfillWorld(t *testing.T, s *laneInboxStore, now time.Time) (queued [
 	accepted := queueTestClaim(t, s, 1, now)
 	waiting := queueTestWaiting(t, s, 2, now)
 	parked := queueTestClaim(t, s, 3, now)
-	if ok, err := s.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkLaunchBackoff, now.Add(time.Hour), now); err != nil || !ok {
+	if ok, err := s.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkLaunchBackoff, nil, now.Add(time.Hour), now); err != nil || !ok {
 		t.Fatalf("park: %v %v", ok, err)
 	}
 	failed := queueTestClaim(t, s, 4, now)
@@ -475,7 +475,7 @@ func TestSpawnQueueReconcileAfterARollback_t5299(t *testing.T) {
 		// running one the old binary will end, and a failure owing its comment.
 		running := queueTestClaim(t, s, 1, now)
 		parked := queueTestClaim(t, s, 2, now)
-		if ok, err := s.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkLaunchBackoff, now.Add(time.Hour), now); err != nil || !ok {
+		if ok, err := s.parkSpawn(t.Context(), parked.Request.RequestID, parked.Attempt, spawnParkLaunchBackoff, nil, now.Add(time.Hour), now); err != nil || !ok {
 			t.Fatalf("park: %v %v", ok, err)
 		}
 		ended := queueTestClaim(t, s, 3, now)

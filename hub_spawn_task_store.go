@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -61,9 +62,10 @@ type hubSpawnOutcome struct {
 // hubSpawnTried is one candidate an attempt asked, and why it was dropped. The
 // pool is empty for a placement candidate the fleet layer reports without one.
 type hubSpawnTried struct {
-	Host   string `json:"host,omitempty"`
-	Pool   string `json:"pool,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	Host       string `json:"host,omitempty"`
+	Pool       string `json:"pool,omitempty"`
+	AccountKey string `json:"account_key,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // String is one list entry: pool and host, then the reason it was dropped.
@@ -75,13 +77,38 @@ func (t hubSpawnTried) String() string {
 		}
 		where += t.Host
 	}
+	if t.AccountKey != "" {
+		if where != "" {
+			where += " " + t.AccountKey
+		} else {
+			where = t.AccountKey
+		}
+	}
 	if where == "" {
-		where = "candidate"
+		return t.Reason
 	}
 	if t.Reason == "" {
 		return where
 	}
 	return where + ": " + t.Reason
+}
+
+// mergeTried concatenates tried lists, dropping a later entry that repeats an
+// earlier pool/host pair, so a wait and a parked pass that name the same seat
+// are listed once.
+func mergeTried(lists ...[]hubSpawnTried) []hubSpawnTried {
+	var merged []hubSpawnTried
+	for _, list := range lists {
+		for _, tried := range list {
+			if slices.ContainsFunc(merged, func(have hubSpawnTried) bool {
+				return have.Host == tried.Host && have.Pool == tried.Pool && have.Reason == tried.Reason
+			}) {
+				continue
+			}
+			merged = append(merged, tried)
+		}
+	}
+	return merged
 }
 
 // spawnTriedText is the tried list as one readable list, or "" when empty.
@@ -101,9 +128,16 @@ func spawnTriedText(tried []hubSpawnTried) string {
 // (hk 5456). A row written before At existed carries a zero time and is read
 // as "asked when the attempt began".
 type hubSpawnRefreshWait struct {
-	Machine string    `json:"machine"`
-	Pool    string    `json:"pool"`
-	At      time.Time `json:"at,omitempty"`
+	Machine string `json:"machine"`
+	Pool    string `json:"pool"`
+	// AccountKey and Attempt are the demand this request made and the
+	// scheduler's ID for it. Only that attempt's completion can settle or
+	// diagnose this wait; a row for the machine and pool alone says nothing
+	// about it (hk 5456). Empty attempt and account mark a wait recorded
+	// before they existed: uncorrelated, kept for diagnostics only.
+	AccountKey string    `json:"account_key,omitempty"`
+	Attempt    string    `json:"attempt,omitempty"`
+	At         time.Time `json:"at,omitempty"`
 }
 
 // hubSpawnRefreshOutcome is the last finished attempt for the refresh a timed
@@ -185,6 +219,11 @@ type hubSpawnTask struct {
 	// ClaimedHost (hk 4661): written once, never by a later pre-claim
 	// refusal or not-started attestation. A request with one ends with it.
 	ClaimResult *hubSpawnOutcome
+	// Tried is what the parked pass asked and why each candidate was dropped
+	// (hk 5456). A parked row keeps it (spawn_operations.tried), so a request
+	// that reaches its limit while parked still names what it tried. It is
+	// cleared when the attempt ends or binds.
+	Tried []hubSpawnTried
 }
 
 type hubSpawnExclusion struct {
@@ -253,6 +292,8 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		spawnAttemptStartByTable,
 		`CREATE TABLE IF NOT EXISTS spawn_placement_snapshots (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,payload TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,delivery TEXT NOT NULL DEFAULT '',PRIMARY KEY(request_id,attempt))`,
 		`CREATE TABLE IF NOT EXISTS quota_refresh_attempts (machine TEXT NOT NULL,pool TEXT NOT NULL,outcome TEXT NOT NULL,seen_ms BIGINT NOT NULL,PRIMARY KEY(machine,pool))`,
+		`CREATE TABLE IF NOT EXISTS quota_refresh_results (attempt_id TEXT PRIMARY KEY,machine TEXT NOT NULL,pool TEXT NOT NULL,account_key TEXT NOT NULL,outcome TEXT NOT NULL,seen_ms BIGINT NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS quota_refresh_results_seen ON quota_refresh_results(seen_ms)`,
 		spawnQueueTable,
 		spawnQueueNextCheckIndex,
 		taskFailNoticeOutboxTable,
@@ -269,7 +310,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// are hk 5124's (postgres: 0022), task_fail_notice_ms is hk 5137's
 	// (postgres: 0023), task_fail_retry_ms is hk 5137's (postgres: 0024), and
 	// replaced_from is hk 5300's (postgres: 0031).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`} {
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -593,7 +634,7 @@ func (s *laneInboxStore) bindSpawnPlaced(parent context.Context, id string, atte
 	if accountKey != "" {
 		placedAttempt = attempt
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,refresh_waits='[]',park_reason='',placed_account_key=?,placed_attempt=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, id, attempt, node.Machine)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, id, attempt, node.Machine)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -810,10 +851,10 @@ func queueSpawnNoticeRows(ctx context.Context, s *laneInboxStore, tx *sql.Tx, ta
 
 func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var task hubSpawnTask
-	var payload, result, node, exclusions, refreshWaits, conditionResult, claimResult, parkJudgedReason, placedAccountKey string
+	var payload, result, node, exclusions, refreshWaits, conditionResult, claimResult, parkJudgedReason, placedAccountKey, tried string
 	var created, deadline, lastRun, placed, expires, conditionsMet, nextCheck, parkSince, parkNoticeAt, placedAttempt int64
 	var replacedFrom sql.NullString
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult, &parkSince, &task.ParkPriority, &parkNoticeAt, &parkJudgedReason, &task.ParkPriorityFailures, &placedAccountKey, &placedAttempt, &replacedFrom)
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult, &parkSince, &task.ParkPriority, &parkNoticeAt, &parkJudgedReason, &task.ParkPriorityFailures, &placedAccountKey, &placedAttempt, &replacedFrom, &tried)
 	if err != nil {
 		return task, err
 	}
@@ -823,6 +864,11 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 		task.PlacedAttempt = int(placedAttempt)
 	}
 	task.ParkJudgedReason = parkJudgedReason
+	if tried != "" {
+		if err := json.Unmarshal([]byte(tried), &task.Tried); err != nil {
+			return task, err
+		}
+	}
 	if parkSince > 0 {
 		task.ParkSince = time.UnixMilli(parkSince)
 	}
@@ -995,7 +1041,7 @@ func spawnTaskColumnsOf(alias string) string {
 	return strings.Join(columns, ",")
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,park_since_ms,park_priority,park_notice_ms,park_judged_reason,park_priority_failures,placed_account_key,placed_attempt,replaced_from`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,park_since_ms,park_priority,park_notice_ms,park_judged_reason,park_priority_failures,placed_account_key,placed_attempt,replaced_from,tried`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
@@ -1221,7 +1267,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	// the placed columns clear in this same write (hk 5124). The outcome
 	// stays the attempt's terminal record.
 	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, task.Request.ExpiresSeconds))
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',tried='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}
@@ -1379,6 +1425,42 @@ func (s *laneInboxStore) recordQuotaRefreshAttempt(parent context.Context, machi
 	defer done()
 	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO quota_refresh_attempts(machine,pool,outcome,seen_ms) VALUES(?,?,?,?)`, "machine,pool", s.dialect.assignIncoming("outcome", "seen_ms"))), machine, pool, outcome, now.UnixMilli())
 	return err
+}
+
+// quotaRefreshResultTTL is how long a finished attempt's result is kept: every
+// request that can reference it (an attempt's per-attempt wait) has ended long
+// before, so a lookup for a live wait always finds its row.
+const quotaRefreshResultTTL = 24 * time.Hour
+
+// recordQuotaRefreshResult persists one finished attempt under its scheduler
+// ID, success included (outcome ""), so the request that waited on that exact
+// attempt can tell a failed measurement from one that finished and from one
+// that never ran. A completion is never mistaken for another attempt's, even
+// for the same machine and pool (hk 5456).
+func (s *laneInboxStore) recordQuotaRefreshResult(parent context.Context, id, machine, pool, accountKey, outcome string, now time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	if _, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO quota_refresh_results(attempt_id,machine,pool,account_key,outcome,seen_ms) VALUES(?,?,?,?,?,?)`, "attempt_id", s.dialect.assignIncoming("outcome", "seen_ms"))), id, machine, pool, accountKey, outcome, now.UnixMilli()); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM quota_refresh_results WHERE seen_ms < ?`), now.Add(-quotaRefreshResultTTL).UnixMilli())
+	return err
+}
+
+// quotaRefreshResult reads one attempt's finished result by its scheduler ID.
+func (s *laneInboxStore) quotaRefreshResult(parent context.Context, id string) (string, string, time.Time, bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var outcome, accountKey string
+	var seen int64
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT outcome,account_key,seen_ms FROM quota_refresh_results WHERE attempt_id=?`), id).Scan(&outcome, &accountKey, &seen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", "", time.Time{}, false, err
+	}
+	return outcome, accountKey, time.UnixMilli(seen), true, nil
 }
 
 // quotaRefreshAttempt reads the last finished attempt for one machine/pool.

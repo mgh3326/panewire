@@ -222,7 +222,6 @@ OAuth 계정만 resolve하므로 API-key 계정인 Command Code에는 "no OAuth 
     launch 후 실제 계정을 읽는 길은 없습니다(omp의 세션 고정 기록은 credential 저장소에 있어
     panewire가 읽지 않습니다).
 - **Default cutoff 90 and one-seat-in-flight rule.** `commandcode` pool의 기본 cutoff는 90(설정 `pools.commandcode.cutoff`가 없을 때 두 window 모두 적용, 명시적 설정이 우선)이며, 계정의 7d window 사용량이 75% 이상일 때는 해당 계정에서 실행 중인 다른 commandcode seat이 없을 때만 새 seat을 admit합니다(2026-11-17 7d 95.5% 사용 계정에 두 implementer가 동시에 안착되어 주간 잔여 약 1.6 크레딧이 2시간 만에 조기 소진된 문제를 방지, hk 5113).
-- **Selection cutoff.** 같은 값이 selection에도 적용됩니다: `commandcode`는 90, 나머지 native pool은 99가 기본 cutoff이고(`pools.<name>.cutoff`가 있으면 그 값이 우선), 공유 reading의 가장 높은 account window 사용량이 그 값 이상이면 그 pool의 계정은 이 request에서 drop됩니다(`window_exhausted cutoff=<n>`). admission gate가 거부할 값을 selection이 먼저 알아보므로, 거의 소진된 pool(codex 7d 99% 등)이 먼저 선택되어 그 pool의 stale reading refresh를 예산이 끝날 때까지 기다리는 일이 없습니다(hk 5456). sub-daily window는 사용량 100%일 때만 drop합니다.
 - **Credentials** are never read: no key, token or auth file is read, copied or sent; omp
   uses its own login, and its stderr (which can name an account) is discarded.
 - **Plan and status.** `panewire quota status`는 이 호스트가 아는 계정마다 pool/window 행을

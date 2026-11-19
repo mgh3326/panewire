@@ -390,7 +390,7 @@ func TestHubStoreCallSiteStatements(t *testing.T) {
 		{"spawn grant rows", func(s *laneInboxStore) { s.spawnGrantRowCount(ctx) },
 			`SELECT count(*) FROM spawn_operations WHERE status LIKE '%\_grant' ESCAPE '\'`,
 			`SELECT count(*) FROM spawn_operations WHERE status LIKE '%\_grant' ESCAPE '\\'`},
-		{"park spawn", func(s *laneInboxStore) { s.parkSpawn(ctx, "req", 1, "why", now, now) },
+		{"park spawn", func(s *laneInboxStore) { s.parkSpawn(ctx, "req", 1, "why", nil, now, now) },
 			`UPDATE spawn_operations SET next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,park_since_ms=CASE WHEN park_since_ms=0 THEN CAST(? AS BIGINT) ELSE park_since_ms END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`,
 			`UPDATE spawn_operations SET next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,park_since_ms=CASE WHEN park_since_ms=0 THEN CAST(? AS SIGNED) ELSE park_since_ms END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`},
 		{"wake parked spawns", func(s *laneInboxStore) { s.wakeParkedSpawns(ctx, []string{"a", "b"}, 5, now) },

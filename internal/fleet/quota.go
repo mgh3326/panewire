@@ -655,44 +655,32 @@ func (a *App) measureTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// scheduleQuotaRefresh queues one shared measurement and reports whether the
-// caller will actually wait for it: a caller the hub did not queue anything
-// for must not stay pending (hk 5456).
-func (a *App) scheduleQuotaRefresh(host, pool, accountKey string) bool {
+// queueQuotaRefresh asks the hub's scheduler to measure one account and
+// reports the attempt it admitted (a new one or a live compatible one). The
+// scheduler owns admission — the request's budget, the measurement window and
+// the post-completion cooldown — so a refused demand is never waited on
+// (hk 5456).
+func (a *App) queueQuotaRefresh(machine, pool, accountKey string) (string, QuotaRefreshAdmission) {
 	if a.ScheduleQuotaRefresh == nil {
-		return false
+		return "", QuotaRefreshRefused
 	}
-	return a.ScheduleQuotaRefresh(host, pool, accountKey, a.measureTimeout())
+	return a.ScheduleQuotaRefresh(machine, pool, accountKey, a.measureTimeout())
 }
 
-// refreshDue reports whether a shared quota refresh for this account should be
-// queued now (hk 5456). A request whose earlier wait on that key finished
-// without making the reading usable drops the seat instead: a second wait
-// cannot help it sooner. A request with less budget left than one measurement
-// takes never starts the wait, so it cannot outlive the request's own deadline.
-func (a *App) refreshDue(ctx context.Context, host, pool string) bool {
-	_, settled := a.refreshSettled(host, pool)
-	return !settled && quotaRefreshFits(ctx, a.measureTimeout())
+// quotaRefreshHold reports whether a demand's answer leaves the caller waiting
+// on a measurement: an admitted attempt, or a retry of a failed one.
+func quotaRefreshHold(admission QuotaRefreshAdmission) bool {
+	return admission == QuotaRefreshAdmitted || admission == QuotaRefreshRetry
 }
 
-// refreshSettled reports whether this request already waited on a refresh for
-// the key and that attempt cannot supply the reading it selects, with the
-// text the dropped seat records.
-func (a *App) refreshSettled(host, pool string) (string, bool) {
+// refreshSettled reports whether the attempt this request waited on for this
+// demand cannot supply the reading it selects, with the text the dropped seat
+// records.
+func (a *App) refreshSettled(machine, pool, accountKey string) (string, bool) {
 	if a.QuotaRefreshSettled == nil {
 		return "", false
 	}
-	return a.QuotaRefreshSettled(host, pool)
-}
-
-// quotaRefreshFits reports whether the caller's remaining budget covers one
-// shared quota refresh. No deadline means an unbounded caller.
-func quotaRefreshFits(ctx context.Context, window time.Duration) bool {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		return true
-	}
-	return time.Until(deadline) >= window
+	return a.QuotaRefreshSettled(machine, pool, accountKey)
 }
 
 func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, local bool, key string, acc SharedAccount) (quotaJudgment, error) {
@@ -728,8 +716,12 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 				a.quotaObservationEvent(host, pool, observed, acc)
 			}
 		}()
-		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.nativeQuotaPool(pool) && a.refreshDue(ctx, host, pool) && a.scheduleQuotaRefresh(host, pool, key) {
-			return j, ErrQuotaRefreshPending
+		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.nativeQuotaPool(pool) {
+			if _, settled := a.refreshSettled(host, pool, key); !settled {
+				if _, admission := a.queueQuotaRefresh(host, pool, key); quotaRefreshHold(admission) {
+					return j, ErrQuotaRefreshPending
+				}
+			}
 		}
 		// A stale or missing observation of an account this host does not hold
 		// is never refreshed by the gate, so measure it on the target first.
@@ -770,8 +762,12 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 		r.AccountKey = key
 	}
 	judgment, err := a.judgeGate(ctx, r, pool, j)
-	if err != nil && !local && !a.planOnly && key != "" && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown && a.refreshDue(ctx, host, pool) && a.scheduleQuotaRefresh(host, pool, key) {
-		return judgment, ErrQuotaRefreshPending
+	if err != nil && !local && !a.planOnly && key != "" && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown {
+		if _, settled := a.refreshSettled(host, pool, key); !settled {
+			if _, admission := a.queueQuotaRefresh(host, pool, key); quotaRefreshHold(admission) {
+				return judgment, ErrQuotaRefreshPending
+			}
+		}
 	}
 	return judgment, err
 }

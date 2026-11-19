@@ -119,7 +119,7 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 		if err != nil {
 			return false, err
 		}
-		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',result=?,deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,claimed_host=?,refresh_waits='[]',failed_attempts=failed_attempts+?,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN ?<>'' THEN `+s.dialect.castInt("?")+` ELSE 0 END,park_priority=CASE WHEN ?<>'' THEN -1 ELSE park_priority END,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), string(rawOutcome), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), pin, failed, parkReason, retryAt, parkReason, now.UnixMilli(), parkReason, task.Request.RequestID, task.Attempt)
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',result=?,deadline_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,claimed_host=?,refresh_waits='[]',tried='[]',failed_attempts=failed_attempts+?,park_reason=?,next_check_ms=?,park_since_ms=CASE WHEN ?<>'' THEN `+s.dialect.castInt("?")+` ELSE 0 END,park_priority=CASE WHEN ?<>'' THEN -1 ELSE park_priority END,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), string(rawOutcome), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, task.Expires).UnixMilli(), pin, failed, parkReason, retryAt, parkReason, now.UnixMilli(), parkReason, task.Request.RequestID, task.Attempt)
 		if err != nil {
 			return false, err
 		}
