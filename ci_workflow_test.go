@@ -53,7 +53,8 @@ func TestCITiers(t *testing.T) {
 		t.Fatal("a pull request's new run must cancel its older run")
 	}
 	postOnly := map[string]string{
-		"post-test": `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
+		"post-test":  `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
+		"post-shard": `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
 		// postgres also runs on a pull request that touches the inbox store
 		// (store-paths), because the production hub keeps its inbox there.
 		"postgres": `${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}`,
@@ -87,7 +88,7 @@ func TestCITiers(t *testing.T) {
 			t.Errorf("%s must need store-paths to decide pull request runs", name)
 		}
 	}
-	for _, name := range []string{"post-test", "postgres", "mysql"} {
+	for _, name := range []string{"post-test", "post-shard", "postgres", "mysql"} {
 		job := w.Jobs[name]
 		if job.If != postOnly[name] {
 			t.Errorf("%s is not post-only (or, for postgres, not store-gated)", name)
@@ -107,10 +108,22 @@ func TestCITiers(t *testing.T) {
 	for _, step := range post.Steps {
 		runs += step.Run + "\n"
 	}
-	for _, want := range []string{"gofmt -l .", "go vet ./...", "go test ./...", "sh -n"} {
+	for _, want := range []string{"gofmt -l .", "go vet ./...", "go list ./... | grep -v -x", "xargs go test", "sh -n"} {
 		if !strings.Contains(runs, want) {
 			t.Errorf("post-test missing %s", want)
 		}
+	}
+	// The root package runs in post-shard (hk 5492), never as one unsharded
+	// `go test ./...` on a single runner.
+	if strings.Contains(runs, "go test ./...") {
+		t.Error("post-test runs the root package unsharded; the root package belongs to post-shard")
+	}
+	var shardRuns string
+	for _, step := range w.Jobs["post-shard"].Steps {
+		shardRuns += step.Run + "\n"
+	}
+	if !strings.Contains(shardRuns, "scripts/ci-test-shard.sh ${{ matrix.shard }}") {
+		t.Error("post-shard does not run scripts/ci-test-shard.sh with its matrix value")
 	}
 	// The heavy checks moved to deploy.yml (r2 §1): the main stage keeps the
 	// basic set and must not run a race pin or a macOS runner.
@@ -149,7 +162,7 @@ func TestCITiers(t *testing.T) {
 	if gate.If != "${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}" {
 		t.Fatal("ci-ok cancellation rule changed")
 	}
-	for _, required := range []string{"test", "post-test", "postgres", "mysql", "auto-tag-test"} {
+	for _, required := range []string{"test", "post-test", "post-shard", "postgres", "mysql", "auto-tag-test"} {
 		if !slices.Contains(gate.Needs, required) {
 			t.Errorf("ci-ok must need %s", required)
 		}
@@ -216,26 +229,32 @@ func TestCITiers(t *testing.T) {
 }
 func TestCIGateResults(t *testing.T) {
 	gate := readCI(t, ".github/workflows/ci.yml").Jobs["ci-ok"]
+	// post is post-test (the non-root packages); shard is post-shard (the root
+	// package's shards, hk 5492). Both follow the same suite rule.
 	for _, tc := range []struct {
-		event, suite, test, post, pg, my, auto string
-		ok                                     bool
+		event, suite, test, post, shard, pg, my, auto string
+		ok                                            bool
 	}{
-		{"pull_request", "all", "success", "skipped", "skipped", "skipped", "success", true},
-		{"pull_request", "all", "failure", "skipped", "skipped", "skipped", "success", false},
-		{"push", "all", "skipped", "success", "success", "success", "success", true},
-		{"push", "all", "skipped", "success", "failure", "success", "success", false},
-		{"push", "all", "skipped", "success", "success", "failure", "success", false},
-		{"push", "all", "skipped", "success", "success", "skipped", "success", false},
-		{"workflow_dispatch", "test", "skipped", "success", "skipped", "skipped", "success", true},
-		{"workflow_dispatch", "postgres", "skipped", "skipped", "success", "skipped", "success", true},
-		{"workflow_dispatch", "mysql", "skipped", "skipped", "skipped", "success", "success", true},
-		{"workflow_dispatch", "mysql", "skipped", "skipped", "skipped", "failure", "success", false},
-		{"workflow_dispatch", "mysql", "skipped", "skipped", "success", "success", "success", false},
-		{"push", "all", "skipped", "success", "success", "success", "failure", false},
-		{"push", "unknown", "skipped", "skipped", "skipped", "skipped", "success", false},
+		{"pull_request", "all", "success", "skipped", "skipped", "skipped", "skipped", "success", true},
+		{"pull_request", "all", "failure", "skipped", "skipped", "skipped", "skipped", "success", false},
+		{"push", "all", "skipped", "success", "success", "success", "success", "success", true},
+		{"push", "all", "skipped", "success", "success", "failure", "success", "success", false},
+		{"push", "all", "skipped", "success", "success", "success", "failure", "success", false},
+		{"push", "all", "skipped", "success", "success", "success", "skipped", "success", false},
+		// A failed or cancelled shard fails the gate even when post-test passed.
+		{"push", "all", "skipped", "success", "failure", "success", "success", "success", false},
+		{"push", "all", "skipped", "success", "cancelled", "success", "success", "success", false},
+		{"workflow_dispatch", "test", "skipped", "success", "success", "skipped", "skipped", "success", true},
+		{"workflow_dispatch", "test", "skipped", "success", "failure", "skipped", "skipped", "success", false},
+		{"workflow_dispatch", "postgres", "skipped", "skipped", "skipped", "success", "skipped", "success", true},
+		{"workflow_dispatch", "mysql", "skipped", "skipped", "skipped", "skipped", "success", "success", true},
+		{"workflow_dispatch", "mysql", "skipped", "skipped", "skipped", "skipped", "failure", "success", false},
+		{"workflow_dispatch", "mysql", "skipped", "skipped", "skipped", "success", "success", "success", false},
+		{"push", "all", "skipped", "success", "success", "success", "success", "failure", false},
+		{"push", "unknown", "skipped", "skipped", "skipped", "skipped", "skipped", "success", false},
 	} {
 		cmd := exec.Command("bash", "-e", "-c", gate.Steps[0].Run)
-		cmd.Env = append(os.Environ(), "EVENT="+tc.event, "SUITE="+tc.suite, "TEST_RESULT="+tc.test, "POST_TEST_RESULT="+tc.post, "POSTGRES_RESULT="+tc.pg, "MYSQL_RESULT="+tc.my, "AUTO_TAG_RESULT="+tc.auto)
+		cmd.Env = append(os.Environ(), "EVENT="+tc.event, "SUITE="+tc.suite, "TEST_RESULT="+tc.test, "POST_TEST_RESULT="+tc.post, "POST_SHARD_RESULT="+tc.shard, "POSTGRES_RESULT="+tc.pg, "MYSQL_RESULT="+tc.my, "AUTO_TAG_RESULT="+tc.auto)
 		out, err := cmd.CombinedOutput()
 		if (err == nil) != tc.ok {
 			t.Errorf("%+v: %s %v", tc, out, err)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"slices"
@@ -42,6 +43,9 @@ const (
 
 	handoverPlaced = "placed"
 	handoverFailed = "handover_failed"
+	// handoverWithdrawn ends a queued successor the hub withdrew because its
+	// job no longer needs it (hk 5491); Reason names the cause.
+	handoverWithdrawn = "withdrawn"
 
 	// handoverJobMissing is the failure reason when the node proved the old
 	// job's directory gone (hk 5296): nothing was closed.
@@ -109,6 +113,9 @@ type handoverInputs struct {
 	expected time.Duration
 	// bound is the job the task's refs.job_id names; empty when unread.
 	bound string
+	// state is the task's hk state (merged, completed, canceled, ...); empty
+	// when unread.
+	state string
 }
 
 func (h *HubServer) readHandoverInputs(ctx context.Context, task string) handoverInputs {
@@ -134,6 +141,7 @@ func (h *HubServer) readHandoverInputs(ctx context.Context, task string) handove
 	}
 	if status, raw, err := h.handoffkeep.do(ctx, http.MethodGet, h.handoffkeep.endpoint("/v1/tasks/"+task), nil); err == nil && status == http.StatusOK {
 		var t struct {
+			State    string  `json:"state"`
 			Priority any     `json:"priority"`
 			Expected *string `json:"expected"`
 			Refs     struct {
@@ -141,6 +149,7 @@ func (h *HubServer) readHandoverInputs(ctx context.Context, task string) handove
 			} `json:"refs"`
 		}
 		if json.Unmarshal(raw, &t) == nil {
+			in.state = t.State
 			in.bound = t.Refs.Job
 			in.priority, _ = quotaTaskPriority(t.Priority)
 			if t.Expected != nil {
@@ -614,20 +623,29 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 			return err
 		}
 		if spawnStatusActive(task.Status) {
-			// I2: the row stays non-final until the successor settled.
-			return nil
-		}
-		if task.Status == "succeeded" && task.Outcome.RC == 0 {
-			handover.Outcome = handoverPlaced
-			handover.Reason = task.Outcome.Host + "/" + task.Outcome.Profile
+			// I2: the row stays non-final until the successor settled, unless
+			// the hub withdraws a queued successor its job no longer needs.
+			withdrawn, err := h.withdrawQueuedHandover(ctx, action, task)
+			if err != nil || !withdrawn {
+				return err
+			}
 		} else {
-			handover.Outcome, handover.Reason = handoverFailed, fmt.Sprintf("successor %s rc=%d %s", task.Status, task.Outcome.RC, task.Outcome.Reason)
-		}
-		if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
-			return err
+			switch cause, withdrawn := spawnHandoverWithdrawCause(task.Outcome.Reason); {
+			case withdrawn:
+				// The withdrawal's outcome landed before this row was saved.
+				handover.Outcome, handover.Reason = handoverWithdrawn, cause
+			case task.Status == "succeeded" && task.Outcome.RC == 0:
+				handover.Outcome = handoverPlaced
+				handover.Reason = task.Outcome.Host + "/" + task.Outcome.Profile
+			default:
+				handover.Outcome, handover.Reason = handoverFailed, fmt.Sprintf("successor %s rc=%d %s", task.Status, task.Outcome.RC, task.Outcome.Reason)
+			}
+			if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
+				return err
+			}
 		}
 	}
-	if handover.Outcome == handoverFailed {
+	if handover.Outcome == handoverFailed || handover.Outcome == handoverWithdrawn {
 		// No successor holds the task: free the role wherever it sits, the
 		// old job's (never transferred) or a successor's that failed. A
 		// successor that succeeded (a sibling row placed it) keeps its role.
@@ -641,19 +659,23 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 			}
 		}
 	}
-	text := fmt.Sprintf("[panewire] handed %s over to %s on %s (%s %s)", action.Job, handover.Job, handover.Reason, handover.Pool, handover.Cause)
-	if handover.Outcome == handoverFailed {
-		text = fmt.Sprintf("[panewire] hand-over of %s failed (%s): %s", action.Job, strings.TrimSpace(handover.Reason), action.Data.Text)
-	}
-	eventID := handoverNoticeID(action)
-	owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
-	if err != nil {
-		return err
-	}
-	if !owned {
-		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
-		if result.ID == 0 || result.PersistFailed {
-			return errors.New("owner notice unavailable")
+	// A withdrawn successor's owner hears the successor's own notice, one info
+	// line or none (hk 5491), so the hand-over notice is not sent for it.
+	if handover.Outcome != handoverWithdrawn {
+		text := fmt.Sprintf("[panewire] handed %s over to %s on %s (%s %s)", action.Job, handover.Job, handover.Reason, handover.Pool, handover.Cause)
+		if handover.Outcome == handoverFailed {
+			text = fmt.Sprintf("[panewire] hand-over of %s failed (%s): %s", action.Job, strings.TrimSpace(handover.Reason), action.Data.Text)
+		}
+		eventID := handoverNoticeID(action)
+		owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+			if result.ID == 0 || result.PersistFailed {
+				return errors.New("owner notice unavailable")
+			}
 		}
 	}
 	h.logger.Info("pool hand-over finished", "job", action.Job, "successor", handover.Job, "outcome", handover.Outcome, "action", action.ID)
@@ -664,6 +686,84 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 	h.poolActionObserved.Delete(action.ID)
 	h.loopNoteDone(loopPoolActions, action.ID)
 	return nil
+}
+
+// The causes a queued successor is withdrawn for (hk 5491). They are the
+// suffix of its outcome reason, handover_withdrawn: <cause>.
+const (
+	handoverCauseTerminal = "task_terminal"
+	handoverCauseRebound  = "task_rebound"
+	handoverCauseClosed   = "successor_closed"
+)
+
+// hkTaskTerminalState is an hk task state that needs no more work (hk 5491).
+func hkTaskTerminalState(state string) bool {
+	return state == "merged" || state == "completed" || state == "canceled"
+}
+
+// withdrawQueuedHandover withdraws the successor task while it is still queued
+// (accepted, unbound) and its job no longer needs it, and ends the hand-over
+// row withdrawn with the cause (hk 5491). It reports false when the successor
+// is still wanted or the withdrawal did not apply; the next pass reads again.
+func (h *HubServer) withdrawQueuedHandover(ctx context.Context, action poolAction, task hubSpawnTask) (bool, error) {
+	cause, err := h.handoverWithdrawCause(ctx, action)
+	if err != nil || cause == "" {
+		return false, err
+	}
+	changed, err := h.withdrawHandoverSuccessor(ctx, task, cause)
+	if err != nil || !changed {
+		return false, err
+	}
+	handover := action.Data.Handover
+	handover.Outcome, handover.Reason = handoverWithdrawn, cause
+	if err := h.inbox.store.savePoolAction(ctx, action, h.now().UTC()); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// withdrawHandoverSuccessor ends the queued successor task through the unbound
+// withdrawal path (releaseUnboundSpawn, the requester's withdrawal's release).
+// It takes only an accepted request that no host holds a claim on.
+func (h *HubServer) withdrawHandoverSuccessor(ctx context.Context, task hubSpawnTask, cause string) (bool, error) {
+	if task.Node != nil || task.Status != "accepted" || spawnHoldsClaim(task) {
+		return false, nil
+	}
+	_, changed, err := h.releaseUnboundSpawn(ctx, task, spawnHandoverWithdrawEnd, cause)
+	if changed {
+		h.logger.Info("pool hand-over successor withdrawn", "request_id", task.Request.RequestID, "job", task.Job, "owner", task.Owner, "reason", cause)
+	}
+	return changed, err
+}
+
+// handoverWithdrawCause names why a queued successor's job no longer needs it,
+// or returns "" while it is still wanted (hk 5491). The successor waits while the
+// task names the old job or the successor itself. A task read that fails leaves
+// it unbound and unterminal, so it waits too: only a read that proves the cause
+// withdraws it.
+func (h *HubServer) handoverWithdrawCause(ctx context.Context, action poolAction) (string, error) {
+	handover := action.Data.Handover
+	in := h.readHandoverInputs(ctx, handover.Task)
+	if hkTaskTerminalState(in.state) {
+		return handoverCauseTerminal, nil
+	}
+	if in.bound != "" && in.bound != action.Job && in.bound != handover.Job {
+		return handoverCauseRebound, nil
+	}
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	record, exists, err := app.ExistingJob(readCtx, handover.Job)
+	cancel()
+	if err != nil {
+		return "", err
+	}
+	if state, _ := record["state"].(string); exists && hkTerminalState(state) {
+		return handoverCauseClosed, nil
+	}
+	return "", nil
 }
 
 // handoverEndReason is the old record's pinned end_reason

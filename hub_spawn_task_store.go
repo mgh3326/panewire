@@ -736,7 +736,7 @@ func (s *laneInboxStore) writeSpawnOutcome(parent context.Context, task hubSpawn
 		if _, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
 			return false, err
 		}
-	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "cancelled" && code == spawnWithdrawnReason || status == "failed" && code == spawnAbandonedReason && (task.Status == "bound" || task.Node == nil) {
+	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "cancelled" && spawnCancelledReason(code) || status == "failed" && code == spawnAbandonedReason && (task.Status == "bound" || task.Node == nil) {
 		// Release the role in the same transaction as its outcome and outbox
 		// notification. A withdrawal does this whatever the attempt's earlier
 		// status, so a failed release write cannot leave a cancelled request
@@ -791,17 +791,34 @@ func (s *laneInboxStore) writeSpawnOutcome(parent context.Context, task hubSpawn
 			noticeRaw = string(corrected)
 		}
 	}
+	// hk 5491: the hub withdrew a queued hand-over successor. Its owner hears one
+	// info line, and nothing when the task is terminal. The submitter copy does
+	// not apply: the hub ended the request, not its submitter.
+	if cause, ok := spawnHandoverWithdrawCause(outcome.Reason); ok {
+		if cause != handoverCauseTerminal {
+			if err = queueSpawnNoticeRows(ctx, s, tx, task, spawnNoticeEventID(task, status), noticeRaw, now, false); err != nil {
+				return false, err
+			}
+		}
+		return true, tx.Commit()
+	}
 	if err = queueSpawnNotifications(ctx, s, tx, task, status, noticeRaw, now, afterUnresolved); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
 }
 
+// spawnNoticeEventID is the event id of the notice an outcome of task's attempt
+// queues: the dedupe key across restarts.
+func spawnNoticeEventID(task hubSpawnTask, status string) string {
+	return fmt.Sprintf("%s:%d:%s", task.Request.RequestID, task.Attempt, status)
+}
+
 // queueSpawnNotifications writes the outbox rows an outcome owes: one for the
 // owner lane, and for a refusal or an unstarted end one for the submitting
 // lane too.
 func queueSpawnNotifications(ctx context.Context, s *laneInboxStore, tx *sql.Tx, task hubSpawnTask, status, raw string, now time.Time, afterUnresolved bool) error {
-	eventID := fmt.Sprintf("%s:%d:%s", task.Request.RequestID, task.Attempt, status)
+	eventID := spawnNoticeEventID(task, status)
 	// A correction goes to every recipient that was told the unresolved
 	// failure, the submitter included (hk 5267 review).
 	submitterCopy := afterUnresolved || status == "failed" || status == "retryable" || status == "given_up" || status == "refused" || status == "cancelled"
@@ -1364,7 +1381,7 @@ func spawnOutcomeStatus(outcome hubSpawnOutcome) string {
 		return "retryable"
 	}
 	// A requester's withdrawal ends the request cancelled, not failed (hk 5429).
-	if code, _, _ := strings.Cut(outcome.Reason, ": "); code == spawnWithdrawnReason {
+	if code, _, _ := strings.Cut(outcome.Reason, ": "); spawnCancelledReason(code) {
 		return "cancelled"
 	}
 	return "failed"

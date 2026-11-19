@@ -28,7 +28,12 @@ type ciPRJob struct {
 
 func readCIPRJobs(t *testing.T) map[string]ciPRJob {
 	t.Helper()
-	raw, err := os.ReadFile(".github/workflows/ci.yml")
+	return readWorkflowJobs(t, ".github/workflows/ci.yml")
+}
+
+func readWorkflowJobs(t *testing.T, path string) map[string]ciPRJob {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +127,29 @@ func TestCIShardsCoverEveryRootTest(t *testing.T) {
 		t.Fatalf("shard job does not run scripts/ci-test-shard.sh with its matrix value: %s", shard.runs())
 	}
 	shardSpecsCoverRootTests(t, specs)
+}
+
+// TestPostAndReleaseShardsCoverEveryRootTest proves the main-stage post-shard
+// job (ci.yml) and the release test-shard job (release.yml) each run every
+// top-level root test exactly once, through the same scripts/ci-test-shard.sh
+// as the pull request shards (hk 5492). A removed matrix entry turns it red.
+func TestPostAndReleaseShardsCoverEveryRootTest(t *testing.T) {
+	for _, tc := range []struct{ path, job string }{
+		{".github/workflows/ci.yml", "post-shard"},
+		{".github/workflows/release.yml", "test-shard"},
+	} {
+		job := readWorkflowJobs(t, tc.path)[tc.job]
+		specs := job.Strategy.Matrix["shard"]
+		if len(specs) == 0 {
+			t.Fatalf("%s %s: no shards in the matrix", tc.path, tc.job)
+		}
+		if !slices.Contains(strings.Split(job.runs(), "\n"), "scripts/ci-test-shard.sh ${{ matrix.shard }}") {
+			t.Fatalf("%s %s does not run scripts/ci-test-shard.sh with its matrix value: %s", tc.path, tc.job, job.runs())
+		}
+		t.Run(tc.job, func(t *testing.T) {
+			shardSpecsCoverRootTests(t, specs)
+		})
+	}
 }
 
 // shardSpecsCoverRootTests proves that the shard specs (INDEX/TOTAL) run every
