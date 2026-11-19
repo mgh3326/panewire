@@ -722,8 +722,11 @@ hk 5310.
 If the hub cannot read the job record, it refuses reassignment until it can
 establish whether fencing is supported. If hk rejects a terminal ownership
 transfer with `job_state_conflict`, the hub refuses the reassignment and names
-the reason; it does not bypass the fence. Conditional terminal owner-only
-transfers await deployment of hk 5303.
+the reason; it does not bypass the fence. The terminal owner-only transfer is
+live from hk v0.0.376 (hk 5303): on a completed, lost or escalated job the hub
+sends only `expected_owner` and the greater `owner` epoch, and hk leaves the
+state, result and other fields unchanged. An hk older than v0.0.376 answers
+`job_state_conflict` to that update, so the reassignment stays refused.
 The hub stores assignments and transfer intents alongside its SQLite inbox,
 or under its panewire state directory when it uses PostgreSQL or no inbox.
 Keep that directory across hub restarts: recovery checks hk's node, epoch, and

@@ -240,6 +240,8 @@ func revokeJobOwnerMismatch(jobs, id string, epoch uint64, current JobOwner, err
 
 // TransferJobOwner moves a fence with one conditional update. The bool says
 // whether the server understands the fence; legacy servers receive no PUT.
+// The update is owner-only, so a terminal record keeps its state and result.
+// An hk older than v0.0.376 answers job_state_conflict there, which fails closed.
 func TransferJobOwner(ctx context.Context, store JobStore, id string, from, to JobOwner) (bool, error) {
 	record, err := store.Get(ctx, id)
 	if err != nil {
