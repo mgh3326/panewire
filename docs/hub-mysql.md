@@ -180,3 +180,32 @@ When a store has been copied back from MySQL to Postgres, run the cutover
 release or newer. Do not roll the hub binary back below the copier release
 while that copied-back store is in use: oversized event keys may be stored as
 digests, and older binaries cannot deduplicate them.
+
+## Cutover and rollback
+
+Stop the hub and keep it stopped throughout the final copy and verification.
+Take and retain the normal database backups. Use the CA-pinned MySQL URL shown
+above; both URLs contain credentials, so supply them from the operator's secure
+runtime without writing them into a script, shell history, or the report.
+
+1. Run `panewire hub store-copy --from "$POSTGRES_URL" --to "$MYSQL_URL"`.
+   The command migrates the target and refuses existing target rows. For a
+   deliberate repeat into a previously populated target, add `--replace`;
+   it replaces the selected tables. `--tables` accepts comma-separated table
+   names for a scoped repair, not an initial full cutover.
+2. Run the same command with `--verify-only` and check every table's count and
+   SHA-256. A mismatch returns a nonzero exit and names the table. The report
+   also counts oversized inbox event keys stored as digests.
+3. Change `PANEWIRE_HUB_DATABASE_URL` to the CA-pinned MySQL URL, start the hub,
+   and verify nodes, inbox delivery, a spawn, and a consult. Keep PostgreSQL
+   fenced read-only for the 48-hour rollback window.
+4. For rollback, stop the hub again. Copy MySQL back to PostgreSQL with the
+   URLs reversed and `--replace`, then repeat with `--verify-only` (without
+   `--replace`). Switch the URL to PostgreSQL, start the cutover release or
+   newer, and verify nodes, inbox, a spawn, and a consult. Never use an older
+   binary against the copied-back store: it cannot deduplicate digest-form keys.
+
+The copier uses a single read-only snapshot and one connection per database.
+Stop all writers, including other hub processes, before using `--replace` or
+verifying. A failed copy must be investigated before changing the URL; if a
+failure happens after the target transaction commits, rerun with `--replace`.

@@ -247,6 +247,14 @@ jobs:
         ports: ["127.0.0.1:53306:3306"]
         options: >-
           --health-cmd "mysqladmin ping -h 127.0.0.1" --health-interval 5s --health-timeout 5s --health-retries 20
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: panewire
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -278,6 +286,17 @@ jobs:
           go test -count=1 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensMySQLInbox|HubDatabaseURL|MySQL' . 2>&1 | tee "$RUNNER_TEMP/mysql-store.log"
           if grep -- '--- SKIP' "$RUNNER_TEMP/mysql-store.log" | grep -qiE 'mysql'; then
             echo "a MySQL test skipped"; exit 1
+          fi
+      - name: store copy round trips
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+          PANEWIRE_TEST_HUB_MYSQL_URL: mysql://root@127.0.0.1:53306/panewire
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run '^TestHubStoreCopyRoundTrips$' . 2>&1 | tee "$RUNNER_TEMP/store-copy.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/store-copy.log"; then
+            echo "store copy integration skipped"; exit 1
           fi
 
   ci-ok:
