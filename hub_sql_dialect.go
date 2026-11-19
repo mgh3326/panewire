@@ -93,6 +93,9 @@ type sqlDialect interface {
 	// where the column holds raw bytes it is bound as bytes.
 	storedKey(key string) any
 
+	// storedKeys lists lookup forms, including legacy PostgreSQL keys.
+	storedKeys(key string) []any
+
 	// ownsSchema is true when the store builds its own schema at open (SQLite)
 	// and false when numbered migration files do.
 	ownsSchema() bool
@@ -196,6 +199,8 @@ func (sqliteDialect) lockLaneCause(context.Context, *sql.Tx, string, string) err
 
 func (sqliteDialect) storedKey(key string) any { return key }
 
+func (d sqliteDialect) storedKeys(key string) []any { return []any{d.storedKey(key)} }
+
 func (sqliteDialect) ownsSchema() bool { return true }
 
 // batchOrder is SQLite's implicit rowid.
@@ -255,6 +260,14 @@ func (d postgresDialect) lockLaneCause(ctx context.Context, tx *sql.Tx, lane, ca
 
 // storedKey hex-encodes: Postgres text holds neither NUL nor non-UTF-8.
 func (postgresDialect) storedKey(key string) any { return hex.EncodeToString([]byte(key)) }
+
+func (d postgresDialect) storedKeys(key string) []any {
+	original := d.storedKey(key)
+	if len(key) > mysqlEventKeyMax {
+		return []any{original, hex.EncodeToString(dialectMySQL.storedKey(key).([]byte))}
+	}
+	return []any{original}
+}
 
 func (postgresDialect) ownsSchema() bool { return false }
 

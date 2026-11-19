@@ -248,8 +248,8 @@ func (s *laneInboxStore) poolNoticeOwned(parent context.Context, owner, eventID 
 	defer cancel()
 	var class string
 	var relayID, digestAt, holdUntil, supersededAt int64
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT class,relay_id,digest_at,hold_until,superseded_at FROM lane_inbox WHERE event_key=?`),
-		s.storedKey(relayLaneEventOutboxKey(owner, eventID))).Scan(&class, &relayID, &digestAt, &holdUntil, &supersededAt)
+	where, args := s.eventKeyPredicate(relayLaneEventOutboxKey(owner, eventID))
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT class,relay_id,digest_at,hold_until,superseded_at FROM lane_inbox WHERE `+where), args...).Scan(&class, &relayID, &digestAt, &holdUntil, &supersededAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

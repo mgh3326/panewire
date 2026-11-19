@@ -135,7 +135,7 @@ jobs:
           fi
       - run: go vet ./...
       - run: go build ./...
-      - run: go test ./...
+      - run: go test ./... -timeout 25m  # the root package outgrew the 10 m default (hk 5408); sharding is the follow-up
       - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
 
   store-paths:
@@ -247,11 +247,34 @@ jobs:
         ports: ["127.0.0.1:53306:3306"]
         options: >-
           --health-cmd "mysqladmin ping -h 127.0.0.1" --health-interval 5s --health-timeout 5s --health-retries 20
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: panewire
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
       - uses: ./.github/actions/setup-go-cached
+      - name: store copy round trips
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+          PANEWIRE_TEST_HUB_MYSQL_URL: mysql://root@127.0.0.1:53306/panewire
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run '^TestHubStoreCopy(RoundTrips|MySQLFreshStats)$' . 2>&1 | tee "$RUNNER_TEMP/store-copy.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/store-copy.log"; then
+            echo "store copy integration skipped"; exit 1
+          fi
+      - name: copied-back key mutation probe
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+        run: scripts/ci-store-copy-key-mutant.sh
       - name: store contract and must-ack on MySQL
         if: ${{ github.event_name == 'pull_request' }}
         env:
