@@ -56,7 +56,9 @@ func (h *HubServer) handleSpawnFeatures(w http.ResponseWriter, r *http.Request) 
 	// and drops for every other node (hk 5098).
 	// checkout_branch_v1: an implementer spec spawn may ask for a local branch
 	// at its pinned commit instead of a detached HEAD (hk 5118).
-	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1", "checkout_spec_v1", "checkout_sparse_v1", "checkout_branch_v1"}})
+	// spawn_withdraw_v1: POST /v1/spawns/<id>/withdraw lets the requester that
+	// submitted a pending request end it cancelled (hk 5429).
+	writeJSON(w, http.StatusOK, map[string][]string{"features": {"spawn_expires_v1", "start_conditions_v1", "checkout_spec_v1", "checkout_sparse_v1", "checkout_branch_v1", spawnWithdrawFeature}})
 }
 
 // hubCheckoutSparseRefusal names the sparse list entry a request refuses, or ""

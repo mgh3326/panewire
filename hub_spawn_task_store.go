@@ -670,11 +670,13 @@ func (s *laneInboxStore) writeSpawnOutcome(parent context.Context, task hubSpawn
 		if _, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
 			return false, err
 		}
-	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "failed" && (task.Status == "bound" || task.Node == nil) && code == spawnAbandonedReason {
-		// Release the unsent role in the same transaction as its outcome and
-		// outbox notification, for a bound request and for an unbound one that
-		// its owner withdrew (hk 5214). Any prior hk claim was handled before
-		// completion.
+	} else if code, _, _ := strings.Cut(outcome.Reason, ": "); status == "cancelled" && code == spawnWithdrawnReason || status == "failed" && code == spawnAbandonedReason && (task.Status == "bound" || task.Node == nil) {
+		// Release the role in the same transaction as its outcome and outbox
+		// notification. A withdrawal does this whatever the attempt's earlier
+		// status, so a failed release write cannot leave a cancelled request
+		// holding its slot (hk 5429 review). An operator abandon does it for a
+		// bound request and for an unbound one (hk 5214). Any prior hk claim was
+		// handled before completion.
 		if _, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=?`), task.Request.RequestID); err != nil {
 			return false, err
 		}
@@ -1261,16 +1263,17 @@ func (s *laneInboxStore) retryableSpawns(parent context.Context) ([]hubSpawnTask
 func (s *laneInboxStore) releaseCompletedSpawnRole(parent context.Context, id, roleKey string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=? AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed'))`), id, roleKey, id)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=? AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed','cancelled'))`), id, roleKey, id)
 	return err
 }
 
 // releaseCompletedSpawnRoleOf frees whatever slot the finished request id
-// holds, whatever its key says.
+// holds, whatever its key says. A withdrawn request (cancelled, hk 5429) ends
+// like a failed one: its slot is free once its outcome is written.
 func (s *laneInboxStore) releaseCompletedSpawnRoleOf(parent context.Context, id string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role IS NOT NULL AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed'))`), id, id)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role IS NOT NULL AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed','cancelled'))`), id, id)
 	return err
 }
 
@@ -1289,6 +1292,10 @@ func spawnOutcomeStatus(outcome hubSpawnOutcome) string {
 	}
 	if outcome.Retryable {
 		return "retryable"
+	}
+	// A requester's withdrawal ends the request cancelled, not failed (hk 5429).
+	if code, _, _ := strings.Cut(outcome.Reason, ": "); code == spawnWithdrawnReason {
+		return "cancelled"
 	}
 	return "failed"
 }

@@ -189,7 +189,10 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 	h.mu.Lock()
 	delete(h.spawnOrphanProbed, task.Request.RequestID)
 	h.mu.Unlock()
-	if task.Status != "bound" {
+	// A withdrawal's outcome commit already cleared the role in the same
+	// transaction (writeSpawnOutcome), so a second write here could only fail
+	// after the request is cancelled and report a false refusal (hk 5429 review).
+	if task.Status != "bound" && code != spawnWithdrawnReason {
 		if err = h.releaseSpawnRole(ctx, task); err != nil {
 			return false, "release_write_failed"
 		}
@@ -226,10 +229,10 @@ func (h *HubServer) probeLabelledPane(ctx context.Context, machine, label string
 // handleSpawnAbandon is POST /v1/spawns/{request_id}/abandon: the operator
 // finishes a pending request as failed and frees its reservation, once its
 // node lists no pane bearing the job label. An unbound request needs no probe,
-// and its owner lane may withdraw it too (abandonUnboundSpawn, hk 5214).
+// and its owner lane may withdraw it too (endUnboundSpawn, hk 5214).
 func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 	// A node may call this only to withdraw an unbound request its own lane
-	// owns (abandonUnboundSpawn). Every other abandon is the operator's.
+	// owns (endUnboundSpawn). Every other abandon is the operator's.
 	caller := h.authenticate(r)
 	if caller.kind != hubCallerOperator && caller.kind != hubCallerNode {
 		hubUnauthorized(w)
@@ -265,31 +268,55 @@ func (h *HubServer) handleSpawnAbandon(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]string{"error": "spawn_not_pending", "status": task.Status})
 		return
 	}
+	h.endPendingSpawn(w, r, caller, task, spawnAbandonEnd, body.Reason)
+}
+
+// spawnEnd is one operator-side way to finish a pending request: the reason
+// code its outcome carries (the code decides the stored status, see
+// spawnOutcomeStatus), the status the answer reports, the fix line the
+// submitter reads, and the name of its hub log line.
+type spawnEnd struct {
+	code, status, fix, warning string
+	// unboundFix is the fix line for a request no node bound. It names the
+	// actor that ended it, so the owner lane is not told the operator did it
+	// when its own node credential withdrew it (hk 5214).
+	unboundFix string
+}
+
+// spawnAbandonEnd is the operator's end: the request fails (hk 3423, hk 5214).
+var spawnAbandonEnd = spawnEnd{code: spawnAbandonedReason, status: "failed", fix: "the operator abandoned this request; submit the work again under a new job id", unboundFix: "the request was withdrawn before any node took it; submit the work again under a new job id", warning: "hub spawn abandon"}
+
+// endPendingSpawn finishes task as end says, with reason as its text. It is the
+// one release path for an operator-side end (abandon and requester withdrawal,
+// hk 5429): a request no node has bound ends with no pane probe, a bound one
+// only when its node lists no labelled pane (finishUnownedSpawn). The caller
+// has checked that task is pending.
+func (h *HubServer) endPendingSpawn(w http.ResponseWriter, r *http.Request, caller hubCaller, task hubSpawnTask, end spawnEnd, reason string) {
 	if task.Node == nil {
-		h.abandonUnboundSpawn(w, r, caller, task, body.Reason)
+		h.endUnboundSpawn(w, r, caller, task, end, reason)
 		return
 	}
 	if caller.kind != hubCallerOperator {
 		hubUnauthorized(w)
 		return
 	}
-	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOutcomeReason(spawnAbandonedReason, spawnRefusalLine(body.Reason)), Host: task.Node.Machine, Fix: "the operator abandoned this request; submit the work again under a new job id"}
+	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: spawnOutcomeReason(end.code, spawnRefusalLine(reason)), Host: task.Node.Machine, Fix: end.fix}
 	released, why := h.finishUnownedSpawn(r.Context(), task, outcome)
-	h.logger.Warn("hub spawn abandon", "request_id", id, "job", task.Job, "host", task.Node.Machine, "status", task.Status, "released", released, "held_by", why, "reason", spawnRefusalLine(body.Reason))
+	h.logger.Warn(end.warning, "request_id", task.Request.RequestID, "job", task.Job, "host", task.Node.Machine, "status", task.Status, "released", released, "held_by", why, "reason", spawnRefusalLine(reason))
 	if !released {
-		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": why, "request_id": id, "job": task.Job, "host": task.Node.Machine})
+		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": why, "request_id": task.Request.RequestID, "job": task.Job, "host": task.Node.Machine})
 		return
 	}
-	writeJSON(w, 200, map[string]string{"request_id": id, "job_id": task.Job, "status": "failed", "reason": outcome.Reason})
+	writeJSON(w, 200, map[string]string{"request_id": task.Request.RequestID, "job_id": task.Job, "status": end.status, "reason": outcome.Reason})
 }
 
-// abandonUnboundSpawn withdraws a pending request no node has bound (hk 5214).
-// It never reached a node, so there is no pane to probe and nothing to stop:
-// the request ends failed with the abandoned reason, its role is released in
-// the same transaction as the outcome, and its owner lane gets one SPAWN_FAILED
-// notice. A node may withdraw only a request whose owner lane it routes. A
-// request that holds an hk job claim stays with its claimed host.
-func (h *HubServer) abandonUnboundSpawn(w http.ResponseWriter, r *http.Request, caller hubCaller, task hubSpawnTask, reason string) {
+// endUnboundSpawn ends a pending request no node has bound (hk 5214). It never
+// reached a node, so there is no pane to probe and nothing to stop: the request
+// ends with end's code, its role is released in the same transaction as the
+// outcome, and its owner lane gets one SPAWN_FAILED (or cancelled) notice. A
+// node may end only a request whose owner lane it routes. A request that holds
+// an hk job claim stays with its claimed host.
+func (h *HubServer) endUnboundSpawn(w http.ResponseWriter, r *http.Request, caller hubCaller, task hubSpawnTask, end spawnEnd, reason string) {
 	if caller.kind == hubCallerNode {
 		if route, exists := loadReportRelayRoutes(h.reportRelayPath)[task.Owner]; !exists || route.Machine != caller.id {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "lane_not_routed_to_caller"})
@@ -304,7 +331,7 @@ func (h *HubServer) abandonUnboundSpawn(w http.ResponseWriter, r *http.Request, 
 		writeJSON(w, 409, map[string]string{"error": "spawn_abandon_refused", "reason": "claimed_host", "request_id": task.Request.RequestID, "job": task.Job, "host": spawnPinnedHost(task)})
 		return
 	}
-	outcome := hubSpawnOutcome{RC: 75, Stage: "placement", Reason: spawnOutcomeReason(spawnAbandonedReason, spawnRefusalLine(reason)), Fix: "the request was withdrawn before any node took it; submit the work again under a new job id"}
+	outcome := hubSpawnOutcome{RC: 75, Stage: "placement", Reason: spawnOutcomeReason(end.code, spawnRefusalLine(reason)), Fix: end.unboundFix}
 	changed, err := h.completeSpawn(r.Context(), task, outcome)
 	if err != nil || !changed {
 		why := "not_pending"
@@ -316,8 +343,8 @@ func (h *HubServer) abandonUnboundSpawn(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	h.recordSpawnTrace(task, outcome)
-	h.logger.Warn("hub spawn abandon", "request_id", task.Request.RequestID, "job", task.Job, "owner", task.Owner, "status", task.Status, "released", true, "reason", spawnRefusalLine(reason))
-	writeJSON(w, 200, map[string]string{"request_id": task.Request.RequestID, "job_id": task.Job, "status": "failed", "reason": outcome.Reason})
+	h.logger.Warn(end.warning, "request_id", task.Request.RequestID, "job", task.Job, "owner", task.Owner, "status", task.Status, "released", true, "reason", spawnRefusalLine(reason))
+	writeJSON(w, 200, map[string]string{"request_id": task.Request.RequestID, "job_id": task.Job, "status": end.status, "reason": outcome.Reason})
 }
 
 // validSpawnAbandonReason is one non-empty printable line within the limit.
