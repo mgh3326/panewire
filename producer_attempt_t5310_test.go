@@ -497,3 +497,37 @@ func TestProducerCallRechecksTheAttemptUnderTheLock_t5310(t *testing.T) {
 		})
 	}
 }
+
+// escalate and joined create and take the events lock, the lock Assign and
+// Revoke take, and refuse to write when they cannot: an unlocked record could
+// be overtaken by a first grant or revocation (mergewake findings on #720).
+func TestBuilderRecordsTakeTheEventsLockAndFailClosed_t5310(t *testing.T) {
+	for _, command := range []string{"escalate", "joined"} {
+		t.Run(command, func(t *testing.T) {
+			f := newProducerFixture(t, 1)
+			lockPath := filepath.Join(f.jobs, producerJob, ".wrk-events.lock")
+			if _, err := os.Stat(lockPath); err == nil {
+				t.Fatal("fixture already has a lock file")
+			}
+			if rc, stderr := f.produce(t, command); rc != ExitOK {
+				t.Fatalf("rc=%d stderr=%q", rc, stderr)
+			}
+			if _, err := os.Stat(lockPath); err != nil {
+				t.Fatalf("the call did not create the events lock: %v", err)
+			}
+
+			// A lock that cannot be opened refuses the record instead of skipping the lock.
+			f = newProducerFixture(t, 1)
+			if err := os.Mkdir(filepath.Join(f.jobs, producerJob, ".wrk-events.lock"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			before := f.eventFiles(t)
+			if rc, _ := f.produce(t, command); rc == ExitOK {
+				t.Fatal("the call succeeded without taking the events lock")
+			}
+			if after := f.eventFiles(t); strings.Join(after, ",") != strings.Join(before, ",") {
+				t.Fatalf("an unlocked call wrote %v", after)
+			}
+		})
+	}
+}

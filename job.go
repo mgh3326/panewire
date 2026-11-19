@@ -958,20 +958,23 @@ func (c *jobCLI) builderFlatEvent(jobsRoot, job, owner, label, pane, parent, hos
 	if head != "" {
 		fields = append(fields, jobField{"head", head})
 	}
-	// Take the lock Assign and Revoke take, when it exists, and re-check the
-	// attempt under it. The lock file is not created here: a job that never
-	// had a grant or revocation has none, and this record's bytes (the frozen
-	// golden) do not include one.
+	// Create and take the lock Assign and Revoke take, then re-check the
+	// attempt under it: a grant or revocation that lands before this point is
+	// seen by the check, and one that follows waits for the write. It is the
+	// same lock completionEvent holds, and a failure to take it refuses the
+	// record rather than writing unfenced.
 	if jobBeforeRecordWrite != nil {
 		jobBeforeRecordWrite()
 	}
-	if lock, err := os.OpenFile(filepath.Join(jobsRoot, job, ".wrk-events.lock"), os.O_RDWR, 0); err == nil {
-		defer lock.Close()
-		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-			return &jobExit{code: 1, message: err.Error()}
-		}
-		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	lock, err := os.OpenFile(filepath.Join(jobsRoot, job, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
+	if err != nil {
+		return &jobExit{code: 1, message: err.Error()}
 	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return &jobExit{code: 1, message: err.Error()}
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	if err := c.revalidateAttempt(jobsRoot, job); err != nil {
 		return err
 	}

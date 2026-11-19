@@ -48,9 +48,11 @@ supersedes it.
 The check is repeated under the job's events lock (the lock `Assign` and
 `Revoke` take) just before the record is written, so a regrant or revocation
 that lands during the call, for instance while the report uploads, stops it.
-For `escalate` and `joined` the lock is taken only when the job's lock file
-already exists: a job that never had a grant or revocation has none, and the
-frozen record golden does not include one. A completion is a duplicate of an
+`done`, `escalate` and `joined` all create and take that lock (the escalate and
+joined record goldens include the lock file) and refuse to write when they
+cannot, so the first grant or revocation cannot slip in between the check and
+the write.
+A completion is a duplicate of an
 earlier one only when it has the same report digest *and* the same epoch, so an
 epoch 1 record never turns the epoch 3 call into an OK with no record of its
 own.
