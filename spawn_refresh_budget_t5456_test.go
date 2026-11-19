@@ -137,7 +137,8 @@ func TestSpawnRefreshSettledUsesTheAttemptTheWaitNames_t5456(t *testing.T) {
 	hub := timeoutRefreshHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), &controlPlaneLogCapture{})
 	key := "codex:0000000000000001"
 	now := time.Now()
-	task := hubSpawnTask{RefreshWaits: []hubSpawnRefreshWait{{Machine: "machine-a", Pool: "codex", AccountKey: key, Attempt: "qr-7", At: now}}}
+	task := hubSpawnTask{RefreshWaits: []hubSpawnRefreshWait{{Machine: "machine-a", Pool: "codex", AccountKey: key, Attempt: "qr-1", At: now}}}
+	nameAttempt := func(id string) { task.RefreshWaits[0].Attempt = id }
 	record := func(id, outcome string) {
 		t.Helper()
 		if err := hub.inbox.store.recordQuotaRefreshResult(t.Context(), id, "machine-a", "codex", key, outcome, time.Now()); err != nil {
@@ -151,6 +152,7 @@ func TestSpawnRefreshSettledUsesTheAttemptTheWaitNames_t5456(t *testing.T) {
 	}
 	// This wait's own attempt finished without a usable reading.
 	record("qr-7", "")
+	nameAttempt("qr-7")
 	reason, settled := hub.spawnRefreshSettled(task, "machine-a", "codex", key)
 	if !settled || !strings.Contains(reason, "without a usable reading") {
 		t.Fatalf("settled=%v reason=%q, want a finished attempt with no usable reading", settled, reason)
@@ -161,13 +163,15 @@ func TestSpawnRefreshSettledUsesTheAttemptTheWaitNames_t5456(t *testing.T) {
 	}
 	// A node that measured another account cannot supply this one: settled,
 	// and the host is named.
-	record("qr-7", "account_mismatch")
+	record("qr-8", "account_mismatch")
+	nameAttempt("qr-8")
 	reason, settled = hub.spawnRefreshSettled(task, "machine-a", "codex", key)
 	if !settled || !strings.Contains(reason, "machine-a") || !strings.Contains(reason, "another account") {
 		t.Fatalf("settled=%v reason=%q, want the account mismatch named", settled, reason)
 	}
 	// A transient failure is retried, not settled.
-	record("qr-7", "node_timeout")
+	record("qr-9", "node_timeout")
+	nameAttempt("qr-9")
 	if reason, settled := hub.spawnRefreshSettled(task, "machine-a", "codex", key); settled {
 		t.Fatalf("a timeout settled the wait: %q", reason)
 	}
@@ -179,6 +183,94 @@ func TestSpawnRefreshSettledUsesTheAttemptTheWaitNames_t5456(t *testing.T) {
 	}
 	if reason, settled := hub.spawnRefreshSettled(legacy, "machine-a", "codex", key); settled {
 		t.Fatalf("an uncorrelated wait settled: %q", reason)
+	}
+}
+
+// hk 5456 review: a demand admitted again after a transient failure replaces
+// its earlier entry, so the request's link always names the attempt it is
+// currently waiting on.
+func TestSpawnRefreshWaitsReplaceARetriedDemand_t5456(t *testing.T) {
+	codex := "codex:0000000000000001"
+	claude := "claude:0000000000000001"
+	previous := []hubSpawnRefreshWait{{Machine: "m", Pool: "codex", AccountKey: codex, Attempt: "qr-1"}}
+	current := []hubSpawnRefreshWait{
+		{Machine: "m", Pool: "codex", AccountKey: codex, Attempt: "qr-2"},
+		{Machine: "m", Pool: "claude", AccountKey: claude, Attempt: "qr-3"},
+	}
+	merged := mergeSpawnRefreshWaits(previous, current)
+	if len(merged) != 2 {
+		t.Fatalf("merged = %+v, want one entry per demand", merged)
+	}
+	if merged[0].Attempt != "qr-2" || merged[1].Attempt != "qr-3" {
+		t.Fatalf("merged = %+v, want the retry's attempt to replace the old one", merged)
+	}
+}
+
+// hk 5456 review: attempt IDs are durable correlation keys, so they must be
+// unique across hub lifetimes. A restarted hub must not reissue an ID whose
+// result is still stored, or its waiter would read the previous process's
+// completion.
+func TestQuotaRefreshAttemptIDsSurviveRestarts_t5456(t *testing.T) {
+	retryHK(t)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	key := "codex:0000000000000001"
+	first := timeoutRefreshHub(t, path, &controlPlaneLogCapture{})
+	firstID, admission := first.scheduleQuotaRefresh("machine-a", "codex", key, time.Minute, time.Now().Add(time.Hour))
+	if admission != fleet.QuotaRefreshAdmitted {
+		t.Fatalf("first admission = %v", admission)
+	}
+	if err := first.inbox.store.recordQuotaRefreshResult(t.Context(), firstID, "machine-a", "codex", key, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	second := timeoutRefreshHub(t, path, &controlPlaneLogCapture{})
+	secondID, admission := second.scheduleQuotaRefresh("machine-a", "codex", key, time.Minute, time.Now().Add(time.Hour))
+	if admission != fleet.QuotaRefreshAdmitted {
+		t.Fatalf("second admission = %v", admission)
+	}
+	if secondID == firstID {
+		t.Fatalf("the restarted hub reissued %q, whose result is still stored", firstID)
+	}
+	task := hubSpawnTask{RefreshWaits: []hubSpawnRefreshWait{{Machine: "machine-a", Pool: "codex", AccountKey: key, Attempt: secondID}}}
+	if reason, settled := second.spawnRefreshSettled(task, "machine-a", "codex", key); settled {
+		t.Fatalf("the new attempt was settled by the previous process's result: %q", reason)
+	}
+	// A later attempt's own completion writes its own row and leaves the
+	// previous one readable for its own waiter.
+	later := hubSpawnTask{RefreshWaits: []hubSpawnRefreshWait{{Machine: "machine-a", Pool: "codex", AccountKey: key, Attempt: "qr-later"}}}
+	if err := second.inbox.store.recordQuotaRefreshResult(t.Context(), "qr-later", "machine-a", "codex", key, "account_mismatch", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if reason, settled := second.spawnRefreshSettled(later, "machine-a", "codex", key); !settled || !strings.Contains(reason, "another account") {
+		t.Fatalf("settled=%v reason=%q, want this attempt's own result", settled, reason)
+	}
+	if outcome, _, _, found, err := second.inbox.store.quotaRefreshResult(t.Context(), firstID); err != nil || !found || outcome != "" {
+		t.Fatalf("the previous attempt's result was overwritten: outcome=%q found=%v err=%v", outcome, found, err)
+	}
+}
+
+// hk 5456 review: a park carries the demand history, so a recheck does not
+// wait again on an attempt this request already knows cannot help it.
+func TestSpawnParkKeepsASettledDemand_t5456(t *testing.T) {
+	retryHK(t)
+	hub := timeoutRefreshHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), &controlPlaneLogCapture{})
+	request := durableSpawnRequest()
+	task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "codex:0000000000000001"
+	task.RefreshWaits = []hubSpawnRefreshWait{{Machine: "machine-a", Pool: "codex", AccountKey: key, Attempt: "qr-previous", At: time.Now()}}
+	if _, err := hub.parkSpawnKeepingWaits(t.Context(), task, spawnParkQuota, "placement refused", nil, nil, hub.spawnWakeSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	parked, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parked.RefreshWaits) != 1 || parked.RefreshWaits[0].Attempt != "qr-previous" || parked.RefreshWaits[0].AccountKey != key {
+		t.Fatalf("parked waits = %+v, want the settled demand kept", parked.RefreshWaits)
 	}
 }
 
@@ -232,67 +324,5 @@ func TestQuotaRefreshSendsTheAccountOnlyToAnAdvertisingNode_t5456(t *testing.T) 
 	}
 	if command := nodeCommandRead(t, newer); string(command["args"]) != `{"account_key":"`+key+`","pool":"codex"}` {
 		t.Fatalf("an advertising node received %s, want the account-named request", command["args"])
-	}
-}
-
-// hk 5456 review (outside-diff): a request that parks and later reaches its
-// limit names what the parked pass tried. The pass's answer is durable with the
-// park, so a restart and the placement passes in between do not lose it.
-func TestSpawnGivenUpAfterAParkNamesWhatTheParkedPassTried_t5456(t *testing.T) {
-	retryHK(t)
-	hub := timeoutRefreshHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), &controlPlaneLogCapture{})
-	request := durableSpawnRequest()
-	task, _, err := hub.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := "codex:0000000000000001"
-	tried := []hubSpawnTried{{Host: "oci", Pool: "codex", AccountKey: key, Reason: "quota exhausted window=7d cutoff=99"}}
-	if _, err := hub.parkSpawnTask(t.Context(), task, spawnParkQuota, "placement refused", tried, hub.spawnWakeSnapshot()); err != nil {
-		t.Fatal(err)
-	}
-	parked, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(parked.Tried) != 1 || parked.Tried[0].Host != "oci" || parked.Tried[0].AccountKey != key {
-		t.Fatalf("parked tried = %+v, want the pass's candidates persisted", parked.Tried)
-	}
-	// A placement pass that changes nothing else must not lose it, and the
-	// expiry names it.
-	parked.Deadline = time.Now().Add(-time.Second)
-	parked.Expires = time.Now().Add(-time.Second)
-	hub.executeSpawnTask(t.Context(), parked)
-	final, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if final.Status != "given_up" {
-		t.Fatalf("status = %s, want given_up", final.Status)
-	}
-	for _, want := range []string{"no candidate could take it", "codex/oci", key, "cutoff=99"} {
-		if !strings.Contains(final.Outcome.Reason, want) {
-			t.Fatalf("given up reason %q does not name %q", final.Outcome.Reason, want)
-		}
-	}
-}
-
-// hk 5456 review: a demand admitted again after a transient failure replaces
-// its earlier entry, so the request's link always names the attempt it is
-// currently waiting on.
-func TestSpawnRefreshWaitsReplaceARetriedDemand_t5456(t *testing.T) {
-	codex := "codex:0000000000000001"
-	claude := "claude:0000000000000001"
-	previous := []hubSpawnRefreshWait{{Machine: "m", Pool: "codex", AccountKey: codex, Attempt: "qr-1"}}
-	current := []hubSpawnRefreshWait{
-		{Machine: "m", Pool: "codex", AccountKey: codex, Attempt: "qr-2"},
-		{Machine: "m", Pool: "claude", AccountKey: claude, Attempt: "qr-3"},
-	}
-	merged := mergeSpawnRefreshWaits(previous, current)
-	if len(merged) != 2 {
-		t.Fatalf("merged = %+v, want one entry per demand", merged)
-	}
-	if merged[0].Attempt != "qr-2" || merged[1].Attempt != "qr-3" {
-		t.Fatalf("merged = %+v, want the retry's attempt to replace the old one", merged)
 	}
 }

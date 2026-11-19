@@ -958,7 +958,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			// A recognised no-candidate refusal never ends the request: a
 			// failed or ambiguous park write leaves it accepted for the next
 			// pass to park again.
-			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), spawnParkTried(currentCandidates(), err), wakeBefore); parkErr != nil {
+			refreshMu.Lock()
+			passWaits := append([]hubSpawnRefreshWait(nil), refreshWaits...)
+			refreshMu.Unlock()
+			if _, parkErr := h.parkSpawnKeepingWaits(parent, task, reason, spawnRefusalLine(err.Error()), spawnParkTried(currentCandidates(), err), passWaits, wakeBefore); parkErr != nil {
 				h.logger.Warn("hub spawn park not stored; retried next pass", "request_id", task.Request.RequestID, "reason", reason, "error", parkErr)
 			}
 			h.releasePlacementCount(task.Job)
@@ -1039,6 +1042,22 @@ func (h *HubServer) noteSpawnRefreshWaits(task hubSpawnTask, waits []hubSpawnRef
 		}
 	}
 	return waits
+}
+
+// parkSpawnKeepingWaits parks the request and carries the attempt's demand
+// history — including demands whose attempt already settled — with the row, so
+// the next recheck does not wait on a measurement this request already knows
+// cannot help it. The park itself still succeeds when only the link write
+// fails: the next pass re-derives what it can (hk 5456).
+func (h *HubServer) parkSpawnKeepingWaits(ctx context.Context, task hubSpawnTask, reason, detail string, tried []hubSpawnTried, passWaits []hubSpawnRefreshWait, before map[string]uint64) (bool, error) {
+	parked, err := h.parkSpawnTask(ctx, task, reason, detail, tried, before)
+	if err != nil || !parked {
+		return parked, err
+	}
+	if merged := mergeSpawnRefreshWaits(task.RefreshWaits, passWaits); len(merged) != 0 {
+		h.noteSpawnRefreshWaits(task, merged)
+	}
+	return true, nil
 }
 
 // mergeSpawnRefreshWaits is the link a parked pass stores: every demand the

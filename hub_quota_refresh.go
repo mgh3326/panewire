@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -142,7 +143,10 @@ func (h *HubServer) scheduleQuotaRefresh(machine, pool, accountKey string, windo
 		}
 		return "", fleet.QuotaRefreshRefused
 	}
-	id := fmt.Sprintf("qr-%d", q.seq.Add(1))
+	// The ID keys a durable result that outlives this process, so it must be
+	// unique across hub restarts: a counter would reissue qr-1 and let a new
+	// wait read the previous process's result (hk 5456).
+	id := newQuotaRefreshAttemptID(q.seq.Add(1))
 	q.keys[key] = id
 	q.queue = append(q.queue, hubQuotaRefreshWork{id: id, key: key, deadline: now.Add(window)})
 	q.mu.Unlock()
@@ -346,6 +350,17 @@ func (h *HubServer) refreshQuotaFromNode(ctx context.Context, key hubQuotaRefres
 		}
 	}
 	return ""
+}
+
+// newQuotaRefreshAttemptID is an attempt ID unique across hub lifetimes: the
+// process-local sequence plus a random suffix, so a restarted hub can never
+// reuse an ID whose finished result is still stored.
+func newQuotaRefreshAttemptID(seq uint64) string {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return fmt.Sprintf("qr-%d-%d", time.Now().UnixNano(), seq)
+	}
+	return fmt.Sprintf("qr-%d-%x", seq, suffix)
 }
 
 // quotaRefreshActive reports whether an attempt for this machine and pool is

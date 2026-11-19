@@ -717,10 +717,24 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 			}
 		}()
 		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.nativeQuotaPool(pool) {
-			if _, settled := a.refreshSettled(host, pool, key); !settled {
-				if _, admission := a.queueQuotaRefresh(host, pool, key); quotaRefreshHold(admission) {
-					return j, ErrQuotaRefreshPending
-				}
+			reason, settled := a.refreshSettled(host, pool, key)
+			if settled {
+				// This request's own attempt cannot supply the reading: refuse
+				// the host with that reason instead of measuring it again
+				// (hk 5456).
+				observed = j.Reason
+				return j, &quotaHostRefusal{fail(exitEvictionUnconfirmed, "account %s on pool %s: %s", key, pool, reason), outcomeQuotaUnknown}
+			}
+			if _, admission := a.queueQuotaRefresh(host, pool, key); quotaRefreshHold(admission) {
+				return j, ErrQuotaRefreshPending
+			}
+			if a.ScheduleQuotaRefresh != nil {
+				// Hub-scheduled placement: the scheduler refused the
+				// measurement (no budget for it, or a cooldown), so this pass
+				// must not fall into the synchronous refresh below — a slow
+				// node there would spend what is left of the request (hk 5456).
+				observed = j.Reason
+				return j, &quotaHostRefusal{fail(exitEvictionUnconfirmed, "account %s on pool %s has no usable reading and no admitted refresh", key, pool), outcomeQuotaUnknown}
 			}
 		}
 		// A stale or missing observation of an account this host does not hold

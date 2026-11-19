@@ -1440,7 +1440,9 @@ const quotaRefreshResultTTL = 24 * time.Hour
 func (s *laneInboxStore) recordQuotaRefreshResult(parent context.Context, id, machine, pool, accountKey, outcome string, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	if _, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO quota_refresh_results(attempt_id,machine,pool,account_key,outcome,seen_ms) VALUES(?,?,?,?,?,?)`, "attempt_id", s.dialect.assignIncoming("outcome", "seen_ms"))), id, machine, pool, accountKey, outcome, now.UnixMilli()); err != nil {
+	// A plain INSERT: attempt IDs are unique across hub lifetimes, so a repeat
+	// is a defect, and overwriting would corrupt another waiter's evidence.
+	if _, err := s.db.ExecContext(ctx, s.q(`INSERT INTO quota_refresh_results(attempt_id,machine,pool,account_key,outcome,seen_ms) VALUES(?,?,?,?,?,?)`), id, machine, pool, accountKey, outcome, now.UnixMilli()); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM quota_refresh_results WHERE seen_ms < ?`), now.Add(-quotaRefreshResultTTL).UnixMilli())

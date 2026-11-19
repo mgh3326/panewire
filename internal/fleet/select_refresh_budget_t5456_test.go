@@ -145,3 +145,46 @@ func TestSelectionMovesPastAnAccountItCannotMeasure_t5456(t *testing.T) {
 		t.Fatalf("codex refusal = %q, want the settled account-mismatch reason", refusal)
 	}
 }
+
+// hk 5456 review: when the hub scheduler refuses a measurement (no budget for
+// it, or a settled attempt), hub-scheduled placement must not fall into the
+// synchronous refresh below — a slow node there would spend what is left of
+// the request instead of trying the next candidate.
+func TestJudgeHostDoesNotMeasureSynchronouslyWhenTheSchedulerRefuses_t5456(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		settled func(machine, pool, accountKey string) (string, bool)
+		want    string
+	}{
+		{"scheduler refuses", nil, "no admitted refresh"},
+		{"attempt settled", func(machine, pool, accountKey string) (string, bool) {
+			return "its shared quota refresh measured another account on " + machine, true
+		}, "another account"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a := testApp(t)
+			a.Source = &fakePlacementSource{
+				hosts:    []HostView{{Name: "host-b", Connected: true}},
+				presence: []PresenceRecord{{HostID: "host-b", AccountKey: "claude:ffffffffffffffff", LastSeen: a.Now()}},
+			}
+			a.Config.Hosts = map[string]map[string]any{"host-b": {"ssh": "host-b"}}
+			a.ScheduleQuotaRefresh = func(machine, pool, accountKey string, window time.Duration) (string, QuotaRefreshAdmission) {
+				return "", QuotaRefreshRefused
+			}
+			a.QuotaRefreshSettled = test.settled
+			runner := a.Runner.(*fakeRunner)
+			key := "claude:0123456789abcdef"
+			acc := SharedAccount{Key: key, Observed: true, Fresh: false, MeasuredAt: a.Now().Add(-time.Hour)}
+			_, err := a.judgeHost(context.Background(), QuotaRequest{}, "claude", "host-b", false, key, acc)
+			if errors.Is(err, ErrQuotaRefreshPending) {
+				t.Fatal("kept the request pending on a demand the scheduler refused")
+			}
+			if err == nil || code(err) != exitEvictionUnconfirmed || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("err = %v, want an unconfirmed refusal naming %q", err, test.want)
+			}
+			if len(runner.Calls) != 0 {
+				t.Fatalf("the refused demand started a synchronous measurement: %v", runner.Calls)
+			}
+		})
+	}
+}
