@@ -98,11 +98,15 @@ func (t *directSpawnTransport) savedPlacementChoice(ctx context.Context, host, p
 
 // quotaFullExcluded returns the request's live full-quota exclusions when the
 // selection or the placement ended on "no candidate" (role_no_candidate, no
-// placement candidate accepted). The request's own refusals caused that, so
-// waiting for a host to appear cannot change it: the request ends with the
-// refusals named, not parked until its limit (hk 5358).
-func quotaFullExcluded(task hubSpawnTask, now time.Time, err error) []hubSpawnExclusion {
-	if err == nil || strings.Contains(err.Error(), "concurrency cap") {
+// placement candidate accepted) and no candidate of this pass is held by a
+// transient blocker. The request's own refusals caused that, so waiting for a
+// host to appear cannot change it: the request ends with the refusals named,
+// not parked until its limit (hk 5358). The decision reads the pass's candidate
+// records (host and reason code, fields of their own), never the rendered error
+// text, where a host named like a reason would pass for one. A pass that
+// recorded no candidates keeps parking as before.
+func quotaFullExcluded(task hubSpawnTask, now time.Time, err error, candidates []fleet.PlacementCandidateRecord) []hubSpawnExclusion {
+	if err == nil || len(candidates) == 0 || strings.Contains(err.Error(), "concurrency cap") {
 		return nil
 	}
 	text := err.Error()
@@ -113,7 +117,7 @@ func quotaFullExcluded(task hubSpawnTask, now time.Time, err error) []hubSpawnEx
 	// holding a candidate: a host that is disconnected, full or backing off, or
 	// another seat dropped for its own quota, can clear by itself, and the
 	// request keeps parking for it.
-	if spawnTransientBlocker(text) {
+	if slices.ContainsFunc(candidates, candidateTransientlyBlocked) {
 		return nil
 	}
 	var out []hubSpawnExclusion
@@ -125,21 +129,20 @@ func quotaFullExcluded(task hubSpawnTask, now time.Time, err error) []hubSpawnEx
 	return out
 }
 
-// spawnTransientBlockerTokens are the drop reasons of a candidate that can
-// become eligible without any change to the request (spawnParkReason reads the
-// same words to park it).
-var spawnTransientBlockerTokens = []string{"task_slots_full", "active_jobs>=max", "lanes_full", "disconnected", "hub_node_unavailable", "not connected", "did not connect", "launch_backoff", "quota", "QUOTA_"}
+// transientReasonCodes are the reason codes of a candidate that can become
+// eligible without any change to the request: the words spawnParkReason parks
+// on, as the placement record writes them (fleetevent.Code).
+var transientReasonCodes = []string{"task_slots_full", "active_jobs_max", "lanes_full", "disconnected", "hub_node_unavailable", "not_connected", "did_not_connect", "launch_backoff", "quota_", "hub_quota_"}
 
-// spawnTransientBlocker reports a placement refusal that names a transient
-// blocker besides this request's own full-quota refusals (hub_quota_full).
-func spawnTransientBlocker(text string) bool {
-	text = strings.ReplaceAll(text, "hub_quota_full", "")
-	for _, token := range spawnTransientBlockerTokens {
-		if strings.Contains(text, token) {
-			return true
-		}
+// candidateTransientlyBlocked reports a candidate whose reason code is one of
+// those, other than this request's own full-quota refusal (hub_quota_full, with
+// the retry suffix a live exclusion adds). Only the reason code is read: the
+// host's name is a different field.
+func candidateTransientlyBlocked(c fleet.PlacementCandidateRecord) bool {
+	if c.Outcome == "chosen" || strings.HasPrefix(c.Reason, "hub_quota_full") {
+		return false
 	}
-	return false
+	return slices.ContainsFunc(transientReasonCodes, func(code string) bool { return strings.HasPrefix(c.Reason, code) })
 }
 
 // quotaFullRefusedNotes names each seat a full quota ruled out, appended to the

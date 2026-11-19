@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -778,7 +779,20 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	releaseTrace()
 	defer h.forgetPlacementTraceBase(task.Request.RequestID, task.Attempt)
 	delivery, _ := json.Marshal(placementDelivery{StateDir: app.StateDir, Home: app.Home, Quota: app.Config.Quota})
+	// The current pass's candidate records: what quotaFullExcluded decides on.
+	var passMu sync.Mutex
+	var passCandidates []fleet.PlacementCandidateRecord
+	currentCandidates := func() []fleet.PlacementCandidateRecord {
+		passMu.Lock()
+		defer passMu.Unlock()
+		return slices.Clone(passCandidates)
+	}
 	app.PlacementTrace = func(tr fleet.PlacementTrace) {
+		if len(tr.Candidates) > 0 {
+			passMu.Lock()
+			passCandidates = slices.Clone(tr.Candidates)
+			passMu.Unlock()
+		}
 		tr = continueSpawnPlacementTrace(previous, tr, task.Exclusions, h.now())
 		if task.ClaimedHost != "" && len(task.Exclusions) != 0 && tr.Record != nil {
 			// The retry's in-process admission error is not the claimed node's
@@ -882,7 +896,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
 			return false
 		}
-		if spawnClaimedAnswer(task, err) || len(quotaFullExcluded(task, h.now(), err)) != 0 {
+		if spawnClaimedAnswer(task, err) || len(quotaFullExcluded(task, h.now(), err, currentCandidates())) != 0 {
 			return false
 		}
 		return spawnParkReason(fleet.ErrorCode(err), err.Error()) != ""
@@ -917,7 +931,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// Every candidate left was ruled out by this request's own full-quota
 	// refusals: that is the request's answer, with the refusals named, not a
 	// lack of hosts to wait out (hk 5358).
-	quotaRefused := quotaFullExcluded(task, h.now(), err)
+	quotaRefused := quotaFullExcluded(task, h.now(), err, currentCandidates())
 	// No candidate can take it now: a request with a limit is parked, not
 	// ended, and is placed again on an event or its next check (hk 4661).
 	if !claimedAnswer && len(quotaRefused) == 0 && parks(err) {

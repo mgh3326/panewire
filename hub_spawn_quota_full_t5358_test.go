@@ -350,21 +350,22 @@ func TestQuotaFullExcludedEndsTheRequestInsteadOfParkingIt_T5358(t *testing.T) {
 	expired := hubSpawnExclusion{Machine: "old", Profile: "sonnet", Reason: "spawn_failed:quota_full", ExpiresMS: now.Add(-time.Minute).UnixMilli()}
 	other := hubSpawnExclusion{Machine: "x", Reason: "cwd_unmapped"}
 	task := hubSpawnTask{Exclusions: []hubSpawnExclusion{live, seat, expired, other}}
+	ours := []fleet.PlacementCandidateRecord{{Host: "mac-personal", Outcome: "skipped", Reason: "hub_quota_full"}, {Host: "mac-dev", Outcome: "skipped", Reason: "hub_quota_full_retry_in_90s"}}
 	for _, text := range []string{"role_no_candidate: every candidate was excluded", "no placement candidate accepted spawn; no local fallback; tried: mac-dev hub_quota_full"} {
-		got := quotaFullExcluded(task, now, errors.New(text))
+		got := quotaFullExcluded(task, now, errors.New(text), ours)
 		if len(got) != 2 {
 			t.Fatalf("%q: refused %+v, want the two live quota refusals", text, got)
 		}
 	}
 	for _, err := range []error{nil, errors.New("role_no_candidate: pool at concurrency cap"), errors.New("QUOTA_EXHAUSTED: claude")} {
-		if got := quotaFullExcluded(task, now, err); len(got) != 0 {
+		if got := quotaFullExcluded(task, now, err, ours); len(got) != 0 {
 			t.Fatalf("%v: %+v, want none", err, got)
 		}
 	}
-	if got := quotaFullExcluded(hubSpawnTask{Exclusions: []hubSpawnExclusion{other, expired}}, now, errors.New("role_no_candidate: x")); len(got) != 0 {
+	if got := quotaFullExcluded(hubSpawnTask{Exclusions: []hubSpawnExclusion{other, expired}}, now, errors.New("role_no_candidate: x"), ours); len(got) != 0 {
 		t.Fatalf("no live quota refusal, nothing to answer with: %+v", got)
 	}
-	notes := quotaFullRefusedNotes(quotaFullExcluded(task, now, errors.New("role_no_candidate: x")))
+	notes := quotaFullRefusedNotes(quotaFullExcluded(task, now, errors.New("role_no_candidate: x"), ours))
 	for _, want := range []string{"mac-personal/devin-swe2-flash quota_full pool=devin-free until", "mac-dev/sonnet quota_full account=claude:0123456789abcdef"} {
 		if !strings.Contains(notes, want) {
 			t.Fatalf("notes %q lack %q", notes, want)
@@ -374,21 +375,33 @@ func TestQuotaFullExcludedEndsTheRequestInsteadOfParkingIt_T5358(t *testing.T) {
 
 // A transient blocker beside the request's own refusals keeps the request
 // parked: another host that is disconnected, full or backing off can clear by
-// itself (mergewake finding on #731, head 687ae18).
-func TestQuotaFullExcludedKeepsParkingForATransientBlocker_T5358(t *testing.T) {
+// itself (mergewake finding on #731, head 687ae18). The decision reads each
+// candidate's reason code, never the rendered text: a host named quota-worker or
+// disconnected-box is a host, not a blocker (consult-5358-51a87acb).
+func TestQuotaFullExcludedReadsCandidateReasonCodesNotText_T5358(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	task := hubSpawnTask{Exclusions: []hubSpawnExclusion{{Machine: "mac-a", Profile: "sonnet", Reason: "spawn_failed:quota_full"}}}
-	ours := "no remote candidate completed; tried: mac-a hub_quota_full"
-	if got := quotaFullExcluded(task, now, errors.New(ours)); len(got) != 1 {
-		t.Fatalf("only our own refusals: %+v", got)
+	task := hubSpawnTask{Exclusions: []hubSpawnExclusion{{Machine: "quota-worker", Profile: "sonnet", Reason: "spawn_failed:quota_full"}}}
+	noCandidate := errors.New("no remote candidate completed; tried: quota-worker hub_quota_full")
+	refused := fleet.PlacementCandidateRecord{Host: "quota-worker", Outcome: "skipped", Reason: "hub_quota_full"}
+	if got := quotaFullExcluded(task, now, noCandidate, []fleet.PlacementCandidateRecord{refused}); len(got) != 1 {
+		t.Fatalf("a host named quota-worker whose only reason is our own refusal must end the request: %+v", got)
 	}
-	for _, blocker := range []string{"mac-b disconnected", "mac-b task_slots_full", "mac-b active_jobs>=max", "mac-b lanes_full", "mac-b launch_backoff", "mac-b hub_node_unavailable", "mac-b QUOTA_EXHAUSTED"} {
-		if got := quotaFullExcluded(task, now, errors.New(ours+", "+blocker)); len(got) != 0 {
-			t.Errorf("%q beside our refusals still ended the request: %+v", blocker, got)
+	named := []fleet.PlacementCandidateRecord{refused, {Host: "disconnected-box", Outcome: "skipped", Reason: "hub_quota_full"}, {Host: "launch_backoff-1", Outcome: "skipped", Reason: "hub_quota_full"}}
+	if got := quotaFullExcluded(task, now, errors.New("no remote candidate completed; tried: disconnected-box hub_quota_full, QUOTA_ launch_backoff-1"), named); len(got) != 1 {
+		t.Fatalf("host names that look like reasons are not blockers: %+v", got)
+	}
+	for _, reason := range []string{"disconnected", "task_slots_full", "active_jobs_max", "lanes_full", "launch_backoff", "hub_node_unavailable", "quota_exhausted", "hub_quota_unknown"} {
+		blocked := []fleet.PlacementCandidateRecord{refused, {Host: "mac-b", Outcome: "skipped", Reason: reason}}
+		if got := quotaFullExcluded(task, now, noCandidate, blocked); len(got) != 0 {
+			t.Errorf("reason %q beside our refusals still ended the request: %+v", reason, got)
 		}
 	}
+	// No record of the pass, no decision: the request keeps parking.
+	if got := quotaFullExcluded(task, now, noCandidate, nil); len(got) != 0 {
+		t.Fatalf("a pass with no candidate records ended the request: %+v", got)
+	}
 	// The parking decision itself, as the placement pass reads it.
-	if spawnParkReason(80, ours+", mac-b disconnected") == "" {
+	if spawnParkReason(80, "no remote candidate completed; tried: mac-b disconnected") == "" {
 		t.Fatal("a disconnected host must keep the request parkable")
 	}
 }
