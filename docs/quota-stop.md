@@ -169,10 +169,12 @@ decides with the §Implementer rule (the job's start, the task's priority and
      close. A timeout, dirty or unpushed worktree refuses the close; its
      journalled reason makes the row `handover_failed` and the owner gets the
      fallback notice. A writer or resumed pane racing the close itself is not
-     stopped: the continuation note names the old `host:path` and the old
-     job's `abandoned-worktree.patch` as places to look for later work. The
-     ordinary worktree cleanup rules apply; this path creates no keep mark or
-     lock.
+     stopped: the continuation note says the old `host:path` may still exist
+     until cleanup and names `jobs/<old job>/abandoned-worktree.patch` under
+     the node inbox root. If cleanup removes the worktree, the patch saves
+     non-ignored untracked files and later work; ignored files are not
+     preserved. The ordinary cleanup rules apply; this path creates no keep
+     mark or lock.
   3. **Close.** The reconciler closes the old pane through `pane.close_op` to
      the job's node at its epoch, keeping `pane.close`'s open-question guard
      for an implementer. The node writes the old record `lost` with

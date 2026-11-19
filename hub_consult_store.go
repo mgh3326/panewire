@@ -84,6 +84,7 @@ func (s *laneInboxStore) ensureConsults() error {
 			respawns INTEGER NOT NULL DEFAULT 0,
 			notified INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE INDEX IF NOT EXISTS consult_requests_active ON consult_requests(state) WHERE state IN ('queued','running')`,
+		`CREATE INDEX IF NOT EXISTS consult_requests_answered_unnotified ON consult_requests(state,notified,created_ms)`,
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return err
@@ -167,11 +168,44 @@ func (s *laneInboxStore) scanConsult(parent context.Context, query string, args 
 	return c, nil
 }
 
-// activeConsults lists every consult a restart must keep working on.
+// activeConsults lists every consult a restart must keep working on, oldest
+// first: the queued and running rows, and the answered rows nobody has
+// notified. Each half is its own indexed read (hk 5300), merged in Go; an OR
+// in one statement defeats both indexes.
 func (s *laneInboxStore) activeConsults(parent context.Context) ([]hubConsult, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+consultColumns+` FROM consult_requests WHERE state IN ('queued','running') OR (state='answered' AND notified=0) ORDER BY created_ms`))
+	live, err := s.consultsWhere(ctx, `state IN ('queued','running')`)
+	if err != nil {
+		return nil, err
+	}
+	undelivered, err := s.consultsWhere(ctx, `state='answered' AND notified=0`)
+	if err != nil {
+		return nil, err
+	}
+	return mergeConsultsByCreated(live, undelivered), nil
+}
+
+// mergeConsultsByCreated merges two lists, each ordered by created, into one
+// list in the same order. On a tie the first list goes first.
+func mergeConsultsByCreated(a, b []hubConsult) []hubConsult {
+	out := make([]hubConsult, 0, len(a)+len(b))
+	for len(a) > 0 && len(b) > 0 {
+		if b[0].Created.Before(a[0].Created) {
+			out = append(out, b[0])
+			b = b[1:]
+			continue
+		}
+		out = append(out, a[0])
+		a = a[1:]
+	}
+	out = append(out, a...)
+	return append(out, b...)
+}
+
+// consultsWhere reads the consult rows matching where, oldest first.
+func (s *laneInboxStore) consultsWhere(ctx context.Context, where string) ([]hubConsult, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+consultColumns+` FROM consult_requests WHERE `+where+` ORDER BY created_ms`))
 	if err != nil {
 		return nil, err
 	}

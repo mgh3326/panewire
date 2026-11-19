@@ -886,7 +886,7 @@ func TestEscalateAuthorExpiresStageOnlyWithAuthorPresent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:implementer", "staged"); err != nil {
+	if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:implementer", "staged", ""); err != nil {
 		t.Fatal(err)
 	}
 	result, commands := f.escalate(t, nil)
@@ -912,7 +912,7 @@ func TestExpiredStagedLadderReconcilerPreservesAbsentAuthor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:implementer", "staged"); err != nil {
+			if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:implementer", "staged", ""); err != nil {
 				t.Fatal(err)
 			}
 			f.paneAbsent = !present

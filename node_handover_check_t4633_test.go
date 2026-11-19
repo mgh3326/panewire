@@ -270,7 +270,7 @@ func TestCloseOpHandoverChecksLastAndNamesLateWork(t *testing.T) {
 			old := quotaHolderRequest("implementer", closeOpJob)
 			old.Repository.Checkout.Origin = origin
 			successor, err := handoverSuccessorRequest(old, closeOpJob, closeOpJob+"-q1", "claude", "machine-a", window5h(), nodeHandoverCheckResult{Outcome: handoverCheckOK, Top: work, Branch: "wk/task", Pushed: commit})
-			if err != nil || !strings.Contains(successor.Brief, "machine-a:"+work) || !strings.Contains(successor.Brief, "abandoned-worktree.patch") {
+			if err != nil || !strings.Contains(successor.Brief, "may still be at machine-a:"+work+" until cleanup") || !strings.Contains(successor.Brief, "jobs/"+closeOpJob+"/abandoned-worktree.patch") || !strings.Contains(successor.Brief, "Ignored files are not preserved") || strings.Contains(successor.Brief, "worktree is kept") {
 				t.Fatalf("successor note=%q err=%v", successor.Brief, err)
 			}
 		})

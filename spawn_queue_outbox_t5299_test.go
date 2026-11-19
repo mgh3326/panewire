@@ -225,7 +225,7 @@ func TestSpawnQueueFollowsStagedOperations_t5299(t *testing.T) {
 				roleKey := "5291:implementer"
 				staged := queueTestRequest(2, "queue-job-staged")
 				staged.Args = replaceSpawnArg(staged.Args, "--task", "5291")
-				if _, _, err := s.claimSpawnReplacing(t.Context(), staged, "queue-job-staged", "parent", now, previous.Request.RequestID, roleKey, "staged"); err != nil {
+				if _, _, err := s.claimSpawnReplacing(t.Context(), staged, "queue-job-staged", "parent", now, previous.Request.RequestID, roleKey, "staged", ""); err != nil {
 					t.Fatal(err)
 				}
 				if _, queued := queueRows(t, s)[staged.RequestID]; !queued {
