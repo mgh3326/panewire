@@ -139,8 +139,9 @@ func TestQuotaStopWorkerWithinExpectedWaitsAndResumesOnce(t *testing.T) {
 	}
 }
 
-// (c) A worker whose reset is beyond its expected time, or has no expected
-// time, or is urgent, is handed over: job.lost is announced for the hub to
+// (c) A worker whose reset is beyond its expected time, or is urgent, is
+// handed over (a task with no expected time is judged on the policy's default,
+// hk 5349): job.lost is announced for the hub to
 // replace it. The same job is not resumed.
 func TestQuotaStopWorkerBeyondExpectedIsHandedOver(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -149,7 +150,6 @@ func TestQuotaStopWorkerBeyondExpectedIsHandedOver(t *testing.T) {
 		reason     string
 	}{
 		"reset after start plus expected": {5 * time.Hour, roleStopTask, "reset_too_late"},
-		"expected missing":                {time.Hour, `{"tasks":[{"priority":3,"refs":{"job_id":"job-active"}}]}`, "expected_missing"},
 		"priority 1":                      {time.Hour, `{"tasks":[{"priority":1,"expected":"4h","refs":{"job_id":"job-active"}}]}`, "urgent"},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -37,7 +37,7 @@ const (
 	// out, so a later stop with another reset counts as the second one.
 	poolActionKindWait = "wait"
 
-	// poolWaitReason is quotaDecisionJob's one wait reason.
+	// poolWaitReason is the wait reason a replayed wait reports.
 	poolWaitReason = "reset_within_expected"
 
 	handoverPlaced = "placed"
@@ -293,6 +293,18 @@ func (h *HubServer) waitPoolStop(ctx context.Context, exhaustion poolExhaustion,
 		return poolJobSkip(role, "store_unavailable")
 	}
 	return h.notifyPoolWait(ctx, exhaustion, task, why)
+}
+
+// poolWaited reports a result reason that records a wait: every wait reason
+// quotaDecisionJob gives (hk 5349 added the reset already past and the policy
+// default when a task names no expected time). The sweep releases a waited
+// job's claim on any of them, so a later stop with another reset reaches it.
+func poolWaited(why string) bool {
+	switch why {
+	case poolWaitReason, "reset_within_default_expected", "reset_passed":
+		return true
+	}
+	return false
 }
 
 // notifyPoolWait publishes the wait's fixed-id notice unless the inbox
