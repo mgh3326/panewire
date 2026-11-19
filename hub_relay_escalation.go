@@ -135,7 +135,9 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(parent context.Context, mach
 	if h.ownerNotifyWithheld(ctx, record.JobID, design) {
 		// The spawn's owner asked for no notice of this kind (hk 5360): the drop
 		// is counted, and the design lane is not told.
-		h.countSilencedSpawnNotice(fmt.Sprintf("unconfirmed:%d", record.ID), design, "delivery_unconfirmed")
+		if _, err := h.inbox.store.recordOwnerNoticeDecision(ctx, fmt.Sprintf("unconfirmed:%d", record.ID), design, "delivery_unconfirmed", ownerDecisionCount, h.now()); err != nil {
+			retry("count_not_recorded")
+		}
 		return
 	}
 	if why := h.unconfirmedNoticeMoot(dropped.Lane); why != "" {

@@ -64,6 +64,8 @@ const (
 	// spawnNoticeSettle settles a row that a later outcome overtook: nothing is
 	// sent and nothing is counted (hk 5360 review).
 	spawnNoticeSettle
+	// spawnNoticeLater leaves the row pending: its decision is not yet recorded.
+	spawnNoticeLater
 )
 
 // spawnNoticeRetry is how soon the flush reads the outbox again while a
@@ -168,40 +170,11 @@ func spawnNoticeAttempt(id string) int {
 	return attempt
 }
 
-// spawnNoticeFor decides what a pending notification does. Anything the hub
-// cannot place (no spawn record, an unreadable store) is delivered.
-//
-// A spawn that names --owner-notify decides its owner copies by that mode
-// (ownerModeNoticeAction), whatever the owner's lane class. Without the flag, a
-// design owner's failure follows the cause rules (hub_spawn_notice_silence.go),
-// and a design owner's routine result follows the reviewer rules.
+// spawnNoticeFor returns the action for a pending notification: its recorded
+// decision, or the decision it makes now (decideSpawnNotice). Nothing is sent or
+// counted before its decision is recorded.
 func (h *HubServer) spawnNoticeFor(ctx context.Context, n spawnNotification, result hubSpawnOutcome) spawnNoticeAction {
-	task, err := h.inbox.store.spawnTask(ctx, n.request)
-	if err != nil {
-		return spawnNoticeDeliver
-	}
-	if mode := ownerNotifyMode(task.Request.Args); mode != "" {
-		if n.owner != task.Owner {
-			return spawnNoticeDeliver // the requester's own copy reaches it at once
-		}
-		return h.ownerModeNoticeAction(n, task, result, mode)
-	}
-	if !h.inbox.policy.designLane(n.owner) {
-		return spawnNoticeDeliver
-	}
-	if result.RC != 0 {
-		if n.owner != task.Owner {
-			return spawnNoticeDeliver // the requester replays from its own failure copy
-		}
-		return h.spawnFailureNoticeAction(n, task, result)
-	}
-	if !daemonStartedReviewer(task.Job, task.Request.Args) {
-		return spawnNoticeDeliver
-	}
-	if result.LaneUnregistered {
-		return spawnNoticeDeliver // the pane's findings are not routed: someone must act
-	}
-	return spawnNoticeFile
+	return h.decideSpawnNotice(ctx, n, result)
 }
 
 func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotification) {
@@ -215,8 +188,10 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 	event := spawnNotificationEvent(n, result)
 	switch h.spawnNoticeFor(ctx, n, result) {
 	case spawnNoticeCount:
-		h.countSilencedSpawnNotice(n.id, n.owner, spawnNoticeOutcomeCause(result))
+		// The count is the recorded decision: it was made with the decision.
 		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
+	case spawnNoticeLater:
+		// The decision could not be read or recorded: the row stays pending.
 	case spawnNoticeSettle:
 		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
 	case spawnNoticeFile:

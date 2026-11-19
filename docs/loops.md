@@ -123,8 +123,10 @@ A retryable failure that a requester replays by itself is counted here and
 never reaches a design lane's inbox, unless its cause is on
 `relay.spawn_notice_must_fix`, its third repeat in 30 minutes, or its request
 is given up. A requester's own copy is never counted. Code:
-`hub_spawn_notice_silence.go`, `hub_loop_ledger.go` (`spawnNoticeRowsLocked`).
-The group is in-process like `selection_drops`: a hub restart clears it.
+`hub_spawn_notice_silence.go`, `hub_owner_notice_decisions.go`, `hub_loop_ledger.go` (`spawnNoticeRowsForDay`).
+The group is read from the durable `owner_notice_decisions` table (hk 5360,
+packet `handoff/2026-11-19/panewire-design-hk5360-root-cause`), so a hub restart
+keeps the day's counts. A count is its decision row, written once per notice.
 
 One document per date: already written is never rewritten (an existing
 document counts as written), and each date's bucket is dropped after its

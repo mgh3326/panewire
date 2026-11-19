@@ -195,16 +195,6 @@ type loopLedgerState struct {
 	// reason and account (the selection_drops group of the daily row). A
 	// date's counts leave with its row.
 	drops map[string]map[selectionDropKey]int64
-	// silenced counts the owner notices the spawn notice rules recorded instead
-	// of sending, by UTC date, owner lane and cause (the spawn_notices group of
-	// the daily row, hk 5360). A date's counts leave with its row.
-	silenced map[string]map[spawnNoticeCountKey]int64
-}
-
-// spawnNoticeCountKey is one spawn_notices row: a cause on one owner lane.
-type spawnNoticeCountKey struct {
-	lane  string
-	cause string
 }
 
 // spawnNoticeRow is one entry of the daily row's spawn_notices group.
@@ -251,7 +241,6 @@ func newLoopLedgerState() *loopLedgerState {
 		nodeConsecutiveNoReport: make(map[string]int),
 		nodeNoticeSent:          make(map[string]string),
 		drops:                   make(map[string]map[selectionDropKey]int64),
-		silenced:                make(map[string]map[spawnNoticeCountKey]int64),
 	}
 }
 
@@ -532,40 +521,23 @@ type loopsRowDoc struct {
 	SpawnNotices []spawnNoticeRow `json:"spawn_notices"`
 }
 
-// noteSpawnNoticeSilenced counts one owner notice recorded instead of sent, for
-// owner lane and cause, into today's UTC date. A hub without a clock skips the
-// count, as every ledger call does.
-func (h *HubServer) noteSpawnNoticeSilenced(lane, cause string) {
-	now, ok := h.loopNow()
-	if !ok {
-		return
+// spawnNoticeRowsForDay returns date's spawn_notices group from the durable
+// decision table (hk 5360): the count decisions of the day, by owner lane and
+// cause. It is read before the ledger lock is taken. A read that fails is logged
+// and the group is empty for this write; the next write rebuilds it from the
+// table.
+func (h *HubServer) spawnNoticeRowsForDay(date string) []spawnNoticeRow {
+	if h.inbox == nil || h.inbox.store == nil {
+		return []spawnNoticeRow{}
 	}
-	st := h.loopLedger()
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	date := loopDateOf(now)
-	byKey := st.silenced[date]
-	if byKey == nil {
-		byKey = make(map[spawnNoticeCountKey]int64)
-		st.silenced[date] = byKey
+	ctx, cancel := context.WithTimeout(context.Background(), handoffkeepTimeout)
+	defer cancel()
+	rows, err := h.inbox.store.ownerNoticeCounts(ctx, date)
+	if err != nil {
+		h.logger.Warn("spawn_notices group not read", "date", date, "err", err)
+		return []spawnNoticeRow{}
 	}
-	byKey[spawnNoticeCountKey{lane: lane, cause: cause}]++
-}
-
-// spawnNoticeRowsLocked returns date's spawn_notices group, sorted by lane then
-// cause so the document body is deterministic. The caller holds st.mu.
-func spawnNoticeRowsLocked(st *loopLedgerState, date string) []spawnNoticeRow {
-	out := make([]spawnNoticeRow, 0, len(st.silenced[date]))
-	for key, n := range st.silenced[date] {
-		out = append(out, spawnNoticeRow{Machine: "hub", Lane: key.lane, Cause: key.cause, Silenced: n})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Lane != out[j].Lane {
-			return out[i].Lane < out[j].Lane
-		}
-		return out[i].Cause < out[j].Cause
-	})
-	return out
+	return rows
 }
 
 // noteSelectionDrops counts the SWE-2 candidates one placed selection dropped
@@ -611,6 +583,7 @@ func selectionDropRowsLocked(st *loopLedgerState, date string) []selectionDropRo
 // row carries its own machine so hk 5117 can append per-node rows beside
 // these.
 func (h *HubServer) loopsRowDocument(date string, now time.Time) loopsRowDoc {
+	spawnNotices := h.spawnNoticeRowsForDay(date)
 	st := h.loopLedger()
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -635,7 +608,7 @@ func (h *HubServer) loopsRowDocument(date string, now time.Time) loopsRowDoc {
 		})
 	}
 	rows = append(rows, h.nodeLoopsRowsLocked(st, date)...)
-	return loopsRowDoc{V: loopsRowVersion, At: now.UTC(), Machine: "hub", Rows: rows, SelectionDrops: selectionDropRowsLocked(st, date), SpawnNotices: spawnNoticeRowsLocked(st, date)}
+	return loopsRowDoc{V: loopsRowVersion, At: now.UTC(), Machine: "hub", Rows: rows, SelectionDrops: selectionDropRowsLocked(st, date), SpawnNotices: spawnNotices}
 }
 
 // nodeLoopsRowsLocked returns the merged per-machine rows for date: each
@@ -778,9 +751,6 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 	for date := range st.drops {
 		dates[date] = true
 	}
-	for date := range st.silenced {
-		dates[date] = true
-	}
 	for date := range dates {
 		if date >= today {
 			continue
@@ -826,7 +796,6 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 		st.mu.Lock()
 		delete(st.days, date)
 		delete(st.drops, date)
-		delete(st.silenced, date)
 		h.pruneNodeLoopDayLocked(st, date)
 		if st.nodeRowsWrittenThrough < date {
 			st.nodeRowsWrittenThrough = date

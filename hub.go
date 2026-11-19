@@ -702,10 +702,6 @@ type HubServer struct {
 	// (inbox_design_filter.go).
 	quietTimings designQuietTimings
 
-	// noticeSilence holds the repeat window and the once-per-event memos of the
-	// silenced spawn notices (hub_spawn_notice_silence.go, hk 5360).
-	noticeSilence spawnNoticeSilence
-
 	// unconfirmedNotices spaces delivery-unconfirmed notices (hk 3431).
 	unconfirmedNotices          unconfirmedNoticeWindows
 	handoffkeep                 *handoffkeepRelayClient

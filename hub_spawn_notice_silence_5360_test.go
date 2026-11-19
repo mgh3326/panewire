@@ -3,6 +3,8 @@ package panewire
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -82,6 +84,31 @@ func s5360OwnerSilenced(t *testing.T, h *HubServer, now time.Time) int64 {
 		}
 	}
 	return total
+}
+
+// s5360HubAt is spawnNotifyHubLanes over a store at path, so a second hub can
+// open the same durable state after a restart.
+func s5360HubAt(t *testing.T, path string) (*HubServer, *fakeHandoffkeep, *hubAgent) {
+	t.Helper()
+	t.Setenv(crashReportDSNEnv, "")
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	config := HubServerConfig{
+		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"},
+		InboxStorePath:  path,
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"`+s5360Owner+`":{"machine":"machine-b","pane":"w1:p1"},"`+s5360Requester+`":{"machine":"machine-b","pane":"w1:p2"}}}`),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		handoffkeep:     client,
+	}
+	h, err := NewHubServer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
+	h.mu.Lock()
+	h.nodes["machine-b"] = &hubNodeRecord{agent: destination}
+	h.mu.Unlock()
+	return h, fake, destination
 }
 
 func s5360Retryable(reason string) hubSpawnOutcome {
@@ -535,5 +562,105 @@ func TestOwnerNotifyEachCompletionHasItsOwnRecord_5360(t *testing.T) {
 	}
 	if counted != 2 {
 		t.Fatalf("job_completed silenced=%d, want 2", counted)
+	}
+}
+
+// The repeat decision is recorded before its effect. A hub that decides a row
+// and stops before routing it (a crash, or a relay that fails) leaves the row
+// pending with that decision; a retry two hours later, past any in-memory memo,
+// still sends it and does not count it (mergewake round 5).
+func TestRepeatDecisionSurvivesRelayRetryAfterTwoHours_5360(t *testing.T) {
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	h, _, _ := spawnNotifyHubLanes(t, "", s5360Owner, s5360Requester)
+	h.now = func() time.Time { return now }
+	for i := range 2 {
+		s5360Spawn(t, h, fmt.Sprintf("pw-5360-retry-%d", i), nil, s5360Retryable("checkout_refused:locked"))
+		s5360Flush(t, h)
+		now = now.Add(5 * time.Minute)
+	}
+	third := s5360Spawn(t, h, "pw-5360-retry-2", nil, s5360Retryable("checkout_refused:locked"))
+	pending, err := h.readSpawnNotifications(t.Context(), spawnNoticePending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owner spawnNotification
+	for _, n := range pending {
+		if n.request == third.Request.RequestID && n.owner == s5360Owner {
+			owner = n
+		}
+	}
+	if owner.id == "" {
+		t.Fatal("the third owner row is not pending")
+	}
+	var result hubSpawnOutcome
+	if err := json.Unmarshal([]byte(owner.raw), &result); err != nil {
+		t.Fatal(err)
+	}
+	// The decision is made, and the hub stops before routing the row.
+	if got := h.spawnNoticeFor(t.Context(), owner, result); got != spawnNoticeDeliver {
+		t.Fatalf("the third occurrence decided %v, want the repeat to deliver", got)
+	}
+
+	now = now.Add(3 * time.Hour)
+	s5360Flush(t, h)
+	items := t4270Items(t, h, s5360Owner)
+	if len(items) != 1 || !strings.Contains(items[0].Event.Text, third.Request.RequestID) {
+		t.Fatalf("owner items after the retry=%+v, want the repeat notice", items)
+	}
+	if n := s5360OwnerSilenced(t, h, now); n != 2 {
+		t.Fatalf("silenced=%d, want the two occurrences the repeat did not replace", n)
+	}
+}
+
+// A hub restart keeps the counts and the repeat window: the decision rows are
+// durable, so a new hub on the same store counts the third occurrence as the
+// repeat, with no extra notice.
+func TestRestartKeepsCountsAndRepeatWindow_5360(t *testing.T) {
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	first, _, _ := s5360HubAt(t, path)
+	first.now = func() time.Time { return now }
+	for i := range 2 {
+		s5360Spawn(t, first, fmt.Sprintf("pw-5360-restart-%d", i), nil, s5360Retryable("checkout_refused:locked"))
+		s5360Flush(t, first)
+		now = now.Add(5 * time.Minute)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, _, _ := s5360HubAt(t, path)
+	second.now = func() time.Time { return now }
+	if n := s5360OwnerSilenced(t, second, now); n != 2 {
+		t.Fatalf("after restart silenced=%d, want the 2 counts kept", n)
+	}
+	s5360Spawn(t, second, "pw-5360-restart-2", nil, s5360Retryable("checkout_refused:locked"))
+	s5360Flush(t, second)
+	if items := t4270Items(t, second, s5360Owner); len(items) != 1 {
+		t.Fatalf("after restart owner items=%d, want the third occurrence as the repeat", len(items))
+	}
+}
+
+// A withheld completion without an event id cannot be recorded under its own
+// key, so it fails open: the owner hears it as before, and nothing is counted
+// under an empty key (mergewake round 5).
+func TestOwnerNotifyWithoutEventIDFailsOpen_5360(t *testing.T) {
+	h, _, _ := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	h.now = func() time.Time { return now }
+	const job = "pw-5360-no-event-id"
+	req := t4270Request(job, t3426Design, "", "implementer")
+	req.Args = append(req.Args, fleet.OwnerNotifyArg, fleet.OwnerNotifyNever)
+	if _, _, err := h.inbox.store.claimSpawn(t.Context(), req, job, t3426Design, now); err != nil {
+		t.Fatal(err)
+	}
+	completed := t3426Completion(job, t3426Design, "")
+	completed.EventID = ""
+	h.relayJobCompletionFrom("host-a", completed)
+	if items := t4270Items(t, h, t3426Design); len(items) != 1 {
+		t.Fatalf("an event without an id was dropped: owner items=%d", len(items))
+	}
+	if n := s5360OwnerSilenced(t, h, now); n != 0 {
+		t.Fatalf("an event without an id was counted (%d)", n)
 	}
 }

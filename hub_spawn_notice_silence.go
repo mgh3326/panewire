@@ -1,54 +1,58 @@
 package panewire
 
 // Contract: docs/hub-spawn-operations.md, "Owner notices by cause" (hk 5360,
-// operator decision 433, split agreed with mergewake-design).
+// operator decision 433), and the root-cause packet
+// handoff/2026-11-19/panewire-design-hk5360-root-cause.
 //
-// A spawn failure the requester replays by itself (replay=yes) is not sent to
-// a design session's inbox. It is recorded and counted per cause in the daily
-// loops row (spawn_notices). A design owner hears it only when:
+// Invariant: a notice's delivery, settle or count decision is made once, from
+// the inputs read at its first routing, and is recorded in
+// owner_notice_decisions before its effect. A later routing of the same notice
+// applies the recorded decision and reads nothing else. Counts and the repeat
+// window are read from that table, so a hub restart keeps both.
 //
-//   - the request is given up (given_up, or a failure that cannot be replayed);
-//   - the same cause repeats for the same owner, spawnNoticeRepeatCount times
-//     within spawnNoticeRepeatWindow: that third occurrence notifies once;
-//   - the cause is on relay.spawn_notice_must_fix, a cause someone must fix.
-//
-// A requester may instead pass --owner-notify final|never (fleet.OwnerNotifyArg),
-// which overrides those rules for the owner lane only: never silences every
-// notice the spawn produces for the owner; final sends only a terminal or
-// given-up failure. The requester's own copy of a failure is never silenced,
-// because that copy is what makes the requester replay.
+// A spawn failure the requester replays by itself (replay=yes) is not sent to a
+// design owner. It is counted by cause (decision count). The owner hears it only
+// when the request is given up or cannot be replayed (replay=no), the same cause
+// repeats for the owner (decision repeat, the third within the window), or the
+// cause is on relay.spawn_notice_must_fix. --owner-notify final|never overrides
+// those rules for the owner's copy only; the requester's own copy is never
+// silenced, because it is what makes the requester replay.
 
 import (
 	"context"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
+// Decisions recorded in owner_notice_decisions.decision.
 const (
-	// spawnNoticeRepeatWindow and spawnNoticeRepeatCount: the same cause
-	// occurring spawnNoticeRepeatCount times for one owner within the window
-	// is itself something the session must hear once.
+	ownerDecisionDeliver = "deliver"
+	ownerDecisionFile    = "file"
+	ownerDecisionCount   = "count"
+	ownerDecisionRepeat  = "repeat"
+	ownerDecisionSettle  = "settle"
+)
+
+// spawnNoticeRepeatWindow and spawnNoticeRepeatCount: once spawnNoticeRepeatCount
+// occurrences of a cause for one owner fall within the window (counted since
+// the last repeat), the next one is a repeat that notifies, and the window
+// starts over at it.
+const (
 	spawnNoticeRepeatWindow = 30 * time.Minute
 	spawnNoticeRepeatCount  = 3
-	// spawnNoticeMemoTTL bounds how long a routed event id is remembered, so a
-	// retried outbox row decides and counts the same way. It is longer than
-	// the window and the retry horizon of a stuck row.
-	spawnNoticeMemoTTL = 2 * time.Hour
 )
 
 // defaultSpawnNoticeMustFix is the built-in must-fix cause list: causes a
-// person has to repair, so they are never silenced for repetition or replay.
-// The policy file's relay.spawn_notice_must_fix replaces it.
+// person has to repair, never silenced for repetition or replay. The policy
+// file's relay.spawn_notice_must_fix replaces it.
 var defaultSpawnNoticeMustFix = []string{"workspace_unresolved", "auth_unavailable", "report_path", "brief_upload", "identity_unproven"}
 
 // spawnNoticeCauseShape is a cause key as spawnNoticeCause produces it: a
-// refusal code (fleet's closed table) or a notice's own cause word, optionally
-// with its detail after one colon, as the documented checkout reasons read
-// (checkout_refused:branch-elsewhere).
+// refusal code or a notice's own cause word, optionally with its detail after
+// one colon (checkout_refused:branch-elsewhere).
 var spawnNoticeCauseShape = regexp.MustCompile(`^[a-z0-9_]{1,40}(:[a-z0-9_-]{1,40})?$`)
 
 func validSpawnNoticeCause(cause string) bool {
@@ -62,9 +66,7 @@ func spawnNoticeCause(reason string) string {
 	return strings.TrimPrefix(code, "spawn_failed:")
 }
 
-// spawnNoticeOutcomeCause is the cause key an outcome is counted under. A
-// success is counted as spawned, or lane_unregistered when the pane's lane is
-// not routed; a failure by its reason's cause.
+// spawnNoticeOutcomeCause is the cause key an outcome is counted under.
 func spawnNoticeOutcomeCause(result hubSpawnOutcome) string {
 	if result.RC == 0 {
 		if result.LaneUnregistered {
@@ -73,6 +75,17 @@ func spawnNoticeOutcomeCause(result hubSpawnOutcome) string {
 		return "spawned"
 	}
 	return spawnNoticeCause(result.Reason)
+}
+
+// spawnNoticeStatus is the status an outbox row's event id names
+// (<request>:<attempt>:<status>[:<lane>]). A row is judged by its own status,
+// not the request's current one.
+func spawnNoticeStatus(id string) string {
+	parts := strings.SplitN(id, ":", 4)
+	if len(parts) < 3 {
+		return ""
+	}
+	return parts[2]
 }
 
 // ownerNotifyMode is the spawn's --owner-notify mode from its saved request:
@@ -92,98 +105,14 @@ func hasDistinctRequester(task hubSpawnTask) bool {
 	return requester != "" && requester != task.Owner
 }
 
-// spawnNoticeSilence is the in-process state of the silence rules: the recent
-// silent occurrences per owner and cause, the event ids already decided and
-// the ids already counted. A hub restart clears it, as it clears the daily
-// counts; a restart therefore restarts the repeat window.
-type spawnNoticeSilence struct {
-	mu       sync.Mutex
-	windows  map[string][]spawnNoticeSeen
-	notified map[string]time.Time
-	counted  map[string]time.Time
+// spawnNoticeSuperseded reports whether a retryable failure row has been
+// overtaken: the request moved to a later attempt, or its current attempt ended
+// with another outcome. Such a row is settled with no notice and no count.
+func spawnNoticeSuperseded(n spawnNotification, task hubSpawnTask) bool {
+	return spawnNoticeStatus(n.id) == "retryable" && (task.Attempt > spawnNoticeAttempt(n.id) || task.Status != "retryable")
 }
 
-type spawnNoticeSeen struct {
-	id string
-	at time.Time
-}
-
-// repeated records one silent occurrence of key (an owner and cause) for event
-// id and reports whether it is the spawnNoticeRepeatCount-th within the window.
-// The same id always gets the same answer, so a retried row cannot notify
-// twice or lose its notice.
-func (s *spawnNoticeSilence) repeated(key, id string, now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.prune(now)
-	if _, ok := s.notified[id]; ok {
-		return true
-	}
-	recent := s.windows[key]
-	for _, seen := range recent {
-		if seen.id == id {
-			return false
-		}
-	}
-	recent = append(recent, spawnNoticeSeen{id: id, at: now})
-	if len(recent) < spawnNoticeRepeatCount {
-		s.windows[key] = recent
-		return false
-	}
-	// The repeat notifies: the window starts over, and this id is remembered as
-	// the one that notified.
-	delete(s.windows, key)
-	s.notified[id] = now
-	return true
-}
-
-// firstCount reports whether id has not been counted before, and marks it
-// counted. A silenced event is counted once however often its row is routed.
-func (s *spawnNoticeSilence) firstCount(id string, now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.prune(now)
-	if _, ok := s.counted[id]; ok {
-		return false
-	}
-	s.counted[id] = now
-	return true
-}
-
-// prune drops window entries older than the repeat window and memo entries
-// older than the memo TTL. The caller holds s.mu.
-func (s *spawnNoticeSilence) prune(now time.Time) {
-	if s.windows == nil {
-		s.windows = make(map[string][]spawnNoticeSeen)
-		s.notified = make(map[string]time.Time)
-		s.counted = make(map[string]time.Time)
-	}
-	for key, recent := range s.windows {
-		kept := recent[:0]
-		for _, seen := range recent {
-			if now.Sub(seen.at) < spawnNoticeRepeatWindow {
-				kept = append(kept, seen)
-			}
-		}
-		if len(kept) == 0 {
-			delete(s.windows, key)
-		} else {
-			s.windows[key] = kept
-		}
-	}
-	for id, at := range s.notified {
-		if now.Sub(at) >= spawnNoticeMemoTTL {
-			delete(s.notified, id)
-		}
-	}
-	for id, at := range s.counted {
-		if now.Sub(at) >= spawnNoticeMemoTTL {
-			delete(s.counted, id)
-		}
-	}
-}
-
-// mustFix reports whether a cause is on the policy's must-fix list.
+// spawnNoticeMustFix reports whether a cause is on the policy's must-fix list.
 func (p *deliveryPolicy) spawnNoticeMustFix(cause string) bool {
 	for _, must := range p.Relay.SpawnNoticeMustFix {
 		if must == cause {
@@ -193,81 +122,128 @@ func (p *deliveryPolicy) spawnNoticeMustFix(cause string) bool {
 	return false
 }
 
-// spawnNoticeStatus is the status an outbox row's event id names
-// (<request>:<attempt>:<status>[:<lane>]). A row is judged by its own status:
-// the request's current status can be later than the row's (hk 5360 review).
-func spawnNoticeStatus(id string) string {
-	parts := strings.SplitN(id, ":", 4)
-	if len(parts) < 3 {
-		return ""
+// decideSpawnNotice returns the action for an outbox row. The first routing
+// decides from its inputs and records the decision; a later routing applies the
+// recorded decision. A row whose decision cannot be read or recorded is left
+// pending: nothing is sent or counted without its record.
+func (h *HubServer) decideSpawnNotice(ctx context.Context, n spawnNotification, result hubSpawnOutcome) spawnNoticeAction {
+	store := h.inbox.store
+	decision, found, err := store.ownerNoticeDecision(ctx, n.id)
+	if err != nil {
+		return spawnNoticeLater
 	}
-	return parts[2]
+	if found {
+		return spawnNoticeActionFor(decision)
+	}
+	decision, ok := h.computeSpawnNoticeDecision(ctx, n, result)
+	if !ok {
+		return spawnNoticeLater
+	}
+	recorded, err := store.recordOwnerNoticeDecision(ctx, n.id, n.owner, spawnNoticeOutcomeCause(result), decision, h.now())
+	if err != nil {
+		h.logger.Warn("owner notice decision not recorded; retried", "event_id", n.id, "err", err)
+		return spawnNoticeLater
+	}
+	return spawnNoticeActionFor(recorded)
 }
 
-// spawnNoticeSuperseded reports whether a retryable failure row has been
-// overtaken: the request moved to a later attempt, or its current attempt ended
-// with another outcome. Such a row is settled without a notice or a count; the
-// outcome that overtook it is what the owner hears.
-func spawnNoticeSuperseded(n spawnNotification, task hubSpawnTask) bool {
-	return spawnNoticeStatus(n.id) == "retryable" && (task.Attempt > spawnNoticeAttempt(n.id) || task.Status != "retryable")
+// spawnNoticeActionFor maps a recorded decision to its effect.
+func spawnNoticeActionFor(decision string) spawnNoticeAction {
+	switch decision {
+	case ownerDecisionFile:
+		return spawnNoticeFile
+	case ownerDecisionCount:
+		return spawnNoticeCount
+	case ownerDecisionSettle:
+		return spawnNoticeSettle
+	}
+	return spawnNoticeDeliver // deliver and repeat both send
 }
 
-// spawnFailureNoticeAction decides a failure's notice for a design owner when
-// the spawn names no --owner-notify mode: the cause rules.
-func (h *HubServer) spawnFailureNoticeAction(n spawnNotification, task hubSpawnTask, result hubSpawnOutcome) spawnNoticeAction {
+// computeSpawnNoticeDecision reads a first routing's inputs and returns its
+// decision. ok is false when an input cannot be read yet.
+func (h *HubServer) computeSpawnNoticeDecision(ctx context.Context, n spawnNotification, result hubSpawnOutcome) (decision string, ok bool) {
+	task, err := h.inbox.store.spawnTask(ctx, n.request)
+	if err != nil {
+		return "", false
+	}
+	if mode := ownerNotifyMode(task.Request.Args); mode != "" {
+		if n.owner != task.Owner {
+			return ownerDecisionDeliver, true // the requester's own copy reaches it at once
+		}
+		return h.ownerModeDecision(n, task, result, mode), true
+	}
+	if !h.inbox.policy.designLane(n.owner) {
+		return ownerDecisionDeliver, true
+	}
+	if result.RC != 0 {
+		if n.owner != task.Owner {
+			return ownerDecisionDeliver, true // the requester replays from its own failure copy
+		}
+		return h.failureDecision(ctx, n, task, result)
+	}
+	if !daemonStartedReviewer(task.Job, task.Request.Args) {
+		return ownerDecisionDeliver, true
+	}
+	if result.LaneUnregistered {
+		return ownerDecisionDeliver, true // the pane's findings are not routed: someone must act
+	}
+	return ownerDecisionFile, true
+}
+
+// failureDecision applies the cause rules to a design owner's failure when the
+// spawn names no --owner-notify mode.
+func (h *HubServer) failureDecision(ctx context.Context, n spawnNotification, task hubSpawnTask, result hubSpawnOutcome) (string, bool) {
 	cause := spawnNoticeCause(result.Reason)
 	switch {
 	case spawnNoticeSuperseded(n, task):
-		return spawnNoticeSettle
+		return ownerDecisionSettle, true
 	case !result.Retryable:
-		return spawnNoticeDeliver // replay=no: nothing the requester can replay
+		return ownerDecisionDeliver, true // replay=no: nothing the requester can replay
 	case spawnNoticeStatus(n.id) == "given_up":
-		return spawnNoticeDeliver
+		return ownerDecisionDeliver, true
 	case n.owner == task.Owner && !hasDistinctRequester(task):
-		return spawnNoticeDeliver // the owner's copy is the only notice it can act on
+		return ownerDecisionDeliver, true // the owner's copy is the only notice it can act on
 	case h.inbox.policy.spawnNoticeMustFix(cause):
-		return spawnNoticeDeliver
-	case h.noticeSilence.repeated(n.owner+"\x00"+cause, n.id, h.now()):
-		return spawnNoticeDeliver
+		return ownerDecisionDeliver, true
 	}
-	return spawnNoticeCount
+	due, err := h.inbox.store.ownerNoticeRepeatDue(ctx, n.owner, cause, h.now())
+	if err != nil {
+		return "", false
+	}
+	if due {
+		return ownerDecisionRepeat, true
+	}
+	return ownerDecisionCount, true
 }
 
-// ownerModeNoticeAction decides a notice for the owner lane of a spawn that
-// names --owner-notify. A requester's copy is not decided here: it always
-// reaches the requester, which replays from it.
-func (h *HubServer) ownerModeNoticeAction(n spawnNotification, task hubSpawnTask, result hubSpawnOutcome, mode string) spawnNoticeAction {
+// ownerModeDecision decides a notice for the owner lane of a spawn that names
+// --owner-notify. The requester's copy is decided by the caller, not here.
+func (h *HubServer) ownerModeDecision(n spawnNotification, task hubSpawnTask, result hubSpawnOutcome, mode string) string {
 	if result.RC == 0 {
 		// SPAWNED and LANE_UNREGISTERED are not terminal: neither mode sends them.
-		return spawnNoticeCount
+		return ownerDecisionCount
 	}
 	if spawnNoticeSuperseded(n, task) {
-		return spawnNoticeSettle
+		return ownerDecisionSettle
 	}
 	if mode == fleet.OwnerNotifyNever {
-		return spawnNoticeCount
+		return ownerDecisionCount
 	}
 	// final: only a failure that cannot be replayed, or a given-up request.
 	if !result.Retryable || spawnNoticeStatus(n.id) == "given_up" {
-		return spawnNoticeDeliver
+		return ownerDecisionDeliver
 	}
-	return spawnNoticeCount
-}
-
-// countSilencedSpawnNotice counts one silenced notice for its owner lane and
-// cause, once per event id, in the daily loops row.
-func (h *HubServer) countSilencedSpawnNotice(id, lane, cause string) {
-	if !h.noticeSilence.firstCount(id, h.now()) {
-		return
-	}
-	h.noteSpawnNoticeSilenced(lane, cause)
+	return ownerDecisionCount
 }
 
 // ownerNotifyJobSilenced reports whether a job event for the owner lane of a
-// spawn that names --owner-notify is held back. Only job.completed is covered
-// here: a completion is not a terminal notice, so neither mode sends it.
+// spawn that names --owner-notify is held back. Only job.completed is covered:
+// a completion is not a terminal notice, so neither mode sends it. An event
+// without an id cannot be recorded under its own key, so it fails open: it is
+// delivered as before, and not silently dropped (mergewake review of PR 732).
 func (h *HubServer) ownerNotifyJobSilenced(ctx context.Context, kind string, event hubJobEventPayload, lane string) bool {
-	if kind != "job.completed" {
+	if kind != "job.completed" || event.EventID == "" {
 		return false
 	}
 	return h.ownerNotifyWithheld(ctx, event.JobID, lane)
@@ -290,37 +266,34 @@ func (h *HubServer) ownerNotifyWithheld(ctx context.Context, job, owner string) 
 // ownerNotifyRecordReason is the reason a withheld completion is filed under.
 // hk's idempotency key is (kind, job, epoch, report path, reason) and excludes
 // the event id, so the event id is part of the reason: a second completion of
-// the same job gets its own row, not the first one's (mergewake review of
-// PR 732). An event without an id keeps the bare reason.
+// the same job gets its own row.
 func ownerNotifyRecordReason(eventID string) string {
-	if eventID == "" {
-		return "owner-notify"
-	}
 	return "owner-notify:" + eventID
 }
 
-// receiveOwnerNotifySilenced files a silenced job event as an hk row under its
-// own reason, the same record the design filter writes, and counts it. The
-// producer is acknowledged and the event counted only once that row is filed
-// under this event; if hk returns no such row, the event is not acknowledged
-// and not counted, so the producer's retry finds it again. handled is false only
-// when no hk client is configured, so the event takes the ordinary path (the
-// design filter's rule too: nothing is recorded, so nothing is silenced).
+// receiveOwnerNotifySilenced files a withheld job event as an hk row under its
+// own reason, then records its count decision under its event key. The producer
+// is acknowledged only after both. An event hk does not file under this event
+// is neither acknowledged nor counted, so the producer's retry finds it again.
+// handled is false only when no hk client is configured, so the event takes the
+// ordinary path (nothing is recorded, so nothing is silenced).
 func (h *HubServer) receiveOwnerNotifySilenced(kind string, event *hubJobEventPayload, sender *hubAgent, senderID, lane string) (result relayLaneEventResult, handled bool) {
 	if h.handoffkeep == nil {
 		return relayLaneEventResult{}, false
 	}
-	reason := ownerNotifyRecordReason(event.EventID)
 	// hk's idempotency reason is the record's own Reason field, not the delivered
 	// label, so the copy filed carries the event id there.
 	recorded := *event
-	recorded.Reason = reason
-	stored, filed, ok := h.fileFilteredInHK(h.closeCtx, kind, recorded, senderID, reason)
+	recorded.Reason = ownerNotifyRecordReason(event.EventID)
+	stored, filed, ok := h.fileFilteredInHK(h.closeCtx, kind, recorded, senderID, recorded.Reason)
 	if !ok || !filed {
 		h.logger.Warn("owner-notify record not filed under this event; not acknowledged", "kind", kind, "job", event.JobID, "event_id", event.EventID, "lane", lane)
 		return relayLaneEventResult{PersistFailed: true}, true
 	}
-	h.countSilencedSpawnNotice(event.EventID, lane, "job_completed")
+	if _, err := h.inbox.store.recordOwnerNoticeDecision(h.closeCtx, "job:"+event.EventID, lane, "job_completed", ownerDecisionCount, h.now()); err != nil {
+		h.logger.Warn("owner-notify count not recorded; not acknowledged", "job", event.JobID, "event_id", event.EventID, "err", err)
+		return relayLaneEventResult{PersistFailed: true}, true
+	}
 	if sender != nil {
 		if kind == "lane.event" {
 			h.queueLaneRelayPersisted(*event, sender, stored.ID)
@@ -328,5 +301,5 @@ func (h *HubServer) receiveOwnerNotifySilenced(kind string, event *hubJobEventPa
 			h.queueRelayPersisted(kind, *event, sender, stored.ID)
 		}
 	}
-	return relayLaneEventResult{ID: stored.ID, Routed: true, Machine: filteredDeliveryPrefix + reason, AlreadyDelivered: true}, true
+	return relayLaneEventResult{ID: stored.ID, Routed: true, Machine: filteredDeliveryPrefix + recorded.Reason, AlreadyDelivered: true}, true
 }

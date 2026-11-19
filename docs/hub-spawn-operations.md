@@ -1325,6 +1325,12 @@ owner hears it only when:
   default `workspace_unresolved`, `auth_unavailable`, `report_path`,
   `brief_upload`, `identity_unproven`). An explicit empty list has none.
 
+Each notice's decision (deliver, file, count, repeat, settle) is made once, from
+its inputs at first routing, and recorded in `owner_notice_decisions` before it
+takes effect (hk 5360, packet `handoff/2026-11-19/panewire-design-hk5360-root-cause`).
+Counts and the repeat window are read from those rows, so a hub restart keeps
+both. A notice without an event id is never withheld.
+
 A requester's own copy of a failure is never silenced, because the requester
 replays from it. A design owner's own spawn, with no separate requester, keeps
 its copy at once. The rules apply to design-lane owners; other lanes are
