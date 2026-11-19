@@ -1286,8 +1286,8 @@ may be deleted with the worktree. Matching follows gitignore: a glob with a
 leading or middle slash (`/build`, `a/logs/`, `build/*`) matches the whole
 path; a glob whose only slash is the trailing one (`name/`) matches a
 wholly ignored directory named `name` at any depth, so `__pycache__/`
-approves `a/b/__pycache__/`; a slash-free glob (`*.log`) matches the last
-segment of an ignored file path. A wholly ignored directory is reported by git as one `dir/` entry and is approved only by a pattern ending in `/`; a directory that holds a non-ignored file is reported file by file and is not approved as a whole. The node re-resolves the
+approves `a/b/__pycache__/` but never an ignored regular file; a slash-free glob (`*.log`) matches the last
+segment of an ignored file path and never a directory. A wholly ignored directory is reported by git as one `dir/` entry and is approved only by a pattern ending in `/`; a directory that holds a non-ignored file is reported file by file and is not approved as a whole. The node re-resolves the
 worktree under the per-clone lock, then removes it only when all hold: the
 resolved worktree path and common git dir are under the node's configured
 work root, it appears in `git worktree list`, is not locked, is not

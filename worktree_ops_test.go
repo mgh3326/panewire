@@ -870,7 +870,11 @@ func TestNodeRegenerableGlobRules(t *testing.T) {
 	if nodeRegenerable([]string{"logs/"}, "a/b/logs/x/") {
 		t.Fatal(`"logs/" must not approve a directory below a logs directory`)
 	}
-	if !nodeRegenerable([]string{"logs/"}, "logs") || !nodeRegenerable([]string{"*.log"}, "a/b/c.log") {
+	// A directory pattern never approves a regular file, even one named like it.
+	if nodeRegenerable([]string{"logs/"}, "logs") || nodeRegenerable([]string{"logs/"}, "a/logs") {
+		t.Fatal(`"logs/" approved an ignored regular file named logs`)
+	}
+	if !nodeRegenerable([]string{"*.log"}, "a/b/c.log") {
 		t.Fatal("expected matches failed")
 	}
 	// A leading or middle slash still anchors the glob as a whole path.

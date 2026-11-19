@@ -732,7 +732,9 @@ func nodeRegenerable(globs []string, name string) bool {
 		// The slash test reads the glob without its trailing slash: "logs/"
 		// is a last-segment directory pattern, "/build" and "a/b/" anchor.
 		g := strings.Trim(raw, "/")
-		if g == "" || (dirEntry && !strings.HasSuffix(raw, "/")) {
+		// A trailing-slash pattern approves only a directory entry, and a
+		// directory entry needs one.
+		if g == "" || dirEntry != strings.HasSuffix(raw, "/") {
 			continue
 		}
 		match := base
