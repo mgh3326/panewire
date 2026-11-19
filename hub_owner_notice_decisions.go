@@ -3,8 +3,9 @@ package panewire
 // The durable owner-notice decision table (hk 5360, packet
 // handoff/2026-11-19/panewire-design-hk5360-root-cause). One row per decided
 // notice, keyed by its event key: the outbox event id for a spawn notice, the
-// "job:" event id for a withheld completion, the "unconfirmed:" relay row id for
-// a withheld delivery-unconfirmed notice. The primary key makes the first
+// "job:" event id for a withheld completion, the "notice:" event id for a
+// withheld owner info notice (hk 5454), the "unconfirmed:" relay row id for a
+// withheld delivery-unconfirmed notice. The primary key makes the first
 // decision the only one; the count rows are the daily spawn_notices group and
 // the repeat window, so nothing about counts lives in memory.
 

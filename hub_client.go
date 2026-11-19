@@ -2920,16 +2920,17 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	}
 	if job.Kind == "lane.event" {
 		payload, _ := json.Marshal(struct {
-			OwnerLane string `json:"owner_lane"`
-			EventID   string `json:"event_id"`
-			Text      string `json:"text"`
-			Epoch     uint64 `json:"epoch,omitempty"`
-			Truncated bool   `json:"truncated,omitempty"`
-			Replay    bool   `json:"replay,omitempty"`
-			Cause     string `json:"cause,omitempty"`
-			Head      string `json:"head,omitempty"`
-			PR        string `json:"pr,omitempty"`
-		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay, job.Cause, job.Head, job.PR})
+			OwnerLane string           `json:"owner_lane"`
+			EventID   string           `json:"event_id"`
+			Text      string           `json:"text"`
+			Epoch     uint64           `json:"epoch,omitempty"`
+			Truncated bool             `json:"truncated,omitempty"`
+			Replay    bool             `json:"replay,omitempty"`
+			Cause     string           `json:"cause,omitempty"`
+			Head      string           `json:"head,omitempty"`
+			PR        string           `json:"pr,omitempty"`
+			Notice    *ownerInfoNotice `json:"notice,omitempty"`
+		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay, job.Cause, job.Head, job.PR, job.Notice})
 		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		payload = relayPayloadNotifyType(payload, job.NotifyType)
 		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, senderPane: laneEventSenderPane(job), orderPriority: job.Priority, sinkRecord: job.Sink}, true

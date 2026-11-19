@@ -465,7 +465,7 @@ func (h *HubServer) sweepPoolJob(ctx context.Context, exhaustion poolExhaustion,
 		}
 		text := poolExhaustionText(exhaustion, task.Job)
 		eventID := "pool-exhausted:" + task.Job
-		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(owner, eventID), OwnerLane: owner, NotifyType: "info", Text: text, Host: "hub", Epoch: 1}, nil)
+		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(owner, eventID), OwnerLane: owner, NotifyType: "info", Text: text, Host: "hub", Epoch: 1, Notice: ownerNoticeFor(task.Job, "pool_exhausted", false)}, nil)
 		if result.ID == 0 || result.PersistFailed {
 			return poolJobSkip(role, "owner_not_notified")
 		}

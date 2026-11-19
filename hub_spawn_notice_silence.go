@@ -253,14 +253,21 @@ func (h *HubServer) ownerNotifyJobSilenced(ctx context.Context, kind string, eve
 // --owner-notify mode and owner is that spawn's owner lane. An unreadable spawn
 // record withholds nothing: the notice takes the ordinary path.
 func (h *HubServer) ownerNotifyWithheld(ctx context.Context, job, owner string) bool {
+	return h.ownerNotifyModeFor(ctx, job, owner) != ""
+}
+
+// ownerNotifyModeFor is the --owner-notify mode of the spawn that started job,
+// when owner is that spawn's owner lane; "" otherwise (hk 5454 reads it for
+// every owner info notice, and ownerNotifyWithheld for a completion).
+func (h *HubServer) ownerNotifyModeFor(ctx context.Context, job, owner string) string {
 	if h.inbox == nil || job == "" || owner == "" {
-		return false
+		return ""
 	}
 	task, err := h.inbox.store.latestSpawnForJob(ctx, job)
-	if err != nil {
-		return false
+	if err != nil || owner != task.Owner {
+		return ""
 	}
-	return ownerNotifyMode(task.Request.Args) != "" && owner == task.Owner
+	return ownerNotifyMode(task.Request.Args)
 }
 
 // ownerNotifyRecordReason is the reason a withheld completion is filed under.
@@ -271,13 +278,13 @@ func ownerNotifyRecordReason(eventID string) string {
 	return "owner-notify:" + eventID
 }
 
-// receiveOwnerNotifySilenced files a withheld job event as an hk row under its
-// own reason, then records its count decision under its event key. The producer
-// is acknowledged only after both. An event hk does not file under this event
-// is neither acknowledged nor counted, so the producer's retry finds it again.
-// handled is false only when no hk client is configured, so the event takes the
-// ordinary path (nothing is recorded, so nothing is silenced).
-func (h *HubServer) receiveOwnerNotifySilenced(kind string, event *hubJobEventPayload, sender *hubAgent, senderID, lane string) (result relayLaneEventResult, handled bool) {
+// receiveOwnerNotifySilenced files a withheld owner event as an hk row under its
+// own reason, then records its count decision under key, grouped by cause. The
+// producer is acknowledged only after both. An event hk does not file under
+// this event is neither acknowledged nor counted, so the producer's retry finds
+// it again. handled is false only when no hk client is configured, so the event
+// takes the ordinary path (nothing is recorded, so nothing is silenced).
+func (h *HubServer) receiveOwnerNotifySilenced(kind string, event *hubJobEventPayload, sender *hubAgent, senderID, lane, key, cause string) (result relayLaneEventResult, handled bool) {
 	if h.handoffkeep == nil {
 		return relayLaneEventResult{}, false
 	}
@@ -290,7 +297,7 @@ func (h *HubServer) receiveOwnerNotifySilenced(kind string, event *hubJobEventPa
 		h.logger.Warn("owner-notify record not filed under this event; not acknowledged", "kind", kind, "job", event.JobID, "event_id", event.EventID, "lane", lane)
 		return relayLaneEventResult{PersistFailed: true}, true
 	}
-	if _, err := h.inbox.store.recordOwnerNoticeDecision(h.closeCtx, "job:"+event.EventID, lane, "job_completed", ownerDecisionCount, h.now()); err != nil {
+	if _, err := h.inbox.store.recordOwnerNoticeDecision(h.closeCtx, key, lane, cause, ownerDecisionCount, h.now()); err != nil {
 		h.logger.Warn("owner-notify count not recorded; not acknowledged", "job", event.JobID, "event_id", event.EventID, "err", err)
 		return relayLaneEventResult{PersistFailed: true}, true
 	}

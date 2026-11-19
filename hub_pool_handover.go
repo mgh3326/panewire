@@ -274,7 +274,7 @@ func (h *HubServer) notifyPoolExhausted(ctx context.Context, exhaustion poolExha
 	if why != "" {
 		text += " (reason: " + why + ")"
 	}
-	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(owner, eventID), OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(owner, eventID), OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(task.Job, "pool_exhausted", false)}, nil)
 	if result.ID == 0 || result.PersistFailed {
 		return poolJobSkip(role, "owner_not_notified")
 	}
@@ -328,7 +328,7 @@ func (h *HubServer) notifyPoolWait(ctx context.Context, exhaustion poolExhaustio
 		return poolJobSkip(role, "waiting")
 	}
 	text := fmt.Sprintf("[panewire] %s waits for the %s reset at %s (%s %s); a later stop hands it over.", task.Job, exhaustion.Pool, exhaustion.Reset.UTC().Format(time.RFC3339), exhaustion.Pool, exhaustion.Cause)
-	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(task.Owner, eventID), OwnerLane: task.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(task.Owner, eventID), OwnerLane: task.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(task.Job, "pool_wait", false)}, nil)
 	if result.ID == 0 || result.PersistFailed {
 		return poolJobSkip(role, "owner_not_notified")
 	}
@@ -663,8 +663,10 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 	// line or none (hk 5491), so the hand-over notice is not sent for it.
 	if handover.Outcome != handoverWithdrawn {
 		text := fmt.Sprintf("[panewire] handed %s over to %s on %s (%s %s)", action.Job, handover.Job, handover.Reason, handover.Pool, handover.Cause)
+		notice := ownerNoticeFor(action.Job, "hand_over", false)
 		if handover.Outcome == handoverFailed {
 			text = fmt.Sprintf("[panewire] hand-over of %s failed (%s): %s", action.Job, strings.TrimSpace(handover.Reason), action.Data.Text)
+			notice = ownerNoticeFor(action.Job, "hand_over_failed", true)
 		}
 		eventID := handoverNoticeID(action)
 		owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
@@ -672,7 +674,7 @@ func (h *HubServer) finishHandover(ctx context.Context, action poolAction, state
 			return err
 		}
 		if !owned {
-			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: notice}, nil)
 			if result.ID == 0 || result.PersistFailed {
 				return errors.New("owner notice unavailable")
 			}

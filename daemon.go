@@ -683,6 +683,7 @@ type localRequest struct {
 	NotifyType    string                `json:"notify_type,omitempty"`
 	Priority      string                `json:"priority,omitempty"`
 	Cause         string                `json:"cause,omitempty"`
+	Notice        *ownerInfoNotice      `json:"notice,omitempty"`
 	Op            string                `json:"op"`
 	Path          string                `json:"path,omitempty"`
 	Target        string                `json:"target,omitempty"`
@@ -995,6 +996,9 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	if req.Kind == "lane.event" {
 		event.JobID = laneEventTransportID(req.OwnerLane, req.EventID)
 		event.ReportPath, event.Reason = "", ""
+		if validOwnerInfoNotice(req.Notice) {
+			event.Notice = req.Notice
+		}
 	} else {
 		// A job.* event's identity is its durable file name, derived here from
 		// the daemon's own namespace so the immediate send and the later scan

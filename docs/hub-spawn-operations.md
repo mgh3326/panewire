@@ -1499,6 +1499,28 @@ before sending the spawn; the saved request keeps it. An `--owner-notify` value
 other than `final` or `never` is a usage error. Code:
 `hub_spawn_notice_silence.go`, `internal/fleet/owner_notify.go`.
 
+### Owner info notices
+
+An info `lane.event` about a job (a pool hand-over, wait or exhaustion notice, a
+stuck or missing pool row, a closed or replaced job, a quota-stop resume, a
+quota replacement, a parked spawn, a ladder step or refusal, a credit publication
+pause) names that job in a `notice` (`job`, `cause`, and `terminal` for a
+hand-over that failed). The hub decides it with the same `--owner-notify` rule as
+a withheld `job.completed` (`owner_info_notice.go`, hk 5454):
+
+- `never`: the notice is recorded (hk `filtered:owner-notify:<event id>`) and
+  counted under its `cause`; the owner lane gets none.
+- `final`: a `terminal` notice is sent; any other is recorded and counted.
+- absent: the notice is sent as before.
+
+The count is one `owner_notice_decisions` row per event, read by the daily loops
+row's `spawn_notices` group. A notice without a valid `job` and `cause` is not
+withheld, so a malformed notice fails open. The node sends `notice` in its
+`lane.event` payload; a hub that predates the field refuses the payload's unknown
+key, so deploy the hub before the nodes. A node emits an owner info event only
+through `ownerInfoEmitArgs` (`panewire emit --notice-job <job> --notice-cause
+<cause>`, with `--type info`); a repository test fails any other spelling.
+
 ## Notifications and telemetry
 
 State changes and notification records commit in one database transaction.

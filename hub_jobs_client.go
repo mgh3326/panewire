@@ -188,7 +188,9 @@ type hubScannedRelayEvent struct {
 	// Priority is a lane.event order's priority (orderPriorities).
 	Priority string
 	Cause    string
-	Kind     string
+	// Notice is an info lane.event's job notice (hk 5454), sent as the lane payload's notice.
+	Notice *ownerInfoNotice
+	Kind   string
 	HubActiveJob
 	Reason string
 	// Final marks a job.lost whose hk record the node already wrote lost. Only
@@ -447,7 +449,10 @@ type hubInboxEvent struct {
 	Text           string `json:"text"`
 	Truncated      bool   `json:"truncated"`
 	Ceiling        bool   `json:"ceiling,omitempty"`
-	Payload        struct {
+
+	// Notice is an info lane.event's job notice (hk 5454), written by panewire emit --notice-job.
+	Notice  *ownerInfoNotice `json:"notice,omitempty"`
+	Payload struct {
 		OwnerEpoch     uint64 `json:"owner_epoch,omitempty"`
 		Late           bool   `json:"late,omitempty"`
 		AgentLabel     string `json:"agent_label"`

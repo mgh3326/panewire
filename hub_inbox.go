@@ -212,7 +212,14 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	// not as reviewer-lifecycle.
 	lane := h.receivingLane(kind, *event)
 	if h.ownerNotifyJobSilenced(jobLookupContext, kind, *event, lane) {
-		if result, handled := h.receiveOwnerNotifySilenced(kind, event, sender, senderID, lane); handled {
+		if result, handled := h.receiveOwnerNotifySilenced(kind, event, sender, senderID, lane, "job:"+event.EventID, "job_completed"); handled {
+			return result, true
+		}
+	}
+	// hk 5454: an owner info notice about a job is decided by the job's saved
+	// --owner-notify mode, here and nowhere else.
+	if notice, held := h.ownerInfoHeld(jobLookupContext, *event, lane); held {
+		if result, handled := h.receiveOwnerNotifySilenced(kind, event, sender, senderID, lane, ownerInfoRecordKey(event.EventID), notice.Cause); handled {
 			return result, true
 		}
 	}
