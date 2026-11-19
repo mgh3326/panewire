@@ -390,11 +390,19 @@ func TestQuotaFullExcludedReadsCandidateReasonCodesNotText_T5358(t *testing.T) {
 	if got := quotaFullExcluded(task, now, errors.New("no remote candidate completed; tried: disconnected-box hub_quota_full, QUOTA_ launch_backoff-1"), named); len(got) != 1 {
 		t.Fatalf("host names that look like reasons are not blockers: %+v", got)
 	}
-	for _, reason := range []string{"disconnected", "task_slots_full", "active_jobs_max", "lanes_full", "launch_backoff", "hub_node_unavailable", "quota_exhausted", "hub_quota_unknown"} {
+	// An unreachable host (host_fit.go: host_unavailable:measure_failed) is the
+	// case a list of transient words missed; a reason this check has never seen
+	// parks too (mergewake finding on #731, head 5a94245).
+	for _, reason := range []string{"disconnected", "task_slots_full", "active_jobs_max", "lanes_full", "launch_backoff", "hub_node_unavailable", "quota_exhausted", "hub_quota_unknown", "host_unavailable_measure_failed", "host_unavailable_no_usable_presence", "all_refused", "a_reason_added_next_year"} {
 		blocked := []fleet.PlacementCandidateRecord{refused, {Host: "mac-b", Outcome: "skipped", Reason: reason}}
 		if got := quotaFullExcluded(task, now, noCandidate, blocked); len(got) != 0 {
 			t.Errorf("reason %q beside our refusals still ended the request: %+v", reason, got)
 		}
+	}
+	// Reasons that hold nothing back do not keep the request parked.
+	idle := []fleet.PlacementCandidateRecord{refused, {Host: "mac-b", Outcome: "skipped", Reason: "no_candidate_present"}, {Host: "mac-c", Outcome: "skipped", Reason: "not_tried"}, {Host: "mac-d", Outcome: "skipped", Reason: "below_choice"}, {Host: "mac-e", Outcome: "skipped", Reason: "hub_quota_full_retry_in_90s"}}
+	if got := quotaFullExcluded(task, now, noCandidate, idle); len(got) != 1 {
+		t.Fatalf("own refusals and idle candidates must end the request: %+v", got)
 	}
 	// No record of the pass, no decision: the request keeps parking.
 	if got := quotaFullExcluded(task, now, noCandidate, nil); len(got) != 0 {

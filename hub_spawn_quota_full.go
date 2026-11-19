@@ -129,20 +129,26 @@ func quotaFullExcluded(task hubSpawnTask, now time.Time, err error, candidates [
 	return out
 }
 
-// transientReasonCodes are the reason codes of a candidate that can become
-// eligible without any change to the request: the words spawnParkReason parks
-// on, as the placement record writes them (fleetevent.Code).
-var transientReasonCodes = []string{"task_slots_full", "active_jobs_max", "lanes_full", "disconnected", "hub_node_unavailable", "not_connected", "did_not_connect", "launch_backoff", "quota_", "hub_quota_"}
+// requestCausedReasonCodes are the candidate reason codes that hold nothing
+// back: this request's own full-quota refusal (hub_quota_full, with the retry
+// suffix a live exclusion adds), a host with no rung left to try
+// (no_candidate_present), and candidates the pass never needed (not_tried,
+// below_choice). The codes are the placement record's (fleetevent.Code of the
+// host trace outcome, host_fit.go).
+var requestCausedReasonCodes = []string{"hub_quota_full", "no_candidate_present", "not_tried", "below_choice"}
 
-// candidateTransientlyBlocked reports a candidate whose reason code is one of
-// those, other than this request's own full-quota refusal (hub_quota_full, with
-// the retry suffix a live exclusion adds). Only the reason code is read: the
-// host's name is a different field.
+// candidateTransientlyBlocked reports a candidate that something other than this
+// request's own refusals holds back, or whose reason this check does not know.
+// It is an allow-list on purpose: host_unavailable_* (a measurement that
+// failed, an unreachable host), a missing connection, full slots, back-off, a
+// quota that is unknown or exhausted on its own, and any reason added later,
+// can clear by themselves, so the request keeps parking for them. Only the
+// reason code is read: the host's name is a different field.
 func candidateTransientlyBlocked(c fleet.PlacementCandidateRecord) bool {
-	if c.Outcome == "chosen" || strings.HasPrefix(c.Reason, "hub_quota_full") {
+	if c.Outcome == "chosen" {
 		return false
 	}
-	return slices.ContainsFunc(transientReasonCodes, func(code string) bool { return strings.HasPrefix(c.Reason, code) })
+	return !slices.ContainsFunc(requestCausedReasonCodes, func(code string) bool { return strings.HasPrefix(c.Reason, code) })
 }
 
 // quotaFullRefusedNotes names each seat a full quota ruled out, appended to the
