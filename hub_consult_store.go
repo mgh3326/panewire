@@ -51,7 +51,7 @@ func consultActive(state string) bool {
 }
 
 func (s *laneInboxStore) ensureConsults() error {
-	if s.dialect == laneInboxPostgres {
+	if !s.dialect.ownsSchema() {
 		return nil
 	}
 	ctx, done := s.op(s.life)
@@ -112,16 +112,16 @@ func (s *laneInboxStore) ensureConsults() error {
 func (s *laneInboxStore) insertConsult(parent context.Context, c hubConsult) (hubConsult, bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`INSERT INTO consult_requests
+	result, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO consult_requests
 		(id,idem_key,task,pr,head,requester,machine,caller_pane,question_doc,author_job,author_family,state,seat_profile,seat_family,seat_grade,job,request_id,reason,answer_doc,created_ms,updated_ms,claim_until_ms,exclude_profiles,answered_ms,deadline_ms,respawns,notified,owner)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`),
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, "idem_key")),
 		c.ID, c.IdemKey, c.Task, c.PR, c.Head, c.Requester, c.Machine, c.CallerPane, c.QuestionDoc, c.AuthorJob, c.AuthorFamily, c.State,
 		c.SeatProfile, c.SeatFamily, c.SeatGrade, c.Job, c.RequestID, c.Reason, c.AnswerDoc,
 		c.Created.UnixMilli(), consultUpdatedMillis(c), consultMs(c.ClaimUntil), strings.Join(c.ExcludeProfiles, ","), c.Answered.UnixMilli(), c.Deadline.UnixMilli(), c.Respawns, consultBoolInt(c.Notified), c.Owner)
 	if err != nil {
 		return hubConsult{}, false, err
 	}
-	n, _ := result.RowsAffected()
+	n, _ := s.dialect.rowsMatched(result)
 	if n == 1 {
 		// A new consult is the consult loop's work (hk 5302).
 		s.noteWork(readConsult)
@@ -259,7 +259,7 @@ func (s *laneInboxStore) updateConsult(parent context.Context, c hubConsult, gua
 	if err != nil {
 		return 0, err
 	}
-	n, err := result.RowsAffected()
+	n, err := s.dialect.rowsMatched(result)
 	if n > 0 {
 		// A state change (queued, running, answered, a respawn intent, a
 		// notified mark) is what the consult loop acts on.

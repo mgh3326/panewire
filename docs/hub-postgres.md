@@ -94,6 +94,50 @@ tables hold thousands of rows, and an index build is far below the startup
 timeout. A new periodic statement that scans without an index is a bug in the
 same terms as a wrong result.
 
+## The dialect seam
+
+Every statement the hub store sends goes through one `sqlDialect`
+(`hub_sql_dialect.go`) for the parts that differ between databases. SQLite and
+Postgres implement it today; the MySQL dialect of hk 4898 is a third
+implementation, not a third copy of each query. A store query never spells one
+of these forms inline:
+
+| Need | Seam operation |
+|---|---|
+| `?` placeholders per backend | `rebind` (the store's `q`) |
+| the transaction and its isolation level | `begin` (the store's `beginTx`): READ COMMITTED stated on Postgres, never a server default |
+| insert, no-op on a duplicate key | `insertIgnore` |
+| insert, update on a duplicate key | `upsert`, `upsertGreatest`, and `upsertWhere` for the per-column conditional of the placement snapshot |
+| integer cast, string concatenation, the LIKE escape | `castInt`, `concat`, `escapeClause` |
+| a bounded `UPDATE` or `DELETE` whose rows a sorted `LIMIT` names | `updateOrdered`, `deleteWhereIn` |
+| the migration lock, the per-(lane, cause) supersede lock | `lockMigration`, `lockLaneCause`: transaction advisory locks on Postgres, nothing on SQLite |
+| a compare-and-set's "the guarded row was there" | `rowsMatched`: the rows an `UPDATE` or `DELETE` matched |
+| the `event_key` form, the batch order column, the `lane_inbox` insert, who builds the schema | `storedKey`, `batchOrder`, `laneInboxInsert`, `ownsSchema` |
+
+Phase 1a (hk 5417) moved the call sites onto the seam without changing a
+statement: SQLite and Postgres produce the text they produced before, except
+that a two-column upsert is written `a=excluded.a,b=excluded.b` with no space
+after the comma. Two tests keep it so:
+
+- `TestSQLDialectGeneratedStatements` and `TestHubStoreCallSiteStatements`
+  assert each operation's text and each call site's statement for both
+  dialects, on a recording driver, with no database.
+- `TestHubStoreQueriesGoThroughTheDialectSeam` fails on a store file that spells
+  one of the forms above inline. Add the form to its list when the seam gains an
+  operation.
+
+What the seam does not move yet, and phase 1b (MySQL) takes up:
+
+- The supersede lock stays an advisory lock on Postgres. On MySQL it is a row
+  lock inside its transaction (`SELECT ... FOR UPDATE` on a `lane_cause` row),
+  because `GET_LOCK` belongs to a session; that needs a table, so it is a schema
+  change and lands with the MySQL migrations.
+- `rowsMatched` is `RowsAffected` today. MySQL's driver counts changed rows
+  unless the DSN sets `clientFoundRows=true`; the MySQL dialect opens it that
+  way, so every compare-and-set keeps its meaning.
+- The SQLite schema is still built in Go and Postgres's in
+  `hub_postgres_migrations/`; neither is a seam operation.
+
 ## Setup (new database)
 
 1. **Create a dedicated database and role.** The role owns the database and
@@ -151,6 +195,8 @@ SQLite backend.
   must-ack, against both backends.
 - `inbox_must_ack_test.go` runs the hub-level must-ack tests on both
   backends.
+- `hub_sql_dialect_test.go` asserts the SQL each dialect generates (see
+  [The dialect seam](#the-dialect-seam)); it needs no database.
 
 The Postgres half needs `PANEWIRE_TEST_HUB_DATABASE_URL`. CI's `postgres` job
 sets it from a service container, and fails if any test in that job skips.

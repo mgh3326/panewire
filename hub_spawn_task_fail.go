@@ -114,7 +114,7 @@ func (s *laneInboxStore) pendingSpawnTaskFailNoticeIDs(parent context.Context, n
 func (s *laneInboxStore) markSpawnTaskFailNotice(parent context.Context, requestID string, now time.Time) (bool, error) {
 	ctx, done := s.op(context.WithoutCancel(parent))
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -123,7 +123,7 @@ func (s *laneInboxStore) markSpawnTaskFailNotice(parent context.Context, request
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
+	n, err := s.dialect.rowsMatched(result)
 	if err != nil {
 		return false, err
 	}
@@ -156,7 +156,7 @@ func (s *laneInboxStore) deferSpawnTaskFailNotice(parent context.Context, reques
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
+	n, err := s.dialect.rowsMatched(result)
 	return n == 1, err
 }
 
@@ -168,7 +168,7 @@ func (s *laneInboxStore) deferSpawnTaskFailNotice(parent context.Context, reques
 func (s *laneInboxStore) judgeSpawnTaskFailBacklog(parent context.Context, now time.Time) (int64, error) {
 	ctx, done := s.op(context.WithoutCancel(parent))
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -177,7 +177,7 @@ func (s *laneInboxStore) judgeSpawnTaskFailBacklog(parent context.Context, now t
 	if err != nil {
 		return 0, err
 	}
-	judged, err := result.RowsAffected()
+	judged, err := s.dialect.rowsMatched(result)
 	if err != nil {
 		return 0, err
 	}
@@ -197,7 +197,7 @@ func (s *laneInboxStore) judgeSpawnTaskFailBacklog(parent context.Context, now t
 func (s *laneInboxStore) backfillSpawnTaskFailNotices(parent context.Context, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func (s *laneInboxStore) backfillSpawnTaskFailNotices(parent context.Context, no
 	if err != nil {
 		return err
 	}
-	if n, _ := marked.RowsAffected(); n == 1 {
+	if n, _ := s.dialect.rowsMatched(marked); n == 1 {
 		if _, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET task_fail_notice_ms=? WHERE task_fail_notice_ms=0 AND status IN ('failed','refused')`), now.UnixMilli()); err != nil {
 			return err
 		}

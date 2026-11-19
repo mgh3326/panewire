@@ -71,7 +71,7 @@ const spawnAttemptGrantsTable = `CREATE TABLE IF NOT EXISTS spawn_attempt_grants
 func (s *laneInboxStore) decideSpawnGrant(parent context.Context, nodeID, machine string, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -95,7 +95,7 @@ func (s *laneInboxStore) decideSpawnGrant(parent context.Context, nodeID, machin
 	default:
 		return false, nil
 	}
-	if _, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_attempt_grants(node_id,request_id,state,decided_ms) VALUES(?,?,'granted',?) ON CONFLICT DO NOTHING`), nodeID, requestID, now.UnixMilli()); err != nil {
+	if _, err = tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_attempt_grants(node_id,request_id,state,decided_ms) VALUES(?,?,'granted',?)`, "")), nodeID, requestID, now.UnixMilli()); err != nil {
 		return false, err
 	}
 	var state string
@@ -111,12 +111,12 @@ func (s *laneInboxStore) decideSpawnGrant(parent context.Context, nodeID, machin
 func (s *laneInboxStore) fenceSpawnAttempt(parent context.Context, requestID, nodeID string, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_attempt_grants(node_id,request_id,state,decided_ms) VALUES(?,?,'fenced',?) ON CONFLICT DO NOTHING`), nodeID, requestID, now.UnixMilli()); err != nil {
+	if _, err = tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_attempt_grants(node_id,request_id,state,decided_ms) VALUES(?,?,'fenced',?)`, "")), nodeID, requestID, now.UnixMilli()); err != nil {
 		return false, err
 	}
 	var state string
@@ -130,7 +130,7 @@ func (s *laneInboxStore) fenceSpawnAttempt(parent context.Context, requestID, no
 func (s *laneInboxStore) recordSpawnStartBy(parent context.Context, nodeID string, startByMS int64) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_attempt_start_by(node_id,start_by_ms) VALUES(?,?) ON CONFLICT(node_id) DO UPDATE SET start_by_ms=CASE WHEN excluded.start_by_ms>spawn_attempt_start_by.start_by_ms THEN excluded.start_by_ms ELSE spawn_attempt_start_by.start_by_ms END`), nodeID, startByMS)
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsertGreatest(`INSERT INTO spawn_attempt_start_by(node_id,start_by_ms) VALUES(?,?)`, "node_id", "spawn_attempt_start_by", "start_by_ms")), nodeID, startByMS)
 	return err
 }
 
@@ -207,7 +207,7 @@ func (s *laneInboxStore) spawnGrantRowCount(parent context.Context) (int, error)
 	ctx, done := s.op(parent)
 	defer done()
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM spawn_operations WHERE status LIKE '%\_grant' ESCAPE '\'`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM spawn_operations WHERE status LIKE '%\_grant'`+s.dialect.escapeClause()).Scan(&n)
 	return n, err
 }
 

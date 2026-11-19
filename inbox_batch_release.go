@@ -34,7 +34,7 @@ func (s *laneInboxStore) releaseBatchClaims(id string) error {
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}

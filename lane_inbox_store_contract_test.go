@@ -535,7 +535,7 @@ func TestLaneInboxStoreContractAbortEndsAStalledCall(t *testing.T) {
 		s := open()
 		// A second connection holds the write lock the next write needs.
 		var unlock func()
-		if s.dialect == laneInboxPostgres {
+		if s.dialect == dialectPostgres {
 			conn, err := s.db.Conn(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -578,7 +578,7 @@ func TestLaneInboxStoreContractAbortEndsAStalledCall(t *testing.T) {
 				t.Fatal("aborted call reported success")
 			}
 			bound := 2 * time.Second
-			if s.dialect == laneInboxSQLite {
+			if s.dialect == dialectSQLite {
 				bound = 6 * time.Second
 			}
 			if waited := time.Since(started); waited > bound {
@@ -658,7 +658,7 @@ func TestHubServerOpensPostgresInbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	if h.inbox == nil || h.inbox.store.dialect != laneInboxPostgres {
+	if h.inbox == nil || h.inbox.store.dialect != dialectPostgres {
 		t.Fatal("hub did not open the Postgres inbox")
 	}
 	if _, err := os.Stat(fallback); err == nil {
@@ -736,11 +736,11 @@ func TestLaneInboxStorePostgresForcesSynchronousCommit(t *testing.T) {
 // Postgres; SQLite errors keep their text.
 func TestLaneInboxStoreLoggableErrors(t *testing.T) {
 	leaky := &net.OpError{Op: "read", Net: "tcp", Addr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 5432}, Err: errors.New("i/o timeout")}
-	pg := &laneInboxStore{dialect: laneInboxPostgres}
+	pg := &laneInboxStore{dialect: dialectPostgres}
 	if got := pg.loggable("startup recovery", leaky).Error(); strings.Contains(got, "192.0.2.7") || got != "hub database startup recovery failed (*net.OpError)" {
 		t.Fatalf("postgres loggable = %q", got)
 	}
-	lite := &laneInboxStore{dialect: laneInboxSQLite}
+	lite := &laneInboxStore{dialect: dialectSQLite}
 	if got := lite.loggable("startup recovery", errors.New("fixture recovery failure")); got.Error() != "fixture recovery failure" {
 		t.Fatalf("sqlite loggable = %q", got)
 	}

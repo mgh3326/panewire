@@ -340,7 +340,7 @@ func (s *laneInboxStore) recordSpawnParkPriority(parent context.Context, task hu
 	if err != nil {
 		return false, err
 	}
-	n, _ := result.RowsAffected()
+	n, _ := s.dialect.rowsMatched(result)
 	return n == 1, nil
 }
 
@@ -371,10 +371,10 @@ func (s *laneInboxStore) recordSpawnParkJudgement(parent context.Context, task h
 	if told {
 		toldFlag = 1
 	}
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_judged_reason=?,park_notice_ms=CASE WHEN ?<>0 THEN CAST(? AS BIGINT) ELSE park_notice_ms END WHERE request_id=? AND attempt=? AND park_reason=? AND status='accepted' AND node_id IS NULL`), task.ParkReason, toldFlag, now.UnixMilli(), task.Request.RequestID, task.Attempt, task.ParkReason)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET park_judged_reason=?,park_notice_ms=CASE WHEN ?<>0 THEN `+s.dialect.castInt("?")+` ELSE park_notice_ms END WHERE request_id=? AND attempt=? AND park_reason=? AND status='accepted' AND node_id IS NULL`), task.ParkReason, toldFlag, now.UnixMilli(), task.Request.RequestID, task.Attempt, task.ParkReason)
 	if err != nil {
 		return false, err
 	}
-	n, _ := result.RowsAffected()
+	n, _ := s.dialect.rowsMatched(result)
 	return n == 1, nil
 }

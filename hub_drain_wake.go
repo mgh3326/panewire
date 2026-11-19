@@ -276,7 +276,7 @@ func (s *laneInboxStore) saveDrainWake(ctx context.Context, lane string, state *
 	if !state.lastSent.IsZero() {
 		sentMS = state.lastSent.UnixMilli()
 	}
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO drain_wake_lanes(lane,pending,last_sent) VALUES(?,?,?) ON CONFLICT(lane) DO UPDATE SET pending=excluded.pending,last_sent=excluded.last_sent`), lane, pending, sentMS)
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO drain_wake_lanes(lane,pending,last_sent) VALUES(?,?,?)`, "lane", s.dialect.assignIncoming("pending", "last_sent"))), lane, pending, sentMS)
 	return err
 }
 

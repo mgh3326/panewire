@@ -49,12 +49,12 @@ const placementSnapshotFrozen = 2
 func (s *laneInboxStore) saveSpawnPlacementSnapshot(parent context.Context, requestID string, attempt int, payload []byte, delivery string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?) ON CONFLICT(request_id,attempt) DO UPDATE SET payload=excluded.payload,delivery=excluded.delivery WHERE spawn_placement_snapshots.recorded=0`), requestID, attempt, string(payload), delivery); err != nil {
+	if _, err := tx.ExecContext(ctx, s.q(s.dialect.upsertWhere(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?)`, "request_id,attempt", "spawn_placement_snapshots", "recorded=0", "payload", "delivery")), requestID, attempt, string(payload), delivery); err != nil {
 		return err
 	}
 	// The outbox row lands with the snapshot it names (hk 5298).
@@ -174,7 +174,7 @@ func continueSpawnPlacementTrace(previous, current fleet.PlacementTrace, exclusi
 func (s *laneInboxStore) markSpawnPlacementRecorded(parent context.Context, requestID string, attempt int) error {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -722,7 +722,7 @@ func (h *HubServer) forgetPlacementTraceBase(requestID string, attempt int) {
 func (s *laneInboxStore) saveDeferredPlacementSnapshot(parent context.Context, d placementDeferredSave) (bool, *placementDeferredBase, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, nil, err
 	}
@@ -731,12 +731,12 @@ func (s *laneInboxStore) saveDeferredPlacementSnapshot(parent context.Context, d
 	if d.Base != nil && d.Base.Exists {
 		result, err = tx.ExecContext(ctx, s.q(`UPDATE spawn_placement_snapshots SET payload=?,delivery=? WHERE request_id=? AND attempt=? AND recorded=0 AND payload=? AND delivery=?`), string(d.Payload), d.Delivery, d.RequestID, d.Attempt, string(d.Base.Payload), d.Base.Delivery)
 	} else {
-		result, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?) ON CONFLICT(request_id,attempt) DO NOTHING`), d.RequestID, d.Attempt, string(d.Payload), d.Delivery)
+		result, err = tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_placement_snapshots(request_id,attempt,payload,delivery) VALUES(?,?,?,?)`, "request_id,attempt")), d.RequestID, d.Attempt, string(d.Payload), d.Delivery)
 	}
 	if err != nil {
 		return false, nil, err
 	}
-	written, err := result.RowsAffected()
+	written, err := s.dialect.rowsMatched(result)
 	if err != nil {
 		return false, nil, err
 	}
