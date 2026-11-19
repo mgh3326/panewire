@@ -52,7 +52,7 @@ func gradeDescription() string {
 	return strings.Join(grades[:len(grades)-1], ", ") + " or " + grades[len(grades)-1]
 }
 
-var baseFlags = []string{"-m", "-w", "-l", "--t", "--effort", "--e6-arm", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--author-family", "--builder-job", "--review-pass"}
+var baseFlags = []string{"-m", "-w", "-l", "--t", "--effort", "--e6-arm", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--owner-notify", "--author-family", "--builder-job", "--review-pass"}
 
 var operatorFlags = []string{"-c", "-p", "--host", "--exclude-host", "--exclude-pool", "--grade", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose", "--consult-stamp"}
 

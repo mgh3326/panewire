@@ -9,6 +9,10 @@ default: interrupt
 # wake (relay.inbox_wake_window, default 5m); see docs/quiet-delivery.md.
 relay:
   design_lanes: ["*-design"]
+  # Spawn-failure causes a design owner is always told about (hk 5360). Other
+  # retryable failures are counted by cause and not sent; see
+  # docs/hub-spawn-operations.md, "Owner notices by cause".
+  spawn_notice_must_fix: [workspace_unresolved, auth_unavailable, report_path, brief_upload, identity_unproven]
 # Completed inbox history; unread items and the one-day replay window are protected.
 retention:
   days: 14

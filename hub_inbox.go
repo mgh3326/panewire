@@ -213,6 +213,13 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		}
 		// hk's row belongs to another event: this one takes the inbox path.
 	}
+	// --owner-notify (hk 5360): the owner of a spawn that named a mode hears no
+	// completion from it; the completion is recorded in hk and counted.
+	if h.ownerNotifyJobSilenced(jobLookupContext, kind, *event, lane) {
+		if result, handled := h.receiveOwnerNotifySilenced(kind, event, sender, senderID, lane); handled {
+			return result, true
+		}
+	}
 	if event.NotifyType == "" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
 		switch kind {
 		case "job.completed", "job.joined":

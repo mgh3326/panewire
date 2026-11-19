@@ -58,7 +58,9 @@ type spawnNoticeAction int
 const (
 	spawnNoticeDeliver spawnNoticeAction = iota
 	spawnNoticeFile
-	spawnNoticeHold
+	// spawnNoticeCount settles a row silently: nothing is sent to the owner, and
+	// the outcome is counted by cause in the daily loops row (hk 5360).
+	spawnNoticeCount
 )
 
 // spawnNoticeRetry is how soon the flush reads the outbox again while a
@@ -165,29 +167,35 @@ func spawnNoticeAttempt(id string) int {
 
 // spawnNoticeFor decides what a pending notification does. Anything the hub
 // cannot place (no spawn record, an unreadable store) is delivered.
+//
+// A spawn that names --owner-notify decides its owner copies by that mode
+// (ownerModeNoticeAction), whatever the owner's lane class. Without the flag, a
+// design owner's failure follows the cause rules (hub_spawn_notice_silence.go),
+// and a design owner's routine result follows the reviewer rules.
 func (h *HubServer) spawnNoticeFor(ctx context.Context, n spawnNotification, result hubSpawnOutcome) spawnNoticeAction {
+	task, err := h.inbox.store.spawnTask(ctx, n.request)
+	if err != nil {
+		return spawnNoticeDeliver
+	}
+	if mode := ownerNotifyMode(task.Request.Args); mode != "" {
+		if n.owner != task.Owner {
+			return spawnNoticeDeliver // the requester's own copy reaches it at once
+		}
+		return h.ownerModeNoticeAction(task, result, mode)
+	}
 	if !h.inbox.policy.designLane(n.owner) {
 		return spawnNoticeDeliver
 	}
-	task, err := h.inbox.store.spawnTask(ctx, n.request)
-	if err != nil || !daemonStartedReviewer(task.Job, task.Request.Args) {
+	if result.RC != 0 {
+		return h.spawnFailureNoticeAction(n, task, result)
+	}
+	if !daemonStartedReviewer(task.Job, task.Request.Args) {
 		return spawnNoticeDeliver
 	}
-	switch {
-	case result.RC == 0:
-		if result.LaneUnregistered {
-			return spawnNoticeDeliver // the pane's findings are not routed: someone must act
-		}
-		return spawnNoticeFile
-	case n.owner != task.Owner:
-		return spawnNoticeDeliver // the requester's own copy reaches it at once
-	case result.Retryable && h.quietTimings.spawnFailureHold > 0 && spawnSubmitterLane(task.Request.Args) != "" && spawnSubmitterLane(task.Request.Args) != task.Owner:
-		// Held only for a requester that has its own copy (completeSpawn
-		// writes one when the submitting lane differs from the owner). With
-		// none, the owner row is the only notice the requester can act on.
-		return spawnNoticeHold
+	if result.LaneUnregistered {
+		return spawnNoticeDeliver // the pane's findings are not routed: someone must act
 	}
-	return spawnNoticeDeliver
+	return spawnNoticeFile
 }
 
 func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotification) {
@@ -200,6 +208,9 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 	}
 	event := spawnNotificationEvent(n, result)
 	switch h.spawnNoticeFor(ctx, n, result) {
+	case spawnNoticeCount:
+		h.countSilencedSpawnNotice(n.id, n.owner, spawnNoticeOutcomeCause(result))
+		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
 	case spawnNoticeFile:
 		switch _, filed, ok := h.fileFilteredInHK(ctx, "lane.event", event, event.Host, filteredReasonReviewerLifecycle); {
 		case ok && filed:
@@ -210,9 +221,6 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 				h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
 			}
 		}
-	case spawnNoticeHold:
-		h.logger.Info("reviewer spawn failure held for its requester", "request", n.request, "job", n.job, "event_id", n.id)
-		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeHeld)
 	default:
 		// The relay owns the durable write. Persisting here first makes its own
 		// POST a 200 duplicate, which it leaves to replay instead of injecting.

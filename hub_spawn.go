@@ -385,6 +385,9 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	if record == nil || !record.capabilities[hubCapabilityConsultStamp] {
 		body.Args = withoutSpawnFlag(body.Args, fleet.ConsultStampArg)
 	}
+	if record == nil || !record.capabilities[hubCapabilityOwnerNotify] {
+		body.Args = withoutSpawnFlag(body.Args, fleet.OwnerNotifyArg)
+	}
 	if record != nil && record.agent != nil && record.state == "connected" && (body.Checkout != nil || body.Brief.Doc != "") && !record.capabilities["spawn_v2"] {
 		h.mu.Unlock()
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "spawn_capability_required", "capability": "spawn_v2"})

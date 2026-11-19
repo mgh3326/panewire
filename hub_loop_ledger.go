@@ -195,6 +195,24 @@ type loopLedgerState struct {
 	// reason and account (the selection_drops group of the daily row). A
 	// date's counts leave with its row.
 	drops map[string]map[selectionDropKey]int64
+	// silenced counts the owner notices the spawn notice rules recorded instead
+	// of sending, by UTC date, owner lane and cause (the spawn_notices group of
+	// the daily row, hk 5360). A date's counts leave with its row.
+	silenced map[string]map[spawnNoticeCountKey]int64
+}
+
+// spawnNoticeCountKey is one spawn_notices row: a cause on one owner lane.
+type spawnNoticeCountKey struct {
+	lane  string
+	cause string
+}
+
+// spawnNoticeRow is one entry of the daily row's spawn_notices group.
+type spawnNoticeRow struct {
+	Machine  string `json:"machine"`
+	Lane     string `json:"lane"`
+	Cause    string `json:"cause"`
+	Silenced int64  `json:"silenced"`
 }
 
 // selectionDropKey is one selection_drops row: a drop reason on one account.
@@ -233,6 +251,7 @@ func newLoopLedgerState() *loopLedgerState {
 		nodeConsecutiveNoReport: make(map[string]int),
 		nodeNoticeSent:          make(map[string]string),
 		drops:                   make(map[string]map[selectionDropKey]int64),
+		silenced:                make(map[string]map[spawnNoticeCountKey]int64),
 	}
 }
 
@@ -507,6 +526,46 @@ type loopsRowDoc struct {
 	// SelectionDrops is the selection drops row group: SWE-2 candidates the
 	// placed selections dropped, by reason and account (docs/loops.md).
 	SelectionDrops []selectionDropRow `json:"selection_drops"`
+	// SpawnNotices is the spawn notices row group: owner notices the spawn
+	// notice rules recorded instead of sending, by owner lane and cause
+	// (hk 5360, docs/loops.md).
+	SpawnNotices []spawnNoticeRow `json:"spawn_notices"`
+}
+
+// noteSpawnNoticeSilenced counts one owner notice recorded instead of sent, for
+// owner lane and cause, into today's UTC date. A hub without a clock skips the
+// count, as every ledger call does.
+func (h *HubServer) noteSpawnNoticeSilenced(lane, cause string) {
+	now, ok := h.loopNow()
+	if !ok {
+		return
+	}
+	st := h.loopLedger()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	date := loopDateOf(now)
+	byKey := st.silenced[date]
+	if byKey == nil {
+		byKey = make(map[spawnNoticeCountKey]int64)
+		st.silenced[date] = byKey
+	}
+	byKey[spawnNoticeCountKey{lane: lane, cause: cause}]++
+}
+
+// spawnNoticeRowsLocked returns date's spawn_notices group, sorted by lane then
+// cause so the document body is deterministic. The caller holds st.mu.
+func spawnNoticeRowsLocked(st *loopLedgerState, date string) []spawnNoticeRow {
+	out := make([]spawnNoticeRow, 0, len(st.silenced[date]))
+	for key, n := range st.silenced[date] {
+		out = append(out, spawnNoticeRow{Machine: "hub", Lane: key.lane, Cause: key.cause, Silenced: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Lane != out[j].Lane {
+			return out[i].Lane < out[j].Lane
+		}
+		return out[i].Cause < out[j].Cause
+	})
+	return out
 }
 
 // noteSelectionDrops counts the SWE-2 candidates one placed selection dropped
@@ -576,7 +635,7 @@ func (h *HubServer) loopsRowDocument(date string, now time.Time) loopsRowDoc {
 		})
 	}
 	rows = append(rows, h.nodeLoopsRowsLocked(st, date)...)
-	return loopsRowDoc{V: loopsRowVersion, At: now.UTC(), Machine: "hub", Rows: rows, SelectionDrops: selectionDropRowsLocked(st, date)}
+	return loopsRowDoc{V: loopsRowVersion, At: now.UTC(), Machine: "hub", Rows: rows, SelectionDrops: selectionDropRowsLocked(st, date), SpawnNotices: spawnNoticeRowsLocked(st, date)}
 }
 
 // nodeLoopsRowsLocked returns the merged per-machine rows for date: each
@@ -719,6 +778,9 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 	for date := range st.drops {
 		dates[date] = true
 	}
+	for date := range st.silenced {
+		dates[date] = true
+	}
 	for date := range dates {
 		if date >= today {
 			continue
@@ -764,6 +826,7 @@ func (h *HubServer) maybeWriteLoopsRow(ctx context.Context) {
 		st.mu.Lock()
 		delete(st.days, date)
 		delete(st.drops, date)
+		delete(st.silenced, date)
 		h.pruneNodeLoopDayLocked(st, date)
 		if st.nodeRowsWrittenThrough < date {
 			st.nodeRowsWrittenThrough = date

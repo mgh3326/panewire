@@ -151,6 +151,12 @@ var spawnRefusals = []spawnRefusal{
 	// secret_like_content: the reason's ": " separator would read as hk's
 	// free-form "code: reason" and the redactor would eat it.
 	{match: "secret_like_content", code: "hk_guard_refused", hint: "hk's secret guard refused the write as secret-like content and named the pattern in the reason; remove the secret-shaped text from the brief or task field and retry."},
+	// hk 5360: an upload the node could not write is a cause someone must
+	// fix (spawn_notice_must_fix), so it gets its own code before the broad
+	// "brief" row. The placement-exhaustion row above is earlier, so its tried
+	// notes that mention an upload still classify as placement.
+	{match: "brief upload to", code: "brief_upload", hint: "Check that the executing node can write its brief document to hk (handoffkeep reachable from that node, and the brief key under the node's prefix writable), then replay the saved request."},
+	{match: "identity not proven", code: "identity_unproven", hint: "Prove the executing host's pane identity for the named harness (run the harness's identity check there, e.g. panewire preflight --json), then replay the saved request."},
 	{match: "brief", code: "brief_invalid", hint: spawnBriefHint},
 	{match: "task title", code: "task_title", hint: "Set the task title marker to (grade X, Tn), matching --t, then retry."},
 	{match: "task scale", code: "task_scale", hint: "Make --t match the task title's T level, then retry."},
