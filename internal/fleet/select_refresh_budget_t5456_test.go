@@ -44,7 +44,9 @@ func TestSelectionQueuesARefreshThatFitsTheBudget_t5456(t *testing.T) {
 // the reading usable, is not waited on again: the seat drops instead.
 func TestSelectionDoesNotWaitTwiceForOneRefresh_t5456(t *testing.T) {
 	a, s, calls := refreshWaitFixture(t)
-	a.QuotaRefreshSettled = func(machine, pool string) bool { return machine == "local" && pool == "codex" }
+	a.QuotaRefreshSettled = func(machine, pool string) (string, bool) {
+		return "its shared quota refresh finished without a usable reading", machine == "local" && pool == "codex"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	_, err := a.selectProfile(ctx, s)
@@ -53,6 +55,25 @@ func TestSelectionDoesNotWaitTwiceForOneRefresh_t5456(t *testing.T) {
 	}
 	if errors.Is(err, ErrQuotaRefreshPending) {
 		t.Fatal("the request was parked on a second refresh for the same key")
+	}
+}
+
+// A refresh the hub did not queue (no budget for it) never leaves the request
+// pending: selection drops the seat and moves on (hk 5456).
+func TestSelectionDoesNotWaitOnAnUnqueuedRefresh_t5456(t *testing.T) {
+	a, s, calls := refreshWaitFixture(t)
+	a.ScheduleQuotaRefresh = func(machine, pool, accountKey string, timeout time.Duration) bool {
+		*calls = append(*calls, timeout)
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	_, err := a.selectProfile(ctx, s)
+	if len(*calls) != 1 {
+		t.Fatalf("selection asked for %v of refresh, want one attempt", *calls)
+	}
+	if errors.Is(err, ErrQuotaRefreshPending) {
+		t.Fatal("selection parked the request on a refresh the hub did not queue")
 	}
 }
 
@@ -70,8 +91,9 @@ func refreshWaitFixture(t *testing.T) (*App, Spawn, *[]time.Duration) {
 	key := "codex:0000000000000001"
 	source.accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: false, MeasuredAt: a.Now().Add(-time.Hour)}
 	var calls []time.Duration
-	a.ScheduleQuotaRefresh = func(machine, pool, accountKey string, timeout time.Duration) {
+	a.ScheduleQuotaRefresh = func(machine, pool, accountKey string, timeout time.Duration) bool {
 		calls = append(calls, timeout)
+		return true
 	}
 	return a, s, &calls
 }

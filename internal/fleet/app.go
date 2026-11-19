@@ -62,17 +62,20 @@ type App struct {
 	PlacementGate func(context.Context) (release func(), err error)
 	// ScheduleQuotaRefresh is set by the hub coordinator. It queues a node
 	// measurement of one account without waiting, with the budget the caller
-	// will actually wait for it; ordinary CLI spawns keep their synchronous
-	// refresh path.
-	ScheduleQuotaRefresh func(machine, pool, accountKey string, timeout time.Duration)
+	// will actually wait for it, and reports whether it queued anything: a
+	// caller with no budget left for the measurement must not be left pending
+	// on a refresh that was never asked for (hk 5456). Ordinary CLI spawns
+	// keep their synchronous refresh path.
+	ScheduleQuotaRefresh func(machine, pool, accountKey string, timeout time.Duration) bool
 	// QuotaRefreshSettled is set by the hub coordinator: it reports that this
 	// request already waited on a shared quota refresh for machine and pool
-	// and that attempt finished without a failure, yet the reading stayed
-	// unusable. A second wait cannot make it usable any sooner, so selection
-	// drops the seat for this request instead (hk 5456). A failed attempt is
-	// not settled: it may be retried while the request is pending. Nil waits
-	// again.
-	QuotaRefreshSettled func(machine, pool string) bool
+	// and that attempt finished, but the reading the request selects still
+	// cannot come from it — it finished with no usable reading, or the host
+	// measured another account. The reason is the refusal text for the seat.
+	// A second wait cannot help, so selection drops the seat for this request
+	// (hk 5456). A transient failure is not settled: it may be retried while
+	// the request is pending. Nil waits again.
+	QuotaRefreshSettled func(machine, pool string) (reason string, settled bool)
 	// PlacementTrace is set by the hub coordinator. It receives the
 	// placement decision's candidate trace as each plan is ranked and again
 	// before each candidate's hub bind, so the hub can persist the latest

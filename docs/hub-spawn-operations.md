@@ -62,13 +62,19 @@ A refresh wait never exceeds what is left of the request (hk 5456). Each queued
 attempt's deadline is the measurement window or the attempt's remaining budget
 less a five-second use margin, whichever is smaller, so it cannot outlive the
 request that asked for it; a request with less budget than that does not start
-the wait at all. A key whose refresh finished without making the reading usable is not waited on
-again by the same request: the seat is dropped for that request and placement
-takes the next candidate, so an unusable reading costs one measurement pass and
-not the whole budget. A failed attempt is not settled that way — it is retried
-while the request stays pending, as before. The wait link keeps every key
-the attempt has asked, not only the last pass's, which is what makes the
-once-per-attempt rule survive the passes in between.
+the wait at all. The hub reports whether it queued the measurement, and a caller
+it did not queue one for never stays pending on it.
+
+A wait is tied to the attempt that asked for it (the link stores when it was
+asked), so a completion an earlier request recorded never settles this one. A
+key whose own refresh finished without making the reading usable, or whose node
+measured another account, is not waited on again by the same request: the seat
+is dropped for that request with that reason and placement takes the next
+candidate, so an unusable reading costs one measurement pass and not the whole
+budget. A failed attempt is not settled that way — it is retried while the
+request stays pending, as before. The wait link keeps every key the attempt has
+asked, not only the last pass's, which is what makes the settled-key rule
+survive the passes in between.
 
 The refresh names the account the request waits on (`account_key` on the
 `quota.refresh` node command). A node that measured another account answers

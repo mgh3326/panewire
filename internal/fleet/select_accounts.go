@@ -241,19 +241,22 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 	}
 	if sp.a.ScheduleQuotaRefresh != nil && sp.a.nativeQuotaPool(pool) {
 		// A request with no budget left for the measurement never starts the
-		// wait (hk 5456): the seat is dropped for this request instead, and
-		// placement takes the next candidate.
+		// wait, and one whose earlier wait on a key cannot supply the reading
+		// does not repeat it (hk 5456): the seat is dropped for this request
+		// instead, and placement takes the next candidate.
 		fits := quotaRefreshFits(ctx, sp.a.measureTimeout())
 		queued := false
+		settled := ""
 		for _, host := range ordered {
-			if !fits {
-				break
-			}
-			if !sp.a.refreshDue(ctx, host.name, pool) {
+			if reason, did := sp.a.refreshSettled(host.name, pool); did {
+				if settled == "" {
+					settled = reason
+				}
 				continue
 			}
-			sp.a.scheduleQuotaRefresh(host.name, pool, key)
-			queued = true
+			if fits && sp.a.scheduleQuotaRefresh(host.name, pool, key) {
+				queued = true
+			}
 		}
 		if queued {
 			sp.refreshPending = true
@@ -262,12 +265,11 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 			sp.accounts[key] = acc
 			return acc
 		}
-		// Nothing can measure this account for this request: waiting would
-		// only spend the rest of its budget on a reading that cannot arrive
-		// in time, or one its last attempt already failed to make usable.
-		why := fmt.Sprintf("account %s on pool %s needs a shared quota refresh that cannot finish inside this request's remaining budget", key, pool)
-		if fits {
-			why = fmt.Sprintf("account %s on pool %s already waited on a shared quota refresh, and it finished without a usable reading", key, pool)
+		why := fmt.Sprintf("account %s on pool %s needs a shared quota refresh the hub could not queue inside this request's remaining budget", key, pool)
+		if settled != "" {
+			why = fmt.Sprintf("account %s on pool %s: %s", key, pool, settled)
+		} else if fits {
+			why = fmt.Sprintf("account %s on pool %s needs a shared quota refresh that this request has no host left to measure", key, pool)
 		}
 		result := accountRefresh{measured: measureNotDue, host: firstHolder(ordered), err: fail(exitEvictionUnconfirmed, "%s", why)}
 		acc = SharedAccount{Key: key, Degraded: true}

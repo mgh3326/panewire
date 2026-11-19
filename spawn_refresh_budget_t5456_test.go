@@ -86,3 +86,63 @@ func TestSpawnGivenUpWithoutCandidatesSaysSo_t5456(t *testing.T) {
 		t.Fatalf("tried = %+v, want none", outcome.Tried)
 	}
 }
+
+// hk 5456 review: a completion recorded before this request asked says nothing
+// about its wait. Only the request's own attempt settles it, and only a
+// finished attempt that cannot supply the reading (nothing usable, or another
+// account measured) settles it at all.
+func TestSpawnRefreshSettledTiesToTheRequestsOwnWait_t5456(t *testing.T) {
+	retryHK(t)
+	hub := timeoutRefreshHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), &controlPlaneLogCapture{})
+	now := time.Now()
+	task := hubSpawnTask{RefreshWaits: []hubSpawnRefreshWait{{Machine: "machine-a", Pool: "codex", At: now}}}
+	record := func(outcome string, at time.Time) {
+		t.Helper()
+		if err := hub.inbox.store.recordQuotaRefreshAttempt(t.Context(), "machine-a", "codex", outcome, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// An older request's successful refresh does not make this wait settled.
+	record("", now.Add(-time.Minute))
+	if reason, settled := hub.spawnRefreshSettled(task, "machine-a", "codex"); settled {
+		t.Fatalf("an older completion settled this wait: %q", reason)
+	}
+	// This wait's own attempt finished without a usable reading.
+	record("", now.Add(time.Second))
+	reason, settled := hub.spawnRefreshSettled(task, "machine-a", "codex")
+	if !settled || !strings.Contains(reason, "without a usable reading") {
+		t.Fatalf("settled=%v reason=%q, want a finished attempt with no usable reading", settled, reason)
+	}
+	// A node that measured another account cannot supply this one: settled.
+	record("account_mismatch", now.Add(2*time.Second))
+	reason, settled = hub.spawnRefreshSettled(task, "machine-a", "codex")
+	if !settled || !strings.Contains(reason, "machine-a") || !strings.Contains(reason, "another account") {
+		t.Fatalf("settled=%v reason=%q, want the account mismatch named", settled, reason)
+	}
+	// A transient failure is retried, not settled.
+	record("node_timeout", now.Add(3*time.Second))
+	if reason, settled := hub.spawnRefreshSettled(task, "machine-a", "codex"); settled {
+		t.Fatalf("a timeout settled the wait: %q", reason)
+	}
+	// A pool this request never asked for is never settled by another's row.
+	if reason, settled := hub.spawnRefreshSettled(task, "machine-b", "codex"); settled {
+		t.Fatalf("a pool the request did not ask for settled: %q", reason)
+	}
+}
+
+// hk 5456 review: the hub tells the caller whether it actually queued the
+// measurement, so a request with no budget for it is not left waiting on one
+// that was never asked for.
+func TestScheduleSpawnQuotaRefreshReportsWhetherItQueued_t5456(t *testing.T) {
+	retryHK(t)
+	hub := timeoutRefreshHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), &controlPlaneLogCapture{})
+	now := time.Now()
+	near := hubSpawnTask{Deadline: now.Add(3 * time.Second)}
+	if hub.scheduleSpawnQuotaRefresh(near, "machine-a", "codex", "codex:0000000000000001", time.Minute, now) {
+		t.Fatal("a request with less than the use margin queued a refresh it would not wait for")
+	}
+	far := hubSpawnTask{Deadline: now.Add(time.Hour)}
+	if !hub.scheduleSpawnQuotaRefresh(far, "machine-a", "codex", "codex:0000000000000001", time.Minute, now) {
+		t.Fatal("a request with an hour left did not queue its refresh")
+	}
+}

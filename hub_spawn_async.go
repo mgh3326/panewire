@@ -836,19 +836,16 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 				return
 			}
 		}
-		refreshWaits = append(refreshWaits, hubSpawnRefreshWait{Machine: machine, Pool: pool})
+		refreshWaits = append(refreshWaits, hubSpawnRefreshWait{Machine: machine, Pool: pool, At: h.now().UTC()})
 	}
-	app.ScheduleQuotaRefresh = func(machine, pool, accountKey string, timeout time.Duration) {
-		// A refresh never outlives what is left of the request's attempt
-		// (hk 5456): the queue deadline is this request's budget too.
-		budget := spawnQuotaRefreshBudget(task, timeout, h.now())
-		if budget <= 0 {
-			return
+	app.ScheduleQuotaRefresh = func(machine, pool, accountKey string, timeout time.Duration) bool {
+		if !h.scheduleSpawnQuotaRefresh(task, machine, pool, accountKey, timeout, h.now()) {
+			return false
 		}
 		rememberRefreshWait(machine, pool)
-		h.scheduleQuotaRefresh(machine, pool, accountKey, budget)
+		return true
 	}
-	app.QuotaRefreshSettled = func(machine, pool string) bool { return h.spawnRefreshSettled(task, machine, pool) }
+	app.QuotaRefreshSettled = func(machine, pool string) (string, bool) { return h.spawnRefreshSettled(task, machine, pool) }
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host, hubSpawnArg(task.Request.Args, "-l")) }
 	app.PlacementGate = h.placementGate.acquire
 	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
@@ -1129,32 +1126,58 @@ func spawnQuotaRefreshBudget(task hubSpawnTask, timeout time.Duration, now time.
 	return timeout
 }
 
+// scheduleSpawnQuotaRefresh queues one shared quota refresh for this attempt
+// inside what is left of it (hk 5456) and reports whether it queued one. With
+// no budget nothing is queued, so the caller must not wait: a caller left
+// pending on a refresh that was never asked for cannot make progress.
+func (h *HubServer) scheduleSpawnQuotaRefresh(task hubSpawnTask, machine, pool, accountKey string, window time.Duration, now time.Time) bool {
+	budget := spawnQuotaRefreshBudget(task, window, now)
+	if budget <= 0 {
+		return false
+	}
+	h.scheduleQuotaRefresh(machine, pool, accountKey, budget)
+	return true
+}
+
 // spawnQuotaRefreshUseMargin is the part of a request's budget a completed
 // refresh needs to be worth waiting for: the attempt is not spent on one whose
 // reading cannot be placed before the deadline.
 const spawnQuotaRefreshUseMargin = 5 * time.Second
 
-// spawnRefreshSettled reports whether this attempt already waited on a shared
-// refresh for machine/pool and that attempt finished without a failure, so a
-// second wait cannot change the reading the request selects (hk 5456). A
-// failed attempt is not settled: it may be retried while the request is
-// pending. One that has not finished yet is not settled either; the scheduler
-// already coalesces a key that is still queued or running.
-func (h *HubServer) spawnRefreshSettled(task hubSpawnTask, machine, pool string) bool {
-	waited := slices.ContainsFunc(task.RefreshWaits, func(wait hubSpawnRefreshWait) bool {
-		return wait.Machine == machine && wait.Pool == pool
-	})
-	if !waited {
-		return false
+// spawnRefreshSettled reports whether this attempt's own wait on a shared
+// refresh for machine/pool is over and cannot supply the reading the request
+// selects, with the sentence the dropped seat records (hk 5456). Settled means
+// the attempt finished without a usable reading, or the node measured another
+// account and will keep doing so. A transient failure is not settled: it may
+// be retried while the request is pending, and one still running is coalesced
+// by the scheduler. A completion recorded before this attempt asked (an older
+// request's refresh) never counts.
+func (h *HubServer) spawnRefreshSettled(task hubSpawnTask, machine, pool string) (string, bool) {
+	var wait hubSpawnRefreshWait
+	waited := false
+	for _, candidate := range task.RefreshWaits {
+		if candidate.Machine == machine && candidate.Pool == pool {
+			wait, waited = candidate, true
+			break
+		}
 	}
-	if h.inbox == nil {
-		return true
+	if !waited || h.inbox == nil {
+		return "", false
 	}
-	outcome, _, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, machine, pool)
+	outcome, seen, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, machine, pool)
 	if err != nil || !found {
-		return false
+		return "", false
 	}
-	return outcome == ""
+	if !wait.At.IsZero() && seen.Before(wait.At) {
+		return "", false
+	}
+	switch outcome {
+	case "":
+		return "its shared quota refresh finished without a usable reading", true
+	case "account_mismatch":
+		return "its shared quota refresh measured another account (" + machine + "), so waiting again cannot supply the selected one", true
+	}
+	return "", false
 }
 
 // spawnTriedRefreshWaits is the tried list a timeout records for the shared
@@ -1167,7 +1190,7 @@ func (h *HubServer) spawnTriedRefreshWaits(task hubSpawnTask) []hubSpawnTried {
 	for _, wait := range task.RefreshWaits {
 		reason := "no refresh attempt finished"
 		if h.inbox != nil {
-			if outcome, _, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, wait.Machine, wait.Pool); err == nil && found {
+			if outcome, seen, found, err := h.inbox.store.quotaRefreshAttempt(h.closeCtx, wait.Machine, wait.Pool); err == nil && found && (wait.At.IsZero() || !seen.Before(wait.At)) {
 				if outcome != "" {
 					reason = "refresh failed: " + outcome
 				} else {

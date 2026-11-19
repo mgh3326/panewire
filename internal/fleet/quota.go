@@ -655,8 +655,14 @@ func (a *App) measureTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func (a *App) scheduleQuotaRefresh(host, pool, accountKey string) {
-	a.ScheduleQuotaRefresh(host, pool, accountKey, a.measureTimeout())
+// scheduleQuotaRefresh queues one shared measurement and reports whether the
+// caller will actually wait for it: a caller the hub did not queue anything
+// for must not stay pending (hk 5456).
+func (a *App) scheduleQuotaRefresh(host, pool, accountKey string) bool {
+	if a.ScheduleQuotaRefresh == nil {
+		return false
+	}
+	return a.ScheduleQuotaRefresh(host, pool, accountKey, a.measureTimeout())
 }
 
 // refreshDue reports whether a shared quota refresh for this account should be
@@ -665,10 +671,18 @@ func (a *App) scheduleQuotaRefresh(host, pool, accountKey string) {
 // cannot help it sooner. A request with less budget left than one measurement
 // takes never starts the wait, so it cannot outlive the request's own deadline.
 func (a *App) refreshDue(ctx context.Context, host, pool string) bool {
-	if a.QuotaRefreshSettled != nil && a.QuotaRefreshSettled(host, pool) {
-		return false
+	_, settled := a.refreshSettled(host, pool)
+	return !settled && quotaRefreshFits(ctx, a.measureTimeout())
+}
+
+// refreshSettled reports whether this request already waited on a refresh for
+// the key and that attempt cannot supply the reading it selects, with the
+// text the dropped seat records.
+func (a *App) refreshSettled(host, pool string) (string, bool) {
+	if a.QuotaRefreshSettled == nil {
+		return "", false
 	}
-	return quotaRefreshFits(ctx, a.measureTimeout())
+	return a.QuotaRefreshSettled(host, pool)
 }
 
 // quotaRefreshFits reports whether the caller's remaining budget covers one
@@ -714,8 +728,7 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 				a.quotaObservationEvent(host, pool, observed, acc)
 			}
 		}()
-		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) && a.refreshDue(ctx, host, pool) {
-			a.scheduleQuotaRefresh(host, pool, key)
+		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.nativeQuotaPool(pool) && a.refreshDue(ctx, host, pool) && a.scheduleQuotaRefresh(host, pool, key) {
 			return j, ErrQuotaRefreshPending
 		}
 		// A stale or missing observation of an account this host does not hold
@@ -757,8 +770,7 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 		r.AccountKey = key
 	}
 	judgment, err := a.judgeGate(ctx, r, pool, j)
-	if err != nil && !local && !a.planOnly && key != "" && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown && a.refreshDue(ctx, host, pool) {
-		a.scheduleQuotaRefresh(host, pool, key)
+	if err != nil && !local && !a.planOnly && key != "" && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown && a.refreshDue(ctx, host, pool) && a.scheduleQuotaRefresh(host, pool, key) {
 		return judgment, ErrQuotaRefreshPending
 	}
 	return judgment, err
