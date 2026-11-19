@@ -137,7 +137,7 @@ their partial indexes are not translated one for one:
   columns its predicate filtered on.
 - `TestHubMySQLMigrationsCoverThePostgresSchema` compares every table and
   column with the Postgres migrations, so a column added on one side fails
-  until the other has it. `supersede_lane_cause` is the one table MySQL adds.
+  until the other has it. `supersede_lane_cause` is used for locking by MySQL; Postgres retains its rows for copy-back and uses advisory locks.
 
 ## Tests
 

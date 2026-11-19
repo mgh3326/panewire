@@ -199,7 +199,7 @@ func TestHubMySQLMigrationsCoverThePostgresSchema(t *testing.T) {
 		}
 	}
 	for table := range mysqlTables {
-		if _, ok := postgres[table]; !ok && table != "supersede_lane_cause" {
+		if _, ok := postgres[table]; !ok {
 			t.Errorf("table %s is in MySQL only", table)
 		}
 	}

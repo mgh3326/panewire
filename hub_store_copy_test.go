@@ -130,7 +130,7 @@ func copyFixtureTables(t *testing.T) []string {
 			t.Fatal(err)
 		}
 		m := re.FindSubmatch(b)
-		if m != nil && string(m[1]) != "supersede_lane_cause" {
+		if m != nil {
 			names = append(names, string(m[1]))
 		}
 	}

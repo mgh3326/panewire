@@ -19,8 +19,7 @@ import (
 )
 
 // storeCopyTables is the portable hub state, in primary-key order. The
-// migration ledger is target-specific; supersede_lane_cause contains only
-// MySQL's transient lock rows and has no Postgres counterpart.
+// migration ledger is target-specific and is rebuilt by target migrations.
 type storeCopyTable struct{ name, key string }
 
 var storeCopyTables = []storeCopyTable{
@@ -34,6 +33,7 @@ var storeCopyTables = []storeCopyTable{
 	{"one_time_action_notices", "machine,kind,need"}, {"placement_record_outbox", "request_id,attempt"},
 	{"spawn_notice_outbox", "event_id"}, {"spawn_queue", "request_id"},
 	{"task_fail_notice_outbox", "request_id"}, {"owner_notice_decisions", "event_key"},
+	{"supersede_lane_cause", "lock_key"},
 }
 
 const storeCopyBatchSize = 256
@@ -242,6 +242,22 @@ type storeCopyResult struct {
 func storeCopyScan(ctx context.Context, tx *sql.Tx, source, target *storeCopyDB, writer *sql.Tx, table storeCopyTable, cols []string, copyRows bool) (storeCopyResult, error) {
 	var result storeCopyResult
 	h := sha256.New()
+	if table.name == "supersede_lane_cause" && source.dialect != dialectMySQL {
+		var exists bool
+		var err error
+		if source.sqlite {
+			err = tx.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='supersede_lane_cause'`).Scan(&exists)
+		} else {
+			err = tx.QueryRowContext(ctx, `SELECT to_regclass('supersede_lane_cause') IS NOT NULL`).Scan(&exists)
+		}
+		if err != nil {
+			return result, hubDatabaseError("inspect lock table", err)
+		}
+		if !exists {
+			copy(result.sum[:], h.Sum(nil))
+			return result, nil
+		}
+	}
 	queryCols := append([]string(nil), cols...)
 	if source.sqlite && table.name == "lane_inbox_batches" {
 		for i, c := range queryCols {
