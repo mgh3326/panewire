@@ -33,7 +33,7 @@ var storeCopyTables = []storeCopyTable{
 	{"one_time_action_notices", "machine,kind,need"}, {"placement_record_outbox", "request_id,attempt"},
 	{"spawn_notice_outbox", "event_id"}, {"spawn_queue", "request_id"},
 	{"task_fail_notice_outbox", "request_id"}, {"owner_notice_decisions", "event_key"},
-	{"supersede_lane_cause", "lock_key"},
+	{"supersede_lane_cause", "lock_key"}, {"quota_refresh_results", "attempt_id"},
 }
 
 const storeCopyBatchSize = 256
