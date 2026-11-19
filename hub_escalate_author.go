@@ -144,9 +144,20 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	if err != nil {
 		return h.escalateAuthorRefusal(ctx, request, "", "job_unreadable", err.Error(), false)
 	}
-	if spawn.Job != request.Job || spawn.Task != request.Task || spawn.Role != "implementer" || spawn.ParentJob != "" {
-		return h.escalateAuthorRefusal(ctx, request, "", "job_mismatch", "the job is not the task's original implementer", false)
+	// Identity rule (hk 5573): the author a step replaces is the chain head, the
+	// job the task's binding (hk refs.job_id) names, whether it is the original
+	// implementer or a successor in its chain: a quota-stop or pool hand-over
+	// successor ("<job>-q<n>") or an earlier ladder successor ("-l<n>"). A
+	// successor's submission names --parent-job and no --task, so its stored
+	// submission cannot say which task it holds; the record's task id and the
+	// live binding (escalateAuthorTaskNamesJob) do, and refuse any job that is
+	// not the current holder, naming the one that is. Here only the shape of
+	// the stored submission is checked: the right job, an implementer, and a
+	// task that is the request's or inherited.
+	if spawn.Job != request.Job || spawn.Role != "implementer" || spawn.Task != "" && spawn.Task != request.Task {
+		return h.escalateAuthorRefusal(ctx, request, "", "job_mismatch", "the job is not an implementer of task "+request.Task, false)
 	}
+	roleKey := fleet.SpawnRoleKey(request.Task, spawn.Role, spawn.ReviewPass)
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
 		return hubEscalateAuthorResult{}, err
@@ -210,7 +221,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			if finished && staged && (result.Code == "job_mismatch" || result.Code == "task_closed") {
 				// The task moved on to another job while this stage waited: the
 				// stage is superseded and is released, never dispatched.
-				if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+				if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, roleKey); err != nil {
 					return hubEscalateAuthorResult{}, err
 				}
 			}
@@ -219,7 +230,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	}
 	if state != "claimed" && state != "spawned" && !resume && !finished {
 		if staged && hkTerminalState(state) {
-			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, roleKey); err != nil {
 				return hubEscalateAuthorResult{}, err
 			}
 			return h.escalateAuthorParentEnded(ctx, request, owner), nil
@@ -251,7 +262,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			return hubEscalateAuthorResult{}, err
 		}
 		if !marked {
-			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+			if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, roleKey); err != nil {
 				return hubEscalateAuthorResult{}, err
 			}
 			return h.escalateAuthorParentEnded(ctx, request, owner), nil
@@ -261,7 +272,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		// closed task releases the stage; an unreadable one keeps it pending.
 		if result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner); stop {
 			if result.Code == "job_mismatch" || result.Code == "task_closed" {
-				if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+				if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, roleKey); err != nil {
 					return hubEscalateAuthorResult{}, err
 				}
 			}
@@ -318,13 +329,27 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		if _, err := fleet.ValidateSubmission(next); err != nil {
 			return h.escalateAuthorRefusal(ctx, request, owner, "successor_invalid", err.Error(), false)
 		}
-		previousID, previousRole := holder.Request.RequestID, spawn.RoleKey()
+		previousID, previousRole := holder.Request.RequestID, roleKey
 		if finished {
 			// The completed author's role is free already (or is freed now): the
 			// successor claims it fresh instead of taking it over.
 			previousID = ""
-			if err := h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, spawn.RoleKey()); err != nil {
+			if err := h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey); err != nil {
 				return hubEscalateAuthorResult{}, err
+			}
+		} else if spawn.ParentJob != "" {
+			// A successor holds the task role only when its predecessor was live
+			// to hand it over: one handed over from a completed author claimed
+			// none (hk 5573). A role nobody holds is claimed fresh; one the
+			// successor holds is taken over; another holder refuses the claim.
+			ownerID, _, _, ownerErr := h.inbox.store.spawnRoleOwner(ctx, roleKey)
+			switch {
+			case errors.Is(ownerErr, sql.ErrNoRows):
+				previousID = ""
+			case ownerErr != nil:
+				return hubEscalateAuthorResult{}, ownerErr
+			case ownerID != holder.Request.RequestID:
+				previousID = ""
 			}
 		}
 		prior, _, err = h.inbox.store.claimSpawnReplacing(ctx, next, newJob, owner, h.now().UTC(), previousID, previousRole, "staged", "")
@@ -338,9 +363,9 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		// reservation is never restored to a terminal job.
 		releaseStage := func() error {
 			if finished {
-				return h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey())
+				return h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, roleKey)
 			}
-			return h.inbox.store.cancelStagedSpawn(ctx, prior.Request.RequestID, holder.Request.RequestID, spawn.RoleKey())
+			return h.inbox.store.cancelStagedSpawn(ctx, prior.Request.RequestID, holder.Request.RequestID, roleKey)
 		}
 		cancel := func(code, why string) (hubEscalateAuthorResult, error) {
 			if err := releaseStage(); err != nil {
@@ -399,7 +424,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 				return hubEscalateAuthorResult{Code: "pending", Reason: "the predecessor's end reason is unconfirmed; retry"}, nil
 			}
 			if hkTerminalState(escalateAuthorStr(current, "state")) && !(escalateAuthorStr(current, "state") == "lost" && escalateAuthorStr(current, "end_reason") == endReason) {
-				if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, spawn.RoleKey()); err != nil {
+				if err := h.inbox.store.discardStagedSpawn(ctx, prior.Request.RequestID, roleKey); err != nil {
 					return hubEscalateAuthorResult{}, err
 				}
 				return h.escalateAuthorParentEnded(ctx, request, owner), nil
@@ -438,7 +463,7 @@ func (h *HubServer) escalateAuthorTaskNamesJob(ctx context.Context, app *fleet.A
 		return hubEscalateAuthorResult{Code: "pending", Reason: "the task's binding is unreadable; retry"}, true
 	}
 	if status.JobID != request.Job {
-		result, _ = h.escalateAuthorRefusal(ctx, request, owner, "job_mismatch", "the task is bound to "+firstNonempty(status.JobID, "no job")+", not "+request.Job, false)
+		result, _ = h.escalateAuthorRefusal(ctx, request, owner, "job_mismatch", "the current implementer is "+firstNonempty(status.JobID, "no job")+" (the task is bound to it), not "+request.Job, false)
 		return result, true
 	}
 	if hkTaskTerminalState(status.State) {
@@ -556,6 +581,10 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		if err != nil || !exists {
 			continue
 		}
+		// A successor holder names --parent-job, not --task: its record carries
+		// the task it holds (hk 5573).
+		taskID := firstNonempty(spawn.Task, hkRecordTaskID(record))
+		roleKey := fleet.SpawnRoleKey(taskID, spawn.Role, spawn.ReviewPass)
 		state := escalateAuthorStr(record, "state")
 		if state == "lost" && escalateAuthorStr(record, "end_reason") == fleet.LadderStepEndReason(id.Round, task.Job) {
 			if h.inbox.store.activateStagedSpawn(ctx, task.Request.RequestID, h.now().UTC(), task.Request.DeadlineSeconds) == nil {
@@ -579,7 +608,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 			request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 			switch h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state {
 			case heldPanePresent:
-				if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
+				if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, roleKey) == nil {
 					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 					_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 				}
@@ -598,18 +627,18 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 					// only while the task still names this author and is open. A
 					// task another job took over supersedes the stage (released,
 					// never dispatched); an unreadable task keeps it.
-					status, statusErr := app.TaskStatus(ctx, spawn.Task)
+					status, statusErr := app.TaskStatus(ctx, taskID)
 					switch {
 					case statusErr != nil:
 						continue
 					case status.JobID != id.Parent:
-						if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
+						if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, roleKey) == nil {
 							h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 							_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "job_mismatch", "the task is bound to "+firstNonempty(status.JobID, "no job")+", not "+id.Parent+"; the staged step was released", false)
 						}
 						continue
 					case hkTaskTerminalState(status.State):
-						if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
+						if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, roleKey) == nil {
 							h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 							_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "task_closed", "the task is "+status.State+"; the staged step was released", false)
 						}
@@ -627,7 +656,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 			}
 		}
 		if hkTerminalState(state) {
-			if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, spawn.RoleKey()) == nil {
+			if h.inbox.store.discardStagedSpawn(ctx, task.Request.RequestID, roleKey) == nil {
 				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 				request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 				h.escalateAuthorParentEnded(ctx, request, task.Owner)
@@ -640,7 +669,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		if h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state != heldPanePresent {
 			continue
 		}
-		if err := h.inbox.store.cancelStagedSpawn(ctx, task.Request.RequestID, holder.Request.RequestID, spawn.RoleKey()); err != nil {
+		if err := h.inbox.store.cancelStagedSpawn(ctx, task.Request.RequestID, holder.Request.RequestID, roleKey); err != nil {
 			continue
 		}
 		h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
@@ -821,9 +850,15 @@ func escalateAuthorSubmission(old fleet.Submission, request hubEscalateAuthorReq
 	}
 	next.Args = escalateAuthorArgs(old.Args, request, newJob)
 	next.Brief = escalateAuthorBrief(old.Brief, request)
-	if old.Repository.Checkout != nil && old.Repository.Checkout.Mode == "branch" {
+	if old.Repository.Checkout != nil && (old.Repository.Checkout.Mode == "branch" || old.Repository.Checkout.Mode == fleet.HubCheckoutSuccessor) {
 		checkout := *old.Repository.Checkout
 		checkout.Sha = ""
+		// A hand-over successor was prepared in the successor mode (a snapshot
+		// fetch ref and a pinned commit). The ladder successor reuses that live
+		// worktree and branch as they stand, which is the branch mode's
+		// verified-reuse contract (hk 5573).
+		checkout.Mode = "branch"
+		checkout.Fetch = ""
 		next.Repository.Checkout = &checkout
 	}
 	if arm := old.E6Arm; arm != "" && arm != request.Profile+"@" && arm != request.Profile+"@"+request.Effort {
