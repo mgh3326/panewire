@@ -64,7 +64,7 @@ report, has no adapter and no delivery proof.
 | codex | same as claude; the working case is `queued_banner` ("Messages to be submitted after next tool call") | observed 8 s |
 | devin | nonce in the transcript, or devin's own queue banner (`nonce_echo`, `devin_queue_banner`) | no |
 | grok | nonce on screen and herdr reports idle/done before the send and `working` after it (`nonce_echo+status_working`) | observed 8 s |
-| omp | same as grok; an unproven send is never retyped | observed 8 s |
+| omp | nonce echo above its one-row composer, which must be empty after the send (`nonce_echo`); `workingUnprovable`: a directive waits for idle or done. Captures in `testdata/relay_omp` (hk 5413) | observed 8 s |
 | cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done; nothing is typed into it while working, and a held row waits for idle while the job is live, unless its pane is proven stuck at working (below); one row per inject | observed 8 s |
 | anything else | none | n/a |
 
@@ -155,14 +155,34 @@ one. Other harnesses keep the batch.
 The nonce is the per-row `[r<id><check>]` token at the head of every typed text
 (#687). It identifies this row, so a replay of another row never counts.
 
-Grok and omp have no captured screens to read a composer or queue banner
-from, so their proof needs neither: a paste that was never submitted shows the
-nonce too, but it does not start a turn. That rule needs an idle or done pane
-before the send. A directive typed into a *working* grok or omp pane is
-therefore injected but stays unconfirmed until a live capture gives a transcript
-rule that tells a queued message from a pending paste. An unproven omp send is
-not retyped: the pane may already contain it. A failed pre-send read can be
-retried safely because no text has been sent.
+Grok has no captured screen to read a composer or queue banner from, so its
+proof needs neither: a paste that was never submitted shows the nonce too, but
+it does not start a turn. That rule needs an idle or done pane before the send.
+A directive typed into a *working* grok pane is therefore injected but stays
+unconfirmed until a live capture gives a transcript rule that tells a queued
+message from a pending paste. A failed pre-send read can be retried safely
+because no text has been sent.
+
+omp has a captured composer (hk 5413, `testdata/relay_omp/README.md`): the row
+that opens with `╰─` and holds the typed text after it, plus the rows below it
+when the text wraps. Those rows are indented by three spaces, and blank rows
+between them are allowed; any other row below the glyph row leaves the composer
+unlocated. The right-aligned placeholder (`⇧⇥ to change thinking effort`) is
+read as an empty composer only when it is the whole of the glyph row with nothing
+below; a draft that contains that text is composer text. The glyph row must be inside the
+visible read, so a composer taller than that read is unlocated too and presend
+refuses it (`presend:composer_unlocated`), rather than typing into a pane it
+cannot see. Its rules: a pending paste in that row is composer residue, and
+the relay presses the one return only when the row holds nothing but this
+inject's text; a submitted prompt is echoed in the transcript above the row,
+which is empty after the send. The transcript is the rows above the row, so a
+typed row never reads as an echo; a screen with no located row has no
+transcript. Presend refuses to type into any composer that is not empty
+(`presend:composer_pending`, `presend:composer_unlocated`). After a send, only
+an unproven verdict with an empty composer (`unproven:composer_empty`) is
+retried once; any other unproven omp verdict may already hold the message, and
+is not retyped. A directive is held while the omp pane is working, since no
+capture shows a message typed into a working omp pane.
 
 cmd uses the same proof, and its transport is different: herdr answers
 `agent get` and `agent read` for a cmd pane but refuses `agent prompt` and

@@ -1390,9 +1390,13 @@ func relayRetriesOnce(result relayInjectResult) bool {
 	case relayInjectRetryable:
 		return true
 	case relayInjectMaybeInPane:
-		// Omp has no composer rule to guard a repeat after a send.
-		if strings.EqualFold(result.Harness, "omp") && !strings.HasPrefix(result.Evidence, "presend:") {
-			return false
+		// hk 5413: omp retries only two verdicts, both proving nothing is in
+		// the pane: an empty composer with no echo after a send (no return was
+		// spent), and a presend read that failed before anything was typed.
+		// Every other verdict, presend-prefixed or after_return, may already
+		// hold the message, or a return was already spent on it.
+		if strings.EqualFold(result.Harness, "omp") {
+			return result.Evidence == "unproven:composer_empty" || result.Evidence == "presend:unproven:read_failed"
 		}
 		// "unproven:..." (also behind a "presend:" prefix) is the reads
 		// showing nothing: no adapter, an unreadable pane, an empty or

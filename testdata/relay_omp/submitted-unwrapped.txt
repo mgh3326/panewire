@@ -1,0 +1,31 @@
+
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.14.2
+
+                        Tip: Hit a Codex rate limit? `/usage reset` spends a saved reset credit
+                                           to immediately restore your quota
+
+ Warning: No default model selected. Use /login, set an API key environment variable, or select a local model with
+ /model or --model.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 19.0.0 is available. Run: omp update
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+ [r5413p1] composer probe
+
+
+ Error: No model selected.
+
+ Use /login, set an API key environment variable, or create
+ <HOME>/.omp/agent/agent.db
+
+ Then use /model to select a model.
+
+ π > ⬢ no-model > 📁 ~/work > ◫ 7.7K/? ⟲ ▶─────────────────────────────────────────────────────────────────────────────
+╰─                                                                                         ⇧⇥ to change thinking effort
