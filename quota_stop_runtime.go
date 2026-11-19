@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
-	"github.com/mgh3326/panewire/internal/quota/devin"
 	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
@@ -40,6 +39,9 @@ type quotaStopManager struct {
 	// endReviewer hands a reviewer's quota stop to the job's watcher, which
 	// ends it as hk 4507 does (hk 5355). Tests substitute it.
 	endReviewer func(ctx context.Context, job, pane string, stop quotastop.Stop) error
+	// keepRungOut keeps the rung a stop spent out of new placements until the
+	// stop's reset (fleet.KeepLimitedRungOut, hk 5562).
+	keepRungOut func(ctx context.Context, job string, stop quotastop.Stop, now func() time.Time)
 	mu          sync.Mutex
 	lastPolicy  time.Time
 	policy      quotaPolicy
@@ -95,6 +97,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
 		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, attempt, stop)
 	}
+	q.keepRungOut = fleet.KeepLimitedRungOut
 	q.endReviewer = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
 		return fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(root, "jobs"), job, pane, q.session(job, pane), stop)
 	}
@@ -503,13 +506,12 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	if !stop.CreditExhaustedAt.IsZero() {
 		return
 	}
-	// A devin free-tier limit is a fact about the host, not the pane: record
-	// it even when this stop is only observed, so the next devin measurement
-	// publishes it and later selections skip the free rung until its reset.
-	if stop.Pool == "devin-free" {
-		if err := fleet.RecordFreeLimit(devin.Config{Now: func() time.Time { return now }}, job.JobID, stop); err != nil {
-			q.logger.Warn("free-limit observation failed", "error", err)
-		}
+	// A provider limit is a fact about the account, not the pane: keep the rung
+	// out of new placements until its reset even when this stop is only
+	// observed (a wait, a hold), not at the job's end (hk 5562). The publish
+	// can take a measurement's time, so it runs beside the observation.
+	if q.keepRungOut != nil {
+		go q.keepRungOut(context.WithoutCancel(ctx), job.JobID, stop, func() time.Time { return now })
 	}
 	// recordDecisionFor logs a failed write itself; there is nothing more to do here.
 	_ = q.actOnQuotaStop(ctx, c, job, inherited, taskID, stop, basis, now)

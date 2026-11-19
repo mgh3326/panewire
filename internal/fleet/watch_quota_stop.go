@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -482,18 +483,41 @@ const quotaRecordLockWait = 10 * time.Second
 // check, when not nil, decides under the events lock whether the record is
 // still wanted (eventIf).
 func (a *App) quotaStopEvent(ctx context.Context, j Job, stop quotastop.Stop, final bool, check func(ledgerView) error) error {
-	if stop.Pool == "devin-free" {
-		if e := RecordFreeLimit(devin.Config{Home: a.Home, Now: a.Now}, j.ID, stop); e != nil {
-			a.warn("free-limit observation failed: %v", e)
-		} else {
-			a.publishFreeLimit(ctx, j.ID)
-		}
-	}
+	a.keepLimitedRungOut(ctx, j.ID, stop)
 	payload := quotaStopPayload(j, stop)
 	if final {
 		payload["final"] = true
 	}
 	return a.eventIf(ctx, j.ID, "job.lost", payload, check)
+}
+
+// keepLimitedRungOut keeps the rung a provider-limit stop spent out of new
+// placements until the stop's reset (hk 5562). Today that is the Devin free
+// band, from the stop itself: the limit is recorded on this host and published
+// at once into the account's shared reading, so every host's selection drops
+// the free rungs as free_limit. A stop of another pool is cooled by the hub
+// when it reads the stop's job.lost (hub_pool_cooling.go).
+func (a *App) keepLimitedRungOut(ctx context.Context, job string, stop quotastop.Stop) {
+	if stop.Pool != "devin-free" {
+		return
+	}
+	if e := RecordFreeLimit(devin.Config{Home: a.Home, Now: a.Now}, job, stop); e != nil {
+		a.warn("free-limit observation failed: %v", e)
+		return
+	}
+	a.publishFreeLimit(ctx, job)
+}
+
+// KeepLimitedRungOut is keepLimitedRungOut for the quota-stop manager, which
+// sees a stop when the pane goes idle on it, whatever it then decides (wait,
+// resume or hand over). Before hk 5562 the manager recorded the limit but left
+// it for the next devin measurement to publish, and a host with a fresh reading
+// never measures: the account kept admitting free rungs that stopped on the
+// same limit. Nothing is sent to the pane.
+func KeepLimitedRungOut(ctx context.Context, job string, stop quotastop.Stop, now func() time.Time) {
+	home, _ := os.UserHomeDir()
+	a := &App{Home: home, Now: now, Runner: ExecRunner{}, Err: io.Discard}
+	a.keepLimitedRungOut(ctx, job, stop)
 }
 
 // freeLimitPublishTimeout bounds publishing a recorded free limit into the
