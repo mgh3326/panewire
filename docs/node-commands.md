@@ -1077,7 +1077,12 @@ index entry (it is not a deletion); a skip-worktree path present on disk is
 refused. A submodule that is moved, dirty, has any flagged entry or has a new
 staged gitlink is refused, and so is an unmerged index. Refusals answer
 `outcome: "snapshot_refused"` with `reason` one of `submodule_changes`,
-`staged_gitlink`, `skip_worktree_file` or `unmerged_index`; nothing is pushed.
+`staged_gitlink`, `skip_worktree_file`, `unmerged_index` or
+`changed_during_snapshot`; nothing is pushed. The tree is built from several
+git reads against the HEAD read in step 1; the node reads HEAD, the index (with
+its flags) and the staged difference before and after, and refuses when they
+differ, so a commit or an index change by the still-running implementer is
+never mixed into the tree.
 
 An `ok` result is `{outcome, top, branch, ref, commit, tree, parent,
 untracked, untracked_more}`. `untracked` names the untracked, non-ignored paths

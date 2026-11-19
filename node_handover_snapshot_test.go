@@ -421,3 +421,50 @@ func TestHandoverSnapshotPushRefusesFailedOrigin(t *testing.T) {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 }
+
+// The implementer keeps running: it stops tracking a credential file and
+// commits that, leaving the file on disk, while the snapshot holds the older
+// HEAD. The path must stay out of the tree, and a change that lands while the
+// tree is being built is refused rather than snapshotted.
+func TestHandoverSnapshotIgnoresPathsUntrackedSinceTheCapturedHead(t *testing.T) {
+	work, _, _ := handoverRepo(t)
+	writeSnapshotFile(t, work, "runtime.env", "tracked once")
+	handoverGit(t, work, "add", "runtime.env")
+	handoverGit(t, work, "commit", "-m", "track env")
+	captured := handoverGit(t, work, "rev-parse", "HEAD")
+	handoverGit(t, work, "rm", "--cached", "runtime.env")
+	handoverGit(t, work, "commit", "-m", "stop tracking env")
+	writeSnapshotFile(t, work, "runtime.env", "TOKEN=secret")
+	tree, err := handoverSnapshotTree(t.Context(), work, t.TempDir(), captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.CommandContext(t.Context(), "git", "-C", work, "cat-file", "-e", tree+":runtime.env").Run(); err == nil {
+		t.Fatal("a path the user's index no longer tracks was captured")
+	}
+}
+
+func TestHandoverSnapshotRefusesAChangeDuringTheBuild(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, work string){
+		"commit": func(t *testing.T, work string) {
+			writeSnapshotFile(t, work, "a.txt", "raced")
+			handoverGit(t, work, "commit", "-am", "raced")
+		},
+		"index": func(t *testing.T, work string) {
+			writeSnapshotFile(t, work, "late.txt", "late")
+			handoverGit(t, work, "add", "late.txt")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			work, origin, _ := handoverRepo(t)
+			writeSnapshotFile(t, work, "a.txt", "edited")
+			handoverSnapshotBeforeRecheck = func() { change(t, work) }
+			t.Cleanup(func() { handoverSnapshotBeforeRecheck = nil })
+			result, code := nodeRun(t, snapshotClient(t, work), nodeCommandHandoverSnapshot, snapshotArgs(t, work))
+			if code != "" || result["outcome"] != handoverSnapshotRefused || result["reason"] != handoverRefusedChanged {
+				t.Fatalf("result=%v code=%q", result, code)
+			}
+			originHasNoSnapshotRef(t, origin)
+		})
+	}
+}

@@ -37,6 +37,7 @@ const (
 	handoverRefusedGitlink      = "staged_gitlink"
 	handoverRefusedSkipWorktree = "skip_worktree_file"
 	handoverRefusedUnmerged     = "unmerged_index"
+	handoverRefusedChanged      = "changed_during_snapshot"
 
 	handoverSnapshotRefPrefix = "refs/panewire/handover/"
 	// nodeHandoverSnapshotMaxListed bounds the untracked paths a result names
@@ -123,7 +124,7 @@ func validNodeHandoverSnapshotResult(result nodeHandoverSnapshotResult) bool {
 		return validNodeCommandPath(result.Top) && validNodeRefName(result.Branch)
 	case handoverSnapshotRefused:
 		switch result.Reason {
-		case handoverRefusedSubmodule, handoverRefusedGitlink, handoverRefusedSkipWorktree, handoverRefusedUnmerged:
+		case handoverRefusedSubmodule, handoverRefusedGitlink, handoverRefusedSkipWorktree, handoverRefusedUnmerged, handoverRefusedChanged:
 			return reflect.DeepEqual(result, nodeHandoverSnapshotResult{Outcome: result.Outcome, Reason: result.Reason})
 		}
 		return false
@@ -326,6 +327,28 @@ func handoverSnapshotCheck(ctx context.Context, top string) error {
 	return nil
 }
 
+// handoverFingerprint is what the snapshot reads from the user's repository:
+// HEAD, the index with its flags, and the staged difference against head.
+// The tree is built from several reads; if this differs before and after, a
+// writer raced them and the lists they were derived from may disagree.
+func handoverFingerprint(ctx context.Context, top, head string) (string, error) {
+	var out strings.Builder
+	for _, args := range [][]string{
+		{"rev-parse", "--verify", "HEAD^{commit}"},
+		{"ls-files", "--stage", "-z"},
+		{"ls-files", "-v", "-z"},
+		{"diff", "--cached", "--raw", "-z", "--no-renames", head},
+	} {
+		part, err := handoverSnapshotGit(ctx, top, nil, "", args...)
+		if err != nil {
+			return "", err
+		}
+		out.WriteString(part)
+		out.WriteString("\x01")
+	}
+	return out.String(), nil
+}
+
 // handoverSkipWorktree lists the paths whose index entry carries skip-worktree
 // (ls-files -v tags S, or s with assume-unchanged).
 func handoverSkipWorktree(ctx context.Context, top string) ([]string, error) {
@@ -350,6 +373,10 @@ func handoverSnapshotTree(ctx context.Context, top, scratch, head string) (strin
 	if err := handoverSnapshotCheck(ctx, top); err != nil {
 		return "", err
 	}
+	before, err := handoverFingerprint(ctx, top, head)
+	if err != nil {
+		return "", err
+	}
 	index, err := handoverIndex(ctx, top)
 	if err != nil {
 		return "", err
@@ -366,11 +393,11 @@ func handoverSnapshotTree(ctx context.Context, top, scratch, head string) (strin
 			return "", handoverRefusal{handoverRefusedSkipWorktree}
 		}
 	}
-	deleted, err := handoverSnapshotGit(ctx, top, nil, "", "diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=D")
+	deleted, err := handoverSnapshotGit(ctx, top, nil, "", "diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=D", head)
 	if err != nil {
 		return "", err
 	}
-	added, err := handoverSnapshotGit(ctx, top, nil, "", "diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=A")
+	added, err := handoverSnapshotGit(ctx, top, nil, "", "diff", "--cached", "--name-only", "-z", "--no-renames", "--diff-filter=A", head)
 	if err != nil {
 		return "", err
 	}
@@ -429,8 +456,25 @@ func handoverSnapshotTree(ctx context.Context, top, scratch, head string) (strin
 		}
 	}
 	tree, err := handoverSnapshotGit(ctx, top, env, "", "write-tree")
-	return strings.TrimSpace(tree), err
+	if err != nil {
+		return "", err
+	}
+	if handoverSnapshotBeforeRecheck != nil {
+		handoverSnapshotBeforeRecheck()
+	}
+	after, err := handoverFingerprint(ctx, top, head)
+	if err != nil {
+		return "", err
+	}
+	if after != before {
+		return "", handoverRefusal{handoverRefusedChanged}
+	}
+	return strings.TrimSpace(tree), nil
 }
+
+// handoverSnapshotBeforeRecheck is a test seam: it runs after the tree is
+// written and before the repository is read again for a racing writer.
+var handoverSnapshotBeforeRecheck func()
 
 type handoverSnapshotCommit struct{ Commit, Ref, Tree, Parent string }
 
