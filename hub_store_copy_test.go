@@ -76,6 +76,9 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 	t.Cleanup(func() { _ = source.close() })
 	names := copyFixtureTables(t)
 	seedCopyFixture(t, source.db, names)
+	if _, err := source.db.Exec(`ALTER TABLE lane_inbox AUTO_INCREMENT=100`); err != nil {
+		t.Fatal(err)
+	}
 	var report bytes.Buffer
 	if err := copyHubStore(t.Context(), mysqlURL, pgURL, "", false, false, &report); err != nil {
 		t.Fatalf("mysql to postgres: %v\n%s", err, report.String())
@@ -84,6 +87,10 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 	pgStore, err := openLaneInboxStorePostgresConfig(t.Context(), pgConfig.Copy())
 	if err != nil {
 		t.Fatal(err)
+	}
+	var nextID int64
+	if err := pgStore.db.QueryRow(`SELECT nextval(pg_get_serial_sequence('lane_inbox','id'))`).Scan(&nextID); err != nil || nextID < 100 {
+		t.Fatalf("postgres sequence: %d, %v", nextID, err)
 	}
 	longKey := "long" + strings.Repeat("x", mysqlEventKeyMax)
 	again, err := pgStore.put(longKey, "lane", "lane.event", "inbox", quietEvent("replay", "test"), time.Now(), 0, 0)
@@ -110,6 +117,10 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer target.Close()
+	var mysqlNext int64
+	if err := target.QueryRow(`SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='lane_inbox'`).Scan(&mysqlNext); err != nil || mysqlNext <= nextID {
+		t.Fatalf("mysql sequence: %d, %v", mysqlNext, err)
+	}
 	if _, err = target.Exec(`UPDATE lane_inbox SET payload='changed' WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
@@ -126,6 +137,18 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 		t.Fatalf("sqlite to mysql: %v\n%s", err, report.String())
 	}
 	assertCopyReport(t, report.String(), names)
+	sqliteTargetConfig, err := hubMySQLConfig(sqliteTargetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqliteTarget, err := openHubMySQL(t.Context(), sqliteTargetConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteTarget.Close()
+	if err := sqliteTarget.QueryRow(`SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='lane_inbox'`).Scan(&mysqlNext); err != nil || mysqlNext <= 50 {
+		t.Fatalf("sqlite floor: %d, %v", mysqlNext, err)
+	}
 }
 
 func copyFixtureTables(t *testing.T) []string {
