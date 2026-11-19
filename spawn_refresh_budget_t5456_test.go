@@ -262,7 +262,9 @@ func TestSpawnParkKeepsASettledDemand_t5456(t *testing.T) {
 	}
 	key := "codex:0000000000000001"
 	task.RefreshWaits = []hubSpawnRefreshWait{{Machine: "machine-a", Pool: "codex", AccountKey: key, Attempt: "qr-previous", At: time.Now()}}
-	if _, err := hub.parkSpawnKeepingWaits(t.Context(), task, spawnParkQuota, "placement refused", nil, nil, hub.spawnWakeSnapshot()); err != nil {
+	// The park carries the demand history in its own transaction: this is the
+	// write executeSpawnTask makes when a pass ends with no candidate.
+	if _, err := hub.parkSpawnTask(t.Context(), task, spawnParkQuota, "placement refused", nil, task.RefreshWaits, hub.spawnWakeSnapshot()); err != nil {
 		t.Fatal(err)
 	}
 	parked, err := hub.inbox.store.spawnTask(t.Context(), request.RequestID)

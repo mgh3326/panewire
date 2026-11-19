@@ -188,10 +188,10 @@ func spawnParked(task hubSpawnTask, now time.Time) bool {
 // before placement began: an event for one of this park's reasons noted
 // since then may have been drained before the park landed, so that reason
 // is noted again (not as a new event, and with no kick) for the next tick.
-func (h *HubServer) parkSpawnTask(ctx context.Context, task hubSpawnTask, reason, detail string, tried []hubSpawnTried, before map[string]uint64) (bool, error) {
+func (h *HubServer) parkSpawnTask(ctx context.Context, task hubSpawnTask, reason, detail string, tried []hubSpawnTried, waits []hubSpawnRefreshWait, before map[string]uint64) (bool, error) {
 	now := h.now().UTC()
 	next := spawnParkUntil(task, now.Add(h.spawnParkRecheck()))
-	parked, err := h.inbox.store.parkSpawn(ctx, task.Request.RequestID, task.Attempt, reason, tried, next, now)
+	parked, err := h.inbox.store.parkSpawn(ctx, task.Request.RequestID, task.Attempt, reason, tried, waits, next, now)
 	if err != nil || !parked {
 		return false, err
 	}
@@ -303,7 +303,7 @@ func (h *HubServer) wakeParkedSpawns(ctx context.Context, ticked bool) {
 // read each other, so next_check_ms goes first and park_reason reads it after:
 // a row that keeps its wake keeps it unchanged, a row that does not has just
 // been set to next, which the same test (next_check_ms>next) fails.
-func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt int, reason string, tried []hubSpawnTried, next, now time.Time) (bool, error) {
+func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt int, reason string, tried []hubSpawnTried, waits []hubSpawnRefreshWait, next, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	tx, err := s.beginTx(ctx)
@@ -318,7 +318,14 @@ func (s *laneInboxStore) parkSpawn(parent context.Context, id string, attempt in
 	if err != nil {
 		return false, err
 	}
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,tried=?,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,park_since_ms=CASE WHEN park_since_ms=0 THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), next.UnixMilli(), next.UnixMilli(), reason, string(rawTried), now.UnixMilli(), id, attempt)
+	// The demand history rides in the same statement as the park: a crash or a
+	// failed second write must not leave a parked row without the attempts it
+	// already settled (hk 5456).
+	rawWaits, err := json.Marshal(waits)
+	if err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET next_check_ms=CASE WHEN next_check_ms>? AND park_reason<>'' THEN next_check_ms ELSE ? END,park_reason=CASE WHEN next_check_ms>? AND park_reason<>'' THEN park_reason ELSE ? END,tried=?,refresh_waits=?,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,park_since_ms=CASE WHEN park_since_ms=0 THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END WHERE request_id=? AND attempt=? AND status='accepted' AND node_id IS NULL`), next.UnixMilli(), next.UnixMilli(), next.UnixMilli(), reason, string(rawTried), string(rawWaits), now.UnixMilli(), id, attempt)
 	if err != nil {
 		return false, err
 	}

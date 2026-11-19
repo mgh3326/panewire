@@ -746,9 +746,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			return
 		}
 	}
-	// This pass now decides placement: drop the link the previous pass left so
-	// a pass that ends for another reason cannot name a stale machine/pool.
-	h.clearSpawnRefreshWaits(task)
+	// The previous pass's link stays until this pass decides: a crash between
+	// the reads and the write that replaces it must not leave the row without
+	// the only durable copy of the attempts it already settled (hk 5456). Every
+	// end that records no wait clears it below.
 	ctx, cancel := context.WithDeadline(parent, task.Deadline)
 	defer cancel()
 	transport := &directSpawnTransport{h: h, task: task, started: time.Now(), probeWait: spawnNotStartedProbe, requireSnapshot: task.Node == nil}
@@ -923,6 +924,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		return
 	} // The node result owns completion and cleanup facts.
 	if errors.Is(err, fleet.ErrHubPlacementDeferred) {
+		h.clearSpawnRefreshWaits(task)
 		h.releasePlacementCount(task.Job)
 		return
 	}
@@ -961,13 +963,14 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 			refreshMu.Lock()
 			passWaits := append([]hubSpawnRefreshWait(nil), refreshWaits...)
 			refreshMu.Unlock()
-			if _, parkErr := h.parkSpawnKeepingWaits(parent, task, reason, spawnRefusalLine(err.Error()), spawnParkTried(currentCandidates(), err), passWaits, wakeBefore); parkErr != nil {
+			if _, parkErr := h.parkSpawnTask(parent, task, reason, spawnRefusalLine(err.Error()), spawnParkTried(currentCandidates(), err), mergeSpawnRefreshWaits(task.RefreshWaits, passWaits), wakeBefore); parkErr != nil {
 				h.logger.Warn("hub spawn park not stored; retried next pass", "request_id", task.Request.RequestID, "reason", reason, "error", parkErr)
 			}
 			h.releasePlacementCount(task.Job)
 			return
 		}
 	}
+	h.clearSpawnRefreshWaits(task)
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
 	outcome.Tried = spawnTriedCandidates(currentCandidates())
@@ -1042,22 +1045,6 @@ func (h *HubServer) noteSpawnRefreshWaits(task hubSpawnTask, waits []hubSpawnRef
 		}
 	}
 	return waits
-}
-
-// parkSpawnKeepingWaits parks the request and carries the attempt's demand
-// history — including demands whose attempt already settled — with the row, so
-// the next recheck does not wait on a measurement this request already knows
-// cannot help it. The park itself still succeeds when only the link write
-// fails: the next pass re-derives what it can (hk 5456).
-func (h *HubServer) parkSpawnKeepingWaits(ctx context.Context, task hubSpawnTask, reason, detail string, tried []hubSpawnTried, passWaits []hubSpawnRefreshWait, before map[string]uint64) (bool, error) {
-	parked, err := h.parkSpawnTask(ctx, task, reason, detail, tried, before)
-	if err != nil || !parked {
-		return parked, err
-	}
-	if merged := mergeSpawnRefreshWaits(task.RefreshWaits, passWaits); len(merged) != 0 {
-		h.noteSpawnRefreshWaits(task, merged)
-	}
-	return true, nil
 }
 
 // mergeSpawnRefreshWaits is the link a parked pass stores: every demand the
