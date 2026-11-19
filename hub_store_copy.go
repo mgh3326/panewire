@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -212,6 +213,9 @@ func copyHubStore(ctx context.Context, from, to, selection string, verify, repla
 		if err != nil {
 			return hubDatabaseError("columns "+table.name, err)
 		}
+		// Physical column order differs across migrations and dialects.
+		// Canonical rows always encode columns in the same name order.
+		sort.Strings(columns)
 		sourceColumns, err := storeCopySourceColumns(ctx, source, src, table)
 		if err != nil {
 			return hubDatabaseError("source columns "+table.name, err)

@@ -95,6 +95,7 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 		t.Fatalf("mysql to postgres: %v\n%s", err, report.String())
 	}
 	assertCopyReport(t, report.String(), names)
+	firstReport := report.String()
 	pgStore, err := openLaneInboxStorePostgresConfig(t.Context(), pgConfig.Copy())
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +115,7 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 		t.Fatalf("postgres to mysql: %v\n%s", err, report.String())
 	}
 	assertCopyReport(t, report.String(), names)
+	assertCopyChecksumsEqual(t, firstReport, report.String(), names)
 	report.Reset()
 	if err := copyHubStore(t.Context(), pgURL, mysqlTargetURL, "", false, false, &report); err == nil || !strings.Contains(err.Error(), "non-empty") {
 		t.Fatalf("non-empty target: %v", err)
@@ -148,6 +150,7 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 		t.Fatalf("sqlite to mysql: %v\n%s", err, report.String())
 	}
 	assertCopyReport(t, report.String(), names)
+	assertCopyChecksumsEqual(t, firstReport, report.String(), names)
 	sqliteTargetConfig, err := hubMySQLConfig(sqliteTargetURL)
 	if err != nil {
 		t.Fatal(err)
@@ -182,6 +185,25 @@ func copyFixtureTables(t *testing.T) []string {
 	}
 	return names
 }
+func assertCopyChecksumsEqual(t *testing.T, first, second string, names []string) {
+	t.Helper()
+	extract := func(report, name string) string {
+		for _, line := range strings.Split(report, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) > 2 && fields[0] == name {
+				return fields[2]
+			}
+		}
+		return ""
+	}
+	for _, name := range names {
+		a, b := extract(first, name), extract(second, name)
+		if a == "" || a != b {
+			t.Errorf("%s checksum differs across directions: %q != %q", name, a, b)
+		}
+	}
+}
+
 func assertCopyReport(t *testing.T, report string, names []string) {
 	t.Helper()
 	for _, name := range names {
