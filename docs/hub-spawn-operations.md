@@ -58,46 +58,25 @@ not see fail. The request's refresh keys and the last attempt per key are
 stored in the hub database, so both survive a restart; a pass that ends without
 parking on a refresh clears the request's link.
 
-A refresh is one *attempt* with an opaque ID, admitted once by the hub's
-scheduler for one logical demand — machine, pool and the account the request
-waits on, with "no account named" its own value (hk 5456). Admission uses the
-request's effective deadline, the configured measurement window and a five
-second use margin: a demand whose measurement could only finish at or past the
-caller's deadline is refused and selection moves to the next candidate; a live
-compatible demand is joined and its ID returned; another account on the same
-machine and pool is a different attempt, so one account's completion never
-answers for another's. Inside the post-completion cooldown a demand is refused
-after a success (the reading it produced can be read now) and held after a
-failure (the caller stays pending and a later pass asks again). The request
-stores the attempt ID and account it waits on, and only that attempt's finished
-result can settle it, diagnose its timeout, or name it in its tried list; a
-wait recorded before attempts had IDs is uncorrelated and only feeds display
-text. A finished attempt's result is kept by ID, so a completion that lands
-after the wait was recorded, or in the same millisecond, is still that
-attempt's. A wait whose attempt finished without making the reading usable, or
-whose node measured another account, is not repeated for that request: the seat
-is dropped with that reason and placement takes the next candidate. A failed
-attempt is retried while the request stays pending. The wait link keeps every
-demand the attempt has asked, not only the last pass's, which is what makes the
-settled rule survive the passes in between.
+A refresh wait never exceeds what is left of the request (hk 5456, narrowed by
+hk 5480). Each queued measurement's deadline is the measurement window or the
+attempt's remaining budget less a five second use margin, whichever is smaller,
+so it cannot outlive the request that asked for it, and the hub reports whether
+it queued or joined one: a request with less budget left than that, or one the
+scheduler suppressed in its post-completion cooldown, does not start the wait.
+That seat is then dropped for the request with reason `refresh_unavailable` and
+placement takes the next candidate inside the same request. No refresh state
+survives a hub restart: an accepted request re-evaluates from scratch, and may
+ask for a refresh again, bounded by its remaining time.
 
-The refresh names the account the request waits on (`account_key` on the
-`quota.refresh` node command) only for a connection that advertised
-`quota_refresh_account_v1`. A node built before the field receives the
-pool-only request its strict argument decoder accepts, and its success is an
-ordinary read of the account by the next placement pass. A node that received
-the field and measured another account answers `account_mismatch` instead of
-`refreshed`, so a measurement that could not change the waited-on reading is
-recorded as a named failure rather than a silent success.
-
-Refreshes coalesce by demand. At most four run at once, with at most one per
-node; waiting attempts are considered in arrival order while busy nodes are
+Refreshes coalesce by machine and pool. At most four run at once, with at most
+one per node; waiting keys are considered in arrival order while busy nodes are
 skipped. The configured `measure_timeout_s` (default 60 seconds, capped at 60)
-starts when an attempt is queued and covers queueing, writer admission, the
-socket write and the response. After writer admission, the socket write also has
-the same five-second maximum as other hub node writes. An expired queued attempt
-keeps its place and its ID, but is sent only if a later placement pass asks for
-that demand again with a new budget; placement is woken meanwhile. On shutdown the hub cancels refreshes; accepted requests and their
+starts when a key is queued and covers queueing, writer admission, the socket
+write and the response. After writer admission, the socket write also has the
+same five-second maximum as other hub node writes. An expired queued attempt
+retains its place, but is sent only if a later placement pass requests it with a
+new budget. On shutdown the hub cancels refreshes; accepted requests and their
 reservations survive restart. Local, non-hub spawns keep their synchronous
 refresh behavior. See [Quota service boundary](placement.md#quota-service-boundary).
 
@@ -187,7 +166,7 @@ deadline), the request is not over:
 | Attempt ends, start proven absent | Result |
 |---|---|
 | before `expires_at` | the same row, reservation and request id start attempt N+1 as `accepted`, with a fresh wait of 600 s (at most to `expires_at`). No notice. The ended attempt's placement record is sealed first, as a client's replay does. |
-| at or after `expires_at` | `given_up`: terminal, reason `expired: expires_at <t> passed after <n> attempt(s); no candidate could take it (tried: <pool/host: reason; …>)`, or `… ; it never found a candidate that could take it` when the attempt recorded none, rc 84, stage `queue`. The tried list names every candidate the attempt asked and why it was dropped (a pool whose refresh could not be used, a host whose quota refusal or readiness check dropped it), and `panewire spawn status` prints it as `tried=[…]` (hk 5456). One `SPAWN_FAILED` for the owner (and the submitting lane); the job id and task/role reservation are freed as for `retryable`. |
+| at or after `expires_at` | `given_up`: terminal, reason `expired: expires_at <t> passed after <n> attempt(s); no candidate could take it (tried: <pool/host: reason; …>)`, or `… ; it never found a candidate that could take it` when the attempt recorded none, rc 84, stage `queue`. The tried list names every candidate the attempt asked and why it was dropped (a pool dropped as `refresh_unavailable`, a host whose quota refusal or readiness check dropped it), and `panewire spawn status` prints it as `tried=[…]` (hk 5456). One `SPAWN_FAILED` for the owner (and the submitting lane); the job id and task/role reservation are freed as for `retryable`. |
 
 A request whose start is **not** proven absent (`dispatching`, `reconciling`,
 `deadline_exceeded`) is never given up, before or after `expires_at`: the limit

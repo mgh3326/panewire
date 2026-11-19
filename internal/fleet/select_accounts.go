@@ -240,42 +240,28 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 		return acc
 	}
 	if sp.a.ScheduleQuotaRefresh != nil && sp.a.nativeQuotaPool(pool) {
-		// The hub's scheduler admits the measurement (budget, window,
-		// cooldown) or refuses it, and a demand whose own attempt already
-		// finished without a usable reading is not repeated (hk 5456): the
-		// seat is dropped for this request and placement takes the next
-		// candidate.
-		settled := ""
-		for _, host := range ordered {
-			if reason, did := sp.a.refreshSettled(host.name, pool, key); did {
-				if settled == "" {
-					settled = reason
+		// A request with no budget left for the measurement never starts the
+		// wait (hk 5456): the seat is dropped for this request and placement
+		// takes the next candidate.
+		fits := quotaRefreshFits(ctx, sp.a.measureTimeout())
+		queued := false
+		if fits {
+			for _, host := range ordered {
+				if sp.a.scheduleQuotaRefresh(host.name, pool) {
+					queued = true
+					break
 				}
-				continue
-			}
-			if _, admission := sp.a.queueQuotaRefresh(host.name, pool, key); quotaRefreshHold(admission) {
-				sp.refreshPending = true
-				sp.refreshed[key] = accountRefresh{measured: measurePending, err: ErrQuotaRefreshPending}
-				acc = SharedAccount{Key: key, Degraded: true}
-				sp.accounts[key] = acc
-				return acc
 			}
 		}
-		// Nothing is worth waiting on. Read the shared account once more: a
-		// refresh another request ran may have landed since the plan read it,
-		// and ruling the candidate out must not rely on the older copy.
-		if fresh, err := sp.a.Source.SharedAccount(ctx, key); err == nil {
-			sp.accounts[key] = fresh
-			if sharedReason(key, fresh) == "" && fresh.Quota != nil {
-				sp.refreshed[key] = accountRefresh{measured: "ok"}
-				return fresh
-			}
+		if queued {
+			sp.refreshPending = true
+			sp.refreshed[key] = accountRefresh{measured: "pending", err: ErrQuotaRefreshPending}
+			acc = SharedAccount{Key: key, Degraded: true}
+			sp.accounts[key] = acc
+			return acc
 		}
-		why := fmt.Sprintf("account %s on pool %s has no usable shared quota reading and no refresh this request can wait for", key, pool)
-		if settled != "" {
-			why = fmt.Sprintf("account %s on pool %s: %s", key, pool, settled)
-		}
-		result := accountRefresh{measured: measureNotDue, host: firstHolder(ordered), err: fail(exitEvictionUnconfirmed, "%s", why)}
+		// Nothing can measure this account inside what is left of the request.
+		result := accountRefresh{measured: measureNotDue, host: firstHolder(ordered), err: refreshUnavailable(key, pool)}
 		acc = SharedAccount{Key: key, Degraded: true}
 		sp.refreshed[key], sp.accounts[key] = result, acc
 		return acc
@@ -329,11 +315,33 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 	return acc
 }
 
+// reasonRefreshUnavailable is the candidate reason for a seat dropped because
+// its shared reading cannot be measured inside what is left of the request
+// (hk 5456).
+const reasonRefreshUnavailable = "refresh_unavailable"
+
+// accountDropReason is the reason recorded for a candidate whose account has no
+// usable reading.
+func (sp *selPresence) accountDropReason(key string) string {
+	if sp.refreshed[key].measured == measureNotDue {
+		return reasonRefreshUnavailable
+	}
+	return strings.ToLower(sp.accountFailureCode(key))
+}
+
 func (sp *selPresence) accountFailureCode(key string) string {
 	if err := sp.refreshed[key].err; err != nil {
 		return gateOutcome(err)
 	}
 	return outcomeQuotaUnknown
+}
+
+// firstHolder names the host a dropped measurement would have run on.
+func firstHolder(hosts []selHost) string {
+	if len(hosts) == 0 {
+		return ""
+	}
+	return hosts[0].name
 }
 
 func (sp *selPresence) unknownJudgment(b accountBinding, why string) quotaJudgment {
@@ -342,35 +350,23 @@ func (sp *selPresence) unknownJudgment(b accountBinding, why string) quotaJudgme
 	}
 	host, status := b.hosts[0], exitEvictionUnconfirmed
 	r := sp.refreshed[b.key]
-	switch {
-	case r.measured == measureWould:
+	if r.measured == measureWould {
 		// A plan skipped the measurement; name what the spawn would run
 		// instead of reporting a measurement that never ran.
 		why = "would_measure"
-	case r.measured == measureNotDue:
-		// No refresh this request can wait for: record the named reason (the
-		// attempt that measured another account, or one that finished without
-		// a usable reading) so the refusal says why the seat was dropped
-		// (hk 5456).
-		why = "no_usable_refresh"
-		if r.err != nil {
-			why, status = r.err.Error(), exitCode(r.err)
-		}
-	case r.measured != "":
+	} else if r.measured != "" {
 		why = "measure_" + why
 		if r.measured == "failed" {
 			why = "measure_failed"
 		}
-		if r.err != nil {
-			status = exitCode(r.err)
-		}
-	}
-	if r.measured != "" && r.measured != measureWould {
 		for _, h := range b.hosts {
 			if h.name == r.host {
 				host = h
 				break
 			}
+		}
+		if r.err != nil {
+			status = exitCode(r.err)
 		}
 	}
 	source := "shared"

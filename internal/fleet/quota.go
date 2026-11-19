@@ -655,32 +655,32 @@ func (a *App) measureTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// queueQuotaRefresh asks the hub's scheduler to measure one account and
-// reports the attempt it admitted (a new one or a live compatible one). The
-// scheduler owns admission — the request's budget, the measurement window and
-// the post-completion cooldown — so a refused demand is never waited on
-// (hk 5456).
-func (a *App) queueQuotaRefresh(machine, pool, accountKey string) (string, QuotaRefreshAdmission) {
+// scheduleQuotaRefresh asks the hub's scheduler for one measurement and reports
+// whether it has something to wait for.
+func (a *App) scheduleQuotaRefresh(host, pool string) bool {
 	if a.ScheduleQuotaRefresh == nil {
-		return "", QuotaRefreshRefused
+		return false
 	}
-	return a.ScheduleQuotaRefresh(machine, pool, accountKey, a.measureTimeout())
+	return a.ScheduleQuotaRefresh(host, pool, a.measureTimeout())
 }
 
-// quotaRefreshHold reports whether a demand's answer leaves the caller waiting
-// on a measurement: an admitted attempt, or a retry of a failed one.
-func quotaRefreshHold(admission QuotaRefreshAdmission) bool {
-	return admission == QuotaRefreshAdmitted || admission == QuotaRefreshRetry
+// quotaRefreshFits reports whether the request's remaining budget covers one
+// shared quota refresh. No deadline means an unbounded caller. A request that
+// cannot fit the measurement drops the seat instead of waiting past its own
+// deadline (hk 5456).
+func quotaRefreshFits(ctx context.Context, window time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Until(deadline) >= window
 }
 
-// refreshSettled reports whether the attempt this request waited on for this
-// demand cannot supply the reading it selects, with the text the dropped seat
-// records.
-func (a *App) refreshSettled(machine, pool, accountKey string) (string, bool) {
-	if a.QuotaRefreshSettled == nil {
-		return "", false
-	}
-	return a.QuotaRefreshSettled(machine, pool, accountKey)
+// refreshUnavailable refuses a seat whose shared reading cannot be measured
+// inside what is left of the request, so placement takes the next candidate
+// (hk 5456).
+func refreshUnavailable(key, pool string) error {
+	return &quotaHostRefusal{fail(exitEvictionUnconfirmed, "account %s on pool %s has no usable shared reading and no refresh this request can wait for", key, pool), reasonRefreshUnavailable}
 }
 
 func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, local bool, key string, acc SharedAccount) (quotaJudgment, error) {
@@ -716,26 +716,15 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 				a.quotaObservationEvent(host, pool, observed, acc)
 			}
 		}()
-		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.nativeQuotaPool(pool) {
-			reason, settled := a.refreshSettled(host, pool, key)
-			if settled {
-				// This request's own attempt cannot supply the reading: refuse
-				// the host with that reason instead of measuring it again
-				// (hk 5456).
-				observed = j.Reason
-				return j, &quotaHostRefusal{fail(exitEvictionUnconfirmed, "account %s on pool %s: %s", key, pool, reason), outcomeQuotaUnknown}
-			}
-			if _, admission := a.queueQuotaRefresh(host, pool, key); quotaRefreshHold(admission) {
+		if (j.Reason == "stale" || j.Reason == "not_observed") && !a.planOnly && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) {
+			if quotaRefreshFits(ctx, a.measureTimeout()) && a.scheduleQuotaRefresh(host, pool) {
 				return j, ErrQuotaRefreshPending
 			}
-			if a.ScheduleQuotaRefresh != nil {
-				// Hub-scheduled placement: the scheduler refused the
-				// measurement (no budget for it, or a cooldown), so this pass
-				// must not fall into the synchronous refresh below — a slow
-				// node there would spend what is left of the request (hk 5456).
-				observed = j.Reason
-				return j, &quotaHostRefusal{fail(exitEvictionUnconfirmed, "account %s on pool %s has no usable reading and no admitted refresh", key, pool), outcomeQuotaUnknown}
-			}
+			// No measurement this request can wait for: refuse the seat and
+			// let placement try the next candidate (hk 5456). A synchronous
+			// measurement here could spend the remaining budget on a slow node.
+			observed = j.Reason
+			return j, refreshUnavailable(key, pool)
 		}
 		// A stale or missing observation of an account this host does not hold
 		// is never refreshed by the gate, so measure it on the target first.
@@ -776,12 +765,11 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 		r.AccountKey = key
 	}
 	judgment, err := a.judgeGate(ctx, r, pool, j)
-	if err != nil && !local && !a.planOnly && key != "" && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown {
-		if _, settled := a.refreshSettled(host, pool, key); !settled {
-			if _, admission := a.queueQuotaRefresh(host, pool, key); quotaRefreshHold(admission) {
-				return judgment, ErrQuotaRefreshPending
-			}
+	if err != nil && !local && !a.planOnly && key != "" && a.ScheduleQuotaRefresh != nil && a.nativeQuotaPool(pool) && gateOutcome(err) == outcomeQuotaUnknown {
+		if quotaRefreshFits(ctx, a.measureTimeout()) && a.scheduleQuotaRefresh(host, pool) {
+			return judgment, ErrQuotaRefreshPending
 		}
+		return judgment, refreshUnavailable(key, pool)
 	}
 	return judgment, err
 }

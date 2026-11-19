@@ -163,11 +163,7 @@ func TestHubSpawnTimeoutNamesFinishedQuotaRefresh_t4600(t *testing.T) {
 	if err != nil || parked.Status != "accepted" || parked.Node != nil {
 		t.Fatalf("the pending pass must leave the request accepted: status=%s node=%v err=%v", parked.Status, parked.Node, err)
 	}
-	if len(parked.RefreshWaits) != 1 || parked.RefreshWaits[0].Attempt == "" {
-		t.Fatalf("the pending pass did not record the attempt it waits on: %+v", parked.RefreshWaits)
-	}
-	wait := parked.RefreshWaits[0]
-	if err := hub.inbox.store.recordQuotaRefreshResult(t.Context(), wait.Attempt, wait.Machine, wait.Pool, wait.AccountKey, "", time.Now()); err != nil {
+	if err := hub.inbox.store.recordQuotaRefreshAttempt(t.Context(), "machine-a", "claude", "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	parked.Deadline = time.Now().Add(-time.Second)

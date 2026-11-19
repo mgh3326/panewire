@@ -62,10 +62,9 @@ type hubSpawnOutcome struct {
 // hubSpawnTried is one candidate an attempt asked, and why it was dropped. The
 // pool is empty for a placement candidate the fleet layer reports without one.
 type hubSpawnTried struct {
-	Host       string `json:"host,omitempty"`
-	Pool       string `json:"pool,omitempty"`
-	AccountKey string `json:"account_key,omitempty"`
-	Reason     string `json:"reason,omitempty"`
+	Host   string `json:"host,omitempty"`
+	Pool   string `json:"pool,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // String is one list entry: pool and host, then the reason it was dropped.
@@ -76,13 +75,6 @@ func (t hubSpawnTried) String() string {
 			where += "/"
 		}
 		where += t.Host
-	}
-	if t.AccountKey != "" {
-		if where != "" {
-			where += " " + t.AccountKey
-		} else {
-			where = t.AccountKey
-		}
 	}
 	if where == "" {
 		return t.Reason
@@ -121,23 +113,11 @@ func spawnTriedText(tried []hubSpawnTried) string {
 }
 
 // hubSpawnRefreshWait is one shared quota refresh a request is parked on: the
-// machine that measures the pool, and when this attempt asked for it. It is
-// stored with the operation (spawn_operations.refresh_waits) so the link
-// survives a hub restart. At ties the wait to its own attempt: a completion
-// recorded before it (an older request's refresh) says nothing about this one
-// (hk 5456). A row written before At existed carries a zero time and is read
-// as "asked when the attempt began".
+// machine that measures the pool. It is stored with the operation
+// (spawn_operations.refresh_waits) so the link survives a hub restart.
 type hubSpawnRefreshWait struct {
 	Machine string `json:"machine"`
 	Pool    string `json:"pool"`
-	// AccountKey and Attempt are the demand this request made and the
-	// scheduler's ID for it. Only that attempt's completion can settle or
-	// diagnose this wait; a row for the machine and pool alone says nothing
-	// about it (hk 5456). Empty attempt and account mark a wait recorded
-	// before they existed: uncorrelated, kept for diagnostics only.
-	AccountKey string    `json:"account_key,omitempty"`
-	Attempt    string    `json:"attempt,omitempty"`
-	At         time.Time `json:"at,omitempty"`
 }
 
 // hubSpawnRefreshOutcome is the last finished attempt for the refresh a timed
@@ -292,8 +272,6 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		spawnAttemptStartByTable,
 		`CREATE TABLE IF NOT EXISTS spawn_placement_snapshots (request_id TEXT NOT NULL,attempt INTEGER NOT NULL,payload TEXT NOT NULL,recorded INTEGER NOT NULL DEFAULT 0,delivery TEXT NOT NULL DEFAULT '',PRIMARY KEY(request_id,attempt))`,
 		`CREATE TABLE IF NOT EXISTS quota_refresh_attempts (machine TEXT NOT NULL,pool TEXT NOT NULL,outcome TEXT NOT NULL,seen_ms BIGINT NOT NULL,PRIMARY KEY(machine,pool))`,
-		`CREATE TABLE IF NOT EXISTS quota_refresh_results (attempt_id TEXT PRIMARY KEY,machine TEXT NOT NULL,pool TEXT NOT NULL,account_key TEXT NOT NULL,outcome TEXT NOT NULL,seen_ms BIGINT NOT NULL)`,
-		`CREATE INDEX IF NOT EXISTS quota_refresh_results_seen ON quota_refresh_results(seen_ms)`,
 		spawnQueueTable,
 		spawnQueueNextCheckIndex,
 		taskFailNoticeOutboxTable,
@@ -1425,44 +1403,6 @@ func (s *laneInboxStore) recordQuotaRefreshAttempt(parent context.Context, machi
 	defer done()
 	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO quota_refresh_attempts(machine,pool,outcome,seen_ms) VALUES(?,?,?,?)`, "machine,pool", s.dialect.assignIncoming("outcome", "seen_ms"))), machine, pool, outcome, now.UnixMilli())
 	return err
-}
-
-// quotaRefreshResultTTL is how long a finished attempt's result is kept: every
-// request that can reference it (an attempt's per-attempt wait) has ended long
-// before, so a lookup for a live wait always finds its row.
-const quotaRefreshResultTTL = 24 * time.Hour
-
-// recordQuotaRefreshResult persists one finished attempt under its scheduler
-// ID, success included (outcome ""), so the request that waited on that exact
-// attempt can tell a failed measurement from one that finished and from one
-// that never ran. A completion is never mistaken for another attempt's, even
-// for the same machine and pool (hk 5456).
-func (s *laneInboxStore) recordQuotaRefreshResult(parent context.Context, id, machine, pool, accountKey, outcome string, now time.Time) error {
-	ctx, done := s.op(parent)
-	defer done()
-	// A plain INSERT: attempt IDs are unique across hub lifetimes, so a repeat
-	// is a defect, and overwriting would corrupt another waiter's evidence.
-	if _, err := s.db.ExecContext(ctx, s.q(`INSERT INTO quota_refresh_results(attempt_id,machine,pool,account_key,outcome,seen_ms) VALUES(?,?,?,?,?,?)`), id, machine, pool, accountKey, outcome, now.UnixMilli()); err != nil {
-		return err
-	}
-	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM quota_refresh_results WHERE seen_ms < ?`), now.Add(-quotaRefreshResultTTL).UnixMilli())
-	return err
-}
-
-// quotaRefreshResult reads one attempt's finished result by its scheduler ID.
-func (s *laneInboxStore) quotaRefreshResult(parent context.Context, id string) (string, string, time.Time, bool, error) {
-	ctx, done := s.op(parent)
-	defer done()
-	var outcome, accountKey string
-	var seen int64
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT outcome,account_key,seen_ms FROM quota_refresh_results WHERE attempt_id=?`), id).Scan(&outcome, &accountKey, &seen)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", time.Time{}, false, nil
-	}
-	if err != nil {
-		return "", "", time.Time{}, false, err
-	}
-	return outcome, accountKey, time.UnixMilli(seen), true, nil
 }
 
 // quotaRefreshAttempt reads the last finished attempt for one machine/pool.
