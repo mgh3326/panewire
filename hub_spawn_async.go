@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -778,7 +779,20 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	releaseTrace()
 	defer h.forgetPlacementTraceBase(task.Request.RequestID, task.Attempt)
 	delivery, _ := json.Marshal(placementDelivery{StateDir: app.StateDir, Home: app.Home, Quota: app.Config.Quota})
+	// The current pass's candidate records: what quotaFullExcluded decides on.
+	var passMu sync.Mutex
+	var passCandidates []fleet.PlacementCandidateRecord
+	currentCandidates := func() []fleet.PlacementCandidateRecord {
+		passMu.Lock()
+		defer passMu.Unlock()
+		return slices.Clone(passCandidates)
+	}
 	app.PlacementTrace = func(tr fleet.PlacementTrace) {
+		if len(tr.Candidates) > 0 {
+			passMu.Lock()
+			passCandidates = slices.Clone(tr.Candidates)
+			passMu.Unlock()
+		}
 		tr = continueSpawnPlacementTrace(previous, tr, task.Exclusions, h.now())
 		if task.ClaimedHost != "" && len(task.Exclusions) != 0 && tr.Record != nil {
 			// The retry's in-process admission error is not the claimed node's
@@ -836,6 +850,9 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.Role = r.Role
 	}
 	request := task.Request
+	// A seat a refusal found full stays out of this request's later
+	// selections (hk 5358).
+	request.Args = withQuotaExclusions(request.Args, liveExclusions(task.Exclusions, h.now()))
 	if pinnedHost := spawnPinnedHost(task); pinnedHost != "" {
 		request.Args = append([]string(nil), request.Args...)
 		foundHost := false
@@ -879,7 +896,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		if err == nil || ctx.Err() != nil || task.Expires.IsZero() {
 			return false
 		}
-		if spawnClaimedAnswer(task, err) {
+		if spawnClaimedAnswer(task, err) || len(quotaFullExcluded(task, h.now(), err, currentCandidates())) != 0 {
 			return false
 		}
 		return spawnParkReason(fleet.ErrorCode(err), err.Error()) != ""
@@ -911,9 +928,13 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// cleanup-confirmed refusal is the answer, not a selection error caused by
 	// excluding that same harness. Other placement errors retain their detail.
 	claimedAnswer := err != nil && ctx.Err() == nil && spawnClaimedAnswer(task, err)
+	// Every candidate left was ruled out by this request's own full-quota
+	// refusals: that is the request's answer, with the refusals named, not a
+	// lack of hosts to wait out (hk 5358).
+	quotaRefused := quotaFullExcluded(task, h.now(), err, currentCandidates())
 	// No candidate can take it now: a request with a limit is parked, not
 	// ended, and is placed again on an event or its next check (hk 4661).
-	if !claimedAnswer && parks(err) {
+	if !claimedAnswer && len(quotaRefused) == 0 && parks(err) {
 		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" {
 			// A recognised no-candidate refusal never ends the request: a
 			// failed or ambiguous park write leaves it accepted for the next
@@ -928,7 +949,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	outcome.RC = fleet.ErrorCode(err)
 	outcome.Reason = fleet.AdmissionRefusalReason(err)
 	if err != nil {
-		outcome.Reason = spawnOutcomeReason(outcome.Reason, spawnRefusalLine(err.Error()))
+		outcome.Reason = spawnOutcomeReason(outcome.Reason, spawnRefusalLine(err.Error())+quotaFullRefusedNotes(quotaRefused))
 		outcome.Fix = utf8PrefixWithin(spawnRefusalLine(fleet.SpawnRefusalFix(err)), 512)
 	}
 	if err != nil && strings.Contains(err.Error(), "hub_spawn_capability_required") {
@@ -1263,7 +1284,9 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	// a launch-proof refusal first tries another harness on this same host;
 	// other refusals rule out the host for the rest of this request (hk 4661: across its attempts).
 	for _, excluded := range liveExclusions(t.task.Exclusions, t.h.now()) {
-		profileOnly := excluded.Reason == "launch_proof_failed" || t.task.ClaimedHost == excluded.Machine
+		// A full quota rules out the seat, not the host: the host's other
+		// profiles stay candidates (hk 5358).
+		profileOnly := excluded.Reason == "launch_proof_failed" || spawnReasonQuotaFull(excluded.Reason) || t.task.ClaimedHost == excluded.Machine
 		if excluded.Machine == req.Machine && (!profileOnly || excluded.Profile == hubSpawnArg(req.Args, "-m")) {
 			t.h.releasePlacementCount(t.task.Job)
 			return fleet.HubSpawnReply{RC: excluded.RC, Error: excluded.Reason, NextHost: true}, nil
@@ -1342,7 +1365,12 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	// deadline still has room for another host.
 	// A cleanup-confirmed replay can already carry a host-bound claim from its
 	// prior attempt, even when this attempt refuses before making a new claim.
-	movesOn := spawnRefusalMovesOn(spawnResultReason(result), result.Stage) || spawnNotStarted(result)
+	// A full quota at the node's gate moves an automatic request on to the
+	// next candidate inside the same request (hk 5358). A pinned -m keeps the
+	// refusal: the requester asked for that seat.
+	quotaFull, quotaFullOK := spawnQuotaFull(result)
+	quotaFullOK = quotaFullOK && spawnStageBeforeJobClaim(result.Stage) && spawnProfileAuto(t.task.Request.Args)
+	movesOn := spawnRefusalMovesOn(spawnResultReason(result), result.Stage) || spawnNotStarted(result) || quotaFullOK
 	if result.RC == 0 || !result.Retryable || !movesOn || !t.h.now().Before(t.task.Deadline) || spawnPinnedHost(t.task) != "" || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
 		return false, nil
 	}
@@ -1351,20 +1379,42 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	}
 	reason := spawnResultReason(result)
 	exclusion := hubSpawnExclusion{Machine: node.Machine, Profile: hubSpawnArg(node.Args, "-m"), Reason: reason, RC: result.RC}
-	if spawnRefusalTriesNextHost(reason) {
+	// A free limit that ends inside the request's time limit is waited out on
+	// the same pool; one that ends later moves the request on at once (hk 5358,
+	// operator decision 435). Both stay inside this request.
+	hold, wait := time.Time{}, false
+	if quotaFullOK {
+		hold, wait = t.h.quotaWaitUntil(t.task, quotaFull)
+		band := t.quotaBand(exclusion.Profile)
+		if !wait {
+			exclusion.Pool = band
+		}
+		exclusion.Account = t.refusedAccount(ctx, node, exclusion.Profile, quotaFull)
+		exclusion = t.h.learnQuotaFull(exclusion, quotaFull, band)
+	} else if spawnRefusalTriesNextHost(reason) {
 		// A host-local refusal rules the host out for the launch backoff only:
 		// the state that caused it can be cleaned up in minutes, and a host
 		// excluded for the request's life would never be asked again (hk 5214).
 		exclusion.ExpiresMS = t.h.now().Add(t.h.hostRefusalBackoff()).UnixMilli()
 	}
-	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task, exclusion, nil, t.h.now().UTC())
+	var park *spawnUnbindPark
+	if quotaFullOK {
+		park = &spawnUnbindPark{reason: "", until: time.Time{}}
+		if wait {
+			park = &spawnUnbindPark{reason: spawnParkQuotaReset, until: hold}
+		}
+	}
+	task, err := t.h.inbox.store.unbindRefusedSpawnParked(ctx, t.task, exclusion, nil, park, t.h.now().UTC())
 	if err != nil {
 		return true, err
 	}
 	t.task, t.bound = task, false
 	// The refused host no longer holds this job; the next candidate counts it.
 	t.h.releasePlacementCount(task.Job)
-	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
+	if !quotaFullOK {
+		// A full quota is the seat's state, not a launch fault of the host.
+		t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
+	}
 	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", reason)
 	t.h.kickSpawnPlacement()
 	return true, nil
