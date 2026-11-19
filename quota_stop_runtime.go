@@ -39,13 +39,18 @@ type quotaStopManager struct {
 	// endReviewer hands a reviewer's quota stop to the job's watcher, which
 	// ends it as hk 4507 does (hk 5355). Tests substitute it.
 	endReviewer func(ctx context.Context, job, pane string, stop quotastop.Stop) error
-	// keepRungOut keeps the rung a stop spent out of new placements until the
-	// stop's reset (fleet.KeepLimitedRungOut, hk 5562).
-	keepRungOut func(ctx context.Context, job string, stop quotastop.Stop, now func() time.Time)
-	mu          sync.Mutex
-	lastPolicy  time.Time
-	policy      quotaPolicy
-	policyOK    bool
+	// recordRung and publishRung keep the rung a stop spent out of new
+	// placements until its reset (fleet.RecordLimitObserved and
+	// PublishLimitObserved, hk 5562). Tests substitute them.
+	recordRung  func(job string, stop quotastop.Stop, now func() time.Time) error
+	publishRung func(ctx context.Context, job string, now func() time.Time) error
+	// publishRetry is how long a failed publication waits before it is tried
+	// again; zero is rungPublishRetry.
+	publishRetry time.Duration
+	mu           sync.Mutex
+	lastPolicy   time.Time
+	policy       quotaPolicy
+	policyOK     bool
 	// clock times the observation phases; nil is time.Now.
 	clock func() time.Time
 	// show reports a pane's quota wait token, or clears it with an empty
@@ -97,7 +102,8 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
 		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, attempt, stop)
 	}
-	q.keepRungOut = fleet.KeepLimitedRungOut
+	q.recordRung = fleet.RecordLimitObserved
+	q.publishRung = fleet.PublishLimitObserved
 	q.endReviewer = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
 		return fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(root, "jobs"), job, pane, q.session(job, pane), stop)
 	}
@@ -508,14 +514,57 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	}
 	// A provider limit is a fact about the account, not the pane: keep the rung
 	// out of new placements until its reset even when this stop is only
-	// observed (a wait, a hold), not at the job's end (hk 5562). The publish
-	// can take a measurement's time, so it runs beside the observation.
-	if q.keepRungOut != nil {
-		go q.keepRungOut(context.WithoutCancel(ctx), job.JobID, stop, func() time.Time { return now })
-	}
+	// observed (a wait, a hold), not at the job's end (hk 5562). The local
+	// record is written before the observation returns, since the wake is
+	// reserved and never read again; only the publication, which can take a
+	// measurement's time, runs beside it.
+	q.keepRungOut(ctx, job.JobID, stop, now)
 	// recordDecisionFor logs a failed write itself; there is nothing more to do here.
 	_ = q.actOnQuotaStop(ctx, c, job, inherited, taskID, stop, basis, now)
 	return false
+}
+
+// rungPublishRetry is the wait between publications of a recorded limit, and
+// rungPublishUnknownReset how long a limit with no readable reset is retried.
+const (
+	rungPublishRetry        = 30 * time.Second
+	rungPublishUnknownReset = time.Hour
+)
+
+// keepRungOut records stop (a Devin free limit) and starts its publication. A
+// refresh that fails (the shared lease held by another host, a store error) is
+// logged and tried again every publishRetry until the reset has passed.
+func (q *quotaStopManager) keepRungOut(ctx context.Context, job string, stop quotastop.Stop, now time.Time) {
+	if stop.Pool != "devin-free" || q.recordRung == nil || q.publishRung == nil {
+		return
+	}
+	clock := func() time.Time { return now }
+	if err := q.recordRung(job, stop, clock); err != nil {
+		q.logger.Warn("free-limit observation failed", "job", job, "error", err)
+		return
+	}
+	until := stop.Reset
+	if until.IsZero() {
+		until = now.Add(rungPublishUnknownReset)
+	}
+	wait := q.publishRetry
+	if wait <= 0 {
+		wait = rungPublishRetry
+	}
+	go func() {
+		ctx := context.WithoutCancel(ctx)
+		for {
+			err := q.publishRung(ctx, job, time.Now)
+			if err == nil {
+				return
+			}
+			q.logger.Warn("free-limit publication failed; retrying", "job", job, "error", err)
+			time.Sleep(wait)
+			if !time.Now().Before(until) {
+				return
+			}
+		}
+	}()
 }
 
 // reserveDecision creates the decision row for candidate c if it does not

@@ -80,5 +80,7 @@ func (a *App) recordRefusedFreeLimit(ctx context.Context, job string, refusal er
 		a.warn("free-limit refusal not recorded for job %s: %v", job, err)
 		return
 	}
-	a.publishFreeLimit(ctx, job)
+	if err := a.publishFreeLimit(ctx, job); err != nil {
+		a.warn("%v", err)
+	}
 }

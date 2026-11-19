@@ -60,3 +60,15 @@ func TestKeepLimitedRungOutLeavesOtherPoolsAlone_T5562(t *testing.T) {
 		t.Fatalf("another pool's stop touched the free limit: %+v, %d commands", got, ran)
 	}
 }
+
+// A refresh that fails is returned, not dropped, so the quota-stop manager can
+// retry a publication another host's lease held up (hk 5562 review).
+func TestPublishLimitFailureIsReturned_T5562(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("PACELEVER_CACHE", "")
+	a := testApp(t)
+	a.Runner.(*fakeRunner).Do = func(Command) Result { return Result{Code: 1, Err: "lease held"} }
+	if err := a.publishFreeLimit(context.Background(), "job-a"); err == nil {
+		t.Fatal("a failed refresh was reported as published")
+	}
+}
