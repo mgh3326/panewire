@@ -680,6 +680,7 @@ type localRequest struct {
 	DeliveryClass string                `json:"delivery_class,omitempty"`
 	Late          bool                  `json:"late,omitempty"`
 	NotifyType    string                `json:"notify_type,omitempty"`
+	Priority      string                `json:"priority,omitempty"`
 	Cause         string                `json:"cause,omitempty"`
 	Op            string                `json:"op"`
 	Path          string                `json:"path,omitempty"`
@@ -933,7 +934,7 @@ func sameLocalPath(left, right string) bool {
 // immediate queue. A hub that is absent or disconnected is not an error: the
 // event file is durable and the node outbox retries from it.
 func (d *Daemon) emitRelayEvent(req localRequest) error {
-	if !emitRelayKinds[req.Kind] || !validDeliveryClass(req.DeliveryClass) || !validNotifyType(req.NotifyType) || !validInboxCause(req.Cause) {
+	if !emitRelayKinds[req.Kind] || !validDeliveryClass(req.DeliveryClass) || !validNotifyType(req.NotifyType) || !validOrderPriority(req.Priority) || !validInboxCause(req.Cause) {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
@@ -983,6 +984,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	}
 	event := hubScannedRelayEvent{
 		DeliveryClass: req.DeliveryClass, Late: req.Late, NotifyType: req.NotifyType, Cause: req.Cause, Kind: req.Kind,
+		Priority: req.laneOrderPriority(),
 		HubActiveJob: HubActiveJob{
 			JobID: req.JobID, Epoch: epoch, AgentLabel: req.AgentLabel, OwnerLane: req.OwnerLane,
 			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,
@@ -1022,4 +1024,13 @@ func (d *Daemon) emitNamespaceRoot() string {
 		local = d.cfg.InboxRoot
 	}
 	return local
+}
+
+// laneOrderPriority is the request's order priority when it is a lane.event
+// typed order, else empty: no other event carries one.
+func (r localRequest) laneOrderPriority() string {
+	if r.Kind != "lane.event" || r.NotifyType != "order" {
+		return ""
+	}
+	return r.Priority
 }

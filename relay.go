@@ -831,9 +831,10 @@ var workerDirectiveTypes = map[string]bool{"findings": true, "decision": true, "
 // lane: a lane whose route names a parent, the design lane it reports to. It is
 // sent at once on every harness, working or not (hk 3276); a lane with no
 // parent, such as the desk, keeps its delivery policy. An explicit deliver on
-// the event or the route still wins.
+// the event or the route still wins. An order marked normal or low is the one
+// exception: its sender said it can wait for the digest (hk 4269).
 func isWorkerDirective(kind string, event hubJobEventPayload, route reportRelayRoute) bool {
-	return kind == "lane.event" && route.Parent != "" && !route.Sink && workerDirectiveTypes[event.NotifyType]
+	return kind == "lane.event" && route.Parent != "" && !route.Sink && workerDirectiveTypes[event.NotifyType] && !digestOrder(event)
 }
 
 func relayInjectDirective(kind string, event hubJobEventPayload, route reportRelayRoute, eventID int64) hubRelayInjectEvent {

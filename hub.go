@@ -343,8 +343,11 @@ type hubJobEventPayload struct {
 	Late          bool   `json:"late,omitempty"`
 	DeliveryClass string `json:"delivery_class,omitempty"`
 	NotifyType    string `json:"notify_type,omitempty"`
-	Cause         string `json:"cause,omitempty"`
-	noDigest      bool
+	// Priority is an order's declared urgency (orderPriorities). Empty is an
+	// unmarked order, which interrupts. Only a lane.event typed order carries it.
+	Priority string `json:"priority,omitempty"`
+	Cause    string `json:"cause,omitempty"`
+	noDigest bool
 	// inboxID is the lane inbox row that holds this lane.event whole, set by
 	// receiveInbox. The typed head points at it (laneEventRelayText).
 	inboxID int64

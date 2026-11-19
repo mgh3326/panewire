@@ -747,5 +747,5 @@ func readLaneEventFile(path string) (hubScannedRelayEvent, bool, int64, bool) {
 	if epoch == 0 {
 		epoch = 1
 	}
-	return hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Cause: event.Cause, Head: event.head(), PR: event.pr(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated(), Sink: !event.Ceiling}, true, hubIndexLaneOverhead + int64(len(contents)) + hubIndexEventOverhead, false
+	return hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Priority: event.orderPriority(), Cause: event.Cause, Head: event.head(), PR: event.pr(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated(), Sink: !event.Ceiling}, true, hubIndexLaneOverhead + int64(len(contents)) + hubIndexEventOverhead, false
 }

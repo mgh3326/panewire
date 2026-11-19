@@ -85,6 +85,7 @@ type emitRecord struct {
 	DeliveryClass string `json:"delivery_class,omitempty"`
 	Late          bool   `json:"late,omitempty"`
 	NotifyType    string `json:"notify_type,omitempty"`
+	Priority      string `json:"priority,omitempty"`
 	Cause         string `json:"cause,omitempty"`
 	Type          string `json:"type"`
 	// Kind carries the same value as Type under the key the reap reader
@@ -129,6 +130,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	late := fs.Bool("late", false, "completion found by a re-armed watcher")
 	deliver := fs.String("deliver", "", "interrupt | inbox (otherwise receiving-lane policy)")
 	notifyType := fs.String("type", "", "notification type: decision | order | ready | merged | blocked | findings | idle-wake | progress | report | ack | info | deploy-approval | watch-hold | culprit-hold | automation-failed")
+	priority := fs.String("priority", "", "order priority: stop | hold | urgent | normal | low (only with --kind lane.event --type order; normal and low wait for the lane's next idle moment, an unmarked order and the rest interrupt)")
 	sink := fs.Bool("sink", false, "sink lane.event text: at most 8192 bytes, cut to that at emit (otherwise text up to 16 KiB is kept whole in the lane inbox)")
 	report := fs.String("report", "", "report path")
 	ownerLane := fs.String("owner-lane", "", "owning lane")
@@ -167,6 +169,10 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	}
 	if !validNotifyType(*notifyType) {
 		fmt.Fprintln(stderr, "emit: invalid --type", *notifyType)
+		return ExitUsage
+	}
+	if *priority != "" && (!orderPriorities[*priority] || *kind != "lane.event" || *notifyType != "order") {
+		fmt.Fprintln(stderr, "emit: invalid --priority", *priority, "(stop, hold, urgent, normal or low, only with --kind lane.event --type order)")
 		return ExitUsage
 	}
 	if !validInboxCause(*cause) {
@@ -218,7 +224,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if paneID == "" {
 			paneID = os.Getenv("HERDR_PANE_ID")
 		}
-		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Cause: *cause, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated, Sink: *sink, Ceiling: !*sink}
+		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Priority: *priority, Type: *kind, Cause: *cause, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated, Sink: *sink, Ceiling: !*sink}
 		if record.Epoch == 0 {
 			record.Epoch = 1
 		}
@@ -701,7 +707,7 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(timeout))
 	request := localRequest{
-		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Cause: record.Cause, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
+		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Priority: record.Priority, Cause: record.Cause, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
 		Label: record.Label, Host: record.Host, PaneID: record.PaneID, ReportPath: record.ReportPath,
 		ReportLastLine: record.ReportLastLine, Reason: record.Reason, Question: record.Question,
 		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, Ceiling: record.Ceiling, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),

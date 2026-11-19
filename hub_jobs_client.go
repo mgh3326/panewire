@@ -185,8 +185,10 @@ type hubScannedRelayEvent struct {
 	Late          bool
 	DeliveryClass string
 	NotifyType    string
-	Cause         string
-	Kind          string
+	// Priority is a lane.event order's priority (orderPriorities).
+	Priority string
+	Cause    string
+	Kind     string
 	HubActiveJob
 	Reason string
 	// Final marks a job.lost whose hk record the node already wrote lost. Only
@@ -420,6 +422,7 @@ type hubInboxEvent struct {
 	Late           bool   `json:"late,omitempty"`
 	DeliveryClass  string `json:"delivery_class,omitempty"`
 	NotifyType     string `json:"notify_type,omitempty"`
+	Priority       string `json:"priority,omitempty"`
 	Cause          string `json:"cause,omitempty"`
 	Type           string `json:"type"`
 	Kind           string `json:"kind"`
@@ -531,6 +534,16 @@ func (e hubInboxEvent) notifyType() string {
 		return ""
 	}
 	return e.NotifyType
+}
+
+// orderPriority is the event file's order priority, or empty when the file
+// is not an order or names a priority outside the vocabulary: the hub rejects
+// such a payload outright, so the event must go out unmarked instead.
+func (e hubInboxEvent) orderPriority() string {
+	if e.notifyType() != "order" || !orderPriorities[e.Priority] {
+		return ""
+	}
+	return e.Priority
 }
 func (e hubInboxEvent) eventID() string { return e.EventID }
 func (e hubInboxEvent) text() string    { return e.Text }
