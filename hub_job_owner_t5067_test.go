@@ -64,8 +64,15 @@ func (s *ownerFenceHK) Put(_ context.Context, _ string, fields map[string]any) e
 		if next, _ := owner["epoch"].(float64); next <= epoch {
 			return &fleet.BackendError{Status: http.StatusConflict, Code: "job_owner_mismatch", OwnerNode: node, OwnerEpoch: uint64(epoch)}
 		}
-		if state := s.record["state"]; !s.terminalOwners && (state == "completed" || state == "lost" || state == "escalated") {
-			return &fleet.BackendError{Status: http.StatusConflict, Code: "job_state_conflict"}
+		if state, _ := s.record["state"].(string); state == "completed" || state == "lost" || state == "escalated" {
+			// Before hk 5303 every owner change on a terminal record is refused.
+			// From 5303 only an owner-only update carrying expected_owner is
+			// accepted; state, result and every other field stay immutable.
+			_, hasExpected := update["expected_owner"]
+			ownerOnly := len(update) == 2 && hasExpected
+			if !s.terminalOwners || !ownerOnly {
+				return &fleet.BackendError{Status: http.StatusConflict, Code: "job_state_conflict"}
+			}
 		}
 		s.record["owner_node"], s.record["owner_epoch"] = owner["node"], owner["epoch"]
 	}
@@ -947,16 +954,16 @@ func TestJobOwnerFenceTerminalTransferFailsClosed_t5067(t *testing.T) {
 	hk := &ownerFenceHK{record: map[string]any{"state": "lost", "owner_node": "machine-a", "owner_epoch": float64(1)}}
 	hub, agent := ownerFenceHub(t, hk)
 	_, err := hub.reassignJob("fenced-job", "machine-b")
-	if err == nil || !strings.Contains(err.Error(), "job_state_conflict") {
-		t.Fatalf("terminal transfer error=%v, want job_state_conflict", err)
+	if err == nil || !strings.Contains(err.Error(), "job_state_conflict") || !strings.Contains(err.Error(), "terminal record refuses ownership transfer") {
+		t.Fatalf("terminal transfer error=%v, want job_state_conflict with the terminal reason", err)
 	}
 	if hub.jobs["fenced-job"].Node != "machine-a" || len(agent.assignments) != 0 {
 		t.Fatal("terminal refusal exposed the successor")
 	}
 }
 
-func TestJobOwnerFenceTerminalTransferFutureHandoffkeep_t5067(t *testing.T) {
-	t.Skip("hk 5303: waiting for the deployed handoffkeep version supporting conditional terminal owner-only transfers")
+// hk 5303 accepts an owner-only update on a terminal record (hk v0.0.376).
+func TestJobOwnerFenceTerminalOwnerOnlyTransfer_t5067(t *testing.T) {
 	hk := &ownerFenceHK{terminalOwners: true, record: map[string]any{"state": "lost", "owner_node": "machine-a", "owner_epoch": float64(1), "result": "immutable"}}
 	hub, _ := ownerFenceHub(t, hk)
 	if _, err := hub.reassignJob("fenced-job", "machine-b"); err != nil {
@@ -965,13 +972,24 @@ func TestJobOwnerFenceTerminalTransferFutureHandoffkeep_t5067(t *testing.T) {
 	if hk.record["owner_node"] != "machine-b" || hk.record["owner_epoch"] != float64(2) || hk.record["state"] != "lost" || hk.record["result"] != "immutable" {
 		t.Fatalf("terminal transfer changed result or state: %v", hk.record)
 	}
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	if len(hk.updates) != 1 {
+		t.Fatalf("terminal transfer sent %d updates, want one: %v", len(hk.updates), hk.updates)
+	}
+	update := hk.updates[0]
+	expected, _ := update["expected_owner"].(map[string]any)
+	owner, _ := update["owner"].(map[string]any)
+	if len(update) != 2 || expected["node"] != "machine-a" || expected["epoch"] != float64(1) || owner["node"] != "machine-b" || owner["epoch"] != float64(2) {
+		t.Fatalf("terminal transfer update=%v, want owner-only A/1 -> B/2 with expected_owner", update)
+	}
 }
 
 var _ fleet.JobStore = (*ownerFenceHK)(nil)
 
 // This exercises the durable pool action through a real hub restart. The fake
-// already carries the new owner: terminal transfer support is tracked by the
-// separately skipped future-server test above.
+// already carries the new owner; the terminal owner-only transfer itself is
+// covered by TestJobOwnerFenceTerminalOwnerOnlyTransfer_t5067.
 func TestJobOwnerFenceRestartSuppressesOldNotice_t5067(t *testing.T) {
 	for _, state := range []string{"lost", "spawned"} {
 		t.Run(state, func(t *testing.T) {

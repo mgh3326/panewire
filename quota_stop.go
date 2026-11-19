@@ -142,12 +142,15 @@ func (q *quotaStopManager) quotaWaits(role, pool string) bool {
 }
 
 // quotaDecisionJob is the decision for an implementer (policy/quota-stop,
-// hk 3334): wait only when the reset is at or before the job's start plus the
-// task's expected time, which is the time left on the task. A missing expected
-// time, an unknown start, an urgent task, a second stop after one resume, a
-// dialog or an unknown reset all hand over; there is no default expected time.
-// A reset further away than the policy's max_wait hands over before the
-// expected-time comparison (hk 4503).
+// hk 3334): wait when the reset is at or before the job's start plus the
+// task's expected time, which is the time left on the task. A task that names
+// no expected time is judged on the policy's default_expected from now, as the
+// generic decision does (hk 5349), so a short reset is waited out whether or
+// not the task estimated its length. A reset already past is a wait that is due
+// at once: the stop is over and the pane is resumed, never ended for it. An
+// unknown reset, an urgent task, a second stop after one resume, a dialog or a
+// reset past the budget hand over. A reset further away than the policy's
+// max_wait hands over before the budget comparison (hk 4503).
 func quotaDecisionJob(policy quotaPolicy, policyOK bool, priority int, expected time.Duration, started time.Time, waits int, stop quotaStop, now time.Time) (string, string) {
 	if !policyOK {
 		return "handover", "policy_unavailable"
@@ -161,22 +164,29 @@ func quotaDecisionJob(policy quotaPolicy, policyOK bool, priority int, expected 
 	if stop.Choice {
 		return "handover", "choice_dialog"
 	}
-	if stop.Reset.IsZero() || !stop.Reset.After(now) {
+	if stop.Reset.IsZero() {
 		return "handover", "reset_unknown"
 	}
-	if expected <= 0 {
-		return "handover", "expected_missing"
+	if !stop.Reset.After(now) {
+		return "wait", "reset_passed"
 	}
-	if started.IsZero() {
+	var limit time.Time
+	reason := "reset_within_expected"
+	switch {
+	case expected > 0 && started.IsZero():
 		return "handover", "start_unknown"
+	case expected > 0:
+		limit = started.Add(expected)
+	default:
+		limit, reason = now.Add(policy.Expected), "reset_within_default_expected"
 	}
 	if policy.resetBeyondMaxWait(stop.Reset, now) {
 		return "handover", "reset_beyond_max_wait"
 	}
-	if stop.Reset.After(started.Add(expected)) {
+	if stop.Reset.After(limit) {
 		return "handover", "reset_too_late"
 	}
-	return "wait", "reset_within_expected"
+	return "wait", reason
 }
 
 func quotaDecision(policy quotaPolicy, policyOK bool, priority int, expected time.Duration, waits int, stop quotaStop, now time.Time) (string, string) {
