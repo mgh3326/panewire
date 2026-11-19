@@ -597,13 +597,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						quotaRetry = true
 					}
 				} else if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
-					resumed, resumable := reviewerWaitResume(j, a.Now())
+					resumed, resumable := reviewerWaitResume(j, stop, a.Now())
 					if until, ok := reviewerWaitUntil(j, stop, a.Now()); ok && !holdTaken && !resumable {
 						// A short reset: hold the job for the manager's resume
 						// (hk 5355). The wait is recorded once, so a second stop
 						// after it ends the job at once; the deadline is extended
 						// by the wait.
-						if err := a.event(ctx, id, quotaWaitKind, map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "reset_at": stop.Reset.UTC().Format(time.RFC3339), "until": until.UTC().Format(time.RFC3339)}); err != nil {
+						if err := a.event(ctx, id, quotaWaitKind, map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "reset_at": stop.Reset.UTC().Format(time.RFC3339), "remaining_s": int64(stop.Reset.Sub(a.Now()).Round(time.Second) / time.Second), "until": until.UTC().Format(time.RFC3339)}); err != nil {
 							return err
 						}
 						reviewerHold = reviewerQuotaHold{active: true, stop: stop, until: until, seq: paneAgent.StateChangeSeq}

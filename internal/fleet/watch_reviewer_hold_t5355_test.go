@@ -140,8 +140,9 @@ func TestWatcherReviewerRestartInsideTheWaitKeepsTheHold(t *testing.T) {
 	// The earlier watcher's durable hold: its wait still has three minutes to run.
 	if e := a.event(context.Background(), "j", quotaWaitKind, map[string]any{
 		"pane_id": "w:p1", "pool": "devin-free",
-		"reset_at": a.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339),
-		"until":    a.Now().Add(3 * time.Minute).UTC().Format(time.RFC3339),
+		"reset_at":    a.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339),
+		"remaining_s": 120,
+		"until":       a.Now().Add(3 * time.Minute).UTC().Format(time.RFC3339),
 	}); e != nil {
 		t.Fatal(e)
 	}
@@ -154,5 +155,34 @@ func TestWatcherReviewerRestartInsideTheWaitKeepsTheHold(t *testing.T) {
 	}
 	if str(h.record(t, "j"), "state") != "lost" {
 		t.Fatalf("hk record %v, want lost once the wait ran out", h.record(t, "j"))
+	}
+}
+
+// A restarted watcher does not inherit a wait for another stop: the stop on the
+// pane has a different remaining duration from the recorded one (a second stop
+// after the resume), so it is ended at once, not held to the old until.
+func TestWatcherReviewerRestartWithAnotherStopEndsAtOnce(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", "")
+	screen := shortResetScreen(t)
+	reviewerHoldRunner(t, a, f,
+		func(time.Duration) string { return "idle" },
+		func(time.Duration) string { return screen })
+	if e := a.event(context.Background(), "j", quotaWaitKind, map[string]any{
+		"pane_id": "w:p1", "pool": "devin-free",
+		"reset_at":    a.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339),
+		"remaining_s": 300,
+		"until":       a.Now().Add(6 * time.Minute).UTC().Format(time.RFC3339),
+	}); e != nil {
+		t.Fatal(e)
+	}
+	start := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if waited := a.Now().Sub(start); waited >= time.Minute {
+		t.Fatalf("the restarted watcher held another stop for %v, want ended at once", waited)
+	}
+	if str(h.record(t, "j"), "state") != "lost" {
+		t.Fatalf("hk record %v, want lost", h.record(t, "j"))
 	}
 }

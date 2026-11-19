@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -651,27 +652,41 @@ func reviewerWaitUntil(j Job, stop quotastop.Stop, now time.Time) (time.Time, bo
 }
 
 // reviewerWaitResume is the hold a restarted watcher inherits (hk 5355): the
-// newest durable wait, while its until is still ahead. The watcher that wrote
-// it held the job in memory only, so a restart inside the wait would otherwise
-// end the job while the manager's resume is pending. A second stop is not
-// re-held here: the watch takes this only once per process, and the manager
-// decides the second stop (resume_limit) either way.
-func reviewerWaitResume(j Job, now time.Time) (time.Time, bool) {
+// newest durable wait, while its until is still ahead and the stop on the pane
+// is the one it recorded. The watcher that wrote it held the job in memory
+// only, so a restart inside the wait would otherwise end the job while the
+// manager's resume is pending.
+//
+// The same stop is recognised by its pool and its remaining duration, not by
+// its reset time: a relative limit ("reset in 2 minutes") is read again as
+// now + duration, so its absolute reset drifts with each read, while the
+// duration stays the same for the same screen. A stop with another duration (a
+// second stop after the resume) is not inherited and is ended at once.
+func reviewerWaitResume(j Job, stop quotastop.Stop, now time.Time) (time.Time, bool) {
 	var wait map[string]any
 	for _, ev := range j.Events {
 		if ev.Kind == quotaWaitKind {
 			wait = ev.Payload
 		}
 	}
-	if wait == nil {
+	if wait == nil || str(wait, "pool") != stop.Pool {
 		return time.Time{}, false
 	}
 	until, err := time.Parse(time.RFC3339, str(wait, "until"))
 	if err != nil || !until.After(now) {
 		return time.Time{}, false
 	}
+	recorded, ok := wait["remaining_s"].(float64)
+	if !ok || math.Abs(stop.Reset.Sub(now).Seconds()-recorded) > reviewerWaitSameStopSlack.Seconds() {
+		return time.Time{}, false
+	}
 	return until, true
 }
+
+// reviewerWaitSameStopSlack is how far the remaining duration of a stop may
+// move between two reads and still be the same stop (whole-second rounding in
+// the record, the read's own clock).
+const reviewerWaitSameStopSlack = 2 * time.Second
 
 // pendingQuotaIntent returns the job's open close intent: the newest intent not
 // followed by a cancellation, an end, a re-prompt or a new claim or spawn.
