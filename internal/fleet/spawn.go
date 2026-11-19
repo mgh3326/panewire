@@ -31,7 +31,7 @@ type Spawn struct {
 	registeredLane                                                                                                                                                                         *Job
 	requestedLocal                                                                                                                                                                         bool
 	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, ReportRelative string
-	OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                                      string
+	OwnerNotify, OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                         string
 	// Expires is --expires: the request's time limit (hk 4660). It travels as
 	// Submission.ExpiresSeconds, never in the node's args.
 	Expires string `json:"-"`
@@ -236,7 +236,7 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 	for _, p := range []struct {
 		k string
 		v *string
-	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"expires", &s.Expires}, {"urgency", &s.Urgency}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}, {"checkout-origin", &s.CheckoutOrigin}, {"checkout-commit", &s.CheckoutCommit}, {"checkout-ref", &s.CheckoutRef}} {
+	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"expires", &s.Expires}, {"urgency", &s.Urgency}, {"owner-notify", &s.OwnerNotify}, {"author-family", &s.AuthorFamily}, {"builder-job", &s.BuilderJob}, {"e6-arm", &s.E6Arm}, {"checkout-origin", &s.CheckoutOrigin}, {"checkout-commit", &s.CheckoutCommit}, {"checkout-ref", &s.CheckoutRef}} {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (implementer or consult)")
@@ -920,6 +920,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	if s.Urgency != "" && !slices.Contains([]string{"normal", "urgent"}, s.Urgency) {
 		return fail(exitUsage, "--urgency must be normal or urgent")
+	}
+	if !ValidOwnerNotify(s.OwnerNotify) {
+		return fail(exitUsage, "--owner-notify must be final or never")
 	}
 	if s.Wait && s.DryRun {
 		return fail(exitUsage, "--wait needs a real spawn")

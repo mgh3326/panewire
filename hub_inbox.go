@@ -206,7 +206,15 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	if h.inbox == nil || event.sinkOnly {
 		return result, false
 	}
+	// --owner-notify (hk 5360) comes before the design filter: a daemon reviewer's
+	// completion that the spawn withholds is filed as owner-notify and counted,
+	// not as reviewer-lifecycle.
 	lane := h.receivingLane(kind, *event)
+	if h.ownerNotifyJobSilenced(jobLookupContext, kind, *event, lane) {
+		if result, handled := h.receiveOwnerNotifySilenced(kind, event, sender, senderID, lane); handled {
+			return result, true
+		}
+	}
 	if reason := h.designFilterReason(kind, *event, lane); reason != "" {
 		if result, handled := h.receiveFiltered(kind, event, sender, senderID, reason); handled {
 			return result, true

@@ -58,7 +58,14 @@ type spawnNoticeAction int
 const (
 	spawnNoticeDeliver spawnNoticeAction = iota
 	spawnNoticeFile
-	spawnNoticeHold
+	// spawnNoticeCount settles a row silently: nothing is sent to the owner, and
+	// the outcome is counted by cause in the daily loops row (hk 5360).
+	spawnNoticeCount
+	// spawnNoticeSettle settles a row that a later outcome overtook: nothing is
+	// sent and nothing is counted (hk 5360 review).
+	spawnNoticeSettle
+	// spawnNoticeLater leaves the row pending: its decision is not yet recorded.
+	spawnNoticeLater
 )
 
 // spawnNoticeRetry is how soon the flush reads the outbox again while a
@@ -163,31 +170,11 @@ func spawnNoticeAttempt(id string) int {
 	return attempt
 }
 
-// spawnNoticeFor decides what a pending notification does. Anything the hub
-// cannot place (no spawn record, an unreadable store) is delivered.
+// spawnNoticeFor returns the action for a pending notification: its recorded
+// decision, or the decision it makes now (decideSpawnNotice). Nothing is sent or
+// counted before its decision is recorded.
 func (h *HubServer) spawnNoticeFor(ctx context.Context, n spawnNotification, result hubSpawnOutcome) spawnNoticeAction {
-	if !h.inbox.policy.designLane(n.owner) {
-		return spawnNoticeDeliver
-	}
-	task, err := h.inbox.store.spawnTask(ctx, n.request)
-	if err != nil || !daemonStartedReviewer(task.Job, task.Request.Args) {
-		return spawnNoticeDeliver
-	}
-	switch {
-	case result.RC == 0:
-		if result.LaneUnregistered {
-			return spawnNoticeDeliver // the pane's findings are not routed: someone must act
-		}
-		return spawnNoticeFile
-	case n.owner != task.Owner:
-		return spawnNoticeDeliver // the requester's own copy reaches it at once
-	case result.Retryable && h.quietTimings.spawnFailureHold > 0 && spawnSubmitterLane(task.Request.Args) != "" && spawnSubmitterLane(task.Request.Args) != task.Owner:
-		// Held only for a requester that has its own copy (completeSpawn
-		// writes one when the submitting lane differs from the owner). With
-		// none, the owner row is the only notice the requester can act on.
-		return spawnNoticeHold
-	}
-	return spawnNoticeDeliver
+	return h.decideSpawnNotice(ctx, n, result)
 }
 
 func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotification) {
@@ -200,6 +187,13 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 	}
 	event := spawnNotificationEvent(n, result)
 	switch h.spawnNoticeFor(ctx, n, result) {
+	case spawnNoticeCount:
+		// The count is the recorded decision: it was made with the decision.
+		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
+	case spawnNoticeLater:
+		// The decision could not be read or recorded: the row stays pending.
+	case spawnNoticeSettle:
+		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
 	case spawnNoticeFile:
 		switch _, filed, ok := h.fileFilteredInHK(ctx, "lane.event", event, event.Host, filteredReasonReviewerLifecycle); {
 		case ok && filed:
@@ -210,9 +204,6 @@ func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotificat
 				h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
 			}
 		}
-	case spawnNoticeHold:
-		h.logger.Info("reviewer spawn failure held for its requester", "request", n.request, "job", n.job, "event_id", n.id)
-		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeHeld)
 	default:
 		// The relay owns the durable write. Persisting here first makes its own
 		// POST a 200 duplicate, which it leaves to replay instead of injecting.

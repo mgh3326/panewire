@@ -300,6 +300,9 @@ func MainWithVersion(args []string, version string) int {
 	}
 	fleet.BuildVersion = version
 	if len(args) > 0 && (args[0] == "version" || args[0] == "--version") {
+		if len(args) == 2 && args[0] == "version" && args[1] == "--json" {
+			return printVersionJSON(version)
+		}
 		if len(args) != 1 {
 			return ExitUsage
 		}

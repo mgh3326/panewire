@@ -2053,7 +2053,12 @@ const hubCapabilityConsultStamp = "consult_stamp_v1"
 // hubSpawnCapabilities is what an upgraded node always advertises in hello;
 // close_ops_v1 is added while the node is ready for it
 // (spawnHelloCapabilities).
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilitySpawnExpires, hubCapabilityConsultStamp, hubCapabilityApplied}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilitySpawnExpires, hubCapabilityConsultStamp, hubCapabilityOwnerNotify, hubCapabilityApplied}
+
+// hubCapabilityOwnerNotify is advertised by a node whose spawn argument rule
+// accepts --owner-notify (hk 5360). The hub strips the flag for any other node;
+// the saved request keeps it, so the owner's notices follow the mode anyway.
+const hubCapabilityOwnerNotify = fleet.OwnerNotifyCapability
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
