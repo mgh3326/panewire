@@ -366,9 +366,7 @@ func storeCopyScan(ctx context.Context, tx *sql.Tx, source, target *storeCopyDB,
 				return result, hubDatabaseError("scan", err)
 			}
 			for i, v := range vals {
-				if b, ok := v.([]byte); ok {
-					vals[i] = append([]byte(nil), b...)
-				}
+				vals[i] = storeCopyValue(v)
 			}
 			batch = append(batch, vals)
 		}
@@ -415,6 +413,21 @@ func storeCopyScan(ctx context.Context, tx *sql.Tx, source, target *storeCopyDB,
 	copy(result.sum[:], h.Sum(nil))
 	return result, nil
 }
+
+// storeCopyValue returns a private copy of a scanned []byte. An empty value
+// stays a non-nil empty slice: append([]byte(nil), b...) turns it into nil,
+// and pgx writes a nil []byte as SQL NULL, which breaks NOT NULL columns. A
+// real SQL NULL scans as an untyped nil and passes through unchanged.
+func storeCopyValue(v any) any {
+	b, ok := v.([]byte)
+	if !ok {
+		return v
+	}
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
+}
+
 func storeCopyBytes(v any) []byte {
 	switch v := v.(type) {
 	case []byte:
@@ -427,7 +440,8 @@ func storeCopyBytes(v any) []byte {
 }
 func storeCopyHashRow(h hash.Hash, vals []any, table storeCopyTable, cols []string, dialect *storeCopyDB) {
 	for i, v := range vals {
-		if v == nil {
+		// A nil []byte is a NULL to pgx, so it hashes as NULL, not as an empty value.
+		if b, ok := v.([]byte); v == nil || ok && b == nil {
 			h.Write([]byte{0})
 			continue
 		}
