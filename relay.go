@@ -16,6 +16,7 @@ const (
 	lanePersistedMaxEntries        = 4096
 	relayReplayExhaustedMaxEntries = 4096
 	relayReplayRetiredMaxEntries   = 4096
+	relayReplayUnroutedMaxEntries  = 4096
 )
 
 // legacyChatRelayEventPattern matches the relay rows the removed operator chat
@@ -1446,14 +1447,14 @@ func (h *HubServer) replayRelayEventCollecting(record handoffkeepRelayEvent, sou
 	route, agent, routed := h.resolveRelayRoute(record.Kind, event)
 	if !routed {
 		h.forgetRelayEvent(key)
-		h.broadcastRelayUnrouted(event)
+		h.announceUnroutedReplay(record.ID, event)
 		return
 	}
 	if record.Kind == "lane.event" && route.Sink {
 		// A failed sink delivery mark leaves an observable undelivered row, but
 		// its later replay must never reinterpret the sink as a pane target.
 		h.forgetRelayEvent(key)
-		h.broadcastRelayUnrouted(event)
+		h.announceUnroutedReplay(record.ID, event)
 		return
 	}
 	if record.Kind == "lane.event" {
