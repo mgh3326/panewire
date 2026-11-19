@@ -148,3 +148,25 @@ func TestPolicyAwareFleetCommandsIncludeEscalateAuthor(t *testing.T) {
 		}
 	}
 }
+
+// A lane the loaded policy names in relay.desk_lanes is never a design lane,
+// even under the default *-design list that keeps the built-in lanes (hk 4241;
+// mergewake finding on consult_design_lanes.go). Mutant-checked: dropping the
+// desk check classifies routing-policy as design and fails this test.
+func TestConsultDesignLanesDefaultPatternHonoursDeskLanes(t *testing.T) {
+	for name, raw := range map[string]string{
+		"explicit *-design":   "default: interrupt\nrelay:\n  design_lanes: [\"*-design\"]\n  desk_lanes: [\"routing-policy\"]\n",
+		"absent design_lanes": "default: interrupt\nrelay:\n  desk_lanes: [\"routing-policy\"]\n",
+	} {
+		isDesign := consultDesignLanes(quietDesignPolicyOf(t, raw))
+		if isDesign == nil {
+			t.Fatalf("%s: no classifier loaded", name)
+		}
+		if isDesign("routing-policy") {
+			t.Fatalf("%s: routing-policy is a desk lane and must not be a design lane", name)
+		}
+		if !isDesign("panewire-design") || !isDesign("fleet-policy") {
+			t.Fatalf("%s: built-in design lanes lost outside the desk list", name)
+		}
+	}
+}
