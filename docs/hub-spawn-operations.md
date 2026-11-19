@@ -1625,8 +1625,8 @@ for the owner-notice rules in [Owner notices by cause](#owner-notices-by-cause).
 A private Sentry client records one always-sampled `runtug.spawn` transaction per
 spawn attempt (the established telemetry name survives the CLI rename). Only this
 spawn path is traced; other hub traffic and the crash reporter's budget are
-unchanged. A transaction finishes on the first outcome observation; late reconciliation stays in the durable audit and each subsequent failure transition still gets its own deduplicated error event. Stage spans use measured claim/placement/checkout/launch/landing
-elapsed durations. Durations from node clocks are end-aligned, not presented as
+unchanged. A transaction finishes on the first outcome observation; late reconciliation stays in the durable audit and each subsequent failure transition still gets its own deduplicated error event. Stage spans use measured claim/placement/checkout/launch/submit/landing
+elapsed durations (hk 5585). The steps after placement are node claim (`claim`), pane start (`launch`), brief submit (`submit`: the brief's write, typing and record) and landing proof (`landing`: the confirmation, model proof and task link). `submit` is a timing key only; a result still reports `landing` as its coarse stage, so the hub's stage rules are unchanged. A hub that does not list `spawn_stage_submit` in hub.features gets submit folded into landing, because a strict hub rejects the whole result for an unknown key. Durations from node clocks are end-aligned, not presented as
 a synchronized cross-host causal timeline. Tags are job, host, profile, role and
 rc. `SPAWN_FAILED`, including timeout, also produces an error event titled
 `SPAWN_FAILED <stage>/<reason>` and fingerprinted by stage and normalized reason.
