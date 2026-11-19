@@ -312,7 +312,7 @@ func (a *App) pickSeat(ctx context.Context, routingRole, grade, gradeSource, lan
 	}
 	cwd, _ := os.Getwd()
 	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: seatRole, T: t, ParentFamily: builderFamily, RoutingRole: routingRole, AllowEscalation: true, DryRun: true}
-	req := selReq{grade: grade, lane: lane, gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: true, authorFamily: builderFamily, excludeFamilies: excludeFamilies, excludeProfiles: excludeProfiles, urgency: urgencyNormal, urgencySource: "default", route: route}
+	req := selReq{grade: grade, designSession: a.designSessionLane(lane), gradeSource: gradeSource, t: t, role: seatRole, allowEscalation: true, authorFamily: builderFamily, excludeFamilies: excludeFamilies, excludeProfiles: excludeProfiles, urgency: urgencyNormal, urgencySource: "default", route: route}
 	sel, err := a.selectFor(ctx, s, req)
 	if err != nil {
 		return SeatChoice{}, err
