@@ -261,21 +261,25 @@ type HubClient struct {
 	stateQuotaInterval time.Duration
 	fleetStateMu       sync.Mutex
 	fleetQuotaResync   bool
-	spawnTimeoutExtra  time.Duration // fixture seam; production uses the absolute deadline.
-	nodeCommandMu      sync.Mutex
-	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
-	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
-	nodeGitStdin       nodeGitStdinRunner // fixture seam for a git command fed on stdin; nil runs git.
-	nodeAdd            nodeAddRunner      // fixture seam for the worktree add child; nil runs git and records it.
-	nodeCheckouts      map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
-	nodeInstallWait    time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
-	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
-	nodeJobs           fleet.JobStore     // fixture seam for job.mark_lost; nil reads spawn.json handoffkeep_env.
-	nativeQuotaMu      sync.Mutex
-	nativeQuota        map[string]*nativeQuotaSource // the node's own measurement per native pool; fixtures set it, a missing pool builds the default.
-	creditPresenceMu   sync.Mutex
-	creditPresence     *creditPresenceSource // the node's credit pool presence publisher; fixtures set it, a missing one builds the default.
-	nodeCloseSettle    time.Duration         // fixture seam; zero is nodePaneCloseSettle.
+	// fleetQuotaKick asks the quota loop for a round now (RepublishFleetQuota);
+	// fleetQuotaRounds counts the rounds it ran.
+	fleetQuotaKick    chan struct{}
+	fleetQuotaRounds  atomic.Int64
+	spawnTimeoutExtra time.Duration // fixture seam; production uses the absolute deadline.
+	nodeCommandMu     sync.Mutex
+	nodeHerdr         relayCommandRunner // fixture seam for node commands; nil runs herdr.
+	nodeGit           relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodeGitStdin      nodeGitStdinRunner // fixture seam for a git command fed on stdin; nil runs git.
+	nodeAdd           nodeAddRunner      // fixture seam for the worktree add child; nil runs git and records it.
+	nodeCheckouts     map[string]string  // fixture seam for the checkout.pull allow-list; nil reads spawn.json checkouts.
+	nodeInstallWait   time.Duration      // fixture seam for install.sh's bound; zero is nodeCheckoutInstallTimeout.
+	nodeLifecycle     relayCommandRunner // fixture seam for job.done; nil runs runtug.
+	nodeJobs          fleet.JobStore     // fixture seam for job.mark_lost; nil reads spawn.json handoffkeep_env.
+	nativeQuotaMu     sync.Mutex
+	nativeQuota       map[string]*nativeQuotaSource // the node's own measurement per native pool; fixtures set it, a missing pool builds the default.
+	creditPresenceMu  sync.Mutex
+	creditPresence    *creditPresenceSource // the node's credit pool presence publisher; fixtures set it, a missing one builds the default.
+	nodeCloseSettle   time.Duration         // fixture seam; zero is nodePaneCloseSettle.
 	// nodeHubClose is the job-ledger side of a hub close (intent, watcher);
 	// nil is nodeFleetHubClose. A fixture seam.
 	nodeHubClose nodeHubCloseLedger

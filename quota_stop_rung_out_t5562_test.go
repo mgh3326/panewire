@@ -117,6 +117,22 @@ func TestQuotaStopRetriesAFailedPublication_T5562(t *testing.T) {
 	}
 }
 
+// Once the limit is published into the shared store the node's quota loop is
+// asked to send it to the hub, which placement reads first: left to the loop's
+// next interval, default placement keeps the old reading for up to a minute
+// (hk 5562 review).
+func TestQuotaStopAsksTheNodeToRepublishAPublishedLimit_T5562(t *testing.T) {
+	rig := newRungOutRig(t, "reviewer", "testdata/quota-stop/devin-reset-2min.txt")
+	kicked := make(chan struct{}, 4)
+	rig.q.republish = func() { kicked <- struct{}{} }
+	rig.run()
+	select {
+	case <-kicked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the node's quota loop was not asked to republish")
+	}
+}
+
 // A screen that is no stop keeps nothing out.
 func TestQuotaStopKeepsNothingOutForAScreenWithoutAStop_T5562(t *testing.T) {
 	rig := newRungOutRig(t, "reviewer", "testdata/quota-stop/devin-reset-2min.txt")
