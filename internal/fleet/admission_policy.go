@@ -211,6 +211,18 @@ func (p admissionPolicy) pool(name string, now time.Time) admissionPoolPolicy {
 	return pool
 }
 
+// cutoff is the used percentage at which admission refuses the pool at now:
+// the pool's own cutoff, else 90 for commandcode and for a preserve pool, 99
+// for others. It is the one place the verdict and selection read a pool's
+// cutoff from (selPlan.poolCutoff ranks a pool at it last).
+func (p admissionPolicy) cutoff(name string, now time.Time) float64 {
+	pool := p.pool(name, now)
+	if p.Pools[name].Cutoff == 0 && pool.Class == "preserve" {
+		return 90
+	}
+	return pool.Cutoff
+}
+
 // subscribed: a profile setting wins over its pool's; both default to on.
 func (p admissionPolicy) subscribed(profile, pool string) bool {
 	if s := p.Profiles[profile]; s != nil {

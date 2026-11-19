@@ -679,10 +679,7 @@ func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) adm
 		// unknown and gates nothing.
 		return d.refuse(gateBlocked, fmt.Sprintf("credit_exhausted balance=%g", *reading.Balance))
 	}
-	cutoff := policy.Cutoff
-	if in.Policy.Pools[row.Pool].Cutoff == 0 && policy.Class == "preserve" {
-		cutoff = 90
-	}
+	cutoff := in.Policy.cutoff(row.Pool, now)
 	buckets := matchingBuckets(reading.Buckets, row.Group)
 	// Confirmed exhaustion refuses even when the reading is otherwise unusable.
 	for _, b := range buckets {
