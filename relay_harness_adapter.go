@@ -132,7 +132,10 @@ func relayOmpComposerRow(lines []string) (int, bool) {
 		end--
 	}
 	for i := end - 1; i >= 0; i-- {
-		if !strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), ompComposerGlyph) {
+		// The glyph opens the composer at column 0; wrap continuations are
+		// indented, so a continuation whose text begins with the glyph is not
+		// taken for the composer row (mergewake 734).
+		if !strings.HasPrefix(lines[i], ompComposerGlyph) {
 			continue
 		}
 		for _, below := range lines[i+1 : end] {
