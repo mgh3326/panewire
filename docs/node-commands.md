@@ -1043,7 +1043,12 @@ then repeats the local worktree check against that tip with a two-second
 deadline immediately before closing. A timeout refuses the close. A refusal
 and its reason are journalled, so status and replay retain them across
 restart. A writer racing the close itself is handled by the ordinary
-worktree and abandoned-worktree patch lifecycle.
+worktree and abandoned-worktree patch lifecycle. For a snapshot hand-over
+(hk 5324) the guard also carries `snapshot` (`tree` and `parent`, with
+`commit` the snapshot commit): the remote read then proves the hand-over ref
+still names the commit, and the final local check requires HEAD to still be
+the parent and `git diff` against the commit to read clean — anything the
+snapshot does not hold refuses the close the same way.
 
 ### `worktree.handover_snapshot`
 
@@ -1096,6 +1101,12 @@ be reached; no ref was made) and `origin_mismatch` (the push returned but
 origin does not hold the commit). The whole command has a 25-second budget,
 under the hub's 30-second wait; on expiry the node answers the error
 `snapshot_failed` and the hub treats it as no snapshot.
+
+The hub (hk 5324) stores an `ok` result on the hand-over row before any close:
+the successor's spec checkout starts at `commit` under `ref`, and the
+`pane.close_op` guard binds the worktree to `parent` (HEAD must still equal
+it) and `tree` (the tracked state must still match `commit`), so a worktree
+that changed after the snapshot refuses the close.
 
 ### `worktree.inspect`
 
@@ -1247,13 +1258,20 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   that never advertised `checkout_sparse_v1`, prepares the full checkout
   instead; `checkout_mode` says which happened.
 - `mode:"successor"` — an implementer spec spawn on `refs/heads/<branch>` (hk
-  5118). `branch` and `sha` are required, `fetch` must be stated empty (the
-  whole remote is fetched), and the sparse lists are refused. The node fetches,
-  then requires the freshly fetched `origin/<branch>` to be exactly `sha`:
+  5118). `branch` and `sha` are required, the sparse lists are refused, and
+  `fetch` is either stated empty (the whole remote is fetched) or a hand-over
+  ref `refs/panewire/handover/<job>/<commit>` (hk 5324): a snapshot
+  hand-over's successor starts at the snapshot commit, which the branch refspec
+  does not carry, so the node fetches that ref too. The node fetches,
+  then requires the freshly fetched `origin/<branch>` to be exactly `sha` —
+  or, with a fetch, an ancestor of `sha` or absent when the snapshotted
+  branch was never pushed — and with a fetch that `sha^{commit}`
+  exists (`sha-missing` otherwise):
   someone pushed after the brief and a successor must not start behind it, so
   it refuses `successor_stale` with `reason` `want=<sha> origin=<sha>`
   (`origin=none` when the branch is not on origin) before anything is
-  prepared. A worktree of the clone that already holds the branch refuses
+  prepared. A never-pushed snapshot branch gets no upstream; the first
+  `git push` of it names origin and the branch. A worktree of the clone that already holds the branch refuses
   `branch_in_use` with `reason` `worktree=<dir>`; the branch is never forced or
   stolen. A worktree at `dir` is reused only on that branch, clean, at the
   commit; a local branch behind the commit is fast-forwarded and one ahead or
@@ -1282,7 +1300,7 @@ refused. A missing clone is created with `git clone <origin>`.
 | `busy` | Another git op holds the per-clone lock; `retry_after_s` is set. |
 | `cancelled` | The caller's context was cancelled while waiting for the per-clone lock; the lock was never taken, nothing ran, and there is no `retry_after_s`. |
 | `branch-elsewhere` | The branch is checked out elsewhere, `dir` sits on another branch/commit, or the branch is not on origin where required. |
-| `successor_stale` | A successor checkout's freshly fetched `origin/<branch>` is not the commit the request names; `reason` carries `want=<sha> origin=<sha>`. |
+| `successor_stale` | A successor checkout's freshly fetched `origin/<branch>` is not the commit the request names — or, for a snapshot fetch, not an ancestor of it; `reason` carries `want=<sha> origin=<sha>`. |
 | `branch_in_use` | A successor checkout's branch is held by another worktree of the clone; `reason` carries `worktree=<dir>`. |
 | `sha-missing` | The fetched ref does not resolve to `sha`, or the commit is not in the clone after fetching. |
 | `origin-mismatch` | The existing clone tracks a different owner/repo. |

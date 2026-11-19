@@ -40,7 +40,7 @@ hk 3334. The wait or hand-over rule is hk `policy/quota-stop`; this section is t
 
 A hub restarted between claiming a reviewer's successor and writing the old record is repaired by a periodic pass (`reconcileQuotaReplacements`, every 2 minutes, for successors older than the replacement budget): a successor that placed whose predecessor's record is still live gets the pane closed and the record written with `replaced_by`. A successor that never left `accepted` (no node) can never place a job and gets no pointer; one still reconciling or past its deadline with a node binding does.
 
-The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it continues a clean, fully pushed branch on another host; dirty or unpushed work is left with the old pane and reported to the owner. Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
+The hub's own hand-over of an implementer on an exhausted pool (hk 4633) is described under "An exhausted pool": it continues a clean, fully pushed branch on another host; on a node that also advertises `handover_snapshot_v1`, dirty or unpushed work is saved as a verified snapshot commit and continues there too (hk 5324). Known limits of this screen-triggered path: an implementer on another host does not carry uncommitted changes or unpushed commits (the ticket's hand-over is the same worktree path, branch and brief; there is no state transfer), and a pane that resumed and settled idle again between the hub's probe and `pane.close` is closed.
 
 ## Job end on a quota stop
 
@@ -146,9 +146,18 @@ decides with the §Implementer rule (the job's start, the task's priority and
      non-ignored untracked files, or any assume-unchanged or skip-worktree
      entries (including in populated submodules) give `dirty_worktree`.
      HEAD must equal the branch tip read with `git ls-remote origin`; an
-     unpushed or never-pushed branch gives `unpushed_commits`. In either case
-     there is no action row and no close; the owner receives the reason and
-     the hand-over-or-respawn notice. Snapshotting local work is hk 5259.
+     unpushed or never-pushed branch gives `unpushed_commits`. A node that
+     advertises `handover_snapshot_v1` does not stop there (hk 5324): the hub
+     runs `worktree.handover_snapshot`, which commits the tracked contents and
+     unpushed commits as a snapshot commit, pushes it to the immutable ref
+     `refs/panewire/handover/<job>/<commit>`, and reads it back from origin —
+     a refused, failed or unproven snapshot means no row and no close, and the
+     owner notice names the reason. Untracked files are never pushed: they are
+     listed in the result, and ignored files are not preserved. On a node
+     without the capability a dirty or unpushed worktree keeps the refusal:
+     no action row and no close; the owner receives the reason and the
+     hand-over-or-respawn notice. The snapshot's ref, commit, tree, parent and
+     untracked list are stored on the hand-over row before any close.
      Otherwise the row stores the complete successor with a fixed request id:
      the same role, owner and brief; job `<old>-q<n>` (at most two); exactly
      one `--parent-job <old>`; the spent pool or band excluded, and the old host
@@ -157,22 +166,29 @@ decides with the §Implementer rule (the job's start, the task's priority and
      `branch_in_use`. Before the row is stored the hub checks another host is
      connected and accepting; with none, the hand-over is refused here with the
      owner notice naming `branch_in_use` and no close is ever sent (hk 5311); its own report
-     path; no start conditions; and a spec checkout at the pushed commit.
+     path; no start conditions; and a spec checkout at the pushed commit — or,
+     with a snapshot, at the snapshot commit fetched under its hand-over ref,
+     still on the same branch so a plain `git push` continues it.
      A pinned profile is dropped, a pinned host is refused, the label is
      bounded, and the end reason and final submission are validated.
   2. **Recheck.** Before the close, the hub holds a row during a spawn drain,
      confirms the stop and task binding, and requires the same idle pane and
      working directory. Inside `pane.close_op`, after checking the job's
      attempt, the node reads the branch tip from origin before the final pane
-     and open-question checks. It then checks the local worktree and HEAD
-     against that tip with a two-second deadline as the last step before
-     close. A timeout, dirty or unpushed worktree refuses the close; its
-     journalled reason makes the row `handover_failed` and the owner gets the
-     fallback notice. A writer or resumed pane racing the close itself is not
-     stopped: the continuation note says the old `host:path` may still exist
-     until cleanup and names `jobs/<old job>/abandoned-worktree.patch` under
-     the node inbox root. If cleanup removes the worktree, the patch saves
-     non-ignored untracked files and later work; ignored files are not
+     and open-question checks — for a snapshot hand-over, it instead proves
+     the hand-over ref on origin still names the stored commit. It then
+     checks the local worktree and HEAD with a two-second deadline as the
+     last step before close: clean against the pushed tip, or, with a
+     snapshot, HEAD still the snapshot's parent and the tracked state still
+     matching the snapshot commit. A timeout, dirty or unpushed worktree —
+     in the snapshot case any work the snapshot does not hold — refuses the
+     close; its journalled reason makes the row `handover_failed` and the
+     owner gets the fallback notice. A writer or resumed pane racing the
+     close itself is not stopped: the continuation note says the old
+     `host:path` may still exist until cleanup and names
+     `jobs/<old job>/abandoned-worktree.patch` under the node inbox root —
+     for a snapshot it also names the ref and the untracked paths, and the
+     patch saves those files and later work. Ignored files are not
      preserved. The ordinary cleanup rules apply; this path creates no keep
      mark or lock.
   3. **Close.** The reconciler closes the old pane through `pane.close_op` to

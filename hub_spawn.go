@@ -186,8 +186,9 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 	case fleet.HubCheckoutSuccessor:
 		// An implementer spec on refs/heads/<branch> (hk 5118): the node
 		// prepares a local branch at the pinned commit, so both are required
-		// and it fetches the whole remote itself.
-		return !checkout.VerifyReuse && validNodeRefName(checkout.Branch) && nodeShaPattern.MatchString(checkout.Sha) && checkout.Fetch == ""
+		// and it fetches the whole remote itself. A snapshot hand-over's
+		// fetch is the hand-over ref the commit lives under (hk 5324).
+		return !checkout.VerifyReuse && validNodeRefName(checkout.Branch) && nodeShaPattern.MatchString(checkout.Sha) && (checkout.Fetch == "" || validHandoverFetchRef(checkout.Fetch))
 	default:
 		return false
 	}

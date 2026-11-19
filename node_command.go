@@ -481,8 +481,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		case fleet.HubCheckoutSuccessor:
 			// A successor checkout tracks origin/<branch> at the pinned
 			// commit, so both are required and it fetches the whole remote
-			// itself (hk 5118).
-			valid := validNodeRefName(args.Branch) && nodeShaPattern.MatchString(args.Sha) && args.Fetch == "" && !args.VerifyReuse
+			// itself (hk 5118). A snapshot hand-over's fetch is the
+			// hand-over ref the snapshot commit lives under (hk 5324).
+			valid := validNodeRefName(args.Branch) && nodeShaPattern.MatchString(args.Sha) && (args.Fetch == "" || validHandoverFetchRef(args.Fetch)) && !args.VerifyReuse
 			return args, valid
 		}
 		return nil, false

@@ -620,7 +620,7 @@ func TestPoolHandoverSuccessorArguments(t *testing.T) {
 	j := slices.Index(old.Args, "--report-relative")
 	old.Args = slices.Delete(old.Args, j, j+2)
 	old.StartConditions = []fleet.StartCondition{{}}
-	next, err := handoverSuccessorRequest(old, "chain-q1", "chain-q1-q2", "claude", "machine-a", window5h(), nodeHandoverCheckResult{Branch: "wk/task", Top: "/work/old-checkout", Pushed: handoverPushed})
+	next, err := handoverSuccessorRequest(old, "chain-q1", "chain-q1-q2", "claude", "machine-a", window5h(), nodeHandoverCheckResult{Branch: "wk/task", Top: "/work/old-checkout", Pushed: handoverPushed}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -838,7 +838,7 @@ func TestPoolHandoverRewritesAnInheritedReport(t *testing.T) {
 	i := slices.Index(old.Args, "--task")
 	old.Args[i], old.Args[i+1] = "--parent-job", "a-job"
 	old.Args[slices.Index(old.Args, "--report-relative")+1] = "a-job/report.md"
-	next, err := handoverSuccessorRequest(old, "b-job", "b-job-q1", "claude", "machine-a", window5h(), nodeHandoverCheckResult{Branch: "wk/task", Top: "/work/old-checkout", Pushed: handoverPushed})
+	next, err := handoverSuccessorRequest(old, "b-job", "b-job-q1", "claude", "machine-a", window5h(), nodeHandoverCheckResult{Branch: "wk/task", Top: "/work/old-checkout", Pushed: handoverPushed}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -849,7 +849,7 @@ func TestPoolHandoverRewritesAnInheritedReport(t *testing.T) {
 		t.Fatalf("brief does not name the rewritten report: %q", next.Brief)
 	}
 	old.Args[slices.Index(old.Args, "--report-relative")+1] = "b-job/custom.md"
-	next, err = handoverSuccessorRequest(old, "b-job", "b-job-q1", "claude", "machine-a", window5h(), nodeHandoverCheckResult{Branch: "wk/task", Top: "/work/old-checkout", Pushed: handoverPushed})
+	next, err = handoverSuccessorRequest(old, "b-job", "b-job-q1", "claude", "machine-a", window5h(), nodeHandoverCheckResult{Branch: "wk/task", Top: "/work/old-checkout", Pushed: handoverPushed}, nil)
 	if err != nil || hubSpawnArg(next.Args, "--report-relative") != "b-job-q1/custom.md" || !strings.Contains(next.Brief, "b-job-q1/custom.md") {
 		t.Fatalf("custom report: args=%v brief=%q err=%v", next.Args, next.Brief, err)
 	}
