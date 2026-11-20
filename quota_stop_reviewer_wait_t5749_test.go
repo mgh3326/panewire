@@ -27,6 +27,8 @@ type waitRig struct {
 	live bool
 	// kept counts the times the manager asked for a watcher to be running.
 	kept int
+	// requests counts the manager's wait requests.
+	requests int
 	// requestErr, when set, fails the manager's wait request.
 	requestErr error
 }
@@ -37,6 +39,7 @@ func newWaitRig(t *testing.T) *waitRig {
 	wait := &rig.q.wait
 	request, adopted := wait.request, wait.adopted
 	wait.request = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop, until time.Time) (bool, error) {
+		rig.requests++
 		if rig.requestErr != nil {
 			return false, rig.requestErr
 		}
@@ -107,7 +110,10 @@ func (rig *waitRig) ledgerEvent(t *testing.T, kind string) (map[string]any, bool
 
 // ack answers the manager's request as the job's watcher does: an event naming
 // the request's attempt and until, and a deadline that reaches it.
-func (rig *waitRig) ack(t *testing.T) {
+func (rig *waitRig) ack(t *testing.T) { rig.ackAt(t, time.Now()) }
+
+// ackAt is ack with the acknowledgement's durable timestamp.
+func (rig *waitRig) ackAt(t *testing.T, at time.Time) {
 	t.Helper()
 	req, ok := rig.ledgerEvent(t, "job.quota_stop_wait_request")
 	if !ok {
@@ -117,7 +123,7 @@ func (rig *waitRig) ack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ack := map[string]any{"kind": "job.quota_stop_wait_adopted", "created_at": time.Now().UTC().Format(time.RFC3339Nano), "payload": map[string]any{"pane_id": req["pane_id"], "attempt": req["attempt"], "pool": req["pool"], "until": req["until"], "deadline": until.Add(time.Minute).Format(time.RFC3339Nano)}}
+	ack := map[string]any{"kind": "job.quota_stop_wait_adopted", "created_at": at.UTC().Format(time.RFC3339Nano), "payload": map[string]any{"pane_id": req["pane_id"], "attempt": req["attempt"], "pool": req["pool"], "until": req["until"], "deadline": until.Add(time.Minute).Format(time.RFC3339Nano)}}
 	b, _ := json.Marshal(ack)
 	if err := os.WriteFile(filepath.Join(rig.events(), rig.nextName("job.quota_stop_wait_adopted")), b, 0600); err != nil {
 		t.Fatal(err)
@@ -294,5 +300,43 @@ func TestQuotaDecisionReviewerBounds(t *testing.T) {
 				t.Fatalf("%s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// An acknowledgement written after the 30 s bound does not adopt the wait, even
+// when the manager's next tick only runs after it: the stop is handed over.
+func TestQuotaReviewerAckAfterTheBoundIsHandedOver(t *testing.T) {
+	rig := newWaitRig(t)
+	rig.decide()
+	rig.ackAt(t, rig.now.Add(45*time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(50*time.Second))
+	rig.wantDecision(t, "handover", "wait_not_adopted")
+	rig.manager.Tick(context.Background(), rig.now.Add(52*time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Minute))
+	if rig.sends != 0 || len(rig.announce) != 1 {
+		t.Fatalf("sends=%d announced=%d, want a hand-over and no resume", rig.sends, len(rig.announce))
+	}
+}
+
+// The bound also limits the request: a manager whose first look at the decision
+// is after the bound starts no handshake.
+func TestQuotaReviewerNoRequestAfterTheBound(t *testing.T) {
+	rig := newWaitRig(t)
+	rig.observe("working", 1, rig.now)
+	rig.observe("idle", 2, rig.now.Add(time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Second))
+	rig.route(0, "owner")
+	// The decision is recorded (and its request written) by the first ticks; make
+	// the row look late by ageing its creation past the bound before any tick acts.
+	if _, err := rig.store.db.Exec(`UPDATE quota_stop_decisions SET created=created-60000, wait_requested=0, action_retry=0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(rig.events()); err != nil {
+		t.Fatal(err)
+	}
+	before := rig.requests
+	rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second))
+	if got := rig.requests; got != before {
+		t.Fatalf("a request was written after the bound: %d -> %d", before, got)
 	}
 }

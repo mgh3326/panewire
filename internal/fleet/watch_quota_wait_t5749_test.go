@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -81,7 +82,7 @@ func TestWatcherAdoptsARequestedWaitAndHoldsTheJobForIt(t *testing.T) {
 	if acks != 1 {
 		t.Fatalf("acks=%d, want one", acks)
 	}
-	if got, err := QuotaWaitAdopted(a.Jobs, "j", attempt, until); err != nil || !got {
+	if got, err := QuotaWaitAckedAt(a.Jobs, "j", attempt, until); err != nil || got.IsZero() {
 		t.Fatalf("the manager does not read the ack as adopted: %v %v", got, err)
 	}
 }
@@ -163,19 +164,19 @@ func TestRestartedWatcherInheritsAnAdoptedWait(t *testing.T) {
 	}
 }
 
-// QuotaWaitAdopted accepts only an ack for the attempt the manager observed and
+// QuotaWaitAckedAt accepts only an ack for the attempt the manager observed and
 // the until it asked for, whose deadline reaches that until, while the attempt
 // is current and not ended.
-func TestQuotaWaitAdoptedNeedsAnAckForThisAttemptAndWait(t *testing.T) {
+func TestQuotaWaitAckedAtNeedsAnAckForThisAttemptAndWait(t *testing.T) {
 	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
 	attempt, until := requestWait(t, a, 10*time.Minute)
 	adopted := func(attempt string, until time.Time) bool {
 		t.Helper()
-		got, err := QuotaWaitAdopted(a.Jobs, "j", attempt, until)
+		got, err := QuotaWaitAckedAt(a.Jobs, "j", attempt, until)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return got
+		return !got.IsZero()
 	}
 	if adopted(attempt, until) {
 		t.Fatal("a request alone was read as adopted")
@@ -214,5 +215,65 @@ func TestRequestQuotaWaitRefusesASupersededAttempt(t *testing.T) {
 	}
 	if slices.Contains(eventKindsOf(t, a, "j"), quotaWaitRequestKind) {
 		t.Fatal("a request was written for a stale attempt")
+	}
+}
+
+// The same request, written again (the manager restarted before it noted the
+// first), is the same request: one event, and the ack stands.
+func TestRequestQuotaWaitIsIdempotentAndKeepsTheAck(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	attempt, until := requestWait(t, a, 10*time.Minute)
+	ledgerEvent(t, a, quotaWaitAdoptedKind, map[string]any{"pane_id": "w:p1", "attempt": attempt, "pool": "devin-free", "until": until.UTC().Format(time.RFC3339), "deadline": until.Add(time.Minute).UTC().Format(time.RFC3339Nano)})
+	stop := quotastop.Stop{Pool: "devin-free", Reset: until.Add(-QuotaReviewerWaitGrace)}
+	if sent, err := RequestQuotaWait(context.Background(), a.Jobs, "j", "w:p1", attempt, stop, until); err != nil || !sent {
+		t.Fatalf("the repeated request: sent=%v err=%v", sent, err)
+	}
+	if n := countKind(eventKindsOf(t, a, "j"), quotaWaitRequestKind); n != 1 {
+		t.Fatalf("requests=%d, want the one", n)
+	}
+	if at, err := QuotaWaitAckedAt(a.Jobs, "j", attempt, until); err != nil || at.IsZero() {
+		t.Fatalf("the ack no longer stands after a repeated request: %v %v", at, err)
+	}
+	// Even a request event that did get written twice keeps the ack.
+	ledgerEvent(t, a, quotaWaitRequestKind, map[string]any{"pane_id": "w:p1", "attempt": attempt, "pool": "devin-free", "until": until.UTC().Format(time.RFC3339)})
+	if at, err := QuotaWaitAckedAt(a.Jobs, "j", attempt, until); err != nil || at.IsZero() {
+		t.Fatalf("a duplicate request event cleared the ack: %v %v", at, err)
+	}
+}
+
+// A watcher is live on positive evidence only: its own life-long lock. The watch
+// lock alone is also held by the hub's close fence, and a hub close intent open in
+// the ledger owns the pane.
+func TestQuotaWatcherLiveNeedsThePositiveEvidence(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
+	hold := func(name string) {
+		t.Helper()
+		f, err := secureOpen(filepath.Join(a.Jobs, "j", name), true, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !tryLock(f) {
+			t.Fatalf("%s already held", name)
+		}
+		t.Cleanup(func() { f.Close() })
+	}
+	if QuotaWatcherLive(a.Jobs, "j") {
+		t.Fatal("live with no watcher")
+	}
+	hold(jobWatchLock)
+	if QuotaWatcherLive(a.Jobs, "j") {
+		t.Fatal("the watch lock alone (the hub's fence holds it too) was read as a live watcher")
+	}
+	hold(hubCloseWatchLock)
+	if !QuotaWatcherLive(a.Jobs, "j") {
+		t.Fatal("a watcher holding its life-long lock was not read as live")
+	}
+	// The attempt the intent binds to is a spawn that names the pane and label.
+	ledgerEvent(t, a, "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "role": "reviewer"})
+	if err := a.recordHubCloseIntent(context.Background(), "j", HubCloseIntent{RequestID: "close-1", Attempt: currentAttemptName(t, a), Pane: "w:p1", Label: "agent-a", EndReason: hubCloseReason}); err != nil {
+		t.Fatal(err)
+	}
+	if QuotaWatcherLive(a.Jobs, "j") {
+		t.Fatal("a watcher was read as live with a hub close open")
 	}
 }

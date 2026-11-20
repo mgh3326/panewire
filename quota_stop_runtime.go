@@ -128,8 +128,8 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		request: func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop, until time.Time) (bool, error) {
 			return fleet.RequestQuotaWait(ctx, jobs, job, pane, attempt, stop, until)
 		},
-		adopted: func(job, attempt string, until time.Time) (bool, error) {
-			return fleet.QuotaWaitAdopted(jobs, job, attempt, until)
+		adopted: func(job, attempt string, until time.Time) (time.Time, error) {
+			return fleet.QuotaWaitAckedAt(jobs, job, attempt, until)
 		},
 		live: func(job string) bool { return fleet.QuotaWatcherLive(jobs, job) },
 		keep: func(_ context.Context, job, pane string) error {
@@ -199,7 +199,9 @@ type quotaStopHK struct {
 // is running.
 type quotaWaitLink struct {
 	request func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop, until time.Time) (bool, error)
-	adopted func(job, attempt string, until time.Time) (bool, error)
+	// adopted is when the wait's acknowledgement was written, zero when none
+	// stands for the attempt and until.
+	adopted func(job, attempt string, until time.Time) (time.Time, error)
 	live    func(job string) bool
 	keep    func(ctx context.Context, job, pane string) error
 }
@@ -1014,6 +1016,14 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			q.failResume(ctx, r.id, r.pane, "screen_changed_or_dialog", now)
 			continue
 		}
+		if r.role == "reviewer" {
+			// The screen reads took time: the handshake is checked again at the
+			// send boundary, before the wait is spent (hk 5749).
+			if reason := q.reviewerWaitStands(r.job, r.attempt, r.waitUntil); reason != "" {
+				q.failResume(ctx, r.id, r.pane, reason, now)
+				continue
+			}
+		}
 		q.store.mu.Lock()
 		result, e := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET attempted=1 WHERE event_id=? AND attempted=0 AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.job=? AND d.attempted=1) AND (EXISTS (SELECT 1 FROM idle_wake_candidates c JOIN idle_wake_panes p ON p.pane_id=c.pane_id AND p.state_change_seq=c.state_change_seq WHERE c.event_id=? AND p.agent_status IN ('idle','done')) OR EXISTS (SELECT 1 FROM quota_stall_wakes c JOIN idle_wake_panes p ON p.pane_id=c.pane_id AND p.state_change_seq=c.state_change_seq WHERE c.event_id=? AND p.agent_status IN ('idle','done')))`, r.id, r.job, r.id, r.id)
 		q.store.mu.Unlock()
@@ -1066,6 +1076,12 @@ func (q *quotaStopManager) negotiateReviewerWait(ctx context.Context, id, job, p
 		return
 	}
 	untilAt := time.UnixMilli(until)
+	if requested == 0 && giveUp {
+		// The bound ran out before the request was written: no new handshake
+		// starts after it.
+		q.failResume(ctx, id, pane, "wait_not_adopted", now)
+		return
+	}
 	if requested == 0 {
 		stop := quotastop.Stop{Pool: pool}
 		if at, err := time.Parse(time.RFC3339, reset); err == nil {
@@ -1091,7 +1107,13 @@ func (q *quotaStopManager) negotiateReviewerWait(ctx context.Context, id, job, p
 			}
 		}
 	}
-	if adopted, err := q.wait.adopted(job, attempt, untilAt); err == nil && adopted {
+	if ackedAt, err := q.wait.adopted(job, attempt, untilAt); err == nil && !ackedAt.IsZero() {
+		if ackedAt.After(time.UnixMilli(created).Add(quotaWaitAdoptBound)) {
+			// An acknowledgement written after the bound does not adopt the wait:
+			// the manager gave up at the deadline, whenever its tick ran.
+			q.failResume(ctx, id, pane, "wait_not_adopted", now)
+			return
+		}
 		q.store.mu.Lock()
 		_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET wait_adopted=? WHERE event_id=?`, now.UnixMilli(), id)
 		q.store.mu.Unlock()
@@ -1108,7 +1130,7 @@ func (q *quotaStopManager) reviewerWaitStands(job, attempt string, until int64) 
 	if q.wait.adopted == nil || q.wait.live == nil {
 		return "wait_not_adopted"
 	}
-	if adopted, err := q.wait.adopted(job, attempt, time.UnixMilli(until)); err != nil || !adopted {
+	if ackedAt, err := q.wait.adopted(job, attempt, time.UnixMilli(until)); err != nil || ackedAt.IsZero() {
 		return "wait_lost"
 	}
 	if !q.wait.live(job) {

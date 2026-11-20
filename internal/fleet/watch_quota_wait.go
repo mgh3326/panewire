@@ -50,6 +50,9 @@ type quotaWait struct {
 	acked bool
 	// ackDeadline is the completion deadline the acks named, the longest of them.
 	ackDeadline time.Time
+	// ackedAt is when the first ack of this wait was written (its durable
+	// timestamp).
+	ackedAt time.Time
 }
 
 // currentQuotaWait is the newest wait request of attempt in evs, in ledger
@@ -67,10 +70,18 @@ func currentQuotaWait(evs []Event, attempt string) (quotaWait, bool) {
 		}
 		switch ev.Kind {
 		case quotaWaitRequestKind:
+			// A repeated request for the same wait (the manager restarted before
+			// it noted the first) is the same request: it keeps the ack.
+			if found && until.Equal(w.until) {
+				continue
+			}
 			w = quotaWait{attempt: attempt, until: until, pool: str(ev.Payload, "pool"), reset: str(ev.Payload, "reset_at")}
 			found = true
 		case quotaWaitAdoptedKind:
 			if found && until.Equal(w.until) {
+				if !w.acked || ev.when.Before(w.ackedAt) {
+					w.ackedAt = ev.when
+				}
 				w.acked = true
 				// The deadline an ack names is the longest any ack of this wait named.
 				if deadline, err := time.Parse(time.RFC3339Nano, str(ev.Payload, "deadline")); err == nil && deadline.After(w.ackDeadline) {
@@ -82,6 +93,14 @@ func currentQuotaWait(evs []Event, attempt string) (quotaWait, bool) {
 	return w, found
 }
 
+// quotaWaitApp is the App the manager's handshake calls run as: with the user's
+// home, so the ledger resolves to the same Arbiter database the watcher writes
+// (App.ledger), as AnnounceQuotaStop's does.
+func quotaWaitApp(jobs, session string) *App {
+	home, _ := os.UserHomeDir()
+	return &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}, HerdrSession: session}
+}
+
 // RequestQuotaWait asks the job's watcher to adopt a wait until the given time,
 // for the attempt the manager observed the stop in. sent is false, with no
 // error, when that attempt is over (ended, reaped, revoked, another attempt, or
@@ -91,7 +110,7 @@ func RequestQuotaWait(ctx context.Context, jobs, job, pane, attempt string, stop
 	if attempt == "" {
 		return false, nil
 	}
-	a := &App{Jobs: jobs, Now: time.Now}
+	a := quotaWaitApp(jobs, "")
 	payload := map[string]any{"pane_id": pane, "attempt": attempt, "pool": stop.Pool, "until": until.UTC().Format(time.RFC3339)}
 	if !stop.Reset.IsZero() {
 		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)
@@ -117,6 +136,12 @@ func RequestQuotaWait(ctx context.Context, jobs, job, pane, attempt string, stop
 	} else if ended {
 		return false, nil
 	}
+	if evs, err := a.ledgerEvents(job); err == nil {
+		if w, ok := currentQuotaWait(evs, attempt); ok && w.until.Equal(until.UTC().Truncate(time.Second)) {
+			// Already requested (the manager restarted before it noted it).
+			return true, nil
+		}
+	}
 	err = a.eventIf(ctx, job, quotaWaitRequestKind, payload, func(v ledgerView) error {
 		if v.Superseded(pane, attempt) || v.Ended != "" {
 			return errQuotaStopSuperseded
@@ -129,39 +154,52 @@ func RequestQuotaWait(ctx context.Context, jobs, job, pane, attempt string, stop
 	return err == nil, err
 }
 
-// QuotaWaitAdopted reports whether a watcher of the job has acknowledged the
-// wait the manager requested for attempt until the given time: an ack names this
-// attempt, this until, and a completion deadline that reaches until, and the
+// QuotaWaitAckedAt is when a watcher of the job acknowledged the wait the manager
+// requested for attempt until the given time, zero when none did: an ack names
+// this attempt, this until, and a completion deadline that reaches until, and the
 // attempt is still the current, unended one. It says nothing about the watcher
 // being alive now; QuotaWatcherLive does.
-func QuotaWaitAdopted(jobs, job, attempt string, until time.Time) (bool, error) {
-	a := &App{Jobs: jobs, Now: time.Now}
+func QuotaWaitAckedAt(jobs, job, attempt string, until time.Time) (time.Time, error) {
+	a := quotaWaitApp(jobs, "")
 	evs, err := a.ledgerEvents(job)
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	v := viewLedger(evs)
 	if v.Superseded("", attempt) || v.Ended != "" {
-		return false, nil
+		return time.Time{}, nil
 	}
 	w, ok := currentQuotaWait(evs, attempt)
-	if !ok || !w.acked || !w.until.Equal(until.UTC().Truncate(time.Second)) {
-		return false, nil
+	if !ok || !w.acked || !w.until.Equal(until.UTC().Truncate(time.Second)) || w.ackDeadline.Before(w.until) {
+		return time.Time{}, nil
 	}
-	return !w.ackDeadline.Before(w.until), nil
+	return w.ackedAt, nil
 }
 
-// QuotaWatcherLive reports whether a watcher holds the job's watch lock now.
+// QuotaWatcherLive reports whether a watcher that defers to hub-close intents
+// holds the job now, on positive evidence: its own life-long lock
+// (ProbeHubCloseWatcher answers aware), which a hub close fencing or borrowing
+// the watch lock never takes, and no hub-close intent open in the ledger. The
+// watch lock alone (watchActive) is a cleanup probe that also answers true when
+// it cannot be opened, for a legacy sentinel, and while the hub holds it.
 func QuotaWatcherLive(jobs, job string) bool {
-	return (&App{Jobs: jobs, Now: time.Now}).watchActive(job)
+	kind, err := ProbeHubCloseWatcher(filepath.Join(jobs, job))
+	if err != nil || kind != HubCloseWatcherAware {
+		return false
+	}
+	j, err := quotaWaitApp(jobs, "").job(job)
+	if err != nil {
+		return false
+	}
+	_, open := pendingHubCloseIntent(j)
+	return !open
 }
 
 // KeepQuotaWatcher starts the job's re-armed watcher when none holds the watch
 // lock, so a resumed or waiting reviewer is never left without one. session is
 // the herdr session the pane lives in (hk 5777).
 func KeepQuotaWatcher(jobs, job, session string) error {
-	home, _ := os.UserHomeDir()
-	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}, HerdrSession: session}
+	a := quotaWaitApp(jobs, session)
 	if a.watchActive(job) {
 		return nil
 	}
