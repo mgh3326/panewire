@@ -88,10 +88,13 @@ const (
 
 // escalateAuthorNotified names the notice state of a refusal from its relay
 // result: the owner lane was notified only when an owner was named and the
-// relay wrote the event's durable row (ID is set only on a persisted row).
-// Without an owner, or when the write failed, no row exists and none is sent.
+// relay reached the owner's inbox. ID is set on any persisted row, including
+// a filtered owner-notify receipt that is kept in hk only (Machine carries
+// filteredDeliveryPrefix there), so that receipt answers none.
+// Without an owner, or when the write failed, no inbox item exists and none is sent.
 func escalateAuthorNotified(owner string, relayed relayLaneEventResult) string {
-	if owner != "" && relayed.ID != 0 {
+	filtered := strings.HasPrefix(relayed.Machine, filteredDeliveryPrefix)
+	if owner != "" && relayed.ID != 0 && !filtered {
 		return escalateAuthorOwnerLane
 	}
 	return escalateAuthorNotNotified
@@ -166,7 +169,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	if hubSpawnArg(holder.Request.Args, "--role") == "worker" && hubSpawnArg(holder.Request.Args, "--task") == request.Task {
 		text := fmt.Sprintf("[panewire] ESC | legacy_worker_submission: job %s uses the retired worker role; its ladder successor was not started. Decide how to continue task %s.", request.Job, request.Task)
 		relayed := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:legacy_worker_submission", request.Job, request.Round), JobID: request.Job, OwnerLane: holder.Owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
-		return hubEscalateAuthorResult{Code: "legacy_worker_submission", Reason: "the stored worker role is retired; the owner lane was notified", Notified: escalateAuthorNotified(holder.Owner, relayed)}, nil
+		return hubEscalateAuthorResult{Code: "legacy_worker_submission", Reason: "the stored worker role is retired; its ladder successor was not started", Notified: escalateAuthorNotified(holder.Owner, relayed)}, nil
 	}
 	spawn, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
