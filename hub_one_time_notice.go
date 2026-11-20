@@ -226,7 +226,7 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 		h.oneTimeActions[s.key] = state
 	}
 	if state, ok := h.oneTimeActions[s.key]; ok && !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() {
-		if !state.GoneSince.IsZero() {
+		if !state.GoneSince.IsZero() && !staleLoginSighting(s.key, state, s.at) {
 			state.GoneSince = time.Time{}
 			if err := h.saveOneTimeLocked(s.key, state); err != nil {
 				h.logger.Warn("one-time action notice could not be stored", "host", s.key.machine, "kind", s.key.kind, "error", err)
@@ -248,10 +248,19 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 	*untold = append(*untold, s)
 }
 
+// staleLoginSighting reports whether a login sighting is not newer than the
+// clean observation that started a pending clear (GoneSince). A delayed report
+// like that cannot undo the observation, so it does not restart the clear
+// (hk 5800). Dialog sightings are never stale here.
+func staleLoginSighting(key oneTimeActionKey, state oneTimeActionState, at time.Time) bool {
+	return key.need == oneTimeLoginMissing && !state.GoneSince.IsZero() && !at.After(state.GoneSince)
+}
+
 // standLoginNeed keeps an untold login need's row, so the need stands while its
 // notice is undelivered. A row that stands untold already (no ToldAt, no
-// confirmed clear, no pending clear) is left alone; any other row starts a new
-// untold episode, as a recurrence after a confirmed clear does.
+// confirmed clear, and no pending clear that this sighting would restart) is
+// left alone; any other row starts a new untold episode, as a recurrence after
+// a confirmed clear does.
 func (h *HubServer) standLoginNeed(key oneTimeActionKey, at time.Time) {
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
@@ -259,7 +268,7 @@ func (h *HubServer) standLoginNeed(key oneTimeActionKey, at time.Time) {
 	if at.After(state.SightedAt) {
 		state.SightedAt = at
 	}
-	if ok && state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() && state.GoneSince.IsZero() {
+	if ok && state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() && (state.GoneSince.IsZero() || staleLoginSighting(key, state, at)) {
 		h.oneTimeActions[key] = state
 		return
 	}
