@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -117,7 +118,9 @@ func (h *HubServer) noteOneTimeActionRefusal(machine, profile string, result hub
 	}
 	kind := fleet.ProfileKind(profile)
 	need := classifyLaunchDialog(kind, result.StdoutTail)
-	if need == "" && spawnFailureCode(result) == "auth_unavailable" {
+	// Only the verified login-screen refusal is login evidence. An rc 88 for an
+	// account the host cannot confirm is not, and its notice would say "log in".
+	if need == "" && spawnFailureCode(result) == "auth_unavailable" && strings.Contains(result.StdoutTail, loginScreenAuthMessage) {
 		need = oneTimeLoginMissing
 	}
 	if need != "" {

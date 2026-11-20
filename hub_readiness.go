@@ -202,7 +202,9 @@ func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
 func (h *HubServer) refreshLoginNeedsLocked() {
 	byMachine := map[string][]string{}
 	for key, state := range h.oneTimeActions {
-		if key.need == oneTimeLoginMissing && state.ConfirmedAt.IsZero() {
+		// A kind the node does not report on (kiro, opencode) cannot clear by
+		// report, so its need is not a placement skip (readinessShowsNeed).
+		if key.need == oneTimeLoginMissing && state.ConfirmedAt.IsZero() && slices.Contains(fleet.ReadinessKinds, key.kind) {
 			byMachine[key.machine] = append(byMachine[key.machine], key.kind)
 		}
 	}

@@ -266,9 +266,12 @@ whatever the node's report says about the login. The node's probe can read
 is not enough. The need is per (host, kind), not per account: the one-time
 record does not name the account. It clears by the same anti-flap rule as the
 operator notice: clean readiness reports must stay clean for one full report
-cycle, and then the hub drops `login_needs` and the pair is placed again. The filter
-runs only in automatic selection (`-m auto`); a named `-m` profile, with or
-without `--host`, is not filtered and is refused at launch as before.
+cycle, and then the hub drops `login_needs` and the pair is placed again. Only the verified login-screen refusal raises the need: an rc 88 whose
+line is `selected quota account login missing`. Another rc 88, such as an
+account the host cannot confirm, raises neither the need nor the notice. Only
+kinds the node reports on are published, since the clear rule needs their
+reports. The need is a skip of automatic selection: a named `-m` profile is
+not held back by it, though the node's own readiness checks still apply.
 
 A drop removes one pair, not the host: another harness on the same host stays
 a candidate, and the dropped host still measures an account it holds. The

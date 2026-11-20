@@ -90,3 +90,25 @@ func TestLoginNeedNamesTheReasonWhenNoHostIsLeft(t *testing.T) {
 		t.Fatalf("record does not name the skip: %s", raw)
 	}
 }
+
+// A named -m profile is not held back by the standing login need, which is a
+// skip of automatic selection only. The node's own readiness checks still apply
+// to it.
+func TestLoginNeedIsNotAppliedToNamedProfile(t *testing.T) {
+	now := time.Date(2026, 11, 20, 1, 0, 0, 0, time.UTC)
+	cfg := map[string]any{}
+	view := readinessView{now: now, states: map[string]ReadinessState{"mac-b": {Readiness: readyNode(), LoginNeeds: []string{"claude"}}}}
+	if got := view.drop("mac-b", cfg, "claude"); got != ReadyLoginMissing {
+		t.Fatalf("automatic placement: drop=%q want %q", got, ReadyLoginMissing)
+	}
+	view.namedProfile = true
+	if got := view.drop("mac-b", cfg, "claude"); got != "" {
+		t.Fatalf("named profile was held back by the login need: %q", got)
+	}
+	r := readyNode()
+	r.Harnesses["claude"] = HarnessReadiness{Installed: false}
+	view.states["mac-b"] = ReadinessState{Readiness: r, LoginNeeds: []string{"claude"}}
+	if got := view.drop("mac-b", cfg, "claude"); got != ReadyHarnessMissing {
+		t.Fatalf("named profile lost the node's own check: %q want %q", got, ReadyHarnessMissing)
+	}
+}

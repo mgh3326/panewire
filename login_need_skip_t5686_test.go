@@ -107,3 +107,34 @@ func TestLoginNeedPublishDoesNotWaitForStorage(t *testing.T) {
 		t.Fatal("a readiness publish waited for the one-time lock held by a store write")
 	}
 }
+
+// An rc 88 that is not the verified login-screen refusal (an account the host
+// cannot confirm) raises neither a login need nor an operator notice.
+func TestAccountRefusalRaisesNoLoginNeed(t *testing.T) {
+	hub, server := fsHub(t, "")
+	fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	transport := oneTimeSentry(t, hub)
+	hub.noteOneTimeActionRefusal("node-a", "agy-flash38-medium", hubSpawnResult{RC: fleet.ExitAuthUnavailable, StdoutTail: "AUTH_UNAVAILABLE: executing host node-a cannot confirm the selected account x: no_usable_presence"})
+	settleOneTimeNotices(t, hub)
+	if got := loginNeedsOf(t, hub, "node-a"); len(got) != 0 {
+		t.Fatalf("an account refusal raised a login need: LoginNeeds=%v", got)
+	}
+	if got := oneTimeMessages(t, hub, transport); len(got) != 0 {
+		t.Fatalf("an account refusal sent a notice: %q", got)
+	}
+}
+
+// A need on a kind the node does not report on (kiro) cannot clear by report,
+// so it is not published as a placement skip.
+func TestLoginNeedOfUncoveredKindIsNotPublished(t *testing.T) {
+	hub, server := fsHub(t, "")
+	fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	hub.oneTimeMu.Lock()
+	hub.oneTimeActions = map[oneTimeActionKey]oneTimeActionState{{"node-a", "kiro", oneTimeLoginMissing}: {ToldAt: hub.now().UTC()}}
+	hub.refreshLoginNeedsLocked()
+	hub.oneTimeMu.Unlock()
+	hub.publishFleetReadiness("node-a", hub.now())
+	if got := loginNeedsOf(t, hub, "node-a"); len(got) != 0 {
+		t.Fatalf("an uncovered kind was published as a skip: LoginNeeds=%v", got)
+	}
+}

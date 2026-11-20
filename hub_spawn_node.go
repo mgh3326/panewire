@@ -742,6 +742,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	return result
 }
 
+// loginScreenAuthMessage is the AUTH_UNAVAILABLE line of a verified login-screen
+// refusal. Other rc 88 refusals (an account the host cannot confirm) read
+// differently, so only this line raises a login need (hub_one_time_action.go).
+const loginScreenAuthMessage = "AUTH_UNAVAILABLE: selected quota account login missing"
+
 const authUnavailableSpawnHint = "Sign in to the selected quota account on the executing host and refresh that pool with panewire quota refresh POOL, then retry."
 
 // loginScreenSpawnRefusal translates a verified rc=76 login-screen capture to
@@ -760,7 +765,7 @@ func (client *HubClient) loginScreenSpawnRefusal(message hubOutboundMessage, res
 		return result
 	}
 	result.RC = fleet.ExitAuthUnavailable
-	result.StdoutTail = hubSpawnTailWithStderr("", "AUTH_UNAVAILABLE: selected quota account login missing\nFix: "+authUnavailableSpawnHint)
+	result.StdoutTail = hubSpawnTailWithStderr("", loginScreenAuthMessage+"\nFix: "+authUnavailableSpawnHint)
 	return result
 }
 

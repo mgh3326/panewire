@@ -291,6 +291,10 @@ type readinessView struct {
 	minVersion map[string]string
 	toolchains []string
 	now        time.Time
+	// namedProfile is set for a spawn that names its profile (-m PROFILE). The
+	// hub's standing login need is a skip of automatic selection only, so it is
+	// not applied; the node's own readiness checks still are.
+	namedProfile bool
 }
 
 func (a *App) newReadinessView(ctx context.Context, cwd string) readinessView {
@@ -309,6 +313,9 @@ func (v readinessView) drop(host string, cfg map[string]any, kind string) string
 	state, reported := v.states[host]
 	if !reported {
 		return ""
+	}
+	if v.namedProfile {
+		state.LoginNeeds = nil
 	}
 	return state.Drop(ReadinessNeed{Kind: kind, Repo: v.repo, Checkout: v.checkout, Brief: str(cfg, "via") == "hub", Toolchains: v.toolchains, MinVersion: v.minVersion[kind]}, v.now)
 }

@@ -726,6 +726,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	// either: selection chose among ready pairs, and placement must not walk
 	// past it to one that is not.
 	view := a.newReadinessView(ctx, s.CWD)
+	view.namedProfile = !s.autoSelected
 	kind := a.Policy.Profiles[s.Profile].Kind
 	for i := range enum {
 		c := &enum[i]
