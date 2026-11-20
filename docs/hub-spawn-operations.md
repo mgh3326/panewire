@@ -608,13 +608,16 @@ unknown key. The lists are not part of a spawn's base replay identity
 (`spawnFingerprint`): they are added or dropped with the target node's
 capability, so a replay after that node's upgrade or rollback still matches its
 journaled request. The journal separately preserves the sparse checkout
-identity (`sparse_hash`) and `checkout_mode` durably across capability
-filtering, restart and replay (hk 5104 / hk 5211): a replay whose lists were
-stripped or added across capability filtering (one side empty) is accepted,
-preserving the truthful execution mode of the executed row (a stripped replay
-of a sparse row does not report sparse, while a replay of a stripped row
-reports full); a replay whose lists are present on both sides and differ
-conflicts (`journal_conflict`).
+identity (`sparse_hash`) durably across capability filtering, restart and
+replay, and keeps the mode each row executed with in its journaled result
+(hk 5104 / hk 5211 / hk 5223). A replay whose lists were stripped or added
+across capability filtering (one side empty) is accepted. A replay with no
+sparse lists never reports `sparse`, whether a settle or a lookup answers it,
+so the hub records it as `full` even where the worktree is sparse on disk; a
+replay with lists reports the executed mode, and a replay of a stripped row
+reports `full`. The answer is the requester's view of the spawn, not a
+statement of the on-disk checkout mode. A replay whose lists are present on
+both sides and differ conflicts (`journal_conflict`).
 
 A spec may also be a successor checkout (hk 5118): an implementer request whose
 `--checkout-ref` is `refs/heads/<branch>` carries `checkout` mode `successor`,

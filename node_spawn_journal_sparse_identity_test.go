@@ -235,12 +235,15 @@ func TestNodeSpawnJournalMigrationAddsSparseIdentity(t *testing.T) {
 	}
 	defer j.db.Close()
 
-	// Verify columns were added.
-	for _, col := range []string{"sparse_hash", "checkout_mode"} {
-		var present int
-		if err := j.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name=?`, col).Scan(&present); err != nil || present != 1 {
-			t.Fatalf("column %s missing after migration: present=%d err=%v", col, present, err)
-		}
+	// sparse_hash is added; checkout_mode is not a column (hk 5223), and the
+	// legacy row's journaled result still carries its mode.
+	var present int
+	if err := j.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name='sparse_hash'`).Scan(&present); err != nil || present != 1 {
+		t.Fatalf("column sparse_hash missing after migration: present=%d err=%v", present, err)
+	}
+	legacy, err := j.resultOf(ctx, "legacy-req")
+	if err != nil || legacy == nil || legacy.CheckoutMode != nodeCheckoutFull {
+		t.Fatalf("legacy row after migration: result=%+v err=%v", legacy, err)
 	}
 }
 
