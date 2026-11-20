@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"math"
-	"net/http"
 	"regexp"
 	"strings"
 	"sync"
@@ -91,18 +89,10 @@ type Flow struct {
 	// PresenceEvery is the minimum gap between announcements of one account;
 	// zero is DefaultPresenceEvery.
 	PresenceEvery time.Duration
-	// Warn reports one line when the store refuses the balance field; nil is
-	// silent.
-	Warn func(format string, args ...any)
 
 	mu       sync.Mutex
 	presence map[string]time.Time
 	backoff  map[string]time.Time
-	// balanceBlockedUntil is when a store that refused the balance field may
-	// see it again; balanceWarned keeps the refusal line to one per process
-	// (hk 5138, approval: readings must keep flowing on an older store).
-	balanceBlockedUntil time.Time
-	balanceWarned       bool
 }
 
 func (f *Flow) now() time.Time {
@@ -440,44 +430,10 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	return reading, nil
 }
 
-// balanceRetry is how long a store that refused the balance field keeps
-// receiving observations without it before the field is tried again.
-const balanceRetry = time.Hour
-
-// publish stores obs. A store that refuses the balance field (a 400 from an
-// older handoffkeep that rejects unknown observation fields) gets the same
-// observation without balance: the reading, its windows and placement keep
-// working, the refusal is remembered for the process, warned once, and the
-// field is retried after balanceRetry (hk 5138).
+// publish stores obs as the store received it. A refusal, the balance field
+// included, is a publish error like any other.
 func (f *Flow) publish(ctx context.Context, c Client, key, holder string, obs Observation) error {
-	f.mu.Lock()
-	blocked := f.now().Before(f.balanceBlockedUntil)
-	f.mu.Unlock()
-	if blocked && obs.Balance != nil {
-		obs.Balance = nil
-	}
-	err := c.Publish(ctx, key, holder, obs)
-	if err == nil || obs.Balance == nil || !unknownFieldRefusal(err) {
-		return err
-	}
-	f.mu.Lock()
-	f.balanceBlockedUntil = f.now().Add(balanceRetry)
-	warn := !f.balanceWarned
-	f.balanceWarned = true
-	f.mu.Unlock()
-	if warn && f.Warn != nil {
-		f.Warn("shared quota store refused the balance field; publishing commandcode readings without it and retrying in %s", balanceRetry)
-	}
-	retry := obs
-	retry.Balance = nil
-	return c.Publish(ctx, key, holder, retry)
-}
-
-// unknownFieldRefusal reports a store's 400: with an older handoffkeep it is
-// the unknown observation field (balance), whose body the client withholds.
-func unknownFieldRefusal(err error) bool {
-	var status *StatusError
-	return errors.As(err, &status) && status.Status == http.StatusBadRequest
+	return c.Publish(ctx, key, holder, obs)
 }
 
 // asFailure is err as a *quota.Error; any other failure is probe_failed.
