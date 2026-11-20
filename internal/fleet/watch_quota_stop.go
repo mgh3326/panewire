@@ -550,6 +550,10 @@ func RecordFreeLimit(cfg devin.Config, job string, stop quotastop.Stop) error {
 	return devin.ObserveFreeLimit(cfg, reset, "", "", "job:"+job, "", stop.Reset.IsZero(), false)
 }
 
+// errQuotaLostPending means the lost record of an announced stop could not be
+// written and hk does not hold another end: the watcher stays and retries.
+var errQuotaLostPending = errors.New("quota-stop lost record is pending")
+
 // quotaStopLost ends a job whose idle pane shows a quota stop and has no
 // report. The contract mergewake reads (hk 3302): the hk record takes
 // state=lost and end_reason="quota_stop pool=<pool> reset_at=<RFC3339 UTC>"
@@ -569,6 +573,14 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 				return a.releaseQuota(ctx, j)
 			}
 			a.jobRecordFailed(ctx, j.ID, "lost", e)
+			// An announced stop's fallback is the only end the job has: hk still
+			// holds it live, so releasing the lease and stopping the watcher now
+			// would leave a reviewer mergewake can never respawn. The grace
+			// expiry keeps the end pending and tries again until hk answers (hk
+			// 5690; the close intent it replaced retried this failure).
+			if !emit && !a.hkJobEnded(ctx, j.ID) {
+				return errQuotaLostPending
+			}
 		}
 	}
 	return a.quotaStopFinish(ctx, j, stop, emit)

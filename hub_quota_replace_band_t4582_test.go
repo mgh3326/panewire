@@ -11,7 +11,7 @@ func TestQuotaStopPaidDevinReplacementExcludesOnlyPaidRungs_T4582(t *testing.T) 
 	f.jobs.records[f.job]["pool"] = "devin"
 	f.stopPool = "devin"
 	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}
-	result, commands := f.run(t, placed, 4)
+	result, commands := f.run(t, placed, 5)
 	if !result.ok || result.job != "mwr-42-p1-q1" {
 		t.Fatalf("replacement=%+v, want mwr-42-p1-q1", result)
 	}
@@ -34,7 +34,7 @@ func TestQuotaStopFreeBandDevinReplacementExcludesOnlyFreeRungs_T4582(t *testing
 	f.jobs.records[f.job]["pool"] = "devin"
 	f.stopPool = "devin-free"
 	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}
-	result, commands := f.run(t, placed, 4)
+	result, commands := f.run(t, placed, 5)
 	if !result.ok || result.job != "mwr-43-p1-q1" {
 		t.Fatalf("replacement=%+v, want mwr-43-p1-q1", result)
 	}

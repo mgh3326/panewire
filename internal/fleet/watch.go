@@ -655,6 +655,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if handOff.active {
 			if handOff.expired(a.Now(), paneAgent, present) {
 				deferred, err := a.endUnlessHubClose(id, j, func(j Job) error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
+				if errors.Is(err, errQuotaLostPending) {
+					// hk did not take the record: the job stays live and leased
+					// and the next poll writes it again.
+					if err := a.Sleep(ctx, 5*time.Second); err != nil {
+						return err
+					}
+					continue
+				}
 				if !deferred {
 					return err
 				}

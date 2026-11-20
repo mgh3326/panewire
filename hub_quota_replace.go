@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/quotastop"
 	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
@@ -35,6 +36,37 @@ import (
 // replaced: the relayed reason always carries the pool.
 func isQuotaStopReason(reason string) bool {
 	return reason == "quota_stop" || strings.HasPrefix(reason, "quota_stop ")
+}
+
+// quotaStopStands reports whether the pane still shows a provider-limit stop,
+// read from the node at the moment the hub is about to close it (hk 5690).
+// The announcement is relayed and can arrive late: a reviewer that resumed,
+// finished and went idle again would pass the idle probe, and closing it would
+// end a recovered review and start a duplicate. known is false when the screen
+// could not be read; the caller then leaves the pane to the node's watcher.
+func (h *HubServer) quotaStopStands(ctx context.Context, machine string, row nodeAgentRow) (stands, known bool) {
+	read := PaneReadResult{}
+	args := nodePaneReadArgs{PaneID: row.PaneID, Name: row.Name, Cwd: row.Cwd, TailLines: poolTriggerScreenLines}
+	if row.Name == "" || !h.nodeCall(ctx, machine, nodeCommandPaneRead, args, poolTriggerNodeWait, &read) || read.Outcome != nodePaneReadOK {
+		return false, false
+	}
+	_, stop := quotastop.ClassifyAgent(read.ScreenTail, row.Agent, h.now(), time.Local)
+	return stop, true
+}
+
+// reviewerQuotaAnnouncement reports whether event is a reviewer's announced
+// quota stop: the job the hub spawned as a reviewer, stopped on a provider limit.
+// A job the hub did not spawn has no stored submission and is not one.
+func (h *HubServer) reviewerQuotaAnnouncement(ctx context.Context, event hubJobEventPayload) bool {
+	if h.inbox == nil || !isQuotaStopReason(event.Reason) {
+		return false
+	}
+	holder, err := h.inbox.store.latestSpawnForJob(ctx, event.JobID)
+	if err != nil {
+		return false
+	}
+	prior, err := fleet.ValidateSubmission(holder.Request)
+	return err == nil && prior.Role == "reviewer"
 }
 
 // quotaReplaceMax is the replacements one task role (one review pass) gets.
@@ -298,6 +330,17 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
 		return skip("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
 	}
+	// A late announcement for a pane that has since moved on is not a stop: it
+	// is left alone, and the watcher decides.
+	if probe.state == heldPanePresent {
+		stands, known := h.quotaStopStands(ctx, spawnHolderHost(holder), probe.row)
+		if !known {
+			return skip("pane_unreadable")
+		}
+		if !stands {
+			return skip("stop_over")
+		}
+	}
 	request, err := quotaReplacementRequest(holder.Request, event.JobID, newJob, pool, exclude, role)
 	if err != nil {
 		return skip("request_id")
@@ -452,6 +495,9 @@ func (h *HubServer) giveUpQuotaStop(ctx context.Context, holder hubSpawnTask, ow
 	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 	switch {
 	case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
+		if stands, known := h.quotaStopStands(ctx, spawnHolderHost(holder), probe.row); !known || !stands {
+			return
+		}
 		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, event.JobID); !closed {
 			return
 		}

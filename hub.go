@@ -1679,11 +1679,19 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 					h.lateRegisterJobEnd(machineID, event, received, true)
 				}
 			}
-			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validLaneReference(event.OwnerLane) {
+			cooled := message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received)
+			// A reviewer's announced quota stop is a control event (hk 5690): the
+			// hub carries the review on, and the requester hears only a give-up.
+			// Filing it as a loss would tell the owner of a carry-over that
+			// succeeds, so it is acknowledged here and never relayed.
+			control := message.Kind == "job.lost" && !event.Final && h.reviewerQuotaAnnouncement(ctx, event)
+			if cooled && !validLaneReference(event.OwnerLane) || control {
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}
-			h.relayJobEventFromContext(ctx, machineID, message.Kind, event)
+			if !control {
+				h.relayJobEventFromContext(ctx, machineID, message.Kind, event)
+			}
 			if message.Kind == "job.lost" && !event.Replay {
 				h.startQuotaReplacement(machineID, event)
 			}

@@ -46,12 +46,12 @@ panewire owns every stop of a launched pane on a provider limit (a quota window,
 | held | the reset passes and the manager resumes the pane once | running | `job.reprompted reason=quota_stop_resumed`; one info line to the owner |
 | held | the hold's wait ends with the pane still on the stop, or the resume is refused or unproven | announced | `job.lost reason=quota_stop pool reset_at`, the hk record live |
 | running | the pane is idle on a provider-limit screen; the decision is hand over (first prompt, a long or unknown reset, urgent, a dialog, a second stop) | announced | the same `job.lost` |
-| announced | the hub reads the relayed reason `quota_stop pool=<p> reset_at=<t>` | replacing | the pool cooled in the hub's placement; no notice to the requester |
-| replacing | the old pane is idle: it is captured and closed, and `<old>-q<n>` (at most 2) is claimed with `--exclude-pool <band>` | placed | the successor's spawn operation |
+| announced | the hub reads the relayed reason `quota_stop pool=<p> reset_at=<t>` | replacing | the pool cooled in the hub's placement; a reviewer's `job.lost` is acknowledged to its node and not relayed to the owner (a control event); no notice to the requester |
+| replacing | the old pane is idle and its screen (`pane.read`) still shows a provider-limit stop: it is captured and closed, and `<old>-q<n>` (at most 2) is claimed with `--exclude-pool <band>` | placed | the successor's spawn operation |
 | placed | the successor is placed, or may still be placed | carried on | old hk record `state=lost`, `end_reason="quota_stop pool=<p> replaced_by=<new>"` (an implementer: `handed_over_to=`); hub log `quota-stop carry-over outcome=carried_on`; the requester hears nothing |
 | replacing | no other pool can take it (not placed), the replacement limit is spent, or the claim is refused | given up | reviewer: old hk record `state=lost`, `end_reason="quota_stop pool=<p> reset_at=<t>"` written now; hub log `outcome=given_up`; exactly one info lane event `gave up <old> (...)` (event id `quota-giveup:<old>`) to the owner |
-| replacing | the pane is busy or unreadable when the hub looks | announced | nothing: the stop may be over; the watcher decides |
-| announced | the grace (`QuotaStopHandOffGrace`) ends, the pane unchanged: no hub, an old hub, or the hub could not look | ended by the watcher | the plain lost record as the given-up row, the lease released; no lane notice |
+| replacing | the pane is busy, unreadable, or no longer shows the stop (a late announcement for a reviewer that resumed and went idle again) when the hub looks | announced | nothing: the stop is over or unproven; the watcher decides |
+| announced | the grace (`QuotaStopHandOffGrace`) ends, the pane unchanged: no hub, an old hub, or the hub could not look | ended by the watcher | the plain lost record as the given-up row, the lease released; no lane notice. If hk refuses the write the watcher keeps the lease and retries every poll until hk holds a terminal record |
 | announced | the pane goes back to work within the grace | running | `job.reprompted` |
 
 An implementer that is given up keeps its older behaviour: the hub writes `handed_over_to=` before it claims the successor, and a spawn that fails tells the owner through the spawn failure notice.

@@ -874,3 +874,29 @@ func TestWatcherQuotaIntentFinishesWhenTheLeaseWasAlreadyReleased(t *testing.T) 
 		t.Fatalf("quota %s, want released", st)
 	}
 }
+
+// hk 5690 review: when the grace ends and hk refuses the lost write, the
+// reviewer is still live in hk. The watcher keeps the lease and retries until
+// hk takes the record; it does not release the lease and stop with the record
+// still spawned, which mergewake could never respawn.
+func TestWatcherKeepsTheReviewerFallbackPendingUntilHkTakesTheRecord(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
+	a.QuotaHandOffGrace = QuotaStopHandOffGrace
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	statuses := make([]int, 0, 6)
+	for range 6 {
+		statuses = append(statuses, 503)
+	}
+	h.mu.Lock()
+	h.putStatuses = statuses
+	h.mu.Unlock()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free") {
+		t.Fatalf("hk record %v, want lost once hk took the write", rec)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released after the record landed", st)
+	}
+}

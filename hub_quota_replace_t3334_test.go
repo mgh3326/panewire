@@ -69,6 +69,9 @@ type quotaReplaceFixture struct {
 	// paneClosed is set once a served node command closed the held pane, so a
 	// later look finds it gone (serveCommands).
 	paneClosed bool
+	// resumed makes the held pane read as a reviewer that moved on: the stop
+	// screen is gone (replyPaneRead).
+	resumed bool
 }
 
 // quotaHolderRequest is the submission of a stopped job of the given role: task
@@ -180,6 +183,8 @@ func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeComm
 				rows = []nodeAgentRow{}
 			}
 			roleReplyPanes(t, f.node, command, rows, true)
+		case `"pane.read"`:
+			f.replyPaneRead(t, command)
 		case `"pane.capture"`:
 			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}})
 		case `"pane.close"`:
@@ -201,10 +206,12 @@ func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeComm
 			t.Fatal("the replacement did not give up on a busy pane")
 		}
 	}
-	// The hub closes the old pane (capture, close) before it places anything.
+	// The hub confirms the stop on the screen, then closes the old pane
+	// (capture, close) before it places anything.
 	serve(nodeCommandRead(t, f.node))
 	serve(nodeCommandRead(t, f.node))
-	served := 3
+	serve(nodeCommandRead(t, f.node))
+	served := 4
 	if f.role != "reviewer" && nodeCommands > 3 {
 		// An implementer's record ends (handed_over_to) before the
 		// successor is admitted, because the spawn refuses a task still bound
@@ -260,7 +267,7 @@ const quotaPlaced = "machine-b"
 func TestQuotaStopReviewerIsReplacedAtOnceOnAnotherPool(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1")
 	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}
-	result, commands := f.run(t, placed, 4)
+	result, commands := f.run(t, placed, 5)
 	if !result.ok || result.job != "mwr-1-p1-q1" {
 		t.Fatalf("replacement=%+v, want mwr-1-p1-q1", result)
 	}
@@ -284,11 +291,11 @@ func TestQuotaStopReviewerIsReplacedAtOnceOnAnotherPool(t *testing.T) {
 	for _, command := range commands {
 		ops = append(ops, strings.Trim(string(command["op"]), `"`))
 	}
-	if !slices.Equal(ops, []string{"agents.list", "pane.capture", "pane.close", "job.mark_lost"}) {
+	if !slices.Equal(ops, []string{"agents.list", "pane.read", "pane.capture", "pane.close", "job.mark_lost"}) {
 		t.Fatalf("node commands %v", ops)
 	}
 	// hk end_reason: replaced_by is the last key=value token (mergewake hk 3335).
-	if reason := endReasonOf(t, commands[3]); reason != "quota_stop pool=claude replaced_by=mwr-1-p1-q1" {
+	if reason := endReasonOf(t, commands[4]); reason != "quota_stop pool=claude replaced_by=mwr-1-p1-q1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
 	// The requester resolves mwr-1-p1 to its successor through replaced_by and
@@ -303,7 +310,7 @@ func TestQuotaStopReviewerIsReplacedAtOnceOnAnotherPool(t *testing.T) {
 
 	// The replacement stops on quota in turn: one more, then none.
 	second := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1-q1")
-	if result, _ := second.run(t, placed, 4); !result.ok || result.job != "mwr-1-p1-q1-q2" {
+	if result, _ := second.run(t, placed, 5); !result.ok || result.job != "mwr-1-p1-q1-q2" {
 		t.Fatalf("second replacement=%+v", result)
 	}
 	third := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1-q1-q2")
@@ -313,7 +320,7 @@ func TestQuotaStopReviewerIsReplacedAtOnceOnAnotherPool(t *testing.T) {
 		thirdDone <- quotaReplaceResult{job, ok}
 	}()
 	// Past the replacement limit the review is given up: probe, close, record.
-	third.serveCommands(t, 4)
+	third.serveCommands(t, 5)
 	if got := <-thirdDone; got.ok || got.job != "" {
 		t.Fatalf("a third stop got a replacement: %q", got.job)
 	}
@@ -343,14 +350,14 @@ func TestQuotaReplacementJobNames(t *testing.T) {
 // replaced_by, and the owner is told exactly once.
 func TestQuotaStopReviewerWithNoOtherPoolIsGivenUp(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-2-p1")
-	result, commands := f.run(t, hubSpawnOutcome{RC: 81, Stage: "placement", Reason: "no_eligible_host"}, 5)
-	if result.ok || len(commands) != 5 {
+	result, commands := f.run(t, hubSpawnOutcome{RC: 81, Stage: "placement", Reason: "no_eligible_host"}, 6)
+	if result.ok || len(commands) != 6 {
 		t.Fatalf("result=%+v commands=%d", result, len(commands))
 	}
-	if op := strings.Trim(string(commands[4]["op"]), `"`); op != "job.mark_lost" {
+	if op := strings.Trim(string(commands[5]["op"]), `"`); op != "job.mark_lost" {
 		t.Fatalf("the give-up's last command is %s, want job.mark_lost", op)
 	}
-	if reason := endReasonOf(t, commands[4]); reason != "quota_stop pool=claude" {
+	if reason := endReasonOf(t, commands[5]); reason != "quota_stop pool=claude" {
 		t.Fatalf("end_reason=%q, want the plain quota_stop record mergewake respawns on", reason)
 	}
 	eventually(t, 2*time.Second, "the owner's one give-up notice", func() bool {
@@ -367,7 +374,7 @@ func TestQuotaStopReviewerWithNoOtherPoolIsGivenUp(t *testing.T) {
 func TestQuotaStopHandedOverWorkerIsReplaced(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "implementer", "pw-task-42")
 	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "devin-swe2"}
-	result, commands := f.run(t, placed, 4)
+	result, commands := f.run(t, placed, 5)
 	if !result.ok || result.job != "pw-task-42-q1" {
 		t.Fatalf("replacement=%+v", result)
 	}
@@ -381,7 +388,7 @@ func TestQuotaStopHandedOverWorkerIsReplaced(t *testing.T) {
 	if !strings.HasPrefix(request.Brief, "Review the change") || !strings.Contains(request.Brief, "Continue the earlier job pw-task-42") || !strings.Contains(request.Brief, "pw-task-42/report.md") || !strings.Contains(request.Brief, "wk/task") {
 		t.Fatalf("brief=%q", request.Brief)
 	}
-	if reason := endReasonOf(t, commands[3]); reason != "quota_stop pool=claude handed_over_to=pw-task-42-q1" {
+	if reason := endReasonOf(t, commands[4]); reason != "quota_stop pool=claude handed_over_to=pw-task-42-q1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
 }
@@ -486,6 +493,7 @@ func TestQuotaStopPaneChangedBeforeCloseGetsNoSuccessor(t *testing.T) {
 	}()
 	command := nodeCommandRead(t, f.node)
 	roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	f.replyPaneRead(t, nodeCommandRead(t, f.node))
 	command = nodeCommandRead(t, f.node)
 	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
 	command = nodeCommandRead(t, f.node)
@@ -533,6 +541,7 @@ func TestQuotaStopRetriesTheStoppedJobRecordWrite(t *testing.T) {
 	}()
 	command := nodeCommandRead(t, f.node)
 	roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	f.replyPaneRead(t, nodeCommandRead(t, f.node))
 	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
 	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
 	var successor hubSpawnTask
@@ -572,6 +581,7 @@ func TestQuotaStopWaitsThroughReconcilingForTheSuccessor(t *testing.T) {
 		done <- quotaReplaceResult{job, ok}
 	}()
 	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	f.replyPaneRead(t, nodeCommandRead(t, f.node))
 	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
 	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
 	var successor hubSpawnTask
@@ -629,6 +639,7 @@ func TestQuotaStopUndecidedSuccessorStillGetsItsPointer(t *testing.T) {
 		done <- quotaReplaceResult{job, ok}
 	}()
 	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	f.replyPaneRead(t, nodeCommandRead(t, f.node))
 	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
 	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
 	var successor hubSpawnTask
@@ -665,6 +676,7 @@ func TestQuotaStopAcceptedSuccessorGetsNoPointer(t *testing.T) {
 		done <- quotaReplaceResult{job, ok}
 	}()
 	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	f.replyPaneRead(t, nodeCommandRead(t, f.node))
 	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
 	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
 	// No pointer: the review is given up (probe of the closed pane, plain record).
@@ -695,7 +707,7 @@ func TestQuotaStopReplacesAnInheritedReviewerJob(t *testing.T) {
 		r.Args = append(r.Args, "--author-family", "anthropic", "--builder-job", "builder-1")
 	})
 	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}
-	result, _ := f.run(t, placed, 4)
+	result, _ := f.run(t, placed, 5)
 	if !result.ok || result.job != "pw-test-1-q1" {
 		t.Fatalf("replacement=%+v", result)
 	}
@@ -758,6 +770,7 @@ func TestQuotaReplaceOldNodeKeepsThePane(t *testing.T) {
 	// The hub probes the old pane; the capability gate then stops the close.
 	command := nodeCommandRead(t, f.node)
 	roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: f.paneStatus, Cwd: "/work/project.checkout"}}, true)
+	f.replyPaneRead(t, nodeCommandRead(t, f.node))
 	select {
 	case result := <-done:
 		if result.ok {
