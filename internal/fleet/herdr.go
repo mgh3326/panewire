@@ -396,10 +396,12 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 	timeout := time.Duration(integer(a.Config.Local, "shell_ready_timeout_ms", 120000)) * time.Millisecond
 	deadline := a.Now().Add(timeout)
 	ready := false
+	shell := ""
 	for n := 0; n < 120 && a.Now().Before(deadline); n++ {
 		p, e := a.pinfo(ctx, pane)
 		if e == nil && p.ShellPID != 0 && len(p.Processes) == 1 && p.Processes[0].PID == p.ShellPID {
 			ready = true
+			shell = paneShellName(p)
 			break
 		}
 		if e = a.Sleep(ctx, time.Second); e != nil {
@@ -409,20 +411,19 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 	if !ready {
 		return fail(exitConfig, "shell not ready")
 	}
-	// The pane's shell runs its lines in order, so the readiness echo below also
-	// proves this removal ran before the agent starts (docs/config.md#agy-ssh-variables).
-	if unset := paneUnsetCommand(seat.Kind); unset != nil {
-		if e := a.must(ctx, "herdr", append([]string{"pane", "run", pane}, unset...)...); e != nil {
-			return e
-		}
+	// Exact output-line proof avoids typing launch argv into an rc-file read. For
+	// agy the line also removes the SSH variables, so the token appears only if
+	// the removal ran (docs/config.md#agy-ssh-variables).
+	prefix, e := paneReadyPrefix(seat.Kind, shell)
+	if e != nil {
+		return fail(exitConfig, "%v", e)
 	}
-	// Exact output-line proof avoids typing launch argv into an rc-file read.
 	var nonce [12]byte
 	if _, e := rand.Read(nonce[:]); e != nil {
 		return e
 	}
 	token := "panewire-ready-" + hex.EncodeToString(nonce[:])
-	if e := a.must(ctx, "herdr", "pane", "run", pane, "echo", token); e != nil {
+	if e := a.must(ctx, "herdr", "pane", "run", pane, prefix, token); e != nil {
 		return e
 	}
 	ready = false
