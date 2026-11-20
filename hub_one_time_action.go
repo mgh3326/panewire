@@ -30,9 +30,18 @@ type oneTimeActionKey struct{ machine, kind, need string }
 // oneTimeActionState is one told need. ToldAt is when the notice was sent.
 // GoneSince is when a report first showed the need gone, and zero while the
 // need shows; it clears once it has stayed gone for oneTimeActionClearCycle.
+// WaitTaskID and WaitID name the handoffkeep anchor task and operator wait the
+// notice worker keeps for the need (hub_one_time_wait.go); both are 0 until
+// the wait write is confirmed, and the row is dropped only after the wait is
+// closed. ConfirmedAt is set once anti-flap clearing has confirmed the need
+// stayed gone for a full cycle: the row then only carries the wait-close
+// obligation, and a sighting of the need again starts a new episode.
 type oneTimeActionState struct {
-	ToldAt    time.Time
-	GoneSince time.Time
+	ToldAt      time.Time
+	GoneSince   time.Time
+	ConfirmedAt time.Time
+	WaitTaskID  int64
+	WaitID      int64
 }
 
 // oneTimeSighting is one need seen on a host at a time, with the action the
@@ -108,10 +117,14 @@ func (h *HubServer) noteReadinessActions(machine string, report *fleet.Readiness
 // clearOneTimeActions advances the clear of every told need of machine that
 // report reads. A report that shows the need cancels a pending clear. A report
 // that shows it gone starts the clear countdown, and a later gone report at
-// least one cycle after that forgets the need.
-func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness) {
+// least one cycle after that forgets the need. It returns the needs whose
+// clear is confirmed: with handoffkeep configured the notice worker
+// still has to close their operator waits (hub_one_time_wait.go)
+// before the rows drop.
+func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness) []oneTimeActionKey {
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
+	var closing []oneTimeActionKey
 	for key, state := range h.oneTimeActions {
 		// A kind the report does not cover (kiro, opencode) says nothing about the
 		// need, so it can neither show it gone nor clear it.
@@ -126,6 +139,13 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 		}
 		shows := readinessShowsNeed(harness, key.need)
 		switch {
+		case shows && !state.ConfirmedAt.IsZero():
+			// The need returned after its clear was confirmed: that is a new
+			// episode, so the row drops and the report's own sighting tells it
+			// again. The still-open handoffkeep wait is not closed — the new
+			// episode re-asserts the same deduped wait on the same anchor.
+			delete(h.oneTimeActions, key)
+			h.deleteOneTimeActionLocked(key)
 		case shows && !state.GoneSince.IsZero():
 			state.GoneSince = time.Time{}
 			h.oneTimeActions[key] = state
@@ -136,10 +156,22 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 			h.oneTimeActions[key] = state
 			h.putOneTimeActionLocked(key, state)
 		case report.CheckedAt.Sub(state.GoneSince) >= oneTimeActionClearCycle:
-			delete(h.oneTimeActions, key)
-			h.deleteOneTimeActionLocked(key)
+			if h.handoffkeep == nil {
+				delete(h.oneTimeActions, key)
+				h.deleteOneTimeActionLocked(key)
+				continue
+			}
+			// The clear is confirmed: the row now only carries the wait-close
+			// obligation, and a sighting of the need again starts a new
+			// episode. It stays until the notice worker confirms the close
+			// on handoffkeep.
+			state.ConfirmedAt = report.CheckedAt
+			h.oneTimeActions[key] = state
+			h.putOneTimeActionLocked(key, state)
+			closing = append(closing, key)
 		}
 	}
+	return closing
 }
 
 func readinessShowsNeed(harness fleet.HarnessReadiness, need string) bool {

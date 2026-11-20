@@ -139,27 +139,35 @@ func releaseOneTimeBarriers(batch []oneTimeObservation) {
 func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender *oneTimeSender) {
 	var untold []oneTimeSighting
 	queued := map[oneTimeActionKey]bool{}
+	touched := map[oneTimeActionKey]bool{}
+	var closing []oneTimeActionKey
+	seenClosing := map[oneTimeActionKey]bool{}
 	var barriers []chan struct{}
 	for _, obs := range batch {
 		switch {
 		case obs.done != nil:
 			barriers = append(barriers, obs.done)
 		case obs.report != nil:
-			h.clearOneTimeActions(obs.machine, obs.report)
+			for _, key := range h.clearOneTimeActions(obs.machine, obs.report) {
+				if !seenClosing[key] {
+					seenClosing[key] = true
+					closing = append(closing, key)
+				}
+			}
 			for _, kind := range fleet.ReadinessKinds {
 				harness, ok := obs.report.Harnesses[kind]
 				if !ok {
 					continue
 				}
 				if harness.Dialog != "" {
-					h.considerOneTimeSighting(obs.machine, kind, harness.Dialog, obs.at, queued, &untold)
+					h.considerOneTimeSighting(obs.machine, kind, harness.Dialog, obs.at, queued, &untold, touched)
 				}
 				if kind != "cmd" && harness.Login == fleet.ReadinessLoginMissing {
-					h.considerOneTimeSighting(obs.machine, kind, oneTimeLoginMissing, obs.at, queued, &untold)
+					h.considerOneTimeSighting(obs.machine, kind, oneTimeLoginMissing, obs.at, queued, &untold, touched)
 				}
 			}
 		default:
-			h.considerOneTimeSighting(obs.machine, obs.kind, obs.need, obs.at, queued, &untold)
+			h.considerOneTimeSighting(obs.machine, obs.kind, obs.need, obs.at, queued, &untold, touched)
 		}
 	}
 	for _, s := range untold {
@@ -177,11 +185,18 @@ func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender 
 			h.oneTimeActions = map[oneTimeActionKey]oneTimeActionState{}
 		}
 		state := oneTimeActionState{ToldAt: s.at}
+		// A confirmed-clear row being replaced by a recurrence keeps its wait
+		// ids: the handoffkeep wait is still open, so the new episode tracks
+		// the same wait and the pending close is cancelled.
+		if prior, ok := h.oneTimeActions[s.key]; ok {
+			state.WaitTaskID, state.WaitID = prior.WaitTaskID, prior.WaitID
+		}
 		h.oneTimeActions[s.key] = state
 		h.putOneTimeActionLocked(s.key, state)
 		h.oneTimeMu.Unlock()
 		h.logger.Warn("host needs a one-time action", "host", s.key.machine, "kind", s.key.kind, "need", s.key.need)
 	}
+	h.syncOneTimeWaits(sender.base, touched, closing)
 	for _, done := range barriers {
 		close(done)
 	}
@@ -189,14 +204,16 @@ func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender 
 
 // considerOneTimeSighting applies one sighting. A told need is only restarted
 // in its clear countdown when it shows again. An untold need joins this batch's
-// delivery once, at the first sighting.
-func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.Time, queued map[oneTimeActionKey]bool, untold *[]oneTimeSighting) {
+// delivery once, at the first sighting. touched records every need the batch
+// saw so the handoffkeep wait sync can re-assert the standing ones.
+func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.Time, queued map[oneTimeActionKey]bool, untold *[]oneTimeSighting, touched map[oneTimeActionKey]bool) {
 	s, ok := oneTimeSightingFor(machine, kind, need, at)
 	if !ok {
 		return
 	}
+	touched[s.key] = true
 	h.oneTimeMu.Lock()
-	if state, told := h.oneTimeActions[s.key]; told {
+	if state, told := h.oneTimeActions[s.key]; told && state.ConfirmedAt.IsZero() {
 		if !state.GoneSince.IsZero() {
 			state.GoneSince = time.Time{}
 			h.oneTimeActions[s.key] = state
