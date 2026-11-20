@@ -203,7 +203,7 @@ func (h *HubServer) notifyStuckPoolAction(ctx context.Context, action poolAction
 		return err
 	}
 	text := fmt.Sprintf("[panewire] The hub holds job %s on host %s: %s (row %s). Check the host; you can hand the job over by hand after checking it.", action.Job, action.Node, reason, action.ID)
-	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(action.Job, "pool_action_stuck", false)}, nil)
 	if result.ID == 0 || result.PersistFailed {
 		return errors.New("stuck pool action notice unavailable")
 	}
@@ -450,7 +450,7 @@ func (h *HubServer) finishMissingJobAction(ctx context.Context, action poolActio
 	}
 	if !owned {
 		text := fmt.Sprintf("[panewire] Host %s no longer has job %s (its directory is gone, proved by the node); the hub released it without a close (row %s). Check whether the job needs a respawn.", action.Node, action.Job, action.ID)
-		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+		result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(action.Job, "pool_action_missing", false)}, nil)
 		if result.ID == 0 || result.PersistFailed {
 			return errors.New("owner notice unavailable")
 		}
@@ -591,7 +591,7 @@ func (h *HubServer) refusePoolAction(ctx context.Context, action poolAction) err
 		}
 		if !owned {
 			text := fmt.Sprintf("[panewire] hand-over of %s failed (%s): %s", action.Job, handover.Reason, action.Data.Text)
-			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(action.Job, "hand_over_failed", true)}, nil)
 			if result.ID == 0 || result.PersistFailed {
 				return errors.New("owner notice unavailable")
 			}
@@ -712,15 +712,17 @@ func (h *HubServer) finishPoolAction(ctx context.Context, action poolAction) err
 	}
 	if state == "lost" && reason == action.Data.EndReason {
 		eventID := "pool-closed:" + action.Job
+		cause := "pool_closed"
 		if action.Data.Kind == poolActionKindSupersedeClose {
 			eventID = supersedeEventID(action.Job)
+			cause = "supersede_closed"
 		}
 		owned, err := h.inbox.store.poolNoticeOwned(ctx, action.Data.Owner, eventID)
 		if err != nil {
 			return err
 		}
 		if !owned {
-			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: action.Data.Text, Host: "hub", Epoch: 1}, nil)
+			result := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: laneEventTransportID(action.Data.Owner, eventID), OwnerLane: action.Data.Owner, NotifyType: "info", Text: action.Data.Text, Host: "hub", Epoch: 1, Notice: ownerNoticeFor(action.Job, cause, false)}, nil)
 			if result.ID == 0 || result.PersistFailed {
 				return errors.New("owner notice unavailable")
 			}

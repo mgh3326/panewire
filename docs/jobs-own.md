@@ -49,8 +49,9 @@ herdr on that node:
   row for that pane id must still carry the receipt's label. A pane id is
   host-local and reused, so a different label means the pane is not the job's
   (`pane-changed`).
-- a job spawned with `--keep` is never closed (`protected`), with or without
-  `--force`.
+- a job spawned with `--keep` is never closed while its pane exists
+  (`protected`), with or without `--force`. Once its pane is gone the record
+  settles as `pane-gone`, like any other job.
 - a pane that is `working`, or `blocked` at a prompt, is refused without
   `--force` (`job-working`, `pane-blocked`) and is reported, so the caller
   knows the job is still running.

@@ -157,7 +157,7 @@ func (a *App) pauseCreditPublication(ctx context.Context, j Job, stop quotastop.
 		at := stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)
 		text := fmt.Sprintf("[%s] CREDIT_CLOSE_PAUSED | pool=%s at=%s | 공유 exhausted-credit 게시가 일시 중단됐습니다(reason=%s). 계정 fingerprint를 확인하면 다음 안전 재시도에서 복구합니다.", j.ID, stop.Pool, at, reason)
 		eventID := fmt.Sprintf("credit-close-paused-%s-%d", j.ID, stop.CreditExhaustedAt.Unix())
-		r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", latest.Owner, "--type", "info", "--event-id", eventID, "--inbox-root", filepath.Dir(a.Jobs), "--text", text)
+		r := a.call(ctx, "panewire", ownerInfoEmitArgs(latest.Owner, eventID, filepath.Dir(a.Jobs), text, j.ID, "credit_close_paused")...)
 		if err := check(r, "credit publication notice"); err != nil {
 			return err
 		}

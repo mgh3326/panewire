@@ -171,11 +171,11 @@ func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
 // heartbeat, completion, late registration, or orphan-sweep candidate.
 func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 13 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 14 {
 		return hubJobEventPayload{}, false
 	}
 	for name := range fields {
-		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "priority" && name != "cause" && name != "head" && name != "pr" && name != "pane_id" {
+		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "priority" && name != "cause" && name != "head" && name != "pr" && name != "pane_id" && name != "notice" {
 			return hubJobEventPayload{}, false
 		}
 	}
@@ -205,6 +205,14 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	}
 	if raw, present := fields["replay"]; present && json.Unmarshal(raw, &event.Replay) != nil {
 		return hubJobEventPayload{}, false
+	}
+	// notice (hk 5454) names the job an info event is about. An invalid one is
+	// dropped, not a refusal: the event then takes the ordinary path.
+	if raw, present := fields["notice"]; present {
+		var notice ownerInfoNotice
+		if json.Unmarshal(raw, &notice) == nil && validOwnerInfoNotice(&notice) {
+			event.Notice = &notice
+		}
 	}
 	// pane_id is the emitting pane (lane_event_sender.go). It only ever quiets
 	// a design lane, so a value the hub cannot use is no pane, not a refusal.

@@ -119,6 +119,12 @@ recorded instead of sending that UTC day (hk 5360, operator decision 433):
 A cause is the refusal code after `spawn_failed:` (`checkout_refused:locked`,
 `role_escalate`, …), or `spawned`, `lane_unregistered`, `job_completed` or
 `delivery_unconfirmed` for the other notices a `--owner-notify` spawn withholds.
+The owner info notices a `--owner-notify` job withholds (hk 5454,
+[docs/hub-spawn-operations.md](hub-spawn-operations.md#owner-info-notices)) are
+counted under their own causes: `pool_exhausted`, `pool_wait`, `hand_over`,
+`hand_over_failed`, `pool_action_stuck`, `pool_action_missing`, `pool_closed`,
+`supersede_closed`, `quota_replace`, `spawn_park`, `ladder_*`,
+`quota_stop_resumed`, `replaced_close` and `credit_close_paused`.
 A retryable failure that a requester replays by itself is counted here and
 never reaches a design lane's inbox, unless its cause is on
 `relay.spawn_notice_must_fix`, its third repeat in 30 minutes, or its request

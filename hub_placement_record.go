@@ -558,6 +558,22 @@ func (h *HubServer) deliverPlacementRecord(ctx context.Context, requestID string
 // job is placed, a refusal before the node's hk job claim is refused, and
 // anything past it failed.
 func hubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int) fleet.PlacementRecord {
+	return boundPlacementRecordText(buildHubPlacementRecord(task, tr, attempt))
+}
+
+// boundPlacementRecordText applies the hk reason contract (hubPlacementReasonText)
+// to the record's reason and to every candidate reason. The candidates are
+// cloned first: they can share a backing array with the trace the caller keeps.
+func boundPlacementRecordText(rec fleet.PlacementRecord) fleet.PlacementRecord {
+	rec.Reason = hubPlacementReasonText(rec.Reason)
+	rec.Candidates = slices.Clone(rec.Candidates)
+	for i := range rec.Candidates {
+		rec.Candidates[i].Reason = hubPlacementReasonText(rec.Candidates[i].Reason)
+	}
+	return rec
+}
+
+func buildHubPlacementRecord(task hubSpawnTask, tr fleet.PlacementTrace, attempt int) fleet.PlacementRecord {
 	if task.Attempt == attempt && (task.Outcome.Reason == "timeout" || task.Status == "given_up" || spawnOutcomeNotStarted(task.Outcome)) {
 		// An in-process placement error can race the authoritative deadline or
 		// not-started result. The terminal operation decides this verdict.

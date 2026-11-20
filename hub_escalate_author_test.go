@@ -89,7 +89,31 @@ func escalateHolderRequest(job string) fleet.Submission {
 	return request
 }
 
+// escalateSuccessorRequest is the submission of a quota-stop or hand-over
+// successor of parent: the same task, named through --parent-job (a successor
+// names no --task, handoverSuccessorRequest).
+func escalateSuccessorRequest(job, parent string) fleet.Submission {
+	request := escalateHolderRequest(job)
+	request.RequestID = "d676220b-e763-4af1-aefd-000000000002"
+	for i := slices.Index(request.Args, "--task"); i >= 0; i = slices.Index(request.Args, "--task") {
+		request.Args = slices.Delete(request.Args, i, i+2)
+	}
+	request.Args = append(request.Args, "--parent-job", parent)
+	return request
+}
+
 func newEscalateFixture(t *testing.T, job string) *escalateFixture {
+	t.Helper()
+	return newEscalateChainFixture(t, job, "", nil)
+}
+
+// newEscalateChainFixture is newEscalateFixture for a chain head that is a
+// successor: when predecessor is not empty, job is a quota-stop or hand-over
+// successor of it. It names --parent-job and no --task, and took over the task
+// role from the predecessor, as claimHandoverSuccessor leaves them. The
+// predecessor's own submission and lost record are kept in the store and hk.
+// successor builds the head's submission (nil: escalateSuccessorRequest).
+func newEscalateChainFixture(t *testing.T, job, predecessor string, successor func(job, parent string) fleet.Submission) *escalateFixture {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	_, client, stop := newFakeHandoffkeep(t)
@@ -128,12 +152,30 @@ func newEscalateFixture(t *testing.T, job string) *escalateFixture {
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
 	node := t14Node(t, hub, server, true)
-	held, _, err := hub.inbox.store.claimSpawn(t.Context(), escalateHolderRequest(job), job, "parent", time.Now())
+	first := firstNonempty(predecessor, job)
+	held, _, err := hub.inbox.store.claimSpawn(t.Context(), escalateHolderRequest(first), first, "parent", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
+	pane := roleHeldPane
+	if predecessor != "" {
+		pane = "w0:p1"
+	}
+	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: pane}, time.Now()); err != nil {
 		t.Fatal(err)
+	}
+	if predecessor != "" {
+		if successor == nil {
+			successor = escalateSuccessorRequest
+		}
+		jobs.records[predecessor] = map[string]any{"state": "lost", "end_reason": "quota_stop pool=claude handed_over_to=" + job, "profile": "sonnet", "effort": "high", "pool": "claude", "family": "anthropic", "owner_lane": "parent", "task_id": "42"}
+		held, _, err = hub.inbox.store.claimHandoverSuccessor(t.Context(), successor(job, predecessor), job, "parent", held.Request.RequestID, predecessor, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	f := &escalateFixture{hub: hub, server: server, node: node, jobs: jobs, destination: destination, job: job}
 	fx = f
@@ -1234,6 +1276,49 @@ func TestEscalateAuthorRefusesLegacyWorkerWithOwnerESC(t *testing.T) {
 		return item.Event.NotifyType == "decision" && strings.Contains(item.Event.Text, "legacy_worker_submission")
 	}) {
 		t.Fatalf("owner did not receive a decision event: %+v", items)
+	}
+}
+
+// TestEscalateAuthorRefusesAKeptAuthor: the ladder never closes a pane spawned
+// with --keep. The step is refused as author_kept before any close is asked of
+// the node, nothing is staged, and the owner gets one decision (ESC) (hk 5295).
+func TestEscalateAuthorRefusesAKeptAuthor(t *testing.T) {
+	f := newEscalateFixture(t, "kept-author")
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder.Request.Args = append(holder.Request.Args, "--keep")
+	raw, err := json.Marshal(holder.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.hub.inbox.store.db.ExecContext(t.Context(), f.hub.inbox.store.q(`UPDATE spawn_operations SET payload=? WHERE request_id=?`), string(raw), holder.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	result, commands := f.escalate(t, nil)
+	if result.Code != "author_kept" || result.AuthorEnded || len(commands) != 0 {
+		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("a kept author's refusal staged a successor")
+	}
+	f.awaitInfo(t, "ESC", "author_kept")
+	items, err := f.hub.inbox.store.list("parent", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions := 0
+	for _, item := range items {
+		if strings.Contains(item.Event.Text, "author_kept") {
+			if item.Event.NotifyType != "decision" {
+				t.Fatalf("author_kept filed as %q, want decision", item.Event.NotifyType)
+			}
+			decisions++
+		}
+	}
+	if decisions != 1 {
+		t.Fatalf("owner received %d author_kept events, want 1", decisions)
 	}
 }
 

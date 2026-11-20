@@ -47,6 +47,27 @@ A stored submission with the retired `worker` role is refused as
 receives a decision event; the existing author's reservation remains until the
 job ends and the ordinary cleanup releases it.
 
+## Who is the author: the chain head
+
+The author a step replaces is the **chain head**: the job the task's binding
+(hk `refs.job_id`) names. It is the original implementer or a successor in its
+chain: a quota-stop or pool hand-over successor (`<job>-q<n>`) or an earlier
+ladder successor (`-l<n>`). A successor's stored submission names `--parent-job`
+and no `--task`, so the hub does not read the task from it: the request's task
+is checked against the job record's task id and the live binding.
+
+- A request naming the current holder goes ahead, whatever its place in the
+  chain. A hand-over successor's checkout (stored in the `successor` mode) is
+  reused as the `branch` checkout the ladder successor verifies, on the same
+  worktree and branch. A successor that holds no task role (its predecessor had
+  completed) has the role claimed fresh.
+- A request naming any other job (an older link of the chain, or another task's
+  job) is `job_mismatch`, and the reason names the current holder ("the current
+  implementer is X"). Nothing is touched.
+- The step limit counts once per chain: the ladder successor id is
+  `<head>-l1` and a hop after it (`-l1-q1`) still carries the `-l` suffix, so a
+  hop neither resets the limit nor bypasses it (`no_rung`).
+
 ## A completed author is not a gone author
 
 An author's first READY completes its hk job record (and frees its task role),
@@ -84,7 +105,7 @@ event). So the step looks at the pane, not at the record's state:
 
 The CLI no longer judges the job's state or task binding. It reads the record
 only for the rung to step from; `job_not_live` (lost, escalated), `job_mismatch`
-(the stored submission or the record names another task) and the rest are the
+(the job is not the task's current holder, or the stored submission or the record names another task) and the rest are the
 hub's refusals, and every hub refusal files one lane event for the owner (see
 the table below). The CLI itself still refuses, with rc 2 and no event, only
 what the hub cannot see: usage errors, an unreadable or malformed findings file
@@ -157,6 +178,7 @@ lane, so a refusal is countable without the hub database:
 | --- | --- | --- | --- |
 | before the pane closed (`job_not_live`, `job_mismatch`, `pane_busy`, `pane_not_closed`, `worktree_*`, `staged_expired`, `no_rung`, `quota_refused`, ...) | `ladder-step:<job>:<round>:preflight:<code>` | info | 2 |
 | after the pane closed (the PR is authorless) | `ladder-step:<job>:<round>:ended:<code>:esc` | decision | 1 |
+| author spawned with `--keep` (`author_kept`; its pane is protected and never closed) | `ladder-step:<job>:<round>:preflight:author_kept:esc` | decision | 2 |
 | step done | `ladder-step:<successor>` | info | 0 |
 | successor placed, task binding unconfirmed | `ladder-step:<job>:<round>:placed:rebind_unconfirmed` | info | 1 |
 

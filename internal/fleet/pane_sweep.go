@@ -1337,8 +1337,7 @@ func (a *App) announceReplacedClose(ctx context.Context, j Job, successor string
 		host = "unknown"
 	}
 	text := fmt.Sprintf("[panewire] closed %s (replaced by %s) on %s", j.ID, successor, host)
-	r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", j.Owner, "--type", "info",
-		"--event-id", "replaced-close-"+j.ID, "--inbox-root", filepath.Dir(a.Jobs), "--text", text)
+	r := a.call(ctx, "panewire", ownerInfoEmitArgs(j.Owner, "replaced-close-"+j.ID, filepath.Dir(a.Jobs), text, j.ID, "replaced_close")...)
 	if err := check(r, "replaced close notice"); err != nil {
 		a.warn("replaced close notice not sent for job %s: %v", j.ID, err)
 	}

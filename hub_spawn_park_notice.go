@@ -114,6 +114,7 @@ func spawnParkNoticeEvent(task hubSpawnTask) hubJobEventPayload {
 		Text:       utf8PrefixWithin(spawnParkNoticeText(task), laneEventTextLimit),
 		Host:       "hub",
 		Epoch:      1,
+		Notice:     ownerNoticeFor(task.Job, "spawn_park", false),
 	}
 }
 

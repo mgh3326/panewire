@@ -87,7 +87,9 @@ type emitRecord struct {
 	NotifyType    string `json:"notify_type,omitempty"`
 	Priority      string `json:"priority,omitempty"`
 	Cause         string `json:"cause,omitempty"`
-	Type          string `json:"type"`
+	// Notice names the job an info lane.event is about (--notice-job, hk 5454).
+	Notice *ownerInfoNotice `json:"notice,omitempty"`
+	Type   string           `json:"type"`
 	// Kind carries the same value as Type under the key the reap reader
 	// (document["kind"]), scanJobCloseState and the fleet census read, so an
 	// emitted terminal kind is terminal for every consumer, not only the
@@ -144,6 +146,8 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	pr := fs.String("pr", "", "pull request URL")
 	head := fs.String("head", "", "head SHA")
 	cause := fs.String("cause", "", "cause key: pr:owner/repo#number, job:id, or task:id")
+	noticeJob := fs.String("notice-job", "", "with --type info: the job this owner notice is about; its spawn's --owner-notify mode decides it (hk 5454)")
+	noticeCause := fs.String("notice-cause", "", "with --notice-job: the count cause this notice is grouped under in the loops row (hk 5454)")
 	inboxRoot := fs.String("inbox-root", "", "inbox root containing jobs/<job>/events")
 	timeout := fs.Duration("timeout", 2*time.Second, "local daemon call timeout")
 	if fs.Parse(args) != nil || fs.NArg() != 0 {
@@ -178,6 +182,15 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if !validInboxCause(*cause) {
 		fmt.Fprintln(stderr, "emit: invalid --cause")
 		return ExitUsage
+	}
+	var notice *ownerInfoNotice
+	if *noticeJob != "" || *noticeCause != "" {
+		candidate := ownerNoticeFor(*noticeJob, *noticeCause, false)
+		if *kind != "lane.event" || *notifyType != "info" || !validOwnerInfoNotice(candidate) {
+			fmt.Fprintln(stderr, "emit: --notice-job and --notice-cause need --kind lane.event --type info, a job id and a cause key")
+			return ExitUsage
+		}
+		notice = candidate
 	}
 	if *kind == "lane.event" {
 		if !LaneNamePattern.MatchString(*lane) {
@@ -224,7 +237,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if paneID == "" {
 			paneID = os.Getenv("HERDR_PANE_ID")
 		}
-		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Priority: *priority, Type: *kind, Cause: *cause, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated, Sink: *sink, Ceiling: !*sink}
+		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Priority: *priority, Type: *kind, Cause: *cause, Notice: notice, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated, Sink: *sink, Ceiling: !*sink}
 		if record.Epoch == 0 {
 			record.Epoch = 1
 		}
@@ -707,7 +720,7 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(timeout))
 	request := localRequest{
-		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Priority: record.Priority, Cause: record.Cause, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
+		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Priority: record.Priority, Cause: record.Cause, Notice: record.Notice, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
 		Label: record.Label, Host: record.Host, PaneID: record.PaneID, ReportPath: record.ReportPath,
 		ReportLastLine: record.ReportLastLine, Reason: record.Reason, Question: record.Question,
 		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, Ceiling: record.Ceiling, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),

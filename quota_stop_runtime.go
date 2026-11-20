@@ -957,7 +957,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			q.update(ctx, r.id, "action_recorded", 1)
 			q.clearQuotaWait(ctx, r.pane, now)
 			if quotaActsOn(r.role, r.pool) {
-				q.infoToOwner(r.owner, "quota-stop-resumed:"+r.id, fmt.Sprintf("resumed %s (%s quota reset) in pane %s", r.job, r.pool, r.pane), now)
+				q.infoToOwner(r.owner, "quota-stop-resumed:"+r.id, fmt.Sprintf("resumed %s (%s quota reset) in pane %s", r.job, r.pool, r.pane), ownerNoticeFor(r.job, "quota_stop_resumed", false), now)
 			}
 		} else {
 			q.failResume(ctx, r.id, r.pane, "submission_unproven", now)
@@ -984,18 +984,19 @@ func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, re
 	q.clearQuotaWait(ctx, pane, now)
 }
 
-// infoToOwner sends the owner one info lane event; a lane event that cannot be
-// written is dropped, since the action it reports is already done.
-func (q *quotaStopManager) infoToOwner(owner, eventID, text string, now time.Time) {
+// infoToOwner sends the owner one info lane event about the job notice names
+// (hk 5454: the job's --owner-notify mode decides it at the hub); a lane event
+// that cannot be written is dropped, since the action it reports is already done.
+func (q *quotaStopManager) infoToOwner(owner, eventID, text string, notice *ownerInfoNotice, now time.Time) {
 	if owner == "" || q.enqueue == nil {
 		return
 	}
-	record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now.UTC().Format(time.RFC3339Nano), OwnerLane: owner, EventID: eventID, Text: text, NotifyType: "info"}
+	record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now.UTC().Format(time.RFC3339Nano), OwnerLane: owner, EventID: eventID, Text: text, NotifyType: "info", Notice: notice}
 	if _, err := ensureLaneEmitRecord(q.root, record); err != nil {
 		q.logger.Warn("quota-stop owner notice was not written", "error", err)
 		return
 	}
-	q.enqueue(hubScannedRelayEvent{Kind: "lane.event", NotifyType: "info", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(owner, eventID), Epoch: 1, OwnerLane: owner}, EventID: eventID, Text: text})
+	q.enqueue(hubScannedRelayEvent{Kind: "lane.event", NotifyType: "info", Notice: notice, HubActiveJob: HubActiveJob{JobID: laneEventTransportID(owner, eventID), Epoch: 1, OwnerLane: owner}, EventID: eventID, Text: text})
 }
 
 func (q *quotaStopManager) update(ctx context.Context, id, col string, value int) {
