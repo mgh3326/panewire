@@ -148,23 +148,39 @@ func relayOmpComposerRow(lines []string) (int, bool) {
 	return 0, false
 }
 
-// harnessLoginScreens is the closed table of the screen each harness shows when
-// it has no login: every line of a row must appear on the screen. The node
-// reads it on the capture of a spawn that ended rc=76 (quota_login_probe.go).
-// A harness has a row only from a recorded capture of its login screen:
-// claude and codex have none yet, so a screen of theirs is never read as a
-// login screen. agy: jobs/at-3816-retro-read-views/spawn-failure-*.txt on
-// mac-dev, 2026-11-10.
-var harnessLoginScreens = map[string][]string{
-	"agy": {"Open the URL below in your browser:", "After authenticating, copy the code displayed in the browser and paste it below:"},
+// harnessLoginScreens is the closed table of the screens each harness shows when
+// it has no login. A screen is one row: every line of a row must appear on the
+// capture, and a capture is a login screen when any one row matches in full.
+// The node reads it on the capture of a spawn that ended rc=76
+// (quota_login_probe.go). A harness has a row only from a recorded capture of
+// its login screen: claude and codex have none yet, so a screen of theirs is
+// never read as a login screen. agy: jobs/at-3816-retro-read-views/spawn-failure-*.txt
+// on mac-dev, 2026-11-10 (the first row); the 2026-11-20 mac-dev capture of the
+// newer sign-in screen (the second row). See docs/fleet-state.md.
+var harnessLoginScreens = map[string][][]string{
+	"agy": {
+		{"Open the URL below in your browser:", "After authenticating, copy the code displayed in the browser and paste it below:"},
+		{"Copy and paste the URL or click on the link below:", "paste the authorization code below:"},
+	},
 }
 
-// harnessLoginScreen reports whether screen is kind's login screen.
+// harnessLoginScreen reports whether screen is kind's login screen: some row of
+// harnessLoginScreens[kind] has every one of its lines on the screen. Every
+// reader of the table goes through this function.
 func harnessLoginScreen(kind, screen string) bool {
-	lines := harnessLoginScreens[kind]
-	if len(lines) == 0 {
-		return false
+	for _, lines := range harnessLoginScreens[kind] {
+		if len(lines) == 0 {
+			continue
+		}
+		if screenHasAllLines(screen, lines) {
+			return true
+		}
 	}
+	return false
+}
+
+// screenHasAllLines reports whether every line appears on screen.
+func screenHasAllLines(screen string, lines []string) bool {
 	for _, line := range lines {
 		if !strings.Contains(screen, line) {
 			return false
