@@ -81,18 +81,16 @@ func openNodeSpawnJournal(root string) (*nodeSpawnJournal, error) {
 		db.Close()
 		return nil, err
 	}
-	// sparse_hash and checkout_mode preserve the sparse checkout identity and
-	// execution mode durably across capability filtering, restart and replay
-	// (hk 5104 / hk 5211).
-	for _, column := range []string{"sparse_hash", "checkout_mode"} {
-		var present int
-		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name=?`, column).Scan(&present); err == nil && present == 0 {
-			_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`)
-		}
-		if err != nil {
-			db.Close()
-			return nil, err
-		}
+	// sparse_hash preserves the sparse checkout identity durably across
+	// capability filtering, restart and replay (hk 5104 / hk 5211). The
+	// execution mode is not a column: the result JSON carries it (hk 5223).
+	var sparsePresent int
+	if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name='sparse_hash'`).Scan(&sparsePresent); err == nil && sparsePresent == 0 {
+		_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN sparse_hash TEXT NOT NULL DEFAULT ''`)
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
 	}
 	return &nodeSpawnJournal{db}, nil
 }
@@ -139,7 +137,7 @@ func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage
 	// record its value as this row's job (hk 4799).
 	job, label := hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l")
 	sparseHash := sparseListsHash(message.Checkout)
-	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label,strict,sparse_hash,checkout_mode) VALUES(?,?,'executing',?,?,1,?,'') ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), job, label, sparseHash)
+	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label,strict,sparse_hash) VALUES(?,?,'executing',?,?,1,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), job, label, sparseHash)
 	if err != nil {
 		return false, nil, err
 	}
@@ -159,7 +157,7 @@ func (j *nodeSpawnJournal) refuseUnstarted(ctx context.Context, message hubOutbo
 		return false, err
 	}
 	sparseHash := sparseListsHash(message.Checkout)
-	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label,strict,sparse_hash,checkout_mode) VALUES(?,?,'completed',?,?,?,1,?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l"), sparseHash, result.CheckoutMode)
+	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label,strict,sparse_hash) VALUES(?,?,'completed',?,?,?,1,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l"), sparseHash)
 	if err != nil {
 		return false, err
 	}
@@ -170,8 +168,8 @@ func (j *nodeSpawnJournal) refuseUnstarted(ctx context.Context, message hubOutbo
 // lookup checks the same fingerprint as claim without creating an executing
 // row. An absent row is still replayable after a node restart.
 func (j *nodeSpawnJournal) lookup(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
-	var old, status, stored, storedSparseHash, storedCheckoutMode string
-	err := j.db.QueryRowContext(ctx, `SELECT fingerprint,status,result,sparse_hash,checkout_mode FROM spawn_inbox WHERE request_id=?`, message.RequestID).Scan(&old, &status, &stored, &storedSparseHash, &storedCheckoutMode)
+	var old, status, stored, storedSparseHash string
+	err := j.db.QueryRowContext(ctx, `SELECT fingerprint,status,result,sparse_hash FROM spawn_inbox WHERE request_id=?`, message.RequestID).Scan(&old, &status, &stored, &storedSparseHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil, nil
 	}
@@ -192,25 +190,32 @@ func (j *nodeSpawnJournal) lookup(ctx context.Context, message hubOutboundMessag
 	if err = json.Unmarshal([]byte(stored), &cached); err != nil {
 		return false, nil, err
 	}
-	if cached.CheckoutMode == "" && storedCheckoutMode != "" {
-		cached.CheckoutMode = storedCheckoutMode
-	}
-	// A stripped replay of a sparse row does not report sparse: the requester
-	// dropped the lists with node/hub capabilities (or did not ask for them),
-	// so returning sparse would send an unrequested/unsupported mode.
-	// Meanwhile, a replay with lists of a stripped first send keeps the
-	// truthful checkout_mode of the row that actually executed (full).
-	if incomingSparseHash == "" && cached.CheckoutMode == nodeCheckoutSparse {
-		cached.CheckoutMode = ""
-	}
+	cached.CheckoutMode = replayCheckoutMode(cached.CheckoutMode, incomingSparseHash)
 	return true, &cached, nil
 }
+
+// replayCheckoutMode is the checkout_mode a replay may report for a journaled
+// row (hk 5104, hk 5211, hk 5223). A replay that carries no sparse lists does
+// not report sparse: the requester dropped the lists with a node or hub
+// capability, or did not ask for them, so sparse would be an unrequested mode.
+// A replay with lists reports the mode the row executed with. The lookup and
+// the settle answer (answerKnownSpawn) both go through here, so a replay gets
+// the same answer whichever path produced the row's result. The hub records a
+// missing mode as full (hub_spawn.go resolveSpawn), so this answer is the
+// requester's view of the spawn, not the on-disk checkout mode.
+func replayCheckoutMode(mode, sparseHash string) string {
+	if sparseHash == "" && mode == nodeCheckoutSparse {
+		return ""
+	}
+	return mode
+}
+
 func (j *nodeSpawnJournal) complete(ctx context.Context, result hubSpawnResult) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
-	_, err = j.db.ExecContext(ctx, `UPDATE spawn_inbox SET status='completed',result=?,checkout_mode=? WHERE request_id=? AND status='executing'`, string(raw), result.CheckoutMode, result.RequestID)
+	_, err = j.db.ExecContext(ctx, `UPDATE spawn_inbox SET status='completed',result=? WHERE request_id=? AND status='executing'`, string(raw), result.RequestID)
 	return err
 }
 
@@ -276,16 +281,13 @@ func (j *nodeSpawnJournal) checkoutOwners(ctx context.Context) (map[string]strin
 
 // resultOf returns the stored completion of a request, if it has one.
 func (j *nodeSpawnJournal) resultOf(ctx context.Context, requestID string) (*hubSpawnResult, error) {
-	var status, stored, storedCheckoutMode string
-	if err := j.db.QueryRowContext(ctx, `SELECT status,result,checkout_mode FROM spawn_inbox WHERE request_id=?`, requestID).Scan(&status, &stored, &storedCheckoutMode); err != nil || status != "completed" {
+	var status, stored string
+	if err := j.db.QueryRowContext(ctx, `SELECT status,result FROM spawn_inbox WHERE request_id=?`, requestID).Scan(&status, &stored); err != nil || status != "completed" {
 		return nil, err
 	}
 	var result hubSpawnResult
 	if err := json.Unmarshal([]byte(stored), &result); err != nil {
 		return nil, err
-	}
-	if result.CheckoutMode == "" && storedCheckoutMode != "" {
-		result.CheckoutMode = storedCheckoutMode
 	}
 	return &result, nil
 }

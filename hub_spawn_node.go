@@ -435,6 +435,8 @@ func (client *HubClient) answerKnownSpawn(ctx context.Context, peer *hubClientCo
 	if active {
 		reply = "reconciling"
 	} else if settled, ok := client.settleRequest(ctx, journal, message.RequestID); ok {
+		// The same replay rule as journal lookup (replayCheckoutMode, hk 5223).
+		settled.CheckoutMode = replayCheckoutMode(settled.CheckoutMode, sparseListsHash(message.Checkout))
 		client.sendSpawnResult(ctx, peer, *settled, message.OperatorAuthorized)
 		return
 	}
