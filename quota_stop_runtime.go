@@ -1059,9 +1059,12 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 // seen. Without an acknowledgement within quotaWaitAdoptBound of the decision,
 // or when the request cannot be written within it, the row becomes a hand-over,
 // as every reviewer stop without a wait is. An attempt that is over has nothing
-// left to wait for or hand over.
+// left to wait for or hand over. A wait whose request is in the ledger but whose
+// wait_requested write was lost (the daemon exited between the two) is still
+// adopted by an on-time acknowledgement, even after the bound.
 func (q *quotaStopManager) negotiateReviewerWait(ctx context.Context, id, job, pane, pool, reset, attempt string, created, until, requested int64, now time.Time) {
-	giveUp := !now.Before(time.UnixMilli(created).Add(quotaWaitAdoptBound))
+	bound := time.UnixMilli(created).Add(quotaWaitAdoptBound)
+	giveUp := !now.Before(bound)
 	again := func() {
 		if giveUp {
 			q.failResume(ctx, id, pane, "wait_not_adopted", now)
@@ -1077,8 +1080,15 @@ func (q *quotaStopManager) negotiateReviewerWait(ctx context.Context, id, job, p
 	}
 	untilAt := time.UnixMilli(until)
 	if requested == 0 && giveUp {
-		// The bound ran out before the request was written: no new handshake
-		// starts after it.
+		// The bound ran out before this manager noted the request. The request may
+		// still stand in the ledger, so an on-time acknowledgement of this attempt
+		// and until adopts the wait; no new handshake starts after the bound.
+		if ackedAt, err := q.wait.adopted(job, attempt, untilAt); err == nil && !ackedAt.IsZero() && !ackedAt.After(bound) {
+			q.store.mu.Lock()
+			_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET wait_adopted=? WHERE event_id=?`, now.UnixMilli(), id)
+			q.store.mu.Unlock()
+			return
+		}
 		q.failResume(ctx, id, pane, "wait_not_adopted", now)
 		return
 	}
@@ -1108,7 +1118,7 @@ func (q *quotaStopManager) negotiateReviewerWait(ctx context.Context, id, job, p
 		}
 	}
 	if ackedAt, err := q.wait.adopted(job, attempt, untilAt); err == nil && !ackedAt.IsZero() {
-		if ackedAt.After(time.UnixMilli(created).Add(quotaWaitAdoptBound)) {
+		if ackedAt.After(bound) {
 			// An acknowledgement written after the bound does not adopt the wait:
 			// the manager gave up at the deadline, whenever its tick ran.
 			q.failResume(ctx, id, pane, "wait_not_adopted", now)
