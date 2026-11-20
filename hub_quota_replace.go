@@ -809,11 +809,12 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	written := 0
 	for _, successor := range successors {
-		// Any claimed successor that is not terminal-and-unplaced, at any age: the
-		// replacement worker holds the job's lock for as long as it works, so a
-		// restart between the claim and the pointer is repaired well inside the
-		// watcher's grace instead of after the replacement budget (hk 5690).
-		if !spawnStatusActive(successor.Status) && successor.Status != "succeeded" {
+		// A successor that is bound to a node or placed, at any age: a restart
+		// between the claim and the pointer is repaired well inside the watcher's
+		// grace instead of after the replacement budget. A claim still queued
+		// (accepted, waiting) or ended unplaced is not a pointer target: it may never
+		// start, and the replay or the give-up owns it (hk 5690).
+		if !quotaSuccessorPlaceable(successor) {
 			continue
 		}
 		old := successor.ReplacedFrom
@@ -825,18 +826,37 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	return written
 }
 
+// quotaSuccessorPlaceable reports whether a claimed successor is bound to a node or
+// placed: the only states a replaced_by pointer to it may be written in.
+func quotaSuccessorPlaceable(successor hubSpawnTask) bool {
+	return successor.Status == "succeeded" || spawnMayStillRun(successor)
+}
+
+// reconcileQuotaReplacement finishes one claimed successor's pointer. It never
+// waits for the predecessor's lock: a replacement that holds it is working the job,
+// and the pass revisits it next time, so the jobs behind it are reached before
+// their grace ends. The successor is read again under the lock, since the snapshot
+// the scan took may have been withdrawn since (hk 5690 review).
 func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string) bool {
-	unlock, free := h.lockWithoutPoolAction(ctx, old)
+	unlock, free := h.tryLockWithoutPoolAction(ctx, old)
 	if !free {
 		return false
 	}
 	defer unlock()
-	return h.finishQuotaReplacement(ctx, app, successor, old, nil)
+	current, err := h.inbox.store.spawnTask(ctx, successor.Request.RequestID)
+	if err != nil {
+		return false
+	}
+	return h.finishQuotaReplacement(ctx, app, current, old, nil)
 }
 
 // finishQuotaReplacement writes the replaced_by record for a claimed successor
 // whose predecessor is still live. The caller holds the job's pool-action lock.
 func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string, stopSeq *int64) bool {
+	// The one rule for a pointer, whoever calls: the successor is bound or placed.
+	if !quotaSuccessorPlaceable(successor) {
+		return false
+	}
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
 	if err != nil || holder.Status != "succeeded" || !quotaLineageHolds(successor, holder, old) {
 		return false
