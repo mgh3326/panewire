@@ -21,6 +21,7 @@ import (
 	"github.com/mgh3326/panewire/internal/durable"
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/harnessstate"
+	"github.com/mgh3326/panewire/internal/herdrpanes"
 	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
@@ -1754,12 +1755,11 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 // nodePaneInUse reports whether any live pane — agent or plain shell — sits
 // inside path, read fresh from `herdr pane list`.
 func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, error) {
-	out, err := client.nodeHerdrRunner()(ctx, "pane", "list")
-	if err != nil {
-		return false, err
-	}
-	panes, err := nodeHerdrRows(out, "panes")
-	if err != nil {
+	var panes []nodeHerdrRow
+	if _, err := herdrpanes.List(ctx, client.nodeHerdrRunner(), func(out []byte) (err error) {
+		panes, err = nodeHerdrRows(out, "panes")
+		return err
+	}); err != nil {
 		return false, err
 	}
 	for _, pane := range panes {

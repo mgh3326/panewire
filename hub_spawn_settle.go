@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/herdrpanes"
 )
 
 // Settling a spawn the node restarted in the middle of.
@@ -172,29 +173,34 @@ func (client *HubClient) readSpawnEvidence(ctx context.Context, session string) 
 	for _, agent := range agents {
 		evidence.agents = append(evidence.agents, agent.nodeAgentRow)
 	}
-	output, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "list")
-	if err != nil {
+	// A reply without a panes array is unreadable, not an empty list; a cut
+	// reply is read again once (herdrpanes), and still unreadable is unproven.
+	var panes []spawnPaneRow
+	if _, err := herdrpanes.List(ctx, client.nodeHerdrRunnerForSession(session), func(output []byte) error {
+		var envelope struct {
+			Result struct {
+				Panes []struct {
+					PaneID string `json:"pane_id"`
+					Label  string `json:"label"`
+					Name   string `json:"name"`
+				} `json:"panes"`
+			} `json:"result"`
+		}
+		if _, err := nodeHerdrRows(output, "panes"); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(output, &envelope); err != nil {
+			return err
+		}
+		panes = panes[:0]
+		for _, pane := range envelope.Result.Panes {
+			panes = append(panes, spawnPaneRow{pane.PaneID, pane.Label, pane.Name})
+		}
+		return nil
+	}); err != nil {
 		return evidence, false
 	}
-	// A reply without a panes array is unreadable, not an empty list.
-	if _, err := nodeHerdrRows(output, "panes"); err != nil {
-		return evidence, false
-	}
-	var envelope struct {
-		Result struct {
-			Panes []struct {
-				PaneID string `json:"pane_id"`
-				Label  string `json:"label"`
-				Name   string `json:"name"`
-			} `json:"panes"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(output, &envelope) != nil {
-		return evidence, false
-	}
-	for _, pane := range envelope.Result.Panes {
-		evidence.panes = append(evidence.panes, spawnPaneRow{pane.PaneID, pane.Label, pane.Name})
-	}
+	evidence.panes = panes
 	return evidence, true
 }
 

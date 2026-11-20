@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/herdrpanes"
 	"github.com/mgh3326/panewire/internal/spawnargs"
 )
 
@@ -1125,17 +1126,19 @@ func (client *HubClient) nodeAgentsListInSession(ctx context.Context, session st
 		return nodeAgentsListResult{}, "herdr_failed"
 	}
 	result := nodeAgentsListResult{Agents: nodeAgentRows(agents)}
-	if output, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "list"); err == nil {
-		if rows, err := nodeHerdrRows(output, "panes"); err == nil {
-			panes := nodeAgentRows(rows)
-			run := client.nodeHerdrRunnerForSession(session)
-			for index := range panes {
-				// pane list carries a label, not the agent name.
-				panes[index].Name = ""
-				agyBusyRow(ctx, run, &panes[index])
-			}
-			result.Panes, result.PanesOK = panes, true
+	var rows []nodeHerdrRow
+	run := client.nodeHerdrRunnerForSession(session)
+	if _, err := herdrpanes.List(ctx, run, func(output []byte) (err error) {
+		rows, err = nodeHerdrRows(output, "panes")
+		return err
+	}); err == nil {
+		panes := nodeAgentRows(rows)
+		for index := range panes {
+			// pane list carries a label, not the agent name.
+			panes[index].Name = ""
+			agyBusyRow(ctx, run, &panes[index])
 		}
+		result.Panes, result.PanesOK = panes, true
 	}
 	return result, ""
 }
