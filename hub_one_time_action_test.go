@@ -19,7 +19,8 @@ const (
 	hooksTail = "stderr: HOOKS_REVIEW_REQUIRED: Codex is waiting at its Hooks need review screen; brief withheld\nFix: review the hooks"
 	trustTail = "stderr: WORKSPACE_TRUST_REQUIRED: Codex directory trust prompt for /work/x; brief withheld\nFix: approve"
 	ompTail   = "stderr: OMP_SETUP_WIZARD: omp is in its setup wizard despite OMP_SKIP_SETUP; seat withheld\nFix: run omp"
-	loginTail = "stderr: no usable login for the selected account\nFix: sign in"
+	// The verified login-screen refusal: the only rc 88 that is login evidence.
+	loginTail = "stderr: " + loginScreenAuthMessage + "\nFix: sign in"
 )
 
 // firstRunRefusal is a node answer that stops at a first-run dialog or a

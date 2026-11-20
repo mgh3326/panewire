@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -157,8 +158,17 @@ func (h *HubServer) observeReadinessLocked(record *hubNodeRecord, readiness *fle
 // publishFleetReadiness publishes one machine's readiness value: the node's
 // last report (or readiness_unknown when it never sent one) and the hub's
 // launch backoff. An identical value is not republished within the load value's
-// republish bound, which keeps measured_at fresh for consumers.
+// republish bound, which keeps measured_at fresh for consumers. It carries the
+// hub's standing login needs (standingLoginNeeds) the same way it carries the
+// launch backoff.
 func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
+	// loginNeedMu covers the read of the login needs and the publish, so a
+	// publish that read an older set cannot land after one that read a newer
+	// set. Lock order: loginNeedMu, then h.mu. No caller holds h.mu here, and
+	// the one-time I/O (oneTimeMu) is never taken on this path.
+	h.loginNeedMu.Lock()
+	defer h.loginNeedMu.Unlock()
+	loginNeeds := slices.Clone(h.loginNeeds[machine])
 	h.mu.Lock()
 	record := h.nodes[machine]
 	if record == nil {
@@ -171,7 +181,7 @@ func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
 	if report != nil && now.Sub(record.readinessAt) > hubReadinessExpiry {
 		report = nil
 	}
-	state := fleet.ReadinessState{Unknown: report == nil, Readiness: report}
+	state := fleet.ReadinessState{Unknown: report == nil, Readiness: report, LoginNeeds: loginNeeds}
 	for key, entry := range h.launchBackoffs {
 		if key.machine == machine && now.Before(entry.until) {
 			if state.BackoffUntil == nil {
@@ -182,6 +192,28 @@ func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
 	}
 	h.mu.Unlock()
 	h.stateStore().publish(FleetStateMessage{Host: machine, Kind: fleetStateKindReadiness, MeasuredAt: now, ReceivedAt: now, Readiness: &state}, fleetStateLoadRepublish)
+}
+
+// refreshLoginNeedsLocked rebuilds loginNeeds from the one-time rows: each
+// machine's login_missing kinds whose clear is not yet confirmed, so the
+// anti-flap clear of hub_one_time_action.go decides when one lifts. Placement
+// skips the (host, kind) pair while it stands (fleet ReadinessState.LoginNeeds).
+// The caller holds oneTimeMu. loginNeedMu is taken only for the map swap.
+func (h *HubServer) refreshLoginNeedsLocked() {
+	byMachine := map[string][]string{}
+	for key, state := range h.oneTimeActions {
+		// A kind the node does not report on (kiro, opencode) cannot clear by
+		// report, so its need is not a placement skip (readinessShowsNeed).
+		if key.need == oneTimeLoginMissing && state.ConfirmedAt.IsZero() && slices.Contains(fleet.ReadinessKinds, key.kind) {
+			byMachine[key.machine] = append(byMachine[key.machine], key.kind)
+		}
+	}
+	for machine := range byMachine {
+		slices.Sort(byMachine[machine])
+	}
+	h.loginNeedMu.Lock()
+	h.loginNeeds = byMachine
+	h.loginNeedMu.Unlock()
 }
 
 // launchFailureReason reports whether a failed node answer shows that the host

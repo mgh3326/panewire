@@ -48,10 +48,11 @@ therefore one `stat` per job directory plus a read of the directories that
 changed, not a read of every event file.
 
 Writers that rewrite an event file in place long after creating it would not be
-seen. None does: `panewire emit`, the completion and close writers in `job.go`
-and `job_close.go`, and `writeHubRevocation` allocate sequence and publish under
-`.wrk-events.lock` by link or rename, and a create-then-write publish finishes inside the racy window above, which keeps
-the directory being read again meanwhile.
+seen. None does: `panewire emit`, the completion and flat-event writers in
+`job.go`, the close writer in `job_close.go`, and `writeHubRevocation` allocate
+sequence and publish under `.wrk-events.lock` by link or rename. A
+create-then-write publish finishes inside the racy window above, which keeps the
+directory being read again meanwhile.
 
 A read that fails (an event file that cannot be opened, or whose stat fails) says
 nothing about the file, unlike a record that is present but invalid. Such a

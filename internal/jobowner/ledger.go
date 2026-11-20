@@ -2,6 +2,7 @@
 package jobowner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +11,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/mgh3326/panewire/internal/durable"
+	"github.com/mgh3326/panewire/internal/filelock"
 )
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -63,10 +64,17 @@ func Assign(jobs, id string, epoch uint64) error {
 
 // Revoke appends a hub revocation unless a later local grant superseded it.
 func Revoke(jobs, id string, epoch uint64) error {
+	return RevokeWithin(context.Background(), jobs, id, epoch)
+}
+
+// RevokeWithin is Revoke with the wait for the job's events lock bounded by
+// ctx. A lock still held when ctx ends writes nothing and returns ctx's error,
+// so the caller can refuse to acknowledge the revocation.
+func RevokeWithin(ctx context.Context, jobs, id string, epoch uint64) error {
 	if epoch == 0 {
 		return errors.New("invalid job revocation")
 	}
-	return withLock(jobs, id, func(dir string) error {
+	return withLockContext(ctx, jobs, id, func(dir string) error {
 		current, err := Epoch(jobs, id)
 		if err != nil || current >= epoch {
 			return err
@@ -120,11 +128,22 @@ func appendRevocation(dir, id string, epoch uint64) error {
 }
 
 func withLock(jobs, id string, fn func(string) error) error {
-	dir, unlock, err := lock(jobs, id)
+	return withLockContext(context.Background(), jobs, id, fn)
+}
+
+func withLockContext(ctx context.Context, jobs, id string, fn func(string) error) error {
+	if jobs == "" || !validID.MatchString(id) || id == "." || id == ".." {
+		return errors.New("invalid job id")
+	}
+	dir := filepath.Join(jobs, id)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	release, err := filelock.Acquire(ctx, filepath.Join(dir, ".wrk-events.lock"))
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer release()
 	return fn(dir)
 }
 
@@ -134,30 +153,14 @@ func withLock(jobs, id string, fn func(string) error) error {
 // action returns, so a grant or revocation cannot land in between: it lands
 // before the check or after the action.
 func Lock(jobs, id string) (unlock func(), err error) {
-	_, unlock, err = lock(jobs, id)
-	return unlock, err
-}
-
-func lock(jobs, id string) (string, func(), error) {
 	if jobs == "" || !validID.MatchString(id) || id == "." || id == ".." {
-		return "", nil, errors.New("invalid job id")
+		return nil, errors.New("invalid job id")
 	}
 	dir := filepath.Join(jobs, id)
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	file, err := os.OpenFile(filepath.Join(dir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0666)
-	if err != nil {
-		return "", nil, err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		file.Close()
-		return "", nil, err
-	}
-	return dir, func() {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		file.Close()
-	}, nil
+	return filelock.Acquire(context.Background(), filepath.Join(dir, ".wrk-events.lock"))
 }
 
 // JobEnv and EpochEnv name the launch environment that binds a worker process
