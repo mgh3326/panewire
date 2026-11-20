@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -44,13 +45,34 @@ type oneTimeActionState struct {
 	AnchorRef   string
 	WaitTaskID  int64
 	WaitID      int64
+	// SightedAt is the latest sighting of a login need, kept in memory only. A
+	// report must be newer than it to count toward the clear, so a report
+	// computed before the refusal cannot clear an untold need (hk 5686 review).
+	SightedAt time.Time
+}
+
+// clearBoundary is the time a report must be newer than to count toward a
+// clear: the notice's delivery or the latest sighting, whichever is later.
+func (s oneTimeActionState) clearBoundary() time.Time {
+	if s.SightedAt.After(s.ToldAt) {
+		return s.SightedAt
+	}
+	return s.ToldAt
 }
 
 // oneTimeRowKept reports whether a row still has something to remember. A told
 // episode the clear has not yet confirmed needs its row; so does a wait that
-// is not known to be closed, even after its episode ended.
-func oneTimeRowKept(state oneTimeActionState) bool {
-	return (!state.ToldAt.IsZero() && state.ConfirmedAt.IsZero()) || state.holdsWait()
+// is not known to be closed, even after its episode ended. A login need is
+// remembered from its first sighting, told or not: placement reads it
+// (standingLoginNeeds), and a failed notice only leaves ToldAt zero to retry.
+func oneTimeRowKept(key oneTimeActionKey, state oneTimeActionState) bool {
+	if state.holdsWait() {
+		return true
+	}
+	if key.need == oneTimeLoginMissing {
+		return state.ConfirmedAt.IsZero()
+	}
+	return !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero()
 }
 
 // holdsWait reports whether the row names any handoffkeep wait or anchor
@@ -109,7 +131,9 @@ func (h *HubServer) noteOneTimeActionRefusal(machine, profile string, result hub
 	}
 	kind := fleet.ProfileKind(profile)
 	need := classifyLaunchDialog(kind, result.StdoutTail)
-	if need == "" && spawnFailureCode(result) == "auth_unavailable" {
+	// Only the verified login-screen refusal is login evidence. An rc 88 for an
+	// account the host cannot confirm is not, and its notice would say "log in".
+	if need == "" && spawnFailureCode(result) == "auth_unavailable" && strings.Contains(result.StdoutTail, loginScreenAuthMessage) {
 		need = oneTimeLoginMissing
 	}
 	if need != "" {
@@ -145,7 +169,7 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 		// A kind the report does not cover (kiro, opencode) says nothing about the
 		// need, so it can neither show it gone nor clear it.
 		harness, covered := report.Harnesses[key.kind]
-		if key.machine != machine || !covered || !report.CheckedAt.After(state.ToldAt) {
+		if key.machine != machine || !covered || !report.CheckedAt.After(state.clearBoundary()) {
 			continue
 		}
 		// An unmeasured login (the probe failed or was rate limited) says nothing

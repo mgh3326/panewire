@@ -254,6 +254,25 @@ outcome, in this order:
 | `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
 | `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |
 
+**Standing login need (hk 5686).** A launch that stopped at the agy login
+screen raises the one-time `login_missing` need of its (host, kind)
+([one-time action](#first-run-refusals-and-the-desk-notice)). The need stands
+from its first sighting, whether or not the operator notice was delivered; a
+failed notice is retried on the next sighting. While that need stands, the hub
+publishes the kind in the host's `readiness` value as
+`login_needs`, and the filter drops the (host, kind) pair with `login_missing`
+whatever the node's report says about the login. The node's probe can read
+`present` while panes still see the login screen, which is why the report alone
+is not enough. The need is per (host, kind), not per account: the one-time
+record does not name the account. It clears by the same anti-flap rule as the
+operator notice: clean readiness reports must stay clean for one full report
+cycle, and then the hub drops `login_needs` and the pair is placed again. Only the verified login-screen refusal raises the need: an rc 88 whose
+line is `selected quota account login missing`. Another rc 88, such as an
+account the host cannot confirm, raises neither the need nor the notice. Only
+kinds the node reports on are published, since the clear rule needs their
+reports. The need is a skip of automatic selection: a named `-m` profile is
+not held back by it, though the node's own readiness checks still apply.
+
 A drop removes one pair, not the host: another harness on the same host stays
 a candidate, and the dropped host still measures an account it holds. The
 outcome is recorded where the placement event already records a host: the

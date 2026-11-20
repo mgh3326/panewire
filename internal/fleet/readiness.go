@@ -64,6 +64,11 @@ type ReadinessState struct {
 	Unknown      bool                 `json:"readiness_unknown,omitempty"`
 	Readiness    *Readiness           `json:"readiness,omitempty"`
 	BackoffUntil map[string]time.Time `json:"backoff_until,omitempty"`
+	// LoginNeeds are the harness kinds whose login_missing need the hub has
+	// not yet seen cleared (hub_one_time_action.go): a launch of that kind on
+	// this host stopped at the login screen. The skip holds whatever the
+	// node's own report says about the login, until the need clears.
+	LoginNeeds []string `json:"login_needs,omitempty"`
 }
 
 // Outcome codes of the readiness filter. The first seven name a check; the
@@ -135,10 +140,13 @@ type ReadinessNeed struct {
 
 // Drop answers the code of the first check the pair fails, or "". A host with
 // no readiness report (Unknown) is never dropped by a readiness check; the
-// hub-observed backoff still applies.
+// hub-observed backoff and login need still apply.
 func (s ReadinessState) Drop(n ReadinessNeed, now time.Time) string {
 	if until, ok := s.BackoffUntil[n.Kind]; ok && now.Before(until) {
 		return ReadyLaunchBackoff
+	}
+	if n.Kind != "cmd" && slices.Contains(s.LoginNeeds, n.Kind) {
+		return ReadyLoginMissing
 	}
 	r := s.Readiness
 	if s.Unknown || r == nil {
@@ -283,6 +291,10 @@ type readinessView struct {
 	minVersion map[string]string
 	toolchains []string
 	now        time.Time
+	// namedProfile is set for a spawn that names its profile (-m PROFILE). The
+	// hub's standing login need is a skip of automatic selection only, so it is
+	// not applied; the node's own readiness checks still are.
+	namedProfile bool
 }
 
 func (a *App) newReadinessView(ctx context.Context, cwd string) readinessView {
@@ -301,6 +313,9 @@ func (v readinessView) drop(host string, cfg map[string]any, kind string) string
 	state, reported := v.states[host]
 	if !reported {
 		return ""
+	}
+	if v.namedProfile {
+		state.LoginNeeds = nil
 	}
 	return state.Drop(ReadinessNeed{Kind: kind, Repo: v.repo, Checkout: v.checkout, Brief: str(cfg, "via") == "hub", Toolchains: v.toolchains, MinVersion: v.minVersion[kind]}, v.now)
 }
