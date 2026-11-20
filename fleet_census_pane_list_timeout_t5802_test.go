@@ -13,7 +13,7 @@ import (
 // base: the first attempt spends the whole budget and the retry starts on a
 // spent deadline.
 func TestFleetCensusPaneListHeldOpenCutRetriedWithinBudget(t *testing.T) {
-	server := newSocketCutHerdrMode(t, 1, true, 8192)
+	server := newSocketCutHerdrWith(t, socketCutOpts{cutCount: 1, cutAt: 8192, holdOpen: true})
 	client, err := NewHerdrClient(server.path)
 	if err != nil {
 		t.Fatalf("dial stub herdr: %v", err)
@@ -37,10 +37,37 @@ func TestFleetCensusPaneListHeldOpenCutRetriedWithinBudget(t *testing.T) {
 	}
 }
 
+// A valid pane.list reply that starts at about 60% of the census budget is read
+// in full with no retry. Fails on 087fed8, where the first attempt had half the
+// budget and gave up before the reply began. The server's delay is simulated
+// latency; the reply is larger than one cut boundary, so it passes through the
+// boundary wait too.
+func TestFleetCensusPaneListSlowValidReplySucceedsWithoutRetry(t *testing.T) {
+	const budget = time.Second
+	server := newSocketCutHerdrWith(t, socketCutOpts{cutCount: 0, cutAt: 8192, delay: budget * 6 / 10})
+	client, err := NewHerdrClient(server.path)
+	if err != nil {
+		t.Fatalf("dial stub herdr: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), budget)
+	defer cancel()
+	view, err := readFleetCensusLocal(ctx, client)
+	if err != nil {
+		t.Fatalf("readFleetCensusLocal: %v", err)
+	}
+	if got := server.paneListCalls(); got != 1 {
+		t.Fatalf("pane.list calls = %d, want the one valid reply and no retry", got)
+	}
+	if !view.paneListOK || len(view.panes) != 1 || view.panes[0].PaneID != "w1:p1" {
+		t.Fatalf("paneListOK=%v panes=%+v, want the full inventory from a slow valid reply", view.paneListOK, view.panes)
+	}
+}
+
 // A pane.list reply held open at a byte count that is not a cut boundary is an
 // ordinary timeout: it is not retried, and the census leaves the pane set unknown.
 func TestFleetCensusPaneListHeldOpenNonBoundaryTimeoutNotRetried(t *testing.T) {
-	server := newSocketCutHerdrMode(t, 1, true, 100)
+	server := newSocketCutHerdrWith(t, socketCutOpts{cutCount: 1, cutAt: 100, holdOpen: true})
 	client, err := NewHerdrClient(server.path)
 	if err != nil {
 		t.Fatalf("dial stub herdr: %v", err)
@@ -57,6 +84,28 @@ func TestFleetCensusPaneListHeldOpenNonBoundaryTimeoutNotRetried(t *testing.T) {
 	}
 	if view.paneListOK || len(view.panes) != 0 {
 		t.Fatalf("paneListOK=%v panes=%+v, want an unknown pane set", view.paneListOK, view.panes)
+	}
+}
+
+// A valid pane.list reply that pauses 300ms after its first 4096 bytes, longer
+// than the stall bound, completes within the census budget. The retry pauses the
+// same way, so only the primary read, kept open to the deadline, can finish it.
+// Fails on 4263a1f: the bound abandons the reply, and both attempts stall.
+func TestFleetCensusPaneListPauseAfterBoundaryCompletes(t *testing.T) {
+	server := newSocketCutHerdrWith(t, socketCutOpts{cutCount: 0, cutAt: 8192, pauseAt: 4096, pause: 300 * time.Millisecond})
+	client, err := NewHerdrClient(server.path)
+	if err != nil {
+		t.Fatalf("dial stub herdr: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	view, err := readFleetCensusLocal(ctx, client)
+	if err != nil {
+		t.Fatalf("readFleetCensusLocal: %v", err)
+	}
+	if !view.paneListOK || len(view.panes) != 1 || view.panes[0].PaneID != "w1:p1" {
+		t.Fatalf("paneListOK=%v panes=%+v, want the full inventory from the paused reply", view.paneListOK, view.panes)
 	}
 }
 
