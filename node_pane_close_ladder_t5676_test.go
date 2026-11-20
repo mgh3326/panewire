@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -248,5 +249,46 @@ func TestNodeLadderCloseJournalDirectoryIsPrivate(t *testing.T) {
 	info, err := os.Stat(filepath.Join(root, ladderCloseDir))
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("info=%v err=%v", info, err)
+	}
+}
+
+// A grant recorded, or an attempt started, while the final look runs leaves the
+// pane open under the superseded request, and the refusal is stored.
+func TestNodeLadderCloseRechecksOwnershipAndAttemptAtTheFinalLook(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, root string){
+		"grant": func(t *testing.T, root string) {
+			if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"reprompt": func(t *testing.T, root string) {
+			body := `{"kind":"job.reprompted","created_at":"2026-11-14T00:00:05Z","payload":{}}`
+			if err := os.WriteFile(filepath.Join(root, "jobs", closeOpJob, "events", "00003-job.reprompted.json"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			seedCloseOpJob(t, root)
+			fake := idlePaneHerdr()
+			client := ladderNode(t, fake, root)
+			run := fake.run
+			client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
+				if len(args) >= 2 && args[0] == "pane" && args[1] == "read" && fake.called("pane", "read") == 1 {
+					change(t, root)
+				}
+				return run(ctx, args...)
+			}
+			args := ladderArgs(ladderRequest)
+			args["attempt"] = closeOpAttempt
+			result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+			wantLadder(t, result, code, nodeLadderRefused, false)
+			if fake.called("pane", "close") != 0 {
+				t.Fatalf("closed under a superseded request: %v", fake.calls)
+			}
+			again, code := nodeRun(t, client, nodeCommandLadderClose, args)
+			wantLadder(t, again, code, nodeLadderRefused, true)
+		})
 	}
 }

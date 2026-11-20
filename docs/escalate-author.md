@@ -206,7 +206,12 @@ inferring it from a pane that is gone. Contract: [node-commands.md](node-command
   have run (the stage stays, one owner decision). The protocol is the stage's own
   once it is marked: an operation-bound stage is never closed with a plain
   `pane.close`, and stays pending while its node cannot answer the operation.
-  A live record's replay and the expiry pass read the same result. After the fence a delayed close command
+  A live record's replay and the expiry pass read the same result, including
+  when the pane is gone or unreadable: a stored close resumes the handoff (lost
+  mark, binding check, activation), and an author whose first READY completed
+  the record meanwhile does not turn a close this step made into `parent_ended`.
+  The node rechecks the ownership epoch and the attempt in the last check before
+  `herdr pane close`, and stores a refusal when either changed. After the fence a delayed close command
   answers `fenced` and touches no pane. A fence the node does not answer keeps
   the stage and the step is retried.
 

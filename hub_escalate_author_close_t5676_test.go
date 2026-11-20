@@ -463,3 +463,70 @@ func TestEscalateAuthorOperationBoundStageDoesNotFallBackToAPlainClose(t *testin
 		t.Fatalf("the stage's binding was overwritten: %v %v", kind, err)
 	}
 }
+
+// The author's first READY completes its record while the node's close is in
+// flight: hk keeps the record terminal and refuses the lost mark. The node
+// stored this step's close, so the handoff goes on instead of reporting an
+// independent end.
+func TestEscalateAuthorActivatesWhenTheAuthorCompletesDuringTheLadderClose(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-93")
+	node := f.withLadderNode(t)
+	f.markLostCompleted = true
+	placed := placedAnywhere
+	result, commands := f.escalate(t, &placed)
+	if result.Code != "" || result.Job != "pw-task-93-l1" {
+		t.Fatalf("a close this step made must activate the successor: %+v", result)
+	}
+	if !slices.Contains(commandOps(commands), "job.mark_lost") || node.closeCount() != 1 {
+		t.Fatalf("ops=%v closes=%d", commandOps(commands), node.closeCount())
+	}
+}
+
+// If the hub stopped after the node removed a live predecessor's pane and
+// before it marked the record lost, the expiry pass resumes the handoff from the
+// node's journal, with no caller replay.
+func TestExpiredLadderStageOfALiveAuthorResumesFromAStoredClose(t *testing.T) {
+	for name, panes := range map[string]func(*escalateFixture){
+		"pane gone":       func(f *escalateFixture) { f.paneAbsent = true },
+		"pane unreadable": func(f *escalateFixture) { f.paneAbsent, f.panesUnknown = true, true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newEscalateFixture(t, "pw-task-94")
+			node := f.withLadderNode(t)
+			holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			staged := f.stageOpBoundReplacing(t, time.Now().Add(-10*time.Minute), holder.Request.RequestID)
+			node.preseed(staged.Request.RequestID, nodeLadderClosed)
+			panes(f)
+			f.take()
+			f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+			f.hub.expireStagedLadderSteps(t.Context())
+			if status, ok := f.stageStatus(t); !ok || status == "staged" {
+				t.Fatalf("the stored close must resume the handoff: %q %v", status, ok)
+			}
+			if !slices.Contains(commandOps(f.take()), "job.mark_lost") {
+				t.Fatal("the predecessor must be marked lost")
+			}
+		})
+	}
+}
+
+// A close the node cannot vouch for, seen by the expiry pass of a live record
+// whose pane is gone, keeps the stage and asks the owner once.
+func TestExpiredLadderStageOfALiveAuthorAsksForAnUnknownCloseWithTheGonePane(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-95")
+	node := f.withLadderNode(t)
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := f.stageOpBoundReplacing(t, time.Now().Add(-10*time.Minute), holder.Request.RequestID)
+	node.preseed(staged.Request.RequestID, nodeLadderUnknown)
+	f.paneAbsent = true
+	f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	f.hub.expireStagedLadderSteps(t.Context())
+	f.stageOpBoundKeepsTheStage(t, "live record, pane gone")
+	f.awaitInfo(t, "authorless?")
+}

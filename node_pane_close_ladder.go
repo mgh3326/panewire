@@ -310,6 +310,7 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 	// The intent is written after the guarded look and before the last look
 	// that precedes `herdr pane close`: a pane that was never going to be
 	// closed leaves no intent, and one that may have been leaves one.
+	stale := ""
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
 		// Read the ledger again after the first look and the settle, immediately
 		// before the intent: an attempt that moved on, or another pane, is not
@@ -325,7 +326,24 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 			return nodeCloseHookStop{outcome: nodePaneChanged}
 		}
 		return writeNodeLadderRecord(root, record)
-	}, nil)
+	}, func() error {
+		// The last check before `herdr pane close`: a grant a job.assigned
+		// recorded, or an attempt a re-prompt started, while the final look ran
+		// leaves the pane open and the refusal stored.
+		if stored, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job); err != nil || stored > args.Epoch {
+			stale = "epoch_changed"
+			return nodeCloseHookStop{outcome: nodePaneChanged}
+		}
+		bound, err := client.ladderBound(args)
+		if err != nil {
+			return err
+		}
+		if !bound {
+			stale = "attempt_changed"
+			return nodeCloseHookStop{outcome: nodePaneChanged}
+		}
+		return nil
+	})
 	if code != "" {
 		// A failed command leaves whatever the journal holds: no record, or
 		// the closing intent a repeat settles as unknown.
@@ -339,7 +357,7 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 	case nodePaneQuestionOpen:
 		record.State, record.Reason = nodeLadderRefused, nodePaneQuestionOpen
 	default:
-		record.State, record.Reason = nodeLadderRefused, nodePaneChanged
+		record.State, record.Reason = nodeLadderRefused, firstNonempty(stale, nodePaneChanged)
 	}
 	if err := writeNodeLadderRecord(root, record); err != nil {
 		return nil, "journal_failed"

@@ -489,13 +489,33 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			if readErr != nil || !exists {
 				return hubEscalateAuthorResult{Code: "pending", Reason: "the predecessor's end reason is unconfirmed; retry"}, nil
 			}
-			if hkTerminalState(escalateAuthorStr(current, "state")) && !(escalateAuthorStr(current, "state") == "lost" && escalateAuthorStr(current, "end_reason") == endReason) {
+			// The author's first READY can complete its record while the close is
+			// in flight; hk keeps it terminal, so the lost mark cannot land. When
+			// the node's stored result says this step closed the pane, the
+			// handoff goes on, as it does for a replay that began with a completed
+			// record (the binding is read again below).
+			closedByStep := false
+			if escalateAuthorStr(current, "state") == "completed" {
+				if kind, err := h.inbox.store.stagedCloseKind(ctx, prior.Request.RequestID); err != nil {
+					return hubEscalateAuthorResult{}, err
+				} else if kind == stagedCloseNodeOp {
+					switch verdict, _ := h.ladderCloseFence(ctx, spawnHolderHost(holder), prior.Request.RequestID, request.Job); verdict {
+					case ladderCloseRetry:
+						return hubEscalateAuthorResult{Code: "pending", Reason: "the node's close result is unreadable; retry"}, nil
+					case ladderAmbiguous:
+						return h.escalateAuthorAmbiguousClose(ctx, request.Job, request.Round, request.PR, owner), nil
+					default:
+						closedByStep = verdict == ladderClosed
+					}
+				}
+			}
+			if !closedByStep && hkTerminalState(escalateAuthorStr(current, "state")) && !(escalateAuthorStr(current, "state") == "lost" && escalateAuthorStr(current, "end_reason") == endReason) {
 				if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, "", false); err != nil {
 					return h.releaseFailed(ctx, err, request.Job, request.Round, request.PR, owner)
 				}
 				return h.escalateAuthorParentEnded(ctx, request, owner), nil
 			}
-			if escalateAuthorStr(current, "state") != "lost" || escalateAuthorStr(current, "end_reason") != endReason {
+			if !closedByStep && (escalateAuthorStr(current, "state") != "lost" || escalateAuthorStr(current, "end_reason") != endReason) {
 				return hubEscalateAuthorResult{Code: "pending", Reason: "the predecessor's end reason is unconfirmed; retry"}, nil
 			}
 		}
@@ -777,7 +797,17 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		if state != "claimed" && state != "spawned" {
 			continue
 		}
-		if h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state != heldPanePresent {
+		paneState := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state
+		if paneState != heldPanePresent {
+			// A stage bound to a node operation is settled from the node's
+			// journal when the pane is gone or unreadable, as a replay does: a
+			// hub that stopped after the node closed the pane resumes the
+			// handoff here, and a close with no result asks the owner.
+			if kind, kindErr := h.inbox.store.stagedCloseKind(ctx, task.Request.RequestID); kindErr == nil && kind == stagedCloseNodeOp {
+				if h.resumeLiveNodeOpStage(ctx, app, task, holder, record, taskID, roleKey, paneState == heldPaneAbsent) {
+					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
+				}
+			}
 			continue
 		}
 		if err := h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, holder.Request.RequestID, true); err != nil {
@@ -838,6 +868,51 @@ func (h *HubServer) expireNodeOpStage(ctx context.Context, app *fleet.App, task 
 	}
 	h.escalateAuthorParentEnded(ctx, request, task.Owner)
 	return true
+}
+
+// resumeLiveNodeOpStage settles an expired, operation-bound stage of a
+// predecessor whose hk record is still live and whose pane is gone or
+// unreadable, from the node's journal. A close that ran resumes the handoff:
+// the record is marked lost (a record that completed meanwhile stays terminal;
+// the stored close still stands), and the stage is activated through the shared
+// reconciler. A close that may have run keeps the stage and asks the owner
+// once. Anything else, or a node that does not answer, leaves the stage for the
+// caller's replay. paneGone reads the journal with a fence; an unreadable pane
+// reads it without ending the request. It reports true when the stage is
+// settled.
+func (h *HubServer) resumeLiveNodeOpStage(ctx context.Context, app *fleet.App, task, holder hubSpawnTask, record map[string]any, taskID, roleKey string, paneGone bool) bool {
+	id := task.Request.LadderStep
+	machine := spawnHolderHost(holder)
+	var verdict ladderClose
+	if paneGone {
+		verdict, _ = h.ladderCloseFence(ctx, machine, task.Request.RequestID, id.Parent)
+	} else {
+		verdict, _ = h.ladderCloseStatus(ctx, machine, task.Request.RequestID, id.Parent)
+	}
+	switch verdict {
+	case ladderAmbiguous:
+		h.escalateAuthorAmbiguousClose(ctx, id.Parent, id.Round, id.PR, task.Owner)
+		return false
+	case ladderClosed:
+	default:
+		return false
+	}
+	endReason := fleet.LadderStepEndReason(id.Round, task.Job)
+	lost, why := h.markHolderJobLostBecause(ctx, app, holder, heldAgentName(holder, record), endReason)
+	if !lost {
+		return false
+	}
+	if why == nodeJobMarkLostCompleted || why == "hk_lost" {
+		current, exists, err := app.ExistingJob(ctx, id.Parent)
+		if err != nil || !exists {
+			return false
+		}
+		state, reason := escalateAuthorStr(current, "state"), escalateAuthorStr(current, "end_reason")
+		if state != "completed" && !(state == "lost" && reason == endReason) {
+			return false
+		}
+	}
+	return h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey)
 }
 
 func (h *HubServer) escalateAuthorParentEnded(ctx context.Context, request hubEscalateAuthorRequest, owner string) hubEscalateAuthorResult {
