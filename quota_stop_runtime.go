@@ -33,6 +33,9 @@ type quotaStopManager struct {
 	hk      quotaStopHK
 	send    func(context.Context, string, string, string) relayInjectResult
 	enqueue func(hubScannedRelayEvent) bool
+	// recordWait tells a reviewer's watcher the manager waits out its stop
+	// (fleet.RecordReviewerQuotaWait); nil records nothing.
+	recordWait func(ctx context.Context, job, pane, pool string, reset, now time.Time) error
 	// announce records job.lost reason quota_stop for a handed-over job, which
 	// the hub then replaces (hub_quota_replace.go).
 	announce func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error
@@ -109,6 +112,9 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	}
 	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
 		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, attempt, stop)
+	}
+	q.recordWait = func(ctx context.Context, job, pane, pool string, reset, now time.Time) error {
+		return fleet.RecordReviewerQuotaWait(ctx, filepath.Join(root, "jobs"), job, pane, pool, reset, now)
 	}
 	q.recordRung = fleet.RecordLimitObserved
 	q.publishRung = fleet.PublishLimitObserved
@@ -787,6 +793,13 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 	// clears it.
 	if q.quotaWaits(job.Role, stop.Pool) {
 		q.showQuotaWait(ctx, c.PaneID, stop.Pool, reset, now)
+	}
+	// The job's watcher stays through a reviewer's wait: it commits the report the
+	// resumed reviewer writes (hk 5690).
+	if job.Role == "reviewer" && q.recordWait != nil {
+		if err := q.recordWait(ctx, job.JobID, c.PaneID, stop.Pool, stop.Reset, now); err != nil {
+			q.logger.Warn("quota-stop reviewer wait was not recorded for its watcher", "error", err)
+		}
 	}
 	return nil
 }

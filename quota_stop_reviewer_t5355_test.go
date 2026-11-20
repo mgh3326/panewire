@@ -67,6 +67,11 @@ func TestQuotaReviewerShortResetIsResumedOnce(t *testing.T) {
 	if reviewerLedgerHas(t, rig, "job.lost") {
 		t.Fatal("job.lost recorded for a reviewer that was resumed")
 	}
+	// The job's watcher is told the manager waits, so it stays through the reset
+	// and the resume to commit the report that follows (hk 5690).
+	if !reviewerLedgerHas(t, rig, "job.quota_stop_wait") {
+		t.Fatal("no wait recorded for the reviewer's watcher: it would end at its completion deadline before the reset")
+	}
 	rig.manager.Tick(context.Background(), rig.now.Add(10*time.Minute))
 	if rig.sends != 1 {
 		t.Fatalf("resumed more than once: sends=%d", rig.sends)

@@ -623,3 +623,100 @@ func TestWatcherLeavesAReviewerOnALimitScreenToTheManager(t *testing.T) {
 		t.Fatalf("quota %s, want left leased", st)
 	}
 }
+
+// hk 5690 review: an adopted announcement keeps the pane state the stop was
+// observed in, so a watcher started on it (a restart, or a manager's
+// announcement) sees a pane idle again at another sequence as moved on and takes
+// the existing resume path, instead of writing it lost at the grace's end.
+func TestAdoptedAnnouncementKeepsThePaneStateTheHubFencesWith(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", "The reviewer is back at work.\n")
+	a.QuotaHandOffGrace = QuotaStopHandOffGrace
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	// Announced at herdr sequence 3; the pane is idle at 7 (the fixture's).
+	if e := a.event(context.Background(), "j", "job.lost", map[string]any{"pane_id": "w:p1", "reason": "quota_stop", "pool": "devin-free", "state_change_seq": 3}); e != nil {
+		t.Fatal(e)
+	}
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stop, ok := announcedQuotaStop(j); !ok || stop.PaneSeq != 3 {
+		t.Fatalf("announced stop %+v ok=%v, want PaneSeq 3 restored from the ledger", stop, ok)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if str(h.record(t, "j"), "state") == "lost" {
+		t.Fatalf("a pane that moved on (seq 7, announced at 3) was written lost: %v", h.record(t, "j"))
+	}
+	revived := false
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.reprompted" {
+			revived = true
+		}
+	}
+	if !revived {
+		t.Fatal("the changed sequence did not take the existing resume path")
+	}
+}
+
+// hk 5690 review: a reviewer the manager decided to WAIT on (a short reset) keeps
+// its watcher through the reset, past the ordinary completion deadline: the
+// resumed reviewer's report is committed by the watcher. With a 60 s completion
+// timeout and a reset 2 minutes out, a report written after the timeout still
+// completes the job.
+func TestWatcherStaysThroughAManagerWaitPastTheCompletionDeadline(t *testing.T) {
+	a, f, _, report := quotaStopFixture(t, "reviewer", "idle", "The reviewer is waiting on its reset.\n")
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
+	// The manager waits out a stop that resets in 2 minutes: reset plus the grace.
+	if e := RecordReviewerQuotaWait(context.Background(), a.Jobs, "j", "w:p1", "devin-free", a.Now().Add(2*time.Minute), a.Now()); e != nil {
+		t.Fatal(e)
+	}
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists == 30 { // 150 s of polls: past the 60 s timeout, after the reset
+				writeReport(t, report, "# review\n")
+				putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(time.Minute))
+			}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	completed := false
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.completed" {
+			completed = true
+		}
+	}
+	if !completed {
+		t.Fatalf("the watcher ended before the resumed reviewer's report (polls=%d)", lists)
+	}
+}
+
+// hk 5690 review: a close intent an older watcher left (decided, hk write not yet
+// committed) is finished on upgrade without a screen read: the watcher no longer
+// detects a reviewer's stop, and the decision was already taken.
+func TestLegacyCloseIntentIsFinishedWithoutAScreenRead(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", "The reviewer is quiet.\n")
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	legacyIntent(t, a, "devin-free", 2*time.Hour)
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free reset_at=") {
+		t.Fatalf("hk record %v, want the intent's lost write finished", rec)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released", st)
+	}
+	for _, c := range f.Calls {
+		if c.Name == "herdr" && len(c.Args) > 1 && c.Args[0] == "agent" && c.Args[1] == "read" {
+			t.Fatalf("the intent was re-verified on the screen: %v", c.Args)
+		}
+	}
+}

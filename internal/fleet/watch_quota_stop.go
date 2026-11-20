@@ -680,6 +680,35 @@ const QuotaReviewerWaitGrace = 5 * time.Minute
 // a second stop after it ends the job at once (hk 5355).
 const quotaWaitKind = "job.quota_stop_wait"
 
+// managerWaitUntil is when the newest wait the quota-stop manager recorded for
+// the job ends (RecordReviewerQuotaWait), and false when it recorded none.
+func managerWaitUntil(j Job) (time.Time, bool) {
+	var until time.Time
+	found := false
+	for _, ev := range j.Events {
+		if ev.Kind != quotaWaitKind {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339, str(ev.Payload, "until")); err == nil {
+			until, found = at, true
+		}
+	}
+	return until, found
+}
+
+// RecordReviewerQuotaWait records, for the job's watcher, that the manager decided
+// to wait out reviewer job's limit stop and resume it once at reset: the watcher
+// extends its completion deadline to the reset plus QuotaReviewerWaitGrace, so it
+// is still running to commit the report the resumed reviewer writes (hk 5690).
+func RecordReviewerQuotaWait(ctx context.Context, jobs, job, pane, pool string, reset, now time.Time) error {
+	at := reset
+	if at.IsZero() || at.Before(now) {
+		at = now
+	}
+	a := &App{Jobs: jobs, Now: time.Now, Runner: ExecRunner{}}
+	return a.event(ctx, job, quotaWaitKind, map[string]any{"pane_id": pane, "pool": pool, "reset_at": reset.UTC().Format(time.RFC3339), "until": at.Add(QuotaReviewerWaitGrace).UTC().Format(time.RFC3339)})
+}
+
 // reviewerWaitUntil reports whether the watcher holds reviewer j's quota stop
 // for the manager (hk 5355) and, if so, until when. Only a known reset within
 // QuotaReviewerWait (a passed one included) on a stop that is not a choice dialog
@@ -843,13 +872,10 @@ func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, h
 	if !present {
 		return cancel("pane_gone")
 	}
-	stop, seen := a.quotaStopScreen(ctx, j, ag, nil)
-	switch {
-	case seen == quotaScreenUnavailable:
-		return quotaIntentRetry, nil
-	case seen != quotaStopFound || !stop.CreditExhaustedAt.IsZero():
-		return cancel("pane_moved_on")
-	}
+	// An intent is a decision already taken (by an older watcher, before an upgrade
+	// that left reviewer stops to the manager): it is finished, not re-verified. The
+	// watcher no longer screen-detects a reviewer, so there is no screen read to
+	// make here (hk 5690).
 	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.reason, "at": a.Now().UTC()}); e != nil {
 		if IsJobOwnerMismatch(e) || errors.Is(e, errJobReassigned) {
 			return cancel("job_reassigned")
