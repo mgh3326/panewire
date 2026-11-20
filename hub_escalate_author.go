@@ -73,6 +73,28 @@ type hubEscalateAuthorResult struct {
 	// AuthorEnded marks a refusal after the old pane was closed: no author
 	// runs on the task, whatever the code says.
 	AuthorEnded bool `json:"author_ended,omitempty"`
+	// Notified says whether the refusal's lane event reached the owner lane:
+	// escalateAuthorOwnerLane when a durable row was enqueued for it, and
+	// escalateAuthorNotNotified when none was. It is set from the relay result,
+	// never from the code, and it is present on every refusal a current hub
+	// answers. An absent field means an older hub, which the CLI reports as nothing.
+	Notified string `json:"notified,omitempty"`
+}
+
+const (
+	escalateAuthorOwnerLane   = "owner-lane"
+	escalateAuthorNotNotified = "none"
+)
+
+// escalateAuthorNotified names the notice state of a refusal from its relay
+// result: the owner lane was notified only when an owner was named and the
+// relay wrote the event's durable row (ID is set only on a persisted row).
+// Without an owner, or when the write failed, no row exists and none is sent.
+func escalateAuthorNotified(owner string, relayed relayLaneEventResult) string {
+	if owner != "" && relayed.ID != 0 {
+		return escalateAuthorOwnerLane
+	}
+	return escalateAuthorNotNotified
 }
 
 func (h *HubServer) handleEscalateAuthor(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +108,7 @@ func (h *HubServer) handleEscalateAuthor(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if reason := request.refusal(); reason != "" {
-		writeJSON(w, http.StatusBadRequest, hubEscalateAuthorResult{Code: "invalid_request", Reason: reason})
+		writeJSON(w, http.StatusBadRequest, hubEscalateAuthorResult{Code: "invalid_request", Reason: reason, Notified: escalateAuthorNotNotified})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), escalateAuthorWait+30*time.Second)
@@ -95,6 +117,12 @@ func (h *HubServer) handleEscalateAuthor(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, hubEscalateAuthorResult{Code: "hub_error", Reason: err.Error()})
 		return
+	}
+	if result.Code != "" && result.Notified == "" {
+		// The refusals that file a lane event set Notified from their relay
+		// result. What is left answers without a relay at all (pending: the
+		// step is retried and nothing is filed), so none was sent.
+		result.Notified = escalateAuthorNotNotified
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -137,8 +165,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	}
 	if hubSpawnArg(holder.Request.Args, "--role") == "worker" && hubSpawnArg(holder.Request.Args, "--task") == request.Task {
 		text := fmt.Sprintf("[panewire] ESC | legacy_worker_submission: job %s uses the retired worker role; its ladder successor was not started. Decide how to continue task %s.", request.Job, request.Task)
-		h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:legacy_worker_submission", request.Job, request.Round), JobID: request.Job, OwnerLane: holder.Owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
-		return hubEscalateAuthorResult{Code: "legacy_worker_submission", Reason: "the stored worker role is retired; the owner lane was notified"}, nil
+		relayed := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:legacy_worker_submission", request.Job, request.Round), JobID: request.Job, OwnerLane: holder.Owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+		return hubEscalateAuthorResult{Code: "legacy_worker_submission", Reason: "the stored worker role is retired; the owner lane was notified", Notified: escalateAuthorNotified(holder.Owner, relayed)}, nil
 	}
 	spawn, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
@@ -575,8 +603,8 @@ func (h *HubServer) escalateAuthorOutcome(ctx context.Context, app *fleet.App, r
 	}
 	if err := app.ConfirmLadderTaskBinding(ctx, request.Task, request.Job, job, hubSpawnArg(task.Request.Args, "-l")); err != nil {
 		text := fmt.Sprintf("ladder step %s: successor %s placed, but its task binding is unconfirmed (round %d, %s)", request.Job, job, request.Round, request.PR)
-		h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:placed:rebind_unconfirmed", request.Job, request.Round), JobID: job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(job, "ladder_rebind_unconfirmed", false)}, nil)
-		return hubEscalateAuthorResult{Code: "rebind_unconfirmed", Reason: "successor placed but task binding is unconfirmed"}, nil
+		relayed := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:placed:rebind_unconfirmed", request.Job, request.Round), JobID: job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(job, "ladder_rebind_unconfirmed", false)}, nil)
+		return hubEscalateAuthorResult{Code: "rebind_unconfirmed", Reason: "successor placed but task binding is unconfirmed", Notified: escalateAuthorNotified(owner, relayed)}, nil
 	}
 	rung := stepValue(task.Request.Args, "-m") + "@" + firstNonempty(stepValue(task.Request.Args, "--effort"), "default")
 	text := fmt.Sprintf("ladder step %s -> %s on %s (round %d, %s)", request.Job, job, rung, request.Round, request.PR)
@@ -736,8 +764,8 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 
 func (h *HubServer) escalateAuthorParentEnded(ctx context.Context, request hubEscalateAuthorRequest, owner string) hubEscalateAuthorResult {
 	text := fmt.Sprintf("ladder step %s: the predecessor ended independently; the staged successor and its reservation were released (round %d, %s)", request.Job, request.Round, request.PR)
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:ended:parent_ended", request.Job, request.Round), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(request.Job, "ladder_parent_ended", false)}, nil)
-	return hubEscalateAuthorResult{Code: "parent_ended", Reason: "the predecessor ended independently; its staged successor was released"}
+	relayed := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:ended:parent_ended", request.Job, request.Round), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(request.Job, "ladder_parent_ended", false)}, nil)
+	return hubEscalateAuthorResult{Code: "parent_ended", Reason: "the predecessor ended independently; its staged successor was released", Notified: escalateAuthorNotified(owner, relayed)}
 }
 
 func escalateCheckoutMatches(tree *nodeWorktree, checkout *fleet.HubCheckout) bool {
@@ -798,8 +826,8 @@ func (h *HubServer) escalateAuthorRefusal(ctx context.Context, request hubEscala
 		notify = "decision"
 		text = fmt.Sprintf("[panewire] ESC | authorless: ladder step %s: %s (%s) (round %d); %s has no author: the pane is closed and no successor was confirmed. Decide how to continue; panewire does not start a successor automatically.", request.Job, code, reason, request.Round, request.PR)
 	}
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: notify, Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(request.Job, "ladder_"+code, false)}, nil)
-	return hubEscalateAuthorResult{Code: code, Reason: reason, AuthorEnded: ended}, nil
+	relayed := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: notify, Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(request.Job, "ladder_"+code, false)}, nil)
+	return hubEscalateAuthorResult{Code: code, Reason: reason, AuthorEnded: ended, Notified: escalateAuthorNotified(owner, relayed)}, nil
 }
 
 // escalateAuthorKept refuses a ladder step on an author spawned with --keep. No
@@ -810,8 +838,8 @@ func (h *HubServer) escalateAuthorKept(ctx context.Context, request hubEscalateA
 	reason := "the author was spawned with --keep; its pane is protected"
 	eventID := fmt.Sprintf("ladder-step:%s:%d:preflight:%s:esc", request.Job, request.Round, code)
 	text := fmt.Sprintf("[panewire] ESC | author_kept: ladder step %s: %s (round %d, %s); the author's pane is protected and panewire never closes it. Decide how to continue; panewire does not start a successor automatically.", request.Job, reason, request.Round, request.PR)
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
-	return hubEscalateAuthorResult{Code: code, Reason: reason}, nil
+	relayed := h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	return hubEscalateAuthorResult{Code: code, Reason: reason, Notified: escalateAuthorNotified(owner, relayed)}, nil
 }
 
 // escalateAuthorChain is the ladder-step and quota-stop suffix of a job id: the

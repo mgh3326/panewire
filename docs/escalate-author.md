@@ -200,6 +200,21 @@ that went back to work or waits on an answer is worth retrying, the others are
 not. `panewire inbox status --event-id ladder-step:<job>:<round>:preflight:<code>`
 answers whether a given refusal was filed.
 
+The hub's answer carries `notified`, and the CLI prints it at the end of the
+refusal line as ` notified=<value>`, so a caller need not keep its own list of
+codes that file nothing:
+
+- `owner-lane`: the refusal's event was enqueued for the job's owner lane.
+- `none`: no event was enqueued. This is the case when the job has no owner
+  (`job_unknown`, `job_mismatch` and `job_unreadable` before the owner is
+  known), when the event write failed, and for `pending`, which files nothing
+  because the step is retried.
+
+`notified` comes from the relay result, never from the code. A hub too old to
+send the field leaves the line without the suffix; the caller then falls back
+to its own list. A `hub_error` answer (HTTP 503) carries no `notified`, since
+the hub does not know whether an event was written before the error.
+
 ## Counting step-ups
 
 A step that placed its successor writes one `ladder_step` rep (docs/reps.md

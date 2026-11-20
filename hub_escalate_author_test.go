@@ -772,6 +772,47 @@ func TestEscalateAuthorDistinctRefusalsReachDesignLane(t *testing.T) {
 	f.awaitInfo(t, "[panewire] ESC | authorless:", "quota_refused", "has no author")
 }
 
+// The refusal says whether its event reached the owner lane. With no owner the
+// relay writes nothing, so the answer is none even though the code is one that
+// files an event for an owned job; with an owner the row is enqueued and the
+// answer is owner-lane. The value comes from the relay, not from the code.
+func TestEscalateAuthorRefusalSaysWhetherTheOwnerLaneWasNotified(t *testing.T) {
+	f := newEscalateFixture(t, "author-notified")
+	request := f.request()
+	ownerless, err := f.hub.escalateAuthorRefusal(t.Context(), request, "", "worktree_dirty", "dirty", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ownerless.Notified != "none" {
+		t.Fatalf("a refusal with no owner filed nothing: notified=%q", ownerless.Notified)
+	}
+	owned, err := f.hub.escalateAuthorRefusal(t.Context(), request, "parent", "worktree_dirty", "dirty", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned.Notified != "owner-lane" {
+		t.Fatalf("a refusal with an owner enqueued the owner's event: notified=%q", owned.Notified)
+	}
+	f.awaitInfo(t, "worktree_dirty")
+}
+
+// The route answers the notice state on the wire: a job the hub cannot name
+// has no owner, so its refusal reports none, and a request refused before
+// anything runs reports none too.
+func TestEscalateAuthorAnswerNamesTheNoticeState(t *testing.T) {
+	f := newEscalateFixture(t, "author-wire")
+	body := map[string]any{"task": "42", "job": "no-such-job-9", "pr": "mgh3326/panewire#77", "round": 5, "findings": "[]", "grade": "A", "from_profile": "sonnet", "profile": "sonnet", "effort": "xhigh", "step": "same_model_next_effort"}
+	status, _, raw := t14HTTP(t, "POST", f.server.URL+"/v1/jobs/escalate-author", t14OperatorToken, body)
+	if status != 200 || !strings.Contains(string(raw), `"code":"job_unknown"`) || !strings.Contains(string(raw), `"notified":"none"`) {
+		t.Fatalf("an unknown job's refusal must say none: %d %s", status, raw)
+	}
+	bad := map[string]any{"task": "x"}
+	status, _, raw = t14HTTP(t, "POST", f.server.URL+"/v1/jobs/escalate-author", t14OperatorToken, bad)
+	if status != 400 || !strings.Contains(string(raw), `"notified":"none"`) {
+		t.Fatalf("a refused request reaches no lane: %d %s", status, raw)
+	}
+}
+
 // A (job, round, code) ended refusal filed before the ESC existed is stored as
 // info under the shorter event id, and lane-event dedupe is first-writer-wins.
 // The ESC must carry its own id, or a replay finds that row and the lane is

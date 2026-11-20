@@ -66,6 +66,19 @@ type EscalateAuthorResult struct {
 	// AuthorEnded is true for a refusal that came after the hub closed the
 	// author's pane: no author runs on the task, whatever the code says.
 	AuthorEnded bool `json:"author_ended,omitempty"`
+	// Notified is the hub's notice state for a refusal: owner-lane or none.
+	// An empty value (an older hub) prints nothing extra.
+	Notified string `json:"notified,omitempty"`
+}
+
+// notifiedSuffix is the stable key=value tail a refusal line ends with, so a
+// caller can tell from the line alone whether the owner lane got the event
+// (docs/escalate-author.md, "Reading the refusals").
+func (r EscalateAuthorResult) notifiedSuffix() string {
+	if r.Notified == "" {
+		return ""
+	}
+	return " notified=" + r.Notified
 }
 
 // EscalateAuthorer is the hub transport surface the command needs.
@@ -87,7 +100,7 @@ func (c *hubHTTP) EscalateAuthor(ctx context.Context, request EscalateAuthorRequ
 		return EscalateAuthorResult{}, fail(exitConfig, "hub escalate-author answer unreadable (HTTP %d)", status)
 	}
 	if status != http.StatusOK {
-		return result, fail(exitConfig, "hub refused escalate-author (HTTP %d, %s): %s", status, result.Code, result.Reason)
+		return result, fail(exitConfig, "hub refused escalate-author (HTTP %d, %s): %s%s", status, result.Code, result.Reason, result.notifiedSuffix())
 	}
 	return result, nil
 }
@@ -181,15 +194,15 @@ func (a *App) escalateAuthorCmd(ctx context.Context, args []string) error {
 	}
 	if result.Code != "" {
 		if result.Code == "pending" {
-			return fail(exitTimeout, "%s: %s", result.Code, result.Reason)
+			return fail(exitTimeout, "%s: %s%s", result.Code, result.Reason, result.notifiedSuffix())
 		}
 		if result.Code == "rebind_unconfirmed" || result.Code == "parent_ended" {
-			return fail(exitFailure, "%s: %s", result.Code, result.Reason)
+			return fail(exitFailure, "%s: %s%s", result.Code, result.Reason, result.notifiedSuffix())
 		}
 		if result.AuthorEnded {
-			return fail(exitFailure, "%s: %s (the author's pane was closed; no confirmed author runs on task %s)", result.Code, result.Reason, task)
+			return fail(exitFailure, "%s: %s (the author's pane was closed; no confirmed author runs on task %s)%s", result.Code, result.Reason, task, result.notifiedSuffix())
 		}
-		return fail(exitUsage, "%s: %s", result.Code, result.Reason)
+		return fail(exitUsage, "%s: %s%s", result.Code, result.Reason, result.notifiedSuffix())
 	}
 	if !validID(result.Job) {
 		return fail(exitConfig, "hub escalate-author returned no job")
