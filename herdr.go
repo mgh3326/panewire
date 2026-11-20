@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -116,18 +117,65 @@ func readResponseKeeping(ctx context.Context, r *bufio.Reader, id string) (json.
 	}
 }
 func (c *HerdrClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	return c.call(ctx, method, params, 0)
+	return c.call(ctx, method, params, 0, nil)
 }
 
-// callCutIdle is Call for a read whose answer may be cut at a byte boundary
-// and held open: once the bytes read sit exactly at a cut boundary with no frame
-// end, the next read waits at most idle rather than the whole deadline (see
-// cutIdleReader). Otherwise the deadline is the call's own.
+// callCutIdle is Call for a read whose answer may be cut at a byte boundary and
+// held open. The primary read keeps the call's own deadline. When its bytes sit
+// exactly at a cut boundary with no frame end and no byte arrives within idle,
+// the reply has stalled: the one retry starts at once while the primary stays
+// eligible to complete until the deadline (see cutIdleReader). The first
+// complete reply wins and the other is cancelled.
 func (c *HerdrClient) callCutIdle(ctx context.Context, method string, params any, idle time.Duration) (json.RawMessage, error) {
-	return c.call(ctx, method, params, idle)
+	type answer struct {
+		raw json.RawMessage
+		err error
+	}
+	primaryCtx, cancelPrimary := context.WithCancel(ctx)
+	defer cancelPrimary()
+	retryCtx, cancelRetry := context.WithCancel(ctx)
+	defer cancelRetry()
+	stalled := make(chan struct{})
+	var stallOnce sync.Once
+	primary := make(chan answer, 1)
+	go func() {
+		raw, err := c.call(primaryCtx, method, params, idle, func() { stallOnce.Do(func() { close(stalled) }) })
+		primary <- answer{raw, err}
+	}()
+	var primaryCh <-chan answer = primary
+	var retryCh <-chan answer
+	var stallCh <-chan struct{} = stalled
+	started := false
+	var primaryErr error
+	for primaryCh != nil || retryCh != nil {
+		select {
+		case a := <-primaryCh:
+			if a.err == nil {
+				return a.raw, nil
+			}
+			primaryCh, primaryErr = nil, a.err
+			if !started {
+				return nil, a.err
+			}
+		case <-stallCh:
+			stallCh, started = nil, true
+			ch := make(chan answer, 1)
+			retryCh = ch
+			go func() {
+				raw, err := c.call(retryCtx, method, params, 0, nil)
+				ch <- answer{raw, err}
+			}()
+		case a := <-retryCh:
+			if a.err == nil {
+				return a.raw, nil
+			}
+			retryCh = nil
+		}
+	}
+	return nil, primaryErr
 }
 
-func (c *HerdrClient) call(ctx context.Context, method string, params any, cutIdle time.Duration) (json.RawMessage, error) {
+func (c *HerdrClient) call(ctx context.Context, method string, params any, cutIdle time.Duration, onStall func()) (json.RawMessage, error) {
 	// A call whose deadline has already passed sends nothing and installs no
 	// deadline, so a retry on a spent budget fails as the budget does, not as an
 	// I/O timeout on the socket.
@@ -139,6 +187,9 @@ func (c *HerdrClient) call(ctx context.Context, method string, params any, cutId
 		return nil, err
 	}
 	defer conn.Close()
+	// A cancelled call unblocks its read, so a hedged loser returns at once.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
 	var deadline time.Time
 	if d, ok := ctx.Deadline(); ok {
 		deadline = d
@@ -150,37 +201,60 @@ func (c *HerdrClient) call(ctx context.Context, method string, params any, cutId
 	}
 	var src io.Reader = conn
 	if cutIdle > 0 {
-		src = &cutIdleReader{conn: conn, deadline: deadline, idle: cutIdle}
+		src = &cutIdleReader{ctx: ctx, conn: conn, deadline: deadline, idle: cutIdle, onStall: onStall}
 	}
 	return readResponse(ctx, bufio.NewReader(src), id)
 }
 
-// cutIdleReader reads a socket reply and bounds the wait for its next bytes at
-// idle only while the bytes read so far sit exactly at a cut boundary (4096 or
-// 8192) with no frame end. Any other point reads under the call's own deadline,
-// so a slow but valid reply is never cut short.
+// cutIdleReader reads a socket reply. While the bytes read so far sit exactly at
+// a cut boundary (4096 or 8192) with no frame end, the wait for the next bytes is
+// bounded at idle. When that bound expires with nothing read, the reply is
+// stalled: onStall reports it once, and reading continues under the call's own
+// deadline, so a slow but valid reply still completes. Every other point reads
+// under the call's own deadline.
 type cutIdleReader struct {
+	ctx      context.Context
 	conn     net.Conn
 	deadline time.Time // the call's deadline; zero when it has none
 	idle     time.Duration
+	onStall  func()
 	total    int
 	sawEnd   bool
+	stalled  bool
 }
 
 func (r *cutIdleReader) Read(p []byte) (int, error) {
-	deadline := r.deadline
-	if !r.sawEnd && herdrpanes.AtBoundary(r.total) {
-		if bound := time.Now().Add(r.idle); deadline.IsZero() || bound.Before(deadline) {
-			deadline = bound
+	for {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+		deadline := r.deadline
+		idle := !r.stalled && !r.sawEnd && herdrpanes.AtBoundary(r.total)
+		if idle {
+			if bound := time.Now().Add(r.idle); deadline.IsZero() || bound.Before(deadline) {
+				deadline = bound
+			}
+		}
+		_ = r.conn.SetReadDeadline(deadline)
+		n, err := r.conn.Read(p)
+		r.total += n
+		if bytes.IndexByte(p[:n], '\n') >= 0 {
+			r.sawEnd = true
+		}
+		if n > 0 || err == nil || !idle || !isNetTimeout(err) {
+			return n, err
+		}
+		r.stalled = true
+		if r.onStall != nil {
+			r.onStall()
 		}
 	}
-	_ = r.conn.SetReadDeadline(deadline)
-	n, err := r.conn.Read(p)
-	r.total += n
-	if bytes.IndexByte(p[:n], '\n') >= 0 {
-		r.sawEnd = true
-	}
-	return n, err
+}
+
+// isNetTimeout reports whether err is a network timeout, such as an expired read deadline.
+func isNetTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // herdrReplyError is an error object herdr returned for a request. It keeps the

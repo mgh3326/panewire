@@ -23,6 +23,8 @@ type socketCutHerdr struct {
 	holdOpen bool
 	cutAt    int
 	delay    time.Duration
+	pauseAt  int
+	pause    time.Duration
 	release  chan struct{}
 	mu       sync.Mutex
 	paneList int
@@ -47,6 +49,10 @@ type socketCutOpts struct {
 	cutAt    int
 	holdOpen bool
 	delay    time.Duration
+	// pauseAt and pause hold every whole pane.list reply back for pause after its
+	// first pauseAt bytes, as a stalled reply.
+	pauseAt int
+	pause   time.Duration
 }
 
 func newSocketCutHerdrWith(t *testing.T, opts socketCutOpts) *socketCutHerdr {
@@ -63,7 +69,7 @@ func newSocketCutHerdrWith(t *testing.T, opts socketCutOpts) *socketCutHerdr {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	server := &socketCutHerdr{path: listener.Addr().String(), cutCount: cutCount, holdOpen: holdOpen, cutAt: opts.cutAt, delay: opts.delay, release: make(chan struct{})}
+	server := &socketCutHerdr{path: listener.Addr().String(), cutCount: cutCount, holdOpen: holdOpen, cutAt: opts.cutAt, delay: opts.delay, pauseAt: opts.pauseAt, pause: opts.pause, release: make(chan struct{})}
 	t.Cleanup(func() { close(server.release) })
 	go func() {
 		for {
@@ -122,7 +128,15 @@ func (s *socketCutHerdr) serve(conn net.Conn) {
 		}
 		return
 	}
-	_, _ = conn.Write(append(raw, '\n'))
+	whole := append(raw, '\n')
+	if req.Method == "pane.list" && s.pause > 0 {
+		// Simulated stall: the reply pauses after pauseAt bytes, then completes.
+		_, _ = conn.Write(whole[:s.pauseAt])
+		time.Sleep(s.pause)
+		_, _ = conn.Write(whole[s.pauseAt:])
+		return
+	}
+	_, _ = conn.Write(whole)
 }
 
 func (s *socketCutHerdr) paneListCalls() int {

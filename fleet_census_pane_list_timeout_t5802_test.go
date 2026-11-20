@@ -87,6 +87,28 @@ func TestFleetCensusPaneListHeldOpenNonBoundaryTimeoutNotRetried(t *testing.T) {
 	}
 }
 
+// A valid pane.list reply that pauses 300ms after its first 4096 bytes, longer
+// than the stall bound, completes within the census budget. The retry pauses the
+// same way, so only the primary read, kept open to the deadline, can finish it.
+// Fails on 4263a1f: the bound abandons the reply, and both attempts stall.
+func TestFleetCensusPaneListPauseAfterBoundaryCompletes(t *testing.T) {
+	server := newSocketCutHerdrWith(t, socketCutOpts{cutCount: 0, cutAt: 8192, pauseAt: 4096, pause: 300 * time.Millisecond})
+	client, err := NewHerdrClient(server.path)
+	if err != nil {
+		t.Fatalf("dial stub herdr: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	view, err := readFleetCensusLocal(ctx, client)
+	if err != nil {
+		t.Fatalf("readFleetCensusLocal: %v", err)
+	}
+	if !view.paneListOK || len(view.panes) != 1 || view.panes[0].PaneID != "w1:p1" {
+		t.Fatalf("paneListOK=%v panes=%+v, want the full inventory from the paused reply", view.paneListOK, view.panes)
+	}
+}
+
 // A call whose deadline has already passed installs no deadline on the socket
 // and reports the context's error. Fails on base: the expired deadline is set on
 // the connection and the write fails as an I/O timeout instead, so a retry on a
