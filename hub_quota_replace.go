@@ -36,6 +36,17 @@ func isQuotaStopReason(reason string) bool {
 	return reason == "quota_stop" || strings.HasPrefix(reason, "quota_stop ")
 }
 
+// quotaStopForReviewer reports whether job is one the hub spawned as a reviewer.
+// A job the hub did not spawn has no stored submission and is not one.
+func (h *HubServer) quotaStopForReviewer(ctx context.Context, job string) bool {
+	holder, err := h.inbox.store.latestSpawnForJob(ctx, job)
+	if err != nil {
+		return false
+	}
+	prior, err := fleet.ValidateSubmission(holder.Request)
+	return err == nil && prior.Role == "reviewer"
+}
+
 // quotaReplaceMax is the replacements one task role (one review pass) gets.
 const quotaReplaceMax = 2
 
@@ -80,6 +91,14 @@ const quotaReplacePoll = 500 * time.Millisecond
 
 func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPayload) {
 	if h.inbox == nil || !isQuotaStopReason(event.Reason) {
+		return
+	}
+	// Only a reviewer is carried on by this path. Its pane holds no work to lose.
+	// An implementer's pane is closed by this path with none of the hand-over
+	// checks (dirty or unpushed work, hk 4633, hub_pool_handover.go), so a
+	// relayed implementer stop is left as it was: the pool hand-over decides it,
+	// and the watcher ends it after its grace (hk 5690 review).
+	if !h.quotaStopForReviewer(h.closeCtx, event.JobID) {
 		return
 	}
 	if h.spawnGrantDrain || h.spawnRollbackDrain {

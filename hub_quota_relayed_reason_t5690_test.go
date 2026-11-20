@@ -45,3 +45,18 @@ func TestIsQuotaStopReasonMatchesAParsedPrefix(t *testing.T) {
 		}
 	}
 }
+
+// hk 5690 review: the legacy close this path takes has none of the hand-over
+// checks an implementer's worktree needs (dirty or unpushed work), so a relayed
+// implementer stop starts no replacement; a reviewer's does.
+func TestRelayedImplementerQuotaStopStartsNoReplacement(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "implementer", "pw-task-42")
+	f.hub.startQuotaReplacement("machine-a", quotaStopEvent(f.job, "claude"))
+	time.Sleep(1500 * time.Millisecond) // proves nothing is sent to the node: a replacement would have probed the pane by now
+	f.hub.mu.Lock()
+	sent := len(f.hub.nodeCommands)
+	f.hub.mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("%d node commands sent for a relayed implementer stop: its pane would be closed without the hand-over checks", sent)
+	}
+}
