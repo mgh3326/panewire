@@ -11,13 +11,23 @@ import (
 )
 
 // hk 5776: a reviewer's replaced_by pointer is written only on a start proof,
-// read afresh: the successor is a node-bound sent attempt (or succeeded), not
-// fenced, and hk holds its job claim (quotaStartProof). These tests are the four
-// windows hk 5690 left open; each one fails on the code before the change.
+// read afresh: the successor is a node-bound sent attempt (or succeeded) that
+// carries the claim receipt, the hub's own sighting of its bound node reporting
+// the job claimed (quotaStartProof). These tests are the four windows hk 5690 left
+// open; each one fails on the code before the change.
 
-// holdsClaim records the successor's job claim in hk, the receipt the node's
-// claim leaves.
-func (f *quotaReplaceFixture) holdsClaim(job string) {
+// holdsClaim records the claim receipt: the hub saw the node the successor is
+// bound to report the job claimed (claimed_ms).
+func (f *quotaReplaceFixture) holdsClaim(t *testing.T, job string) {
+	t.Helper()
+	if err := f.hub.inbox.store.markSpawnClaimed(t.Context(), job, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// independentHKRecord is a record a node-local launch left under the successor's
+// generated name: hk has it, no operation of the hub's claimed it.
+func (f *quotaReplaceFixture) independentHKRecord(job string) {
 	f.jobs.mu.Lock()
 	defer f.jobs.mu.Unlock()
 	f.jobs.records[job] = map[string]any{"state": "claimed", "pool": "claude"}
@@ -96,7 +106,7 @@ func TestQuotaReplaceWindow1StaleSnapshotOfAParkedSuccessorGetsNoPointer(t *test
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-51-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
 	sent := f.bindSuccessor(t, successor, true)
-	f.holdsClaim(successor.Job) // even an hk record does not make an unbound row a start
+	f.holdsClaim(t, successor.Job) // even a claim stamp does not make an unbound row a start
 	f.refuseBeforeClaim(t, sent)
 	f.paneClosed = true
 	app := f.spawnApp(t)
@@ -113,7 +123,7 @@ func TestQuotaReplaceWindow1RefusalDuringThePaneProbeGetsNoPointer(t *testing.T)
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-52-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
 	sent := f.bindSuccessor(t, successor, true)
-	f.holdsClaim(successor.Job)
+	f.holdsClaim(t, successor.Job)
 	f.paneClosed = true
 	app := f.spawnApp(t)
 	done := make(chan bool, 1)
@@ -144,13 +154,6 @@ func TestQuotaReplaceWindow2FencedSuccessorGetsNoPointer(t *testing.T) {
 	go func() { done <- f.hub.reconcileQuotaReplacements(t.Context()) > 0 }()
 	f.expectNoNodeCommand(t, done, "window 2")
 	f.requireRecordUntouched(t)
-	// A fence settles the row as the node's own deadline_not_started would, and
-	// hk never saw a claim: even a record from elsewhere would not be a start.
-	f.holdsClaim(successor.Job)
-	app := f.spawnApp(t)
-	if _, proven := f.hub.quotaStartProof(t.Context(), app, sent.Request.RequestID); proven {
-		t.Fatal("a fenced attempt was proven")
-	}
 }
 
 // Window 3 (hk 5776): a sent attempt is unbound by a node refusal while the
@@ -159,7 +162,7 @@ func TestQuotaReplaceWindow3RefusalWhileThePointerIsBeingWrittenGetsNoPointer(t 
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-54-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
 	sent := f.bindGrantSuccessor(t, successor)
-	f.holdsClaim(successor.Job)
+	f.holdsClaim(t, successor.Job)
 	f.paneClosed = true
 	app := f.spawnApp(t)
 	done := make(chan bool, 1)
@@ -191,7 +194,7 @@ func TestQuotaReplaceWindow4BoundSuccessorAtTheEndOfTheWaitGetsNoPointer(t *test
 		return err == nil
 	})
 	f.bindSuccessor(t, successor, false)
-	f.holdsClaim(successor.Job) // not even an hk record turns a bound row into a start
+	f.holdsClaim(t, successor.Job) // not even a claim stamp turns a bound row into a start
 	select {
 	case result := <-done:
 		if result.ok {
@@ -236,7 +239,7 @@ func TestQuotaReplaceWindow4SentSuccessorWithoutAClaimIsPointedToOnceItIsClaimed
 		t.Fatal("the replacement did not finish")
 	}
 	f.requireRecordUntouched(t)
-	f.holdsClaim(successor.Job)
+	f.holdsClaim(t, successor.Job)
 	f.paneClosed = true
 	wrote := make(chan int, 1)
 	go func() { wrote <- f.hub.reconcileQuotaReplacements(t.Context()) }()
@@ -255,11 +258,10 @@ func TestQuotaReplaceStartProofWritesThePointerExactlyOnce(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-57-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
 	sent := f.bindGrantSuccessor(t, successor)
-	f.holdsClaim(successor.Job)
+	f.holdsClaim(t, successor.Job)
 	f.paneClosed = true
-	app := f.spawnApp(t)
-	if _, proven := f.hub.quotaStartProof(t.Context(), app, sent.Request.RequestID); !proven {
-		t.Fatal("a sent, unfenced, claimed attempt has no proof")
+	if _, proven := f.hub.quotaStartProof(t.Context(), sent.Request.RequestID); !proven {
+		t.Fatal("a sent, claimed attempt has no proof")
 	}
 	wrote := make(chan int, 1)
 	go func() { wrote <- f.hub.reconcileQuotaReplacements(t.Context()) }()
@@ -284,35 +286,22 @@ func TestQuotaReplaceStartProofWritesThePointerExactlyOnce(t *testing.T) {
 func TestQuotaStartProofByState(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-58-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
-	app := f.spawnApp(t)
 	proof := func() bool {
-		_, ok := f.hub.quotaStartProof(t.Context(), app, successor.Request.RequestID)
+		_, ok := f.hub.quotaStartProof(t.Context(), successor.Request.RequestID)
 		return ok
 	}
 	if proof() {
 		t.Fatal("an accepted successor was proven")
 	}
 	sent := f.bindSuccessor(t, successor, false)
-	f.holdsClaim(successor.Job)
+	f.independentHKRecord(successor.Job)
+	f.holdsClaim(t, successor.Job)
 	if proof() {
 		t.Fatal("a bound, unsent successor was proven")
 	}
 	sent = sentSpawnFixture(t, f.hub.inbox.store, sent)
 	if !proof() {
-		t.Fatal("a sent successor with an hk claim was not proven")
-	}
-	f.jobs.mu.Lock()
-	delete(f.jobs.records, successor.Job)
-	f.jobs.mu.Unlock()
-	if proof() {
-		t.Fatal("a sent successor with no hk claim was proven")
-	}
-	f.holdsClaim(successor.Job)
-	f.jobs.mu.Lock()
-	f.jobs.failGets = 1
-	f.jobs.mu.Unlock()
-	if proof() {
-		t.Fatal("an unreadable hk record was taken as a proof")
+		t.Fatal("a sent successor with the claim receipt was not proven")
 	}
 	f.refuseBeforeClaim(t, sent)
 	if proof() {
@@ -339,9 +328,10 @@ func TestQuotaReplaceRetryOfTheWriteTakesTheProofAgain(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-59-p1")
 	f.hub.quotaWait = 150 * time.Millisecond
 	f.hub.quotaMarkBackoff = 400 * time.Millisecond
+	acked := make(chan struct{}, 1)
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"))
+		job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked <- struct{}{} }, nil)
 		done <- quotaReplaceResult{job, ok}
 	}()
 	f.serveCommands(t, 3) // probe, capture, close
@@ -352,7 +342,7 @@ func TestQuotaReplaceRetryOfTheWriteTakesTheProofAgain(t *testing.T) {
 		return err == nil
 	})
 	sent := f.bindSuccessor(t, successor, true)
-	f.holdsClaim(successor.Job)
+	f.holdsClaim(t, successor.Job)
 	first := nodeCommandRead(t, f.node)
 	if op := strings.Trim(string(first["op"]), `"`); op != "job.mark_lost" {
 		t.Fatalf("first command after the proof is %s, want job.mark_lost", op)
@@ -361,6 +351,13 @@ func TestQuotaReplaceRetryOfTheWriteTakesTheProofAgain(t *testing.T) {
 	f.refuseBeforeClaim(t, sent) // lands inside the back-off
 	f.expectNoNodeCommandResult(t, done)
 	f.requireRecordUntouched(t)
+	// The stop stays with its node: acknowledged, no later delivery would reach the
+	// give-up if the requeued successor then fails (hk 5776 review).
+	select {
+	case <-acked:
+		t.Fatal("the stop was acknowledged after the proof was lost during the write")
+	default:
+	}
 }
 
 // expectNoNodeCommandResult waits for the replacement to end without a pointer and
@@ -385,4 +382,23 @@ func (f *quotaReplaceFixture) expectNoNodeCommandResult(t *testing.T, done <-cha
 	case <-time.After(2500 * time.Millisecond):
 		t.Fatal("the replacement did not finish")
 	}
+}
+
+// hk 5776 review: an hk record found under the successor's name is no evidence. A
+// node-local launch can leave one without any operation of the hub's, and the node
+// then refuses the hub's own claim as a duplicate. A sent successor with such a
+// record and no claim receipt gets no pointer, here and at the end of a live wait.
+func TestQuotaReplaceIndependentHKRecordIsNoStartProof(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-60-p1")
+	successor := f.quotaClaimedSuccessor(t, "accepted")
+	sent := f.bindSuccessor(t, successor, true)
+	f.independentHKRecord(successor.Job)
+	f.paneClosed = true
+	if _, proven := f.hub.quotaStartProof(t.Context(), sent.Request.RequestID); proven {
+		t.Fatal("an independent hk record was taken for the successor's claim")
+	}
+	done := make(chan bool, 1)
+	go func() { done <- f.hub.reconcileQuotaReplacements(t.Context()) > 0 }()
+	f.expectNoNodeCommand(t, done, "independent record")
+	f.requireRecordUntouched(t)
 }

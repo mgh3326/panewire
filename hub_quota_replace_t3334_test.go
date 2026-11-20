@@ -684,7 +684,7 @@ func TestQuotaStopUndecidedClaimedSuccessorStillGetsItsPointer(t *testing.T) {
 		return err == nil
 	})
 	f.bindSuccessor(t, successor, true)
-	f.holdsClaim(successor.Job)
+	f.holdsClaim(t, successor.Job)
 	command := nodeCommandRead(t, f.node)
 	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}})
 	select {

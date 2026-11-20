@@ -950,7 +950,7 @@ func TestReconcileWritesThePointerForASentSuccessor(t *testing.T) {
 	if sent.Status != "dispatching" {
 		t.Fatalf("status %q, want dispatching", sent.Status)
 	}
-	f.holdsClaim(successor.Job)
+	f.holdsClaim(t, successor.Job)
 	f.paneClosed = true
 	wrote := make(chan int, 1)
 	go func() { wrote <- f.hub.reconcileQuotaReplacements(t.Context()) }()

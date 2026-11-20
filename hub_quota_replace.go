@@ -540,7 +540,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// mark writes the old record's pointer. A reviewer's pointer passes a start
 	// proof read afresh before every write attempt (hk 5776): a refusal, a fence or
 	// an unbind that landed since the wait read the successor leaves it unwritten.
-	mark := func(proven func() bool) bool {
+	mark := func(proven func() bool) (lost, unproven bool) {
 		// The pointer can only be written once and the watcher's fallback
 		// would write a plain record, so a transient failure is retried
 		// inside the grace.
@@ -548,7 +548,6 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 		if backoff <= 0 {
 			backoff = quotaMarkBackoff
 		}
-		var lost bool
 		var reason string
 		for attempt := 0; attempt < quotaMarkAttempts && !lost; attempt++ {
 			if attempt > 0 {
@@ -558,7 +557,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 				}
 			}
 			if proven != nil && !proven() {
-				reason = "start_unproven"
+				reason, unproven = "start_unproven", true
 				break
 			}
 			lost, reason = h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
@@ -566,7 +565,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 		if !lost {
 			h.logger.Warn("quota-stop replacement: the stopped job's record was not written", "job", event.JobID, "replacement", newJob, "reason", reason)
 		}
-		return lost
+		return lost, unproven
 	}
 	// An implementer is handed over in the order the ticket gives: the
 	// record ends with handed_over_to first, then the task is spawned. The
@@ -574,8 +573,10 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// record must end before the successor is admitted. When the spawn then
 	// fails the pointer names a job that never ran, and the owner is told by
 	// the spawn failure notice.
-	if role != "reviewer" && !mark(nil) {
-		return "", false
+	if role != "reviewer" {
+		if lost, _ := mark(nil); !lost {
+			return "", false
+		}
 	}
 	if prior.HoldsTaskRole() {
 		if priorID, _, _, err := store.spawnRoleOwner(ctx, prior.RoleKey()); err == nil && priorID == holder.Request.RequestID {
@@ -650,7 +651,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 		// with its node; a later delivery or the reconcile pass writes the pointer
 		// once the proof exists, or gives the review up when the successor ends.
 		proven := func() bool {
-			_, ok := h.quotaStartProof(ctx, app, request.RequestID)
+			_, ok := h.quotaStartProof(ctx, request.RequestID)
 			return ok
 		}
 		if !proven() {
@@ -659,7 +660,13 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 		if !settled {
 			h.logger.Warn("quota-stop replacement undecided; writing its pointer", "job", event.JobID, "replacement", newJob, "status", task.Status)
 		}
-		if !mark(proven) {
+		if lost, unproven := mark(proven); !lost {
+			if unproven {
+				// The proof held at the wait's end and was gone by a write attempt (a
+				// cleaned-up refusal requeued the operation): the stop stays with its
+				// node, and a later delivery finishes, or gives up, the successor.
+				return retryLater("successor_start_unproven", "replacement", newJob)
+			}
 			return "", false
 		}
 	} else if settled && outcome.RC != 0 {
@@ -907,21 +914,24 @@ func quotaSuccessorSent(successor hubSpawnTask) bool {
 // never decides, and answers true only when the successor started or must:
 //
 //   - the operation succeeded (placed, its job landed), or
-//   - it is bound to a node and was sent (dispatching, reconciling or past its
-//     deadline with that node), is not fenced (a fenced attempt can never be
-//     granted, so never starts), and hk holds its job claim.
+//   - it is bound to a node, was sent (dispatching, reconciling or past its
+//     deadline with that node), and carries the claim receipt: the hub saw the
+//     node it was bound to report the job claimed (claimed_ms, markSpawnClaimed).
 //
-// hk's job claim is the claim receipt. The node claims the job only after the
-// hub granted its start, and from the claim on hk holds the job id for that
-// host, so a later refusal keeps the claim pinned and the job is retried
-// there: a pointer taken on this proof names a job with an hk record whatever
-// the dispatching worker does next. A row that is accepted, waiting, only
-// bound, refused or unbound has no proof, whatever an earlier read said. The
-// dispatch worker holds the request's action fence for the whole attempt, so
-// this gate cannot share that lock; the receipt is what makes the read
-// sufficient. An unreadable row or record is no proof.
-func (h *HubServer) quotaStartProof(ctx context.Context, app *fleet.App, requestID string) (hubSpawnTask, bool) {
-	if h.inbox == nil || app == nil {
+// The receipt belongs to this spawn request and its bound node: the stamp is
+// written only from the decided host's report of the job, and a new bind clears
+// it. An hk record found by job id is not evidence, since a node-local launch
+// can leave one under the generated name without any operation of the hub's. A
+// fenced attempt can never be granted, so it never reports a claim. From the
+// claim on hk holds the job id for that host, so a later refusal keeps it
+// pinned and the job is retried there: a pointer taken on this proof names a job
+// with an hk record whatever the dispatch worker does next. A row that is
+// accepted, waiting, only bound, refused or unbound has no proof, whatever an
+// earlier read said. The dispatch worker holds the request's action fence for
+// the whole attempt, so this gate cannot share that lock; the receipt is what
+// makes the read sufficient. An unreadable row is no proof.
+func (h *HubServer) quotaStartProof(ctx context.Context, requestID string) (hubSpawnTask, bool) {
+	if h.inbox == nil {
 		return hubSpawnTask{}, false
 	}
 	task, err := h.inbox.store.spawnTask(ctx, requestID)
@@ -934,15 +944,8 @@ func (h *HubServer) quotaStartProof(ctx context.Context, app *fleet.App, request
 	if !quotaSuccessorSent(task) {
 		return task, false
 	}
-	if task.Node.GrantRequired {
-		if fenced, err := h.inbox.store.spawnAttemptFenced(ctx, task.Node.RequestID); err != nil || fenced {
-			return task, false
-		}
-	}
-	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	_, exists, err := app.ExistingJob(readCtx, task.Job)
-	cancel()
-	return task, err == nil && exists
+	claimed, err := h.inbox.store.spawnNodeClaimed(ctx, requestID, task.Attempt, task.Node.RequestID)
+	return task, err == nil && claimed
 }
 
 // reconcileQuotaReplacement finishes one claimed successor's pointer. It never
@@ -968,7 +971,7 @@ func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.Ap
 // can take seconds (hk 5776).
 func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string, stopSeq *int64) bool {
 	// The one rule for a pointer, whoever calls: the successor has a start proof.
-	successor, proven := h.quotaStartProof(ctx, app, successor.Request.RequestID)
+	successor, proven := h.quotaStartProof(ctx, successor.Request.RequestID)
 	if !proven {
 		return false
 	}
@@ -1007,7 +1010,7 @@ func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, 
 	case probe.state != heldPaneAbsent:
 		return false
 	}
-	if _, proven := h.quotaStartProof(ctx, app, successor.Request.RequestID); !proven {
+	if _, proven := h.quotaStartProof(ctx, successor.Request.RequestID); !proven {
 		return false
 	}
 	if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); lost {

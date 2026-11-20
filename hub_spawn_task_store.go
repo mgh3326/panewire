@@ -1172,6 +1172,20 @@ func (s *laneInboxStore) markSpawnClaimed(parent context.Context, job string, no
 	return err
 }
 
+// spawnNodeClaimed reports whether the hub saw the node that attempt `attempt`
+// of the request is bound to (nodeID) report the job claimed: the claim receipt
+// (hk 5776). A bind clears the stamp, so it belongs to the current binding.
+func (s *laneInboxStore) spawnNodeClaimed(parent context.Context, requestID string, attempt int, nodeID string) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var stamp int64
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT claimed_ms FROM spawn_operations WHERE request_id=? AND attempt=? AND node_id=?`), requestID, attempt, nodeID).Scan(&stamp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return stamp > 0, err
+}
+
 // boundSpawnsSince lists the operations placed at or after since that are bound
 // to a node, not yet claimed, and may still hold an unclaimed launch: in flight,
 // reconciling, timed out while bound, or succeeded. Refused, failed and
