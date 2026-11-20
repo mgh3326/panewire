@@ -633,6 +633,36 @@ func TestReplayAfterRestartFinishesAClaimedSuccessor(t *testing.T) {
 	}
 }
 
+// replaceSendingNothing runs one replacement of the fixture's job and fails if the hub
+// sends the node any command while it does: it reads the node connection
+// concurrently, since a command nobody answers is only a timeout later.
+func (f *quotaReplaceFixture) replaceSendingNothing(t *testing.T, event hubJobEventPayload, ack func()) (string, bool) {
+	t.Helper()
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, ack)
+		done <- quotaReplaceResult{job, ok}
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
+	defer cancel()
+	read := make(chan []byte, 1)
+	go func() {
+		_, payload, err := f.node.Read(ctx)
+		if err == nil {
+			read <- payload
+		}
+	}()
+	select {
+	case payload := <-read:
+		t.Fatalf("the hub sent the node %s", payload)
+	case got := <-done:
+		return got.job, got.ok
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("the replacement did not finish without a node command")
+	}
+	return "", false
+}
+
 // hk 5690 review: the claimed-successor shortcut matches by lineage, not by name. A
 // job that merely carries the next name in the chain (no replaced_from) is a name
 // collision: it is refused, the record is kept, and the predecessor's pane is never
@@ -653,14 +683,8 @@ func TestSuccessorNameCollisionIsRefusedWithoutClosingTheTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	acked := 0
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked++ }); ok || job != "" {
+	if job, ok := f.replaceSendingNothing(t, quotaStopEvent(f.job, "claude"), func() { acked++ }); ok || job != "" {
 		t.Fatalf("a name collision was taken for a replacement: %q", job)
-	}
-	f.hub.mu.Lock()
-	sent := len(f.hub.nodeCommands)
-	f.hub.mu.Unlock()
-	if sent != 0 {
-		t.Fatalf("%d node commands sent on a name collision: the target's pane would be closed", sent)
 	}
 	if state := f.jobs.records[f.job]["state"]; state != "spawned" {
 		t.Fatalf("the colliding name changed the job's record: %v", state)
@@ -725,4 +749,92 @@ func TestSpawnOutcomeThatCannotBeReadIsUnknown(t *testing.T) {
 		t.Fatalf("an unreadable operation: settled=%v known=%v, want unknown", settled, known)
 	}
 	_ = task
+}
+
+// hk 5690 review: a lineage the startup backfill derived from the job's name is no
+// proof. Only a replaced_from written by the quota claim itself (replaced_reason =
+// claim) passes: a row whose replaced_from was filled in after the fact is a name
+// collision and closes nothing.
+func TestBackfilledLineageIsNotProofOfAReplacement(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-31-p1")
+	next, _, _ := quotaReplacementJob(f.job)
+	request, err := quotaReplacementRequest(f.holder.Request, f.job, next, "claude", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	collision, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, next, "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What backfillSpawnReplacedFrom does to a "<old>-q<n>" row: replaced_from from the
+	// name, with no claim behind it.
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE spawn_operations SET replaced_from=? WHERE request_id=?`, f.job, collision.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), collision, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if job, ok := f.replaceSendingNothing(t, quotaStopEvent(f.job, "claude"), nil); ok || job != "" {
+		t.Fatalf("a backfilled lineage was taken for a replacement: %q", job)
+	}
+	if state := f.jobs.records[f.job]["state"]; state != "spawned" {
+		t.Fatalf("the record was changed: %v", state)
+	}
+}
+
+// hk 5690 review: one finalizer. While a successor claim for the job is not
+// terminal (accepted included), the stop is never acknowledged as already replaced
+// or stale: it is retried, so the node keeps it until the claim is finished or ends.
+func TestAQueuedSuccessorClaimIsNeverAcknowledgedAsReplaced(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-32-p1")
+	next, _, _ := quotaReplacementJob(f.job)
+	request, err := quotaReplacementRequest(f.holder.Request, f.job, next, "claude", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.hub.inbox.store.claimSpawnFrom(t.Context(), request, next, "parent", time.Now().Add(-4*time.Minute-20*time.Second), f.job); err != nil {
+		t.Fatal(err)
+	}
+	acked := 0
+	event := quotaStopEvent(f.job, "claude")
+	event.Reason += " at=" + strconv.FormatInt(time.Now().Add(-9*time.Minute).Unix(), 10) // an old resend: would be stale
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }); ok || job != "" || acked != 0 {
+		t.Fatalf("a queued claim: job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
+	}
+}
+
+// hk 5690 review: the periodic pass picks up a claimed successor at any age, not
+// only after the replacement budget (6 minutes). A claim made 4 minutes 20 seconds
+// ago whose pointer was never written (the hub restarted between the two) is
+// repaired before the watcher's 10 minute grace ends, and no plain loss is written.
+func TestReconcilePicksUpAClaimedSuccessorFourMinutesOld(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-33-p1")
+	next, _, _ := quotaReplacementJob(f.job)
+	request, err := quotaReplacementRequest(f.holder.Request, f.job, next, "claude", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedAt := time.Now().Add(-4*time.Minute - 20*time.Second)
+	successor, _, err := f.hub.inbox.store.claimSpawnFrom(t.Context(), request, next, "parent", claimedAt, f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, claimedAt); err != nil {
+		t.Fatal(err)
+	}
+	f.paneClosed = true
+	wrote := make(chan int, 1)
+	go func() { wrote <- f.hub.reconcileQuotaReplacements(t.Context()) }()
+	commands := f.serveCommands(t, 2) // probe (pane gone), mark_lost
+	if reason := endReasonOf(t, commands[1]); reason != "quota_stop pool=claude replaced_by="+next {
+		t.Fatalf("end_reason=%q, want the pointer, not a plain loss", reason)
+	}
+	select {
+	case n := <-wrote:
+		if n != 1 {
+			t.Fatalf("wrote %d records, want 1", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reconcile pass did not finish")
+	}
 }

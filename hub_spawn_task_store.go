@@ -141,7 +141,12 @@ type hubSpawnTask struct {
 	Job, Owner, Status string
 	// ReplacedFrom is the job a quota-stop successor replaces (hk 5300). Empty
 	// for every other spawn: the column is NULL there.
-	ReplacedFrom      string
+	ReplacedFrom string
+	// ReplacedReason is "claim" when the claim itself wrote replaced_from (a
+	// quota-stop or hand-over successor), and empty for a row whose replaced_from
+	// was derived from its name by the startup backfill: a derived lineage is no
+	// proof that the job replaced anything (hk 5690).
+	ReplacedReason    string
 	Created, Deadline time.Time
 	// Expires is the request's time limit (hk 4660): past it, a request whose
 	// start is not unproven ends given_up. Zero on a row from before the
@@ -291,8 +296,8 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// notice columns are hk 4662's (postgres: 0019); the placed seat columns
 	// are hk 5124's (postgres: 0022), task_fail_notice_ms is hk 5137's
 	// (postgres: 0023), task_fail_retry_ms is hk 5137's (postgres: 0024), and
-	// replaced_from is hk 5300's (postgres: 0031).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`} {
+	// replaced_from is hk 5300's (postgres: 0031), and replaced_reason is hk 5690's (postgres: 0035).
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`, `replaced_reason TEXT NOT NULL DEFAULT ''`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -485,17 +490,21 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	deadline := spawnAttemptDeadline(now, request.DeadlineSeconds, expires)
 	// replaced_from is NULL for every spawn but a quota-stop successor.
 	var replaced any
+	replacedReason := ""
 	if replacedFrom != "" {
 		replaced = replacedFrom
+		// Written by this claim, not derived from the job's name: the only lineage
+		// quotaLineageHolds accepts (hk 5690).
+		replacedReason = "claim"
 	}
-	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms,expires_ms,replaced_from) VALUES(?,?,?,?,?,?,?,?,?,?)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli(), expires.UnixMilli(), replaced)
+	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_operations(request_id,job,owner,fingerprint,payload,status,created_ms,deadline_ms,expires_ms,replaced_from,replaced_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?)`), request.RequestID, job, owner, fingerprint, string(raw), status, now.UnixMilli(), deadline.UnixMilli(), expires.UnixMilli(), replaced, replacedReason)
 	if err != nil {
 		return hubSpawnTask{}, false, err
 	}
 	if err = s.enqueueSpawn(ctx, tx, request.RequestID); err != nil {
 		return hubSpawnTask{}, false, err
 	}
-	accepted := hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, ReplacedFrom: replacedFrom, Created: now, Deadline: deadline, Expires: expires, Attempt: 1}
+	accepted := hubSpawnTask{Request: request, Job: job, Owner: owner, Status: status, ReplacedFrom: replacedFrom, ReplacedReason: replacedReason, Created: now, Deadline: deadline, Expires: expires, Attempt: 1}
 	// A successor that may owe its parent's close is armed with the fence
 	// generation current when it is accepted, in the same transaction: a
 	// request accepted while the switch is off is never armed, so replaying
@@ -891,11 +900,13 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var payload, result, node, exclusions, refreshWaits, conditionResult, claimResult, parkJudgedReason, placedAccountKey, tried string
 	var created, deadline, lastRun, placed, expires, conditionsMet, nextCheck, parkSince, parkNoticeAt, placedAttempt int64
 	var replacedFrom sql.NullString
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult, &parkSince, &task.ParkPriority, &parkNoticeAt, &parkJudgedReason, &task.ParkPriorityFailures, &placedAccountKey, &placedAttempt, &replacedFrom, &tried)
+	var replacedReason string
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult, &parkSince, &task.ParkPriority, &parkNoticeAt, &parkJudgedReason, &task.ParkPriorityFailures, &placedAccountKey, &placedAttempt, &replacedFrom, &tried, &replacedReason)
 	if err != nil {
 		return task, err
 	}
 	task.ReplacedFrom = replacedFrom.String
+	task.ReplacedReason = replacedReason
 	task.PlacedAccountKey = placedAccountKey
 	if placedAttempt > 0 {
 		task.PlacedAttempt = int(placedAttempt)
@@ -1078,7 +1089,7 @@ func spawnTaskColumnsOf(alias string) string {
 	return strings.Join(columns, ",")
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,park_since_ms,park_priority,park_notice_ms,park_judged_reason,park_priority_failures,placed_account_key,placed_attempt,replaced_from,tried`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,park_since_ms,park_priority,park_notice_ms,park_judged_reason,park_priority_failures,placed_account_key,placed_attempt,replaced_from,tried,replaced_reason`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)

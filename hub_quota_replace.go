@@ -61,11 +61,13 @@ func (h *HubServer) reviewerQuotaAnnouncement(ctx context.Context, event hubJobE
 }
 
 // quotaLineageHolds reports whether successor is a replacement of predecessor (the
-// job named old): it was claimed as replacing it (replaced_from) for the same owner
+// job named old): its claim wrote replaced_from as replacing it, for the same owner
 // and the same task or parent job. A job that merely carries the next name in the
 // chain is not (hk 5690 review).
 func quotaLineageHolds(successor, predecessor hubSpawnTask, old string) bool {
-	if successor.ReplacedFrom != old || successor.Owner != predecessor.Owner {
+	// replaced_from counts only when the claim itself wrote it (replaced_reason):
+	// the startup backfill derives it from the job's name, which is no proof.
+	if successor.ReplacedFrom != old || successor.ReplacedReason != "claim" || successor.Owner != predecessor.Owner {
 		return false
 	}
 	for _, flag := range []string{"--task", "--parent-job"} {
@@ -321,16 +323,23 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// claimed successor that may still run needs its replaced_by write, which the
 	// periodic pass would otherwise leave until its own age (hk 5690 review).
 	if claimed, _, ok := quotaReplacementJob(event.JobID); ok {
-		if successor, err := store.latestSpawnForJob(ctx, claimed); err == nil {
-			// A job with that name is a replacement only with the lineage: it
-			// replaces this job (replaced_from) for the same task and owner. A name
-			// collision is refused and the record kept; the predecessor is never
-			// closed without the lineage and a verified stop sequence (hk 5690).
+		successor, err := store.latestSpawnForJob(ctx, claimed)
+		switch {
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			// One finalizer: while a successor claim may exist the stop is never
+			// acknowledged as stale or replaced on a failed read.
+			return retryLater("successor_lookup_unavailable", "error", err.Error())
+		case err == nil:
+			// A job with that name is a replacement only with the claim's own
+			// lineage: replaced_from written by the claim (not the name backfill),
+			// for the same owner and task. A name collision is refused and the
+			// record kept; the predecessor is never closed without the lineage and a
+			// verified stop sequence (hk 5690).
 			predecessor, perr := store.latestSpawnForJob(ctx, event.JobID)
-			if perr != nil {
+			if perr != nil && !errors.Is(perr, sql.ErrNoRows) {
 				return retryLater("holder_unavailable", "error", perr.Error())
 			}
-			if !quotaLineageHolds(successor, predecessor, event.JobID) {
+			if perr != nil || !quotaLineageHolds(successor, predecessor, event.JobID) {
 				return skip("successor_name_collision", "job", claimed)
 			}
 			if successor.Status == "succeeded" || spawnMayStillRun(successor) {
@@ -343,6 +352,22 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 					// The pointer is not written yet: the node keeps the announcement
 					// and the next delivery tries again.
 					return retryLater("successor_finish_pending", "replacement", claimed)
+				}
+				return skip("already_replaced", "replacement", claimed)
+			}
+			if spawnStatusActive(successor.Status) {
+				// A claim still queued (accepted, waiting) is not terminal: the
+				// worker that made it, or the periodic pass, owns it. Not
+				// acknowledged, never taken for stale or replaced.
+				return retryLater("successor_in_flight", "status", successor.Status)
+			}
+			// The claimed successor ended without being placed: no other pool could
+			// take the review, and this delivery finishes the give-up.
+			if predecessor.Status == "succeeded" {
+				if prior, verr := fleet.ValidateSubmission(predecessor.Request); verr == nil && prior.Role == "reviewer" {
+					if h.giveUpQuotaStop(ctx, predecessor, prior.Owner, event, "not_placed") {
+						return retryLater("successor_give_up_pending", "replacement", claimed)
+					}
 				}
 			}
 			return skip("already_replaced", "replacement", claimed)
@@ -784,12 +809,11 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	written := 0
 	for _, successor := range successors {
-		if !spawnMayStillRun(successor) && successor.Status != "succeeded" {
-			continue
-		}
-		// A replacement younger than its own budget is still being finished by
-		// replaceQuotaStopped.
-		if h.now().Sub(successor.Created) < quotaReplaceBudget {
+		// Any claimed successor that is not terminal-and-unplaced, at any age: the
+		// replacement worker holds the job's lock for as long as it works, so a
+		// restart between the claim and the pointer is repaired well inside the
+		// watcher's grace instead of after the replacement budget (hk 5690).
+		if !spawnStatusActive(successor.Status) && successor.Status != "succeeded" {
 			continue
 		}
 		old := successor.ReplacedFrom
