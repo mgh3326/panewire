@@ -388,9 +388,13 @@ drop, a rate-limit skip, a non-2xx, a network error, a timeout or shutdown leave
 the need untold, and the next sighting tries again. Hub shutdown stops the
 worker, cancels its request and joins it before the store closes. With no Sentry
 DSN nothing is told, and the next report tries again. The told state is kept in
-the hub store (table `one_time_action_notices`, Postgres migration 0026) and
-read back at start, so a
-hub restart does not tell a standing need again. A need clears only when a
+the hub store (table `one_time_action_notices`: Postgres migrations 0026 and 0034,
+MySQL migrations 0019 and 0027) and read back at start, so a hub restart does
+not tell a standing need again. While a need stands, the hub also holds one
+handoffkeep operator wait on an intake anchor task per (host, kind, need)
+(`hub_one_time_wait.go`): it opens once after the notice and closes after the
+anti-flap clear. The wait id is kept in the same row; a failed hk write is
+retried on later reports and never dropped. A need clears only when a
 readiness report shows it gone and it stays gone for one full readiness cycle
 (5 minutes): a report that shows it again inside that cycle cancels the clear
 and tells nothing. A report computed before the notice cannot clear it, and a

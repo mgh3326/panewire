@@ -9,8 +9,8 @@ import (
 
 // A told one-time action also holds one durable handoffkeep operator wait, so
 // the need reaches the desk's needs_operator section instead of only Discord.
-// The contract with handoffkeep-design (hk 5250, decision
-// pw-onetime-wait-5250-decision-1):
+// The contract is panewire-design's decision on hk 5250 (2026-11-20), built
+// on the task-scoped wait routes live on handoffkeep:
 //
 //   - One idempotent intake anchor per need: POST /v1/intake with
 //     (source, source_ref) = ("panewire",
