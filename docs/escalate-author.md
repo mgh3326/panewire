@@ -178,6 +178,7 @@ lane, so a refusal is countable without the hub database:
 | --- | --- | --- | --- |
 | before the pane closed (`job_not_live`, `job_mismatch`, `pane_busy`, `pane_not_closed`, `worktree_*`, `staged_expired`, `no_rung`, `quota_refused`, ...) | `ladder-step:<job>:<round>:preflight:<code>` | info | 2 |
 | after the pane closed (the PR is authorless) | `ladder-step:<job>:<round>:ended:<code>:esc` | decision | 1 |
+| author spawned with `--keep` (`author_kept`; its pane is protected and never closed) | `ladder-step:<job>:<round>:preflight:author_kept:esc` | decision | 2 |
 | step done | `ladder-step:<successor>` | info | 0 |
 | successor placed, task binding unconfirmed | `ladder-step:<job>:<round>:placed:rebind_unconfirmed` | info | 1 |
 

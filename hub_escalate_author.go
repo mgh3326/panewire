@@ -163,6 +163,11 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		return hubEscalateAuthorResult{}, err
 	}
 	owner := holder.Owner
+	// A kept author's pane is protected: the ladder never closes it, so the
+	// step is refused before any close is attempted (hk 5295).
+	if hubSpawnHasBoolFlag(holder.Request.Args, "--keep") {
+		return h.escalateAuthorKept(ctx, request, owner)
+	}
 	newJob, _, ok := escalateAuthorJob(request.Job)
 	if !ok {
 		return h.escalateAuthorRefusal(ctx, request, owner, "no_rung", "the ladder step limit is reached", false)
@@ -744,6 +749,18 @@ func (h *HubServer) escalateAuthorRefusal(ctx context.Context, request hubEscala
 	}
 	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: notify, Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(request.Job, "ladder_"+code, false)}, nil)
 	return hubEscalateAuthorResult{Code: code, Reason: reason, AuthorEnded: ended}, nil
+}
+
+// escalateAuthorKept refuses a ladder step on an author spawned with --keep. No
+// automatic path can take the step, so the owner lane gets a decision (ESC) and
+// not info; the refusal is author_kept, never pane_not_closed (hk 5295).
+func (h *HubServer) escalateAuthorKept(ctx context.Context, request hubEscalateAuthorRequest, owner string) (hubEscalateAuthorResult, error) {
+	const code = "author_kept"
+	reason := "the author was spawned with --keep; its pane is protected"
+	eventID := fmt.Sprintf("ladder-step:%s:%d:preflight:%s:esc", request.Job, request.Round, code)
+	text := fmt.Sprintf("[panewire] ESC | author_kept: ladder step %s: %s (round %d, %s); the author's pane is protected and panewire never closes it. Decide how to continue; panewire does not start a successor automatically.", request.Job, reason, request.Round, request.PR)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	return hubEscalateAuthorResult{Code: code, Reason: reason}, nil
 }
 
 // escalateAuthorChain is the ladder-step and quota-stop suffix of a job id: the
