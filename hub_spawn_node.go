@@ -250,7 +250,7 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	// successor refusal names in its error; an older hub's strict parser
 	// would drop the whole answer for it (hk 5118).
 	message.checkoutBranchReply = peer.acceptsCheckoutBranch.Load()
-	result := client.runClaimedHubSpawn(admissionCtx, message)
+	result := client.runClaimedHubSpawn(fleet.WithSpawnLanded(admissionCtx, func() { client.sendSpawnStarted(ctx, peer, message.RequestID) }), message)
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
 	if ctx.Err() != nil && result.RC != 0 {
@@ -434,6 +434,12 @@ func (client *HubClient) answerKnownSpawn(ctx context.Context, peer *hubClientCo
 	reply := "unknown"
 	if active {
 		reply = "reconciling"
+		client.spawnActiveMu.Lock()
+		landed := client.spawnLanded[message.RequestID]
+		client.spawnActiveMu.Unlock()
+		if landed {
+			client.sendSpawnStarted(ctx, peer, message.RequestID)
+		}
 	} else if settled, ok := client.settleRequest(ctx, journal, message.RequestID); ok {
 		// The same replay rule as journal lookup (replayCheckoutMode, hk 5223).
 		settled.CheckoutMode = replayCheckoutMode(settled.CheckoutMode, sparseListsHash(message.Checkout))
@@ -459,6 +465,28 @@ func (client *HubClient) endHubSpawn(requestID string) {
 	client.spawnActiveMu.Lock()
 	defer client.spawnActiveMu.Unlock()
 	delete(client.spawnActive, requestID)
+	delete(client.spawnLanded, requestID)
+}
+
+// sendSpawnStarted reports the start receipt of the execution of requestID, the
+// unique node request id the hub bound: its job landed durably (hk 5776). It is
+// sent once from the landing point and again when the hub replays the request
+// while the execution is still running. The final result stays the durable
+// answer; a receipt that does not reach the hub only delays the successor's
+// pointer until that result.
+func (client *HubClient) sendSpawnStarted(ctx context.Context, peer *hubClientConnection, requestID string) {
+	client.spawnActiveMu.Lock()
+	if client.spawnLanded == nil {
+		client.spawnLanded = make(map[string]bool)
+	}
+	client.spawnLanded[requestID] = true
+	client.spawnActiveMu.Unlock()
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_ = peer.write(writeCtx, struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+	}{"job.spawn.started", requestID})
 }
 
 func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {

@@ -1584,6 +1584,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return e
 	}
 	committed = true
+	notifySpawnLanded(ctx)
 	if s.replacesParent() {
 		hint := takeoverLaneName(s, task)
 		a.finishTaskTakeover(ctx, &s, task, owner, hint, pane, machine)

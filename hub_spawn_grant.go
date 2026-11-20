@@ -224,3 +224,30 @@ func (h *HubServer) logSpawnGrantRows() {
 	}
 	h.logger.Info("hub spawn grant rows", "grant_rows", n, "spawn_grant_drain", h.spawnGrantDrain)
 }
+
+// parseHubSpawnStarted reads a node's {"type":"job.spawn.started","request_id"}:
+// the start receipt of the attempt it executes (hk 5776, docs/hub-spawn-operations.md,
+// "Start receipt").
+func parseHubSpawnStarted(raw []byte) (string, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields) != 2 {
+		return "", false
+	}
+	var kind, requestID string
+	if json.Unmarshal(fields["type"], &kind) != nil || kind != "job.spawn.started" || json.Unmarshal(fields["request_id"], &requestID) != nil || !validHubSpawnRequestID(requestID) {
+		return "", false
+	}
+	return requestID, true
+}
+
+// noteSpawnStarted stores the start receipt a node reports for the attempt bound
+// to nodeID. A store error drops it: the node repeats it when the hub replays the
+// request, and the final result is the durable answer.
+func (h *HubServer) noteSpawnStarted(ctx context.Context, machine, nodeID string) {
+	if h.inbox == nil || h.inbox.store == nil {
+		return
+	}
+	if _, err := h.inbox.store.markSpawnStarted(ctx, nodeID, machine, h.now().UTC()); err != nil {
+		h.logger.Warn("hub spawn start receipt not stored", "node_request_id", nodeID, "host", machine, "err", err)
+	}
+}

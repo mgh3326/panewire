@@ -1516,6 +1516,10 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 		h.answerSpawnClaim(ctx, machineID, agent, nodeID)
 		return
 	}
+	if nodeID, ok := parseHubSpawnStarted(payload); ok {
+		h.noteSpawnStarted(ctx, machineID, nodeID)
+		return
+	}
 	if result, ok := parseHubNodeCommandResult(payload); ok {
 		h.resolveNodeCommand(machineID, agent, result)
 		return

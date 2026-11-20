@@ -940,8 +940,9 @@ func (f *quotaReplaceFixture) bindSuccessor(t *testing.T, successor hubSpawnTask
 	return bound
 }
 
-// The states a pointer may be written in are placed and sent: a successor whose
-// start was handed to a node (dispatching) may still land.
+// The states a pointer may be written in are placed and sent with the job's claim
+// in hk (hk 5776): a successor whose start was handed to a node (dispatching) and
+// whose node claimed the job may still land.
 func TestReconcileWritesThePointerForASentSuccessor(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-35-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
@@ -949,6 +950,7 @@ func TestReconcileWritesThePointerForASentSuccessor(t *testing.T) {
 	if sent.Status != "dispatching" {
 		t.Fatalf("status %q, want dispatching", sent.Status)
 	}
+	f.holdsClaim(t, successor.Job)
 	f.paneClosed = true
 	wrote := make(chan int, 1)
 	go func() { wrote <- f.hub.reconcileQuotaReplacements(t.Context()) }()
