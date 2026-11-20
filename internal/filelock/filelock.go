@@ -20,11 +20,17 @@ const pollInterval = 20 * time.Millisecond
 // deadline. A context that can never be done blocks until the lock is free.
 // The returned release drops the lock and closes the file.
 func Acquire(ctx context.Context, path string) (func(), error) {
+	return acquire(ctx, path, nil)
+}
+
+// acquire is Acquire with a test seam: beforeFlock, when non-nil, runs after
+// the pre-flock context check and before each flock attempt.
+func acquire(ctx context.Context, path string, beforeFlock func()) (func(), error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o666)
 	if err != nil {
 		return nil, err
 	}
-	if err := lock(ctx, f); err != nil {
+	if err := lock(ctx, f, beforeFlock); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
@@ -35,20 +41,23 @@ func Acquire(ctx context.Context, path string) (func(), error) {
 }
 
 // lock mirrors the bounded events-lock wait in internal/arbiter (flockContext).
-func lock(ctx context.Context, f *os.File) error {
+func lock(ctx context.Context, f *os.File, beforeFlock func()) error {
 	if ctx.Done() == nil {
 		return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
 	}
 	for {
 		// A done context ends the wait before another attempt, so a lock that
 		// frees after the deadline is never taken (T5698).
-		if err := ctx.Err(); err != nil {
+		if err := contextErr(ctx); err != nil {
 			return err
+		}
+		if beforeFlock != nil {
+			beforeFlock()
 		}
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			// The flock can succeed just after the deadline; drop it then.
-			if err := ctx.Err(); err != nil {
+			// The flock can succeed just after the context ends; drop it then.
+			if err := contextErr(ctx); err != nil {
 				syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 				return err
 			}
@@ -65,4 +74,17 @@ func lock(ctx context.Context, f *os.File) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// contextErr is ctx.Err(), plus a passed deadline. ctx.Err only flips when the
+// runtime timer fires, so a deadline already in the past is compared on the
+// wall clock here (elapsed-time rules stay on the wall clock).
+func contextErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
