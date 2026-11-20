@@ -184,9 +184,10 @@ func TestGiveUpLeavesABusyPaneAlone(t *testing.T) {
 // job.lost frame from its node. The frame starts the replacement (the real relay
 // path, the relayed reason) and is a control event: the owner lane is not handed
 // a loss for a review the hub is carrying on. An implementer's announcement is
-// still relayed to its owner.
+// relayed to its owner as before and starts no replacement: the legacy close has
+// none of the hand-over checks its worktree needs (dirty or unpushed work).
 func TestAnnouncedReviewerQuotaStopStartsTheReplacementAndIsNotRelayedToTheOwner(t *testing.T) {
-	for role, wantRelayed := range map[string]bool{"reviewer": false, "implementer": true} {
+	for role, isReviewer := range map[string]bool{"reviewer": true, "implementer": false} {
 		t.Run(role, func(t *testing.T) {
 			f := newQuotaReplaceFixture(t, role, "mwr-12-p1")
 			event := relayedQuotaStop(f.job, "devin-free")
@@ -197,9 +198,19 @@ func TestAnnouncedReviewerQuotaStopStartsTheReplacementAndIsNotRelayedToTheOwner
 			if err := wsjson.Write(t.Context(), f.node, hubClientWireEvent(hubClientEvent{Kind: "job.lost", Payload: raw})); err != nil {
 				t.Fatal(err)
 			}
-			// The replacement's first act is to look at the old pane.
-			if op := strings.Trim(string(nodeCommandRead(t, f.node)["op"]), `"`); op != "agents.list" {
-				t.Fatalf("first node command %q, want the pane probe", op)
+			if isReviewer {
+				// The replacement's first act is to look at the old pane.
+				if op := strings.Trim(string(nodeCommandRead(t, f.node)["op"]), `"`); op != "agents.list" {
+					t.Fatalf("first node command %q, want the pane probe", op)
+				}
+			} else {
+				time.Sleep(1200 * time.Millisecond) // proves nothing is sent to the node for an implementer
+				f.hub.mu.Lock()
+				sent := len(f.hub.nodeCommands)
+				f.hub.mu.Unlock()
+				if sent != 0 {
+					t.Fatalf("%d node commands for a relayed implementer stop", sent)
+				}
 			}
 			relayed := false
 			waitUntil(700*time.Millisecond, func() bool {
@@ -210,8 +221,8 @@ func TestAnnouncedReviewerQuotaStopStartsTheReplacementAndIsNotRelayedToTheOwner
 				}
 				return relayed
 			})
-			if relayed != wantRelayed {
-				t.Fatalf("job.lost relayed to the owner = %v, want %v", relayed, wantRelayed)
+			if relayed == isReviewer {
+				t.Fatalf("job.lost relayed to the owner = %v for a %s", relayed, role)
 			}
 		})
 	}

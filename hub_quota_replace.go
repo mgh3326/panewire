@@ -120,6 +120,18 @@ func (h *HubServer) startQuotaReplacementAck(machine string, event hubJobEventPa
 	h.closeMu.Unlock()
 	go func() {
 		defer h.spawnWorkers.Done()
+		// Only a reviewer is carried on from a relayed stop: its pane holds no work.
+		// The legacy close this path takes has none of the hand-over checks an
+		// implementer's worktree needs (dirty or unpushed work, hk 4633), so an
+		// implementer's relayed stop stays as it was (docs/quota-stop.md). The
+		// check runs here, off the node's reader, and a stop that is not a
+		// reviewer's is acknowledged: a resend would change nothing.
+		if !h.reviewerQuotaAnnouncement(h.closeCtx, event) {
+			if settled != nil {
+				settled()
+			}
+			return
+		}
 		h.replaceQuotaStoppedAck(h.closeCtx, machine, event, settled)
 	}()
 }

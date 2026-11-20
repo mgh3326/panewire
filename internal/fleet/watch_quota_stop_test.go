@@ -948,11 +948,13 @@ func TestWatcherRetriesAnAnnouncementThatTimedOutOnTheEndLock(t *testing.T) {
 	}
 }
 
-// hk 5690 review: an adopted hand-off keeps the pane state the stop was observed
-// in. A watcher started on an announced ledger (a restart, or a manager's
-// announcement) sees the pane idle again at another sequence: the stop is over,
-// the job is revived instead of being written lost at the grace's end.
-func TestAdoptedHandOffKeepsTheAnnouncedPaneState(t *testing.T) {
+// hk 5690: a reviewer's hand-over decision is terminal for its pane. A watcher
+// started on an announced ledger (a restart, or a manager's announcement) that
+// finds the pane idle again at another sequence than the stop's has nothing to
+// resume: there is no re-prompt or completion path for a reviewer after the
+// announcement. The hub's close refuses a pane that changed, so the job stays
+// alive and is not lost; the watcher ends without writing either.
+func TestAdoptedReviewerHandOffStandsDownWhenThePaneMovedOn(t *testing.T) {
 	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
 	a.QuotaHandOffGrace = QuotaStopHandOffGrace
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
@@ -964,17 +966,8 @@ func TestAdoptedHandOffKeepsTheAnnouncedPaneState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stop, ok := announcedQuotaStop(j)
-	if !ok || stop.PaneSeq != 3 {
+	if stop, ok := announcedQuotaStop(j); !ok || stop.PaneSeq != 3 {
 		t.Fatalf("announced stop %+v ok=%v, want PaneSeq 3 restored from the ledger", stop, ok)
-	}
-	// The reviewer resumed and finished: its screen no longer shows the limit.
-	do := f.Do
-	f.Do = func(c Command) Result {
-		if c.Name == "herdr" && len(c.Args) > 1 && c.Args[0] == "agent" && c.Args[1] == "read" {
-			return Result{Out: "I resumed and finished the review.\n"}
-		}
-		return do(c)
 	}
 	if e := a.watch(context.Background(), []string{"j"}); e != nil {
 		t.Fatal(e)
@@ -982,15 +975,12 @@ func TestAdoptedHandOffKeepsTheAnnouncedPaneState(t *testing.T) {
 	if str(h.record(t, "j"), "state") == "lost" {
 		t.Fatalf("a pane that moved on (seq 7, announced at 3) was written lost: %v", h.record(t, "j"))
 	}
-	revived := false
 	for _, kind := range eventKindsOf(t, a, "j") {
 		if kind == "job.reprompted" {
-			revived = true
+			t.Fatal("a reviewer was re-prompted after its hand-over decision")
 		}
 	}
-	if !revived {
-		t.Fatal("the pane's changed sequence did not retire the stale stop")
-	}
+	_ = f
 }
 
 // hk 5690 review: a herdr outage during an announced hand-off does not end the
@@ -1053,5 +1043,35 @@ func TestWatcherDoesNotWriteLossForAPaneHerdrCouldNotBeAskedAbout(t *testing.T) 
 	}
 	if rec := h.record(t, "j"); str(rec, "state") == "lost" {
 		t.Fatalf("a reviewer that resumed during the outage was written lost: %v", rec)
+	}
+}
+
+// hk 5690 review: a lock timeout on the first announcement, with the retry
+// crossing the ordinary completion deadline, must not end the watcher with no
+// announcement and no loss: the announcement stays owed until it is made.
+func TestWatcherAnnouncementRetryOutlivesTheCompletionDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the 10 s end-lock bound once")
+	}
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
+	a.QuotaHandOffGrace = QuotaStopHandOffGrace
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "4") // the retry's 5 s sleep crosses it
+	unlock, err := LockJobEnd(filepath.Join(a.Jobs, "j"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.AfterFunc(quotaRecordLockWait+2*time.Second, unlock)
+	done := make(chan error, 1)
+	go func() { done <- a.watch(context.Background(), []string{"j"}) }()
+	select {
+	case e := <-done:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(40 * time.Second): // real time: the lock bound is real
+		t.Fatal("the watcher never finished")
+	}
+	if p := lostPayload(t, a); p == nil || str(p, "reason") != "quota_stop" {
+		t.Fatalf("job.lost payload=%v: the watcher ended with the stop never announced", p)
 	}
 }

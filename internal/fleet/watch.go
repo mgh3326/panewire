@@ -267,6 +267,9 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	holdTaken := false
 	var creditAttempts int
 	quotaRetry := false
+	// announceRetry: a reviewer's announcement timed out on a lock and is still
+	// owed; the completion deadline must not end the watcher before the next look.
+	announceRetry := false
 	var lastCredit time.Time
 	var watchedAttempt string
 	for {
@@ -346,7 +349,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		}
 		credit, creditPending := pendingCreditRejection(j)
 		intent, hasIntent := pendingQuotaIntent(j)
-		quotaRetry = hasIntent
+		quotaRetry = hasIntent || announceRetry
 		agents, e := a.agents(ctx)
 		if e != nil && hasIntent && !creditPending && !view.Reaped {
 			// An open close intent outlives a herdr outage: hk alone can
@@ -622,12 +625,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 							// The screen was read and cached for this pane state: look
 							// again next poll, or an unchanged stop is never retried.
 							screenRead = quotaStopWatch{}
+							announceRetry = true
 							if err := a.Sleep(ctx, 5*time.Second); err != nil {
 								return err
 							}
 							continue
 						}
 						handOff = next
+						announceRetry = false
 					}
 				} else if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
 					resumed, resumable := reviewerWaitResume(j, stop, a.Now())
@@ -663,12 +668,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 							// The screen was read and cached for this pane state: look
 							// again next poll, or an unchanged stop is never retried.
 							screenRead = quotaStopWatch{}
+							announceRetry = true
 							if err := a.Sleep(ctx, 5*time.Second); err != nil {
 								return err
 							}
 							continue
 						}
 						handOff = next
+						announceRetry = false
 					}
 				}
 			}
@@ -693,6 +700,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 					return err
 				}
 				continue
+			}
+			if present && !handOff.unchanged(paneAgent) && j.QuotaRole() == "reviewer" {
+				// A reviewer's hand-over decision is terminal for its pane (hk
+				// 5690): there is no resume, re-prompt or completion path after the
+				// announcement. The hub's close refuses a pane that changed, and
+				// then the job stays alive and is not lost; the watcher's part is
+				// over.
+				return nil
 			}
 			if present && !handOff.unchanged(paneAgent) {
 				// The pane moved on during the grace (someone resumed it): the

@@ -596,20 +596,21 @@ func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandid
 	if err != nil {
 		return false, false, err
 	}
-	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner,attempt) VALUES(?,?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane, attempt)
+	// A stall examination's candidate keeps its local sequence in the stall wake
+	// row, not in the candidate (job_inactivity.go).
+	local := int64(c.StateChangeSeq)
+	if local == 0 {
+		_ = q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM quota_stall_wakes WHERE event_id=?`, c.EventID).Scan(&local)
+	}
+	// herdr's own sequence for the state this wake observed goes in with the
+	// reservation, in the one statement: a row reserved without it would announce
+	// with no pane state to fence the hub's close with (hk 5690). Zero when the
+	// pane has moved on locally or herdr reported none.
+	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner,attempt,herdr_seq) VALUES(?,?,?,?,?,?,?,?,COALESCE((SELECT upstream_state_change_seq FROM idle_wake_panes WHERE pane_id=? AND state_change_seq=?),0))`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane, attempt, c.PaneID, local)
 	if err != nil {
 		return false, false, err
 	}
 	if n, _ := result.RowsAffected(); n == 1 {
-		// herdr's sequence for the state this wake observed; zero when the pane
-		// has moved on locally or herdr reported none.
-		// A stall examination's candidate keeps its local sequence in the stall
-		// wake row, not in the candidate (job_inactivity.go).
-		local := int64(c.StateChangeSeq)
-		if local == 0 {
-			_ = q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM quota_stall_wakes WHERE event_id=?`, c.EventID).Scan(&local)
-		}
-		_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET herdr_seq=COALESCE((SELECT upstream_state_change_seq FROM idle_wake_panes WHERE pane_id=? AND state_change_seq=?),0) WHERE event_id=?`, c.PaneID, local, c.EventID)
 		return true, false, nil
 	}
 	if err := q.store.db.QueryRowContext(ctx, `SELECT decision FROM quota_stop_decisions WHERE event_id=?`, c.EventID).Scan(&decision); err != nil {
