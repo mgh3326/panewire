@@ -90,6 +90,9 @@ func IsCut(size int, decodeErr error) bool {
 	return decodeErr != nil && atBoundary(size)
 }
 
+// AtBoundary reports whether n is a byte count a cut answer stops at.
+func AtBoundary(n int) bool { return atBoundary(n) }
+
 // atBoundary reports whether n is one of the byte counts a cut answer stops at.
 func atBoundary(n int) bool {
 	for _, boundary := range cutBoundaries {

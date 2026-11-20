@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // socketCutHerdr is a herdr socket double. The first cutCount pane.list replies
@@ -21,6 +22,7 @@ type socketCutHerdr struct {
 	// read timeout instead of EOF; release ends the hold at cleanup.
 	holdOpen bool
 	cutAt    int
+	delay    time.Duration
 	release  chan struct{}
 	mu       sync.Mutex
 	paneList int
@@ -34,14 +36,22 @@ var socketCutPaneRow = map[string]any{
 
 func newSocketCutHerdr(t *testing.T, cutCount int) *socketCutHerdr {
 	t.Helper()
-	return newSocketCutHerdrMode(t, cutCount, false, 8192)
+	return newSocketCutHerdrWith(t, socketCutOpts{cutCount: cutCount, cutAt: 8192})
 }
 
-// newSocketCutHerdrMode is newSocketCutHerdr, with holdOpen set when a cut
-// connection must stay open after its bytes, and cutAt the byte count a cut
-// reply stops at.
-func newSocketCutHerdrMode(t *testing.T, cutCount int, holdOpen bool, cutAt int) *socketCutHerdr {
+// socketCutOpts configures the herdr double: cutCount pane.list replies are cut
+// at cutAt bytes; holdOpen keeps a cut connection open; delay holds every
+// pane.list reply back before it is written, as simulated latency.
+type socketCutOpts struct {
+	cutCount int
+	cutAt    int
+	holdOpen bool
+	delay    time.Duration
+}
+
+func newSocketCutHerdrWith(t *testing.T, opts socketCutOpts) *socketCutHerdr {
 	t.Helper()
+	cutCount, holdOpen := opts.cutCount, opts.holdOpen
 	// unix sockets cap sun_path near 104 bytes, so the socket lives in short /tmp.
 	dir, err := os.MkdirTemp("/tmp", "t5790")
 	if err != nil {
@@ -53,7 +63,7 @@ func newSocketCutHerdrMode(t *testing.T, cutCount int, holdOpen bool, cutAt int)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	server := &socketCutHerdr{path: listener.Addr().String(), cutCount: cutCount, holdOpen: holdOpen, cutAt: cutAt, release: make(chan struct{})}
+	server := &socketCutHerdr{path: listener.Addr().String(), cutCount: cutCount, holdOpen: holdOpen, cutAt: opts.cutAt, delay: opts.delay, release: make(chan struct{})}
 	t.Cleanup(func() { close(server.release) })
 	go func() {
 		for {
@@ -99,6 +109,10 @@ func (s *socketCutHerdr) serve(conn net.Conn) {
 	raw, err := json.Marshal(map[string]any{"id": req.ID, "result": result})
 	if err != nil {
 		return
+	}
+	if req.Method == "pane.list" && s.delay > 0 {
+		// Simulated latency: the reply starts only after delay.
+		time.Sleep(s.delay)
 	}
 	if cut {
 		// The reply stops at the boundary with no newline; the connection closes.

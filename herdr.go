@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -115,6 +116,18 @@ func readResponseKeeping(ctx context.Context, r *bufio.Reader, id string) (json.
 	}
 }
 func (c *HerdrClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return c.call(ctx, method, params, 0)
+}
+
+// callCutIdle is Call for a read whose answer may be cut at a byte boundary
+// and held open: once the bytes read sit exactly at a cut boundary with no frame
+// end, the next read waits at most idle rather than the whole deadline (see
+// cutIdleReader). Otherwise the deadline is the call's own.
+func (c *HerdrClient) callCutIdle(ctx context.Context, method string, params any, idle time.Duration) (json.RawMessage, error) {
+	return c.call(ctx, method, params, idle)
+}
+
+func (c *HerdrClient) call(ctx context.Context, method string, params any, cutIdle time.Duration) (json.RawMessage, error) {
 	// A call whose deadline has already passed sends nothing and installs no
 	// deadline, so a retry on a spent budget fails as the budget does, not as an
 	// I/O timeout on the socket.
@@ -126,14 +139,48 @@ func (c *HerdrClient) Call(ctx context.Context, method string, params any) (json
 		return nil, err
 	}
 	defer conn.Close()
+	var deadline time.Time
 	if d, ok := ctx.Deadline(); ok {
+		deadline = d
 		_ = conn.SetDeadline(d)
 	}
 	id := c.nextID()
 	if err := writeRequest(conn, id, method, params); err != nil {
 		return nil, err
 	}
-	return readResponse(ctx, bufio.NewReader(conn), id)
+	var src io.Reader = conn
+	if cutIdle > 0 {
+		src = &cutIdleReader{conn: conn, deadline: deadline, idle: cutIdle}
+	}
+	return readResponse(ctx, bufio.NewReader(src), id)
+}
+
+// cutIdleReader reads a socket reply and bounds the wait for its next bytes at
+// idle only while the bytes read so far sit exactly at a cut boundary (4096 or
+// 8192) with no frame end. Any other point reads under the call's own deadline,
+// so a slow but valid reply is never cut short.
+type cutIdleReader struct {
+	conn     net.Conn
+	deadline time.Time // the call's deadline; zero when it has none
+	idle     time.Duration
+	total    int
+	sawEnd   bool
+}
+
+func (r *cutIdleReader) Read(p []byte) (int, error) {
+	deadline := r.deadline
+	if !r.sawEnd && herdrpanes.AtBoundary(r.total) {
+		if bound := time.Now().Add(r.idle); deadline.IsZero() || bound.Before(deadline) {
+			deadline = bound
+		}
+	}
+	_ = r.conn.SetReadDeadline(deadline)
+	n, err := r.conn.Read(p)
+	r.total += n
+	if bytes.IndexByte(p[:n], '\n') >= 0 {
+		r.sawEnd = true
+	}
+	return n, err
 }
 
 // herdrReplyError is an error object herdr returned for a request. It keeps the
