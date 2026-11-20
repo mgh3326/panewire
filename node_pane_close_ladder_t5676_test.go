@@ -560,3 +560,66 @@ func TestNodeLadderCloseAfterARegrantReadsThePastRevocation(t *testing.T) {
 		t.Fatalf("closes=%d %v", fake.called("pane", "close"), fake.calls)
 	}
 }
+
+// A lock that frees with less than the settle interval left must not leave the
+// first pass's intent as an unknown close: neither pass reached `herdr pane
+// close`, so the refusal is stored.
+func TestNodeLadderCloseStoresARefusalWhenTheRetryRunsOutBeforeTheClose(t *testing.T) {
+	root := t.TempDir()
+	seedCloseOpJob(t, root)
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	client.nodeCloseSettle = 300 * time.Millisecond
+	release, err := jobowner.Lock(filepath.Join(root, "jobs"), closeOpJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fixture pacing: the writer lets go after the first pass has reached the
+	// lock (about one settle) and well inside the second settle's window.
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		release()
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 600*time.Millisecond)
+	defer cancel()
+	args := ladderArgs(ladderRequest)
+	args["attempt"] = closeOpAttempt
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, code := client.runNodeCommand(ctx, nodeCommandLadderClose, raw)
+	got, ok := result.(nodeLadderCloseResult)
+	if code != "" || !ok || got.State != nodeLadderRefused {
+		t.Fatalf("result=%+v code=%q", result, code)
+	}
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("closed: %v", fake.calls)
+	}
+	fenced, code := nodeRun(t, client, nodeCommandLadderCloseFence, closeOpRef(ladderRequest))
+	wantLadder(t, fenced, code, nodeLadderRefused, false)
+}
+
+// A grant back to this node (A/1 -> B/2 -> A/3) does not return the revoked
+// pane: until a fresh claim or spawn receipt, the old receipt does not bind a
+// close.
+func TestNodeLadderCloseAfterARegrantNeedsAFreshReceipt(t *testing.T) {
+	root := t.TempDir()
+	dir := seedCloseOpJob(t, root)
+	body := `{"type":"job.revoked","job_id":"` + closeOpJob + `","epoch":2}`
+	if err := os.WriteFile(filepath.Join(dir, "events", "00003-job.revoked.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
+		t.Fatal(err)
+	}
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	args := ladderArgs(ladderRequest)
+	args["epoch"], args["attempt"] = 3, closeOpAttempt
+	result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+	wantLadder(t, result, code, nodeLadderRefused, false)
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("closed a revoked attempt's pane: %v", fake.calls)
+	}
+}

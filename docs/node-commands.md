@@ -798,7 +798,13 @@ without waiting and only after the final pane, composer and question checks, so 
 job event writer (an author's completion) is never held off by a slow pane read;
 a busy lock is waited for within the command's deadline, without holding it, and
 the pane checks are repeated before the next try. A wait that runs out closes
-nothing and stores `refused` (`lock_busy`), releasing the node's acting lock. The
+nothing and stores `refused` (`lock_busy`), releasing the node's acting lock; so
+does any failure after the intent and before `herdr pane close` is reached
+(`not_closed`), such as a deadline during a repeated look or settle. A hub
+revocation (a `job.revoked` with an epoch) takes the job from the attempt it
+follows, and a later grant does not return it: until a fresh claim or spawn
+receipt, the old attempt does not bind a close (an attempt that merely ended, by
+the author's first READY, still does). The
 open-question scan reads past a hub revocation marker a regrant left in the
 ledger. The
 journal directory and the jobs root are fsynced on every open, so a created

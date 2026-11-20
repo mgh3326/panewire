@@ -240,6 +240,13 @@ func (client *HubClient) ladderBound(args nodeLadderCloseArgs) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// A hub revocation takes the job from the attempt it follows, and a later
+	// grant of the job back to this node does not return it: only a fresh claim
+	// or spawn receipt does. An attempt that merely ended (the author's first
+	// READY) is still the author's pane; a revoked one is not.
+	if target.hubRevoked {
+		return false, nil
+	}
 	attempt := firstNonempty(target.attempt, nodeLadderNoAttempt)
 	if args.Attempt != attempt {
 		return false, nil
@@ -350,6 +357,10 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 	// that precedes `herdr pane close`: a pane that was never going to be
 	// closed leaves no intent, and one that may have been leaves one.
 	stale := ""
+	// intentWritten: the closing record is on disk. closeReached: the last check
+	// passed, so the next step is the herdr close itself. A failure with the
+	// intent written and the close not reached closed nothing.
+	intentWritten, closeReached := false, false
 	jobs := filepath.Join(client.jobsInboxRoot, "jobs")
 	var result nodePaneCloseResult
 	var code string
@@ -373,7 +384,11 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 				stale = "attempt_changed"
 				return nodeCloseHookStop{outcome: nodePaneChanged}
 			}
-			return writeNodeLadderRecord(root, record)
+			if err := writeNodeLadderRecord(root, record); err != nil {
+				return err
+			}
+			intentWritten = true
+			return nil
 		}, func() error {
 			// The last check before `herdr pane close`, under the job's ownership
 			// lock (the one job.assigned and job.revoked take, taken even for a job
@@ -407,6 +422,7 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 				stale = "attempt_changed"
 				return nodeCloseHookStop{outcome: nodePaneChanged}
 			}
+			closeReached = true
 			return nil
 		})
 		releaseOwner()
@@ -427,8 +443,19 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 		unlock()
 	}
 	if code != "" {
+		if intentWritten && !closeReached {
+			// The intent is on disk, but the command failed before it reached
+			// `herdr pane close` (a deadline during a repeated look or settle, a
+			// herdr read): nothing was closed, and the refusal is stored so a
+			// repeat does not read the intent as an unknown close.
+			record.State, record.Reason = nodeLadderRefused, "not_closed"
+			if writeNodeLadderRecord(root, record) != nil {
+				return nil, "journal_failed"
+			}
+			return nodeLadderAnswer(record, false), ""
+		}
 		// A failed command leaves whatever the journal holds: no record, or
-		// the closing intent a repeat settles as unknown.
+		// the closing intent a repeat settles as unknown (herdr's close ran).
 		return nil, code
 	}
 	switch result.Outcome {

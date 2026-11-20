@@ -519,6 +519,10 @@ type nodeCloseTarget struct {
 	// hubClose: a hub-close intent was recorded on this attempt; it keeps
 	// intent set for the rest of the attempt.
 	hubClose bool
+	// hubRevoked: a hub revocation (a job.revoked carrying an epoch) came after
+	// the attempt's claim or spawn receipt. Only a fresh claim or spawn clears
+	// it; a later grant does not, and a re-prompt does not.
+	hubRevoked bool
 }
 
 func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
@@ -532,7 +536,7 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 		case nodeJobClaimKind(event.kind):
 			target = nodeCloseTarget{attempt: event.name, role: event.role}
 		case event.kind == "job.spawned":
-			target.attempt, target.receipt, target.ended, target.announced, target.intent, target.hubClose = event.name, true, false, false, false, false
+			target.attempt, target.receipt, target.ended, target.announced, target.intent, target.hubClose, target.hubRevoked = event.name, true, false, false, false, false, false
 			target.pane, target.label, target.session, target.cwd = event.pane, event.label, event.session, event.cwd
 			if event.role != "" {
 				target.role = event.role
@@ -565,6 +569,9 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 			event.kind == "job.joined", event.kind == "job.revoked",
 			event.kind == "job.handed_off", event.kind == "job.escalate", event.kind == "job.reaped":
 			target.ended = true
+			if event.kind == "job.revoked" && event.hubRevokedEpoch > 0 {
+				target.hubRevoked = true
+			}
 		}
 	}
 	return target, nil
