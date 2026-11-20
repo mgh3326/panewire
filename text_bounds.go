@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/mgh3326/panewire/internal/textbound"
@@ -106,6 +107,26 @@ func truncateHubRelayPayloadText(value string, normalizeNewlines bool) (string, 
 		return value, false
 	}
 	return textbound.RunePrefix(value, hubRelayPayloadTextLimit), true
+}
+
+// hubPlacementReasonLimit is the byte bound hk places on a placement record's
+// reason and on each candidate reason: hk accepts only printable text of at
+// most this many bytes and refuses anything else with 400 invalid_context.
+const hubPlacementReasonLimit = 256
+
+// hubPlacementReasonText is the reason contract for a placement record
+// (hk placement record, hub_placement_record.go). A spawn outcome's reason can
+// be a whole engine message with newlines and control bytes, so control runes
+// become spaces, invalid UTF-8 is replaced, and the text is cut on a rune
+// boundary. The leading code (the stage or spawn_failed prefix) survives the cut.
+func hubPlacementReasonText(reason string) string {
+	reason = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(reason, "?"))
+	return utf8PrefixWithin(strings.TrimSpace(reason), hubPlacementReasonLimit)
 }
 
 const inboxSummaryTitleRunes = 60
