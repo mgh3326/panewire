@@ -42,6 +42,15 @@ func ValidOwnerNotify(value string) bool {
 	return value == "" || value == OwnerNotifyFinal || value == OwnerNotifyNever
 }
 
+// ownerInfoEmitArgs is the `panewire emit` argument list of an owner info
+// lane event about job (hk 5454). The notice names the job, so the hub decides
+// the event by that job's --owner-notify mode, and cause is the key its count
+// is grouped under in the loops row. Every node-side owner info notice is
+// built here: a second `--type info` emit would bypass the decision.
+func ownerInfoEmitArgs(lane, eventID, inboxRoot, text, job, cause string) []string {
+	return []string{"emit", "--kind", "lane.event", "--lane", lane, "--type", "info", "--event-id", eventID, "--inbox-root", inboxRoot, "--text", text, "--notice-job", job, "--notice-cause", cause}
+}
+
 // FeatureCapabilities is the closed list of feature names panewire advertises
 // on this build: `panewire version --json` prints it so a requester can gate on
 // a feature before it passes the flag.

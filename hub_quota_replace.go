@@ -373,7 +373,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		place = "(placement still pending)"
 	}
 	text := fmt.Sprintf("%s %s (%s quota) %s %s on %s", verb, event.JobID, pool, to, newJob, place)
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "quota-replace:" + newJob, JobID: newJob, OwnerLane: next.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "quota-replace:" + newJob, JobID: newJob, OwnerLane: next.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(newJob, "quota_replace", false)}, nil)
 	return newJob, true
 }
 

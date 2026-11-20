@@ -347,6 +347,9 @@ type hubJobEventPayload struct {
 	// unmarked order, which interrupts. Only a lane.event typed order carries it.
 	Priority string `json:"priority,omitempty"`
 	Cause    string `json:"cause,omitempty"`
+	// Notice names the job an info lane.event is about (hk 5454). The job's
+	// --owner-notify mode decides it in receiveInbox. Absent for every other event.
+	Notice   *ownerInfoNotice `json:"notice,omitempty"`
 	noDigest bool
 	// inboxID is the lane inbox row that holds this lane.event whole, set by
 	// receiveInbox. The typed head points at it (laneEventRelayText).

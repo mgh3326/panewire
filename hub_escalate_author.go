@@ -524,12 +524,12 @@ func (h *HubServer) escalateAuthorOutcome(ctx context.Context, app *fleet.App, r
 	}
 	if err := app.ConfirmLadderTaskBinding(ctx, request.Task, request.Job, job, hubSpawnArg(task.Request.Args, "-l")); err != nil {
 		text := fmt.Sprintf("ladder step %s: successor %s placed, but its task binding is unconfirmed (round %d, %s)", request.Job, job, request.Round, request.PR)
-		h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:placed:rebind_unconfirmed", request.Job, request.Round), JobID: job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+		h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:placed:rebind_unconfirmed", request.Job, request.Round), JobID: job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(job, "ladder_rebind_unconfirmed", false)}, nil)
 		return hubEscalateAuthorResult{Code: "rebind_unconfirmed", Reason: "successor placed but task binding is unconfirmed"}, nil
 	}
 	rung := stepValue(task.Request.Args, "-m") + "@" + firstNonempty(stepValue(task.Request.Args, "--effort"), "default")
 	text := fmt.Sprintf("ladder step %s -> %s on %s (round %d, %s)", request.Job, job, rung, request.Round, request.PR)
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "ladder-step:" + job, JobID: job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "ladder-step:" + job, JobID: job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(job, "ladder_step", false)}, nil)
 	return hubEscalateAuthorResult{Job: job, Rung: rung}, nil
 }
 
@@ -680,7 +680,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 
 func (h *HubServer) escalateAuthorParentEnded(ctx context.Context, request hubEscalateAuthorRequest, owner string) hubEscalateAuthorResult {
 	text := fmt.Sprintf("ladder step %s: the predecessor ended independently; the staged successor and its reservation were released (round %d, %s)", request.Job, request.Round, request.PR)
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:ended:parent_ended", request.Job, request.Round), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:ended:parent_ended", request.Job, request.Round), JobID: request.Job, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(request.Job, "ladder_parent_ended", false)}, nil)
 	return hubEscalateAuthorResult{Code: "parent_ended", Reason: "the predecessor ended independently; its staged successor was released"}
 }
 
@@ -742,7 +742,7 @@ func (h *HubServer) escalateAuthorRefusal(ctx context.Context, request hubEscala
 		notify = "decision"
 		text = fmt.Sprintf("[panewire] ESC | authorless: ladder step %s: %s (%s) (round %d); %s has no author: the pane is closed and no successor was confirmed. Decide how to continue; panewire does not start a successor automatically.", request.Job, code, reason, request.Round, request.PR)
 	}
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: notify, Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: eventID, JobID: request.Job, OwnerLane: owner, NotifyType: notify, Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(request.Job, "ladder_"+code, false)}, nil)
 	return hubEscalateAuthorResult{Code: code, Reason: reason, AuthorEnded: ended}, nil
 }
 
