@@ -814,6 +814,12 @@ type HubServer struct {
 	// (hub_one_time_action.go, hub_one_time_action_store.go).
 	oneTimeMu      sync.Mutex
 	oneTimeActions map[oneTimeActionKey]oneTimeActionState
+	// loginNeeds is each machine's standing login_missing kinds (sorted), kept
+	// in memory by refreshLoginNeedsLocked and read by the readiness publish. It
+	// has its own lock, never held across storage I/O, and publishes hold it so
+	// an older snapshot cannot be published after a newer one (hub_readiness.go).
+	loginNeedMu sync.Mutex
+	loginNeeds  map[string][]string
 	// oneTimeDSN is the panewire Sentry DSN the ACTION NEEDED events go to; ""
 	// when reporting is not configured. oneTimeNotify, when set, replaces the
 	// Sentry send (tests only). oneTimeQueue feeds the one notice worker that

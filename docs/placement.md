@@ -256,8 +256,10 @@ outcome, in this order:
 
 **Standing login need (hk 5686).** A launch that stopped at the agy login
 screen raises the one-time `login_missing` need of its (host, kind)
-([one-time action](#first-run-refusals-and-the-desk-notice)). While that need
-stands, the hub publishes the kind in the host's `readiness` value as
+([one-time action](#first-run-refusals-and-the-desk-notice)). The need stands
+from its first sighting, whether or not the operator notice was delivered; a
+failed notice is retried on the next sighting. While that need stands, the hub
+publishes the kind in the host's `readiness` value as
 `login_needs`, and the filter drops the (host, kind) pair with `login_missing`
 whatever the node's report says about the login. The node's probe can read
 `present` while panes still see the login screen, which is why the report alone

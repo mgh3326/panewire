@@ -228,11 +228,33 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 		return
 	}
 	h.oneTimeMu.Unlock()
+	// A login need stands from this sighting, delivered or not: placement reads
+	// it, and a failed notice leaves ToldAt zero so the delivery is tried again.
+	if s.key.need == oneTimeLoginMissing {
+		h.standLoginNeed(s.key)
+	}
 	if queued[s.key] {
 		return
 	}
 	queued[s.key] = true
 	*untold = append(*untold, s)
+}
+
+// standLoginNeed keeps an untold login need's row, so the need stands while its
+// notice is undelivered. A row that stands untold already (no ToldAt, no
+// confirmed clear, no pending clear) is left alone; any other row starts a new
+// untold episode, as a recurrence after a confirmed clear does.
+func (h *HubServer) standLoginNeed(key oneTimeActionKey) {
+	h.oneTimeMu.Lock()
+	defer h.oneTimeMu.Unlock()
+	state, ok := h.oneTimeActions[key]
+	if ok && state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() && state.GoneSince.IsZero() {
+		return
+	}
+	state.ToldAt, state.GoneSince, state.ConfirmedAt = time.Time{}, time.Time{}, time.Time{}
+	if err := h.saveOneTimeLocked(key, state); err != nil {
+		h.logger.Warn("one-time action need could not be stored", "host", key.machine, "kind", key.kind, "error", err)
+	}
 }
 
 // deliverOneTimeAction sends the ACTION NEEDED event for s. It answers an error

@@ -29,7 +29,8 @@ func (h *HubServer) saveOneTimeLocked(key oneTimeActionKey, state oneTimeActionS
 	if h.oneTimeActions == nil {
 		h.oneTimeActions = map[oneTimeActionKey]oneTimeActionState{}
 	}
-	if !oneTimeRowKept(state) {
+	defer h.refreshLoginNeedsLocked()
+	if !oneTimeRowKept(key, state) {
 		if err := h.deleteOneTimeActionLocked(key); err != nil {
 			h.oneTimeActions[key] = state
 			return err
@@ -82,6 +83,7 @@ func (h *HubServer) loadOneTimeActions() {
 	var owed []oneTimeActionKey
 	h.oneTimeMu.Lock()
 	h.oneTimeActions = told
+	h.refreshLoginNeedsLocked()
 	for key, state := range told {
 		if state.holdsWait() || !state.ConfirmedAt.IsZero() {
 			owed = append(owed, key)

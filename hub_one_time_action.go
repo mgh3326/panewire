@@ -48,9 +48,17 @@ type oneTimeActionState struct {
 
 // oneTimeRowKept reports whether a row still has something to remember. A told
 // episode the clear has not yet confirmed needs its row; so does a wait that
-// is not known to be closed, even after its episode ended.
-func oneTimeRowKept(state oneTimeActionState) bool {
-	return (!state.ToldAt.IsZero() && state.ConfirmedAt.IsZero()) || state.holdsWait()
+// is not known to be closed, even after its episode ended. A login need is
+// remembered from its first sighting, told or not: placement reads it
+// (standingLoginNeeds), and a failed notice only leaves ToldAt zero to retry.
+func oneTimeRowKept(key oneTimeActionKey, state oneTimeActionState) bool {
+	if state.holdsWait() {
+		return true
+	}
+	if key.need == oneTimeLoginMissing {
+		return state.ConfirmedAt.IsZero()
+	}
+	return !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero()
 }
 
 // holdsWait reports whether the row names any handoffkeep wait or anchor
