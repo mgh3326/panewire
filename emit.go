@@ -326,6 +326,10 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 			fmt.Fprintln(stderr, "emit: duplicate outbox key")
 			return ExitDeliveryFailure
 		}
+		if producerRefusal(err) {
+			fmt.Fprintln(stderr, "emit: refused:", err)
+			return ExitUsage
+		}
 		fmt.Fprintln(stderr, "emit: event file could not be written:", err)
 		return ExitInternal
 	}
@@ -367,6 +371,12 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		return "", err
 	}
 	defer release()
+	// The epoch was checked before the lock wait. A revocation or regrant
+	// written under this same lock while emit waited is only visible now, so
+	// the captured epoch is checked again before dedupe or publish (T5698).
+	if _, err := producerEpoch(filepath.Join(inboxRoot, "jobs"), record.JobID, record.Epoch); err != nil {
+		return "", err
+	}
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
 		return "", err

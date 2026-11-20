@@ -40,8 +40,18 @@ func lock(ctx context.Context, f *os.File) error {
 		return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
 	}
 	for {
+		// A done context ends the wait before another attempt, so a lock that
+		// frees after the deadline is never taken (T5698).
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
+			// The flock can succeed just after the deadline; drop it then.
+			if err := ctx.Err(); err != nil {
+				syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				return err
+			}
 			return nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
