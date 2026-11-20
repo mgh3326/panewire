@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -293,7 +292,7 @@ func (s *nativeQuotaSource) refreshOne(ctx context.Context) (shared.Reading, boo
 		return shared.Reading{}, false, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
 	}
 	s.flowOnce.Do(func() {
-		s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(freshTTL), HostID: s.HostID, Wait: s.Wait, Warn: quotaFlowWarn(s.Warn)}
+		s.flow = &shared.Flow{Now: s.Now, FreshTTL: s.refreshTTL(freshTTL), HostID: s.HostID, Wait: s.Wait}
 		if s.Pool == "devin" {
 			config := s.Devin
 			config.Now = s.Now
@@ -423,14 +422,6 @@ func (s *nativeQuotaSource) measureDirect(ctx context.Context, measure shared.Me
 
 // quotaErrorKind is err's quota error kind, or fleetQuotaErrorKindUnreadable
 // for a failure that is not one.
-// quotaFlowWarn adapts the node's line logger to shared.Flow's format logger.
-func quotaFlowWarn(warn func(string)) func(string, ...any) {
-	if warn == nil {
-		return nil
-	}
-	return func(format string, args ...any) { warn(fmt.Sprintf(format, args...)) }
-}
-
 func quotaErrorKind(err error) string {
 	if kind := quota.KindOf(err); fleetQuotaErrorKindPattern.MatchString(kind) {
 		return kind

@@ -3,6 +3,7 @@ package shared
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,21 +13,15 @@ import (
 	"time"
 )
 
-// hk 5138: an older handoffkeep rejects unknown observation fields, so a
-// commandcode reading that carries `balance` fails publish. The flow must
-// republish the same observation without balance, keep the local reading's
-// balance, warn once, and retry the field after an hour.
-func TestFlowPublishesBalanceOnlyWhenTheStoreAcceptsIt_t5138(t *testing.T) {
-	now := time.Date(2026, 11, 18, 12, 40, 0, 0, time.UTC)
+// hk 5217: a store's 400 on an observation that carries `balance` is a
+// publish error like any other refusal. It is not retried without the field:
+// the balance-less republish that hid such a refusal for an hour is gone.
+func TestFlowBalanceRefusalIsAPublishError_t5217(t *testing.T) {
+	now := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
 	var mu sync.Mutex
 	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/lease"):
-			_, _ = io.WriteString(w, `{"holder":"h","acquired":true,"expires_at":"2099-01-01T00:00:00Z"}`)
-		case r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusNoContent)
-		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/observation"):
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/observation") {
 			raw, _ := io.ReadAll(r.Body)
 			mu.Lock()
 			bodies = append(bodies, string(raw))
@@ -36,59 +31,41 @@ func TestFlowPublishesBalanceOnlyWhenTheStoreAcceptsIt_t5138(t *testing.T) {
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
-		default:
-			w.WriteHeader(http.StatusOK)
+			return
 		}
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 	client := Client{BaseURL: server.URL}
 	f := &Flow{Now: func() time.Time { return now }}
-	var warns []string
-	f.Warn = func(format string, args ...any) { warns = append(warns, format) }
 	balance := 0.5
 	obs := Observation{Kind: KindAuto, MeasuredAt: now, Buckets: []Bucket{{Window: "5h", UsedPct: 10, Scope: "account"}}, Balance: &balance}
 
-	if err := f.publish(t.Context(), client, testKey, "holder", obs); err != nil {
-		t.Fatal(err)
+	err := f.publish(t.Context(), client, testKey, "holder", obs)
+	var status *StatusError
+	if !errors.As(err, &status) || status.Status != http.StatusBadRequest {
+		t.Fatalf("publish err = %v, want the store's 400 as a publish error", err)
 	}
 	mu.Lock()
 	got := append([]string(nil), bodies...)
 	mu.Unlock()
-	if len(got) != 2 || !strings.Contains(got[0], `"balance"`) || strings.Contains(got[1], `"balance"`) {
-		t.Fatalf("publish bodies = %v, want a balance attempt then the same observation without it", got)
-	}
-	if len(warns) != 1 {
-		t.Fatalf("warns = %v, want exactly one", warns)
+	if len(got) != 1 || !strings.Contains(got[0], `"balance"`) {
+		t.Fatalf("publish bodies = %v, want one attempt with balance and no republish", got)
 	}
 	if obs.Balance == nil || *obs.Balance != balance {
 		t.Fatal("the local observation lost its balance")
 	}
 
-	// Remembered for the process: the next publication omits the field
-	// without another refusal, and does not warn again.
+	// A balance-less observation the store accepts publishes cleanly.
+	obs.Balance = nil
 	if err := f.publish(t.Context(), client, testKey, "holder", obs); err != nil {
-		t.Fatal(err)
+		t.Fatalf("balance-less publish: %v", err)
 	}
 	mu.Lock()
 	got = append([]string(nil), bodies...)
 	mu.Unlock()
-	if len(got) != 3 || strings.Contains(got[2], `"balance"`) {
-		t.Fatalf("remembered publish bodies = %v, want one body without balance", got)
-	}
-	if len(warns) != 1 {
-		t.Fatalf("warns after remembered refusal = %v, want one", warns)
-	}
-
-	// Retried after an hour.
-	now = now.Add(balanceRetry)
-	if err := f.publish(t.Context(), client, testKey, "holder", obs); err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	got = append([]string(nil), bodies...)
-	mu.Unlock()
-	if len(got) != 5 || !strings.Contains(got[3], `"balance"`) || strings.Contains(got[4], `"balance"`) {
-		t.Fatalf("retry bodies = %v, want the field tried and dropped again", got)
+	if len(got) != 2 || strings.Contains(got[1], `"balance"`) {
+		t.Fatalf("publish bodies = %v, want the balance-less observation as the second", got)
 	}
 }
 
