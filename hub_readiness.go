@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -157,8 +158,13 @@ func (h *HubServer) observeReadinessLocked(record *hubNodeRecord, readiness *fle
 // publishFleetReadiness publishes one machine's readiness value: the node's
 // last report (or readiness_unknown when it never sent one) and the hub's
 // launch backoff. An identical value is not republished within the load value's
-// republish bound, which keeps measured_at fresh for consumers.
+// republish bound, which keeps measured_at fresh for consumers. It carries the
+// hub's standing login needs (standingLoginNeeds) the same way it carries the
+// launch backoff.
 func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
+	// Read before h.mu: the one-time state has its own lock, and no caller of
+	// this publish holds h.mu.
+	loginNeeds := h.standingLoginNeeds(machine)
 	h.mu.Lock()
 	record := h.nodes[machine]
 	if record == nil {
@@ -171,7 +177,7 @@ func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
 	if report != nil && now.Sub(record.readinessAt) > hubReadinessExpiry {
 		report = nil
 	}
-	state := fleet.ReadinessState{Unknown: report == nil, Readiness: report}
+	state := fleet.ReadinessState{Unknown: report == nil, Readiness: report, LoginNeeds: loginNeeds}
 	for key, entry := range h.launchBackoffs {
 		if key.machine == machine && now.Before(entry.until) {
 			if state.BackoffUntil == nil {
@@ -182,6 +188,23 @@ func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
 	}
 	h.mu.Unlock()
 	h.stateStore().publish(FleetStateMessage{Host: machine, Kind: fleetStateKindReadiness, MeasuredAt: now, ReceivedAt: now, Readiness: &state}, fleetStateLoadRepublish)
+}
+
+// standingLoginNeeds lists the harness kinds whose login_missing need on machine
+// still stands: its row is kept and no report has confirmed it clear, so the
+// anti-flap clear of hub_one_time_action.go decides when it lifts. Placement
+// skips the (host, kind) pair while it stands (fleet ReadinessState.LoginNeeds).
+func (h *HubServer) standingLoginNeeds(machine string) []string {
+	h.oneTimeMu.Lock()
+	defer h.oneTimeMu.Unlock()
+	var kinds []string
+	for key, state := range h.oneTimeActions {
+		if key.machine == machine && key.need == oneTimeLoginMissing && state.ConfirmedAt.IsZero() {
+			kinds = append(kinds, key.kind)
+		}
+	}
+	slices.Sort(kinds)
+	return kinds
 }
 
 // launchFailureReason reports whether a failed node answer shows that the host

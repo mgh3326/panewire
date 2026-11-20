@@ -189,6 +189,15 @@ func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender 
 		h.oneTimeMu.Unlock()
 		h.logger.Warn("host needs a one-time action", "host", s.key.machine, "kind", s.key.kind, "need", s.key.need)
 	}
+	// A login need the batch touched is what placement reads (ReadinessState.LoginNeeds),
+	// so its machine's readiness value is republished now, not at the next heartbeat.
+	republished := map[string]bool{}
+	for key := range touched {
+		if key.need == oneTimeLoginMissing && !republished[key.machine] {
+			republished[key.machine] = true
+			h.publishFleetReadiness(key.machine, h.now().UTC())
+		}
+	}
 	// The wait worker does every handoffkeep write, so a slow or failing hk
 	// never delays the notices above. It reconciles each touched need.
 	h.enqueueOneTimeWaits(touchedKeys(touched)...)

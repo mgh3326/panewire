@@ -64,6 +64,11 @@ type ReadinessState struct {
 	Unknown      bool                 `json:"readiness_unknown,omitempty"`
 	Readiness    *Readiness           `json:"readiness,omitempty"`
 	BackoffUntil map[string]time.Time `json:"backoff_until,omitempty"`
+	// LoginNeeds are the harness kinds whose login_missing need the hub has
+	// not yet seen cleared (hub_one_time_action.go): a launch of that kind on
+	// this host stopped at the login screen. The skip holds whatever the
+	// node's own report says about the login, until the need clears.
+	LoginNeeds []string `json:"login_needs,omitempty"`
 }
 
 // Outcome codes of the readiness filter. The first seven name a check; the
@@ -135,10 +140,13 @@ type ReadinessNeed struct {
 
 // Drop answers the code of the first check the pair fails, or "". A host with
 // no readiness report (Unknown) is never dropped by a readiness check; the
-// hub-observed backoff still applies.
+// hub-observed backoff and login need still apply.
 func (s ReadinessState) Drop(n ReadinessNeed, now time.Time) string {
 	if until, ok := s.BackoffUntil[n.Kind]; ok && now.Before(until) {
 		return ReadyLaunchBackoff
+	}
+	if n.Kind != "cmd" && slices.Contains(s.LoginNeeds, n.Kind) {
+		return ReadyLoginMissing
 	}
 	r := s.Readiness
 	if s.Unknown || r == nil {
