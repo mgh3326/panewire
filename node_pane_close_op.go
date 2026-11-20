@@ -116,6 +116,11 @@ type nodePaneCloseOpArgs struct {
 	EndReason string `json:"end_reason"`
 	// Handover requires the old worktree still to match the saved checkout.
 	Handover *nodeHandoverCloseGuard `json:"handover,omitempty"`
+	// StopSeq is the herdr state_change_seq a quota stop was observed in (hk
+	// 5780): the close refuses a pane no longer in that state, as pane.close does
+	// with its stop_seq. Sent only to a node advertising
+	// hubCapabilityCloseOpStopSeq.
+	StopSeq *int64 `json:"stop_seq,omitempty"`
 }
 
 // nodeHandoverSnapshotBound binds a snapshot hand-over's close (hk 5324) to
@@ -187,7 +192,7 @@ type nodeCloseOpStatusResult struct {
 
 func validNodePaneCloseOpArgs(args nodePaneCloseOpArgs) bool {
 	guard := args.Handover
-	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && args.Epoch > 0 && validNodeAttemptToken(args.Attempt) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != "" && (guard == nil || guard.Origin != "" && validNodeRefName(guard.Branch) && nodeShaPattern.MatchString(guard.Commit) && (guard.Snapshot == nil || nodeShaPattern.MatchString(guard.Snapshot.Tree) && nodeShaPattern.MatchString(guard.Snapshot.Parent)))
+	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && args.Epoch > 0 && validNodeAttemptToken(args.Attempt) && (args.StopSeq == nil || *args.StopSeq >= 0) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd) && validNodeEndReason(args.EndReason) && args.EndReason != "" && (guard == nil || guard.Origin != "" && validNodeRefName(guard.Branch) && nodeShaPattern.MatchString(guard.Commit) && (guard.Snapshot == nil || nodeShaPattern.MatchString(guard.Snapshot.Tree) && nodeShaPattern.MatchString(guard.Snapshot.Parent)))
 }
 
 func validHandoverCloseReason(reason string) bool {
@@ -390,7 +395,7 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 	if outcome != "" {
 		return nodePaneCloseOpResult{Outcome: outcome}, ""
 	}
-	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, target: target}
+	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, StopSeq: args.StopSeq, target: target}
 	if target.role == "implementer" {
 		// An idle implementer may be waiting on an ESC answer: the hub's
 		// hand-over close keeps the open-question guard pane.close has

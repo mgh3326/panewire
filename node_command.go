@@ -286,6 +286,28 @@ func nodeCommandPaneCloseFields(raw json.RawMessage) bool {
 	return true
 }
 
+// nodePaneCloseOpFields accepts pane.close_op's required fields plus any subset
+// of the optional handover guard and stop_seq (hk 5780).
+func nodePaneCloseOpFields(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	for _, name := range nodeCommandArgFields[nodeCommandPaneCloseOp] {
+		value, found := fields[name]
+		if !found || isJSONNull(value) {
+			return false
+		}
+		delete(fields, name)
+	}
+	for key, value := range fields {
+		if (key != "handover" && key != "stop_seq") || isJSONNull(value) {
+			return false
+		}
+	}
+	return true
+}
+
 // nodeCloseStatusFields accepts pane.close_status's required fields plus any
 // subset of the optional ack (hk 5073) and epoch (hk 5296).
 func nodeCloseStatusFields(raw json.RawMessage) bool {
@@ -403,7 +425,7 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
 	optionalAck := op == nodeCommandPaneCloseStatus && nodeCloseStatusFields(raw)
-	optionalHandover := op == nodeCommandPaneCloseOp && nodeCommandHasFields(raw, append(append([]string(nil), names...), "handover"))
+	optionalHandover := op == nodeCommandPaneCloseOp && nodePaneCloseOpFields(raw)
 	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover) {
 		return nil, false
 	}

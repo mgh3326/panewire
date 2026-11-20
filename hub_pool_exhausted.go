@@ -33,6 +33,12 @@ type poolExhaustion struct {
 	// 5780): the successor excludes it. It is read once, when the hand-over is
 	// prepared, and is not stored with the row.
 	Band string
+	// StopSeq is the pane state the screen stop was observed in; the close is
+	// fenced to it (poolHandover.StopSeq).
+	StopSeq *int64
+	// StopEvent is the announcement's producer event id: the row and the owner
+	// decision are keyed by it, so a resend finds its own outcome (hk 5780).
+	StopEvent string
 }
 
 // poolCauseRetired: every catalog row of the pool is retired (hk 4625).

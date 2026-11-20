@@ -283,6 +283,14 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			settle()
 		}
 	}()
+	// fileLoss hands the stop to the ordinary loss relay, which owns its receipt:
+	// the node's outbox row is not acknowledged here (hk 5780 review).
+	fileLoss := func() {
+		if announced != nil {
+			announced.fileLoss(ctx)
+			retry = true
+		}
+	}
 	skip := func(reason string, kv ...any) (string, bool) {
 		h.logger.Info("quota-stop replacement skipped", append([]any{"job", event.JobID, "node", machine, "reason", reason}, kv...)...)
 		return "", false
@@ -303,6 +311,10 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// it with pool-action admission so neither can overwrite the other's end.
 	unlockJob, free := h.lockWithoutPoolAction(ctx, event.JobID)
 	if !free {
+		if announced != nil && h.handoverRowOwns(ctx, event.JobID) {
+			// A hand-over row already owns the job: the announcement has its outcome.
+			return skip("handover_owned")
+		}
 		return retryLater("pool_action_pending")
 	}
 	released := false
@@ -317,7 +329,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// A job the hub did not spawn has no stored submission: not one it carries on.
-		announced.fileLoss(ctx)
+		fileLoss()
 		return skip("unknown_job")
 	}
 	if err != nil {
@@ -328,14 +340,14 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
-		announced.fileLoss(ctx)
+		fileLoss()
 		return skip("unreadable_request")
 	}
 	role := prior.Role
 	// An announced reviewer stop is replaced at once. An implementer only
 	// announces job.lost when the quota-stop manager handed it over.
 	if role != "reviewer" && role != "implementer" {
-		announced.fileLoss(ctx)
+		fileLoss()
 		return skip("role", "role", role)
 	}
 	// An announced implementer is handed over by the guarded worktree hand-over
@@ -419,10 +431,14 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	if guarded {
 		// createPoolAction takes the job's lock itself.
 		unlock()
-		if !h.handOverAnnouncedImplementer(ctx, machine, event, holder, prior, announced) {
-			return retryLater("handover_pending")
+		switch h.handOverAnnouncedImplementer(ctx, machine, event, holder, prior, announced) {
+		case quotaStopSettled:
+			return "", false
+		case quotaStopFiled:
+			retry = true // the ordinary relay owns the receipt
+			return "", false
 		}
-		return "", false
+		return retryLater("handover_pending")
 	}
 	// A reviewer the hub cannot carry on is given up: its record ends lost now
 	// (not after the watcher's grace) and the owner is told once (hk 5690).

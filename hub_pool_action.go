@@ -376,6 +376,7 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 					return errors.New("handover checkout unavailable")
 				}
 				args.Handover = &nodeHandoverCloseGuard{Origin: checkout.Origin, Branch: handover.Branch, Commit: checkout.Sha}
+				args.StopSeq = handover.StopSeq
 				if snapshot := handover.Snapshot; snapshot != nil {
 					args.Handover.Snapshot = &nodeHandoverSnapshotBound{Tree: snapshot.Tree, Parent: snapshot.Parent}
 				}

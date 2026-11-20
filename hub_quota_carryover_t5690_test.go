@@ -387,15 +387,15 @@ func TestAnnouncedStopRoleIsReadFromTheHolderTheReplacementLoads(t *testing.T) {
 	var filed, settled int
 	announced := &quotaAnnouncement{relay: func(context.Context) { filed++ }}
 	ack := func() { settled++ }
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", relayedQuotaStop("never-spawned", "claude"), ack, announced); ok || job != "" || filed != 1 || settled != 1 {
-		t.Fatalf("a job the hub never spawned: filed=%d settled=%d, want a loss filed once and settled", filed, settled)
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", relayedQuotaStop("never-spawned", "claude"), ack, announced); ok || job != "" || filed != 1 || settled != 0 {
+		t.Fatalf("a job the hub never spawned: filed=%d settled=%d, want a loss filed once and not acknowledged", filed, settled)
 	}
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", relayedQuotaStop(f.job, "claude"), ack, announced); ok || job != "" || filed != 2 || settled != 2 {
-		t.Fatalf("a consult: filed=%d settled=%d, want a loss filed and settled", filed, settled)
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", relayedQuotaStop(f.job, "claude"), ack, announced); ok || job != "" || filed != 2 || settled != 0 {
+		t.Fatalf("a consult: filed=%d settled=%d, want a loss filed and not acknowledged", filed, settled)
 	}
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if job, ok := f.hub.replaceQuotaStoppedAck(canceled, "machine-a", relayedQuotaStop(f.job, "claude"), ack, announced); ok || job != "" || filed != 2 || settled != 2 {
+	if job, ok := f.hub.replaceQuotaStoppedAck(canceled, "machine-a", relayedQuotaStop(f.job, "claude"), ack, announced); ok || job != "" || filed != 2 || settled != 0 {
 		t.Fatalf("a failed lookup: filed=%d settled=%d, want neither", filed, settled)
 	}
 }
