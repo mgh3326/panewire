@@ -868,7 +868,21 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		// may be transient, so the request keeps waiting for the retry a later
 		// pass admits. After a success the reading is current now, and the seat
 		// drops instead (hk 5456).
-		return h.quotaRefreshFailed(machine, pool)
+		if !h.quotaRefreshFailed(machine, pool) {
+			return false
+		}
+		// This pass holds on the refresh the last pass queued, so it keeps that
+		// pass's start: the timeout must still name the attempt that failed
+		// (hk 5572). With no earlier link the failure itself holds the request,
+		// so the start is left unset and nothing gates what it names.
+		var held time.Time
+		for _, prev := range task.RefreshWaits {
+			if prev.Machine == machine && prev.Pool == pool {
+				held = prev.StartedAt
+			}
+		}
+		rememberRefreshWait(machine, pool, held)
+		return true
 	}
 	app.PlacementTry = func(host string) { h.countPlacement(task.Job, host, hubSpawnArg(task.Request.Args, "-l")) }
 	app.PlacementGate = h.placementGate.acquire
