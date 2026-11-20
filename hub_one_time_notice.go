@@ -219,7 +219,10 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 	h.oneTimeMu.Lock()
 	if state, ok := h.oneTimeActions[s.key]; ok && s.key.need == oneTimeLoginMissing {
 		// Reports older than this sighting cannot clear the login need (SightedAt).
-		state.SightedAt = s.at
+		// Sightings can be applied out of time order, so keep the latest.
+		if s.at.After(state.SightedAt) {
+			state.SightedAt = s.at
+		}
 		h.oneTimeActions[s.key] = state
 	}
 	if state, ok := h.oneTimeActions[s.key]; ok && !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() {
@@ -253,7 +256,9 @@ func (h *HubServer) standLoginNeed(key oneTimeActionKey, at time.Time) {
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
 	state, ok := h.oneTimeActions[key]
-	state.SightedAt = at
+	if at.After(state.SightedAt) {
+		state.SightedAt = at
+	}
 	if ok && state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() && state.GoneSince.IsZero() {
 		h.oneTimeActions[key] = state
 		return
