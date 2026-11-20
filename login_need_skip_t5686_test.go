@@ -138,3 +138,25 @@ func TestLoginNeedOfUncoveredKindIsNotPublished(t *testing.T) {
 		t.Fatalf("an uncovered kind was published as a skip: LoginNeeds=%v", got)
 	}
 }
+
+// A readiness report computed before the refusal, but received after it, cannot
+// start or confirm the clear of an untold login need (hk 5686 review). Two such
+// clean reports one cycle apart would clear it if the refusal did not bound them.
+func TestLoginNeedNotClearedByReportBeforeRefusal(t *testing.T) {
+	hub, server := fsHub(t, "")
+	fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	hub.oneTimeNotify = func(*sentry.Event) (bool, error) { return false, errors.New("sentry unavailable") }
+	refused := hub.now().UTC()
+	hub.noteOneTimeActionRefusal("node-a", "agy-flash38-medium", hubSpawnResult{RC: fleet.ExitAuthUnavailable, StdoutTail: loginScreenAuthMessage + "\nFix: sign in"})
+	settleOneTimeNotices(t, hub)
+	clean := func(checked, received time.Time) {
+		t.Helper()
+		hub.noteReadinessActions("node-a", readinessWith(checked, "agy", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}), received)
+		settleOneTimeNotices(t, hub)
+	}
+	clean(refused.Add(-time.Minute), refused.Add(time.Second))
+	clean(refused.Add(-time.Minute+oneTimeActionClearCycle), refused.Add(time.Second+oneTimeActionClearCycle))
+	if got := loginNeedsOf(t, hub, "node-a"); len(got) != 1 || got[0] != "agy" {
+		t.Fatalf("stale reports cleared the need: LoginNeeds=%v want [agy]", got)
+	}
+}

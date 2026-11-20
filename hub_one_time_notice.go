@@ -217,6 +217,11 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 	}
 	touched[s.key] = true
 	h.oneTimeMu.Lock()
+	if state, ok := h.oneTimeActions[s.key]; ok && s.key.need == oneTimeLoginMissing {
+		// Reports older than this sighting cannot clear the login need (SightedAt).
+		state.SightedAt = s.at
+		h.oneTimeActions[s.key] = state
+	}
 	if state, ok := h.oneTimeActions[s.key]; ok && !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() {
 		if !state.GoneSince.IsZero() {
 			state.GoneSince = time.Time{}
@@ -231,7 +236,7 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 	// A login need stands from this sighting, delivered or not: placement reads
 	// it, and a failed notice leaves ToldAt zero so the delivery is tried again.
 	if s.key.need == oneTimeLoginMissing {
-		h.standLoginNeed(s.key)
+		h.standLoginNeed(s.key, s.at)
 	}
 	if queued[s.key] {
 		return
@@ -244,11 +249,13 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 // notice is undelivered. A row that stands untold already (no ToldAt, no
 // confirmed clear, no pending clear) is left alone; any other row starts a new
 // untold episode, as a recurrence after a confirmed clear does.
-func (h *HubServer) standLoginNeed(key oneTimeActionKey) {
+func (h *HubServer) standLoginNeed(key oneTimeActionKey, at time.Time) {
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
 	state, ok := h.oneTimeActions[key]
+	state.SightedAt = at
 	if ok && state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() && state.GoneSince.IsZero() {
+		h.oneTimeActions[key] = state
 		return
 	}
 	state.ToldAt, state.GoneSince, state.ConfirmedAt = time.Time{}, time.Time{}, time.Time{}

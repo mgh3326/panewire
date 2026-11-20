@@ -45,6 +45,19 @@ type oneTimeActionState struct {
 	AnchorRef   string
 	WaitTaskID  int64
 	WaitID      int64
+	// SightedAt is the latest sighting of a login need, kept in memory only. A
+	// report must be newer than it to count toward the clear, so a report
+	// computed before the refusal cannot clear an untold need (hk 5686 review).
+	SightedAt time.Time
+}
+
+// clearBoundary is the time a report must be newer than to count toward a
+// clear: the notice's delivery or the latest sighting, whichever is later.
+func (s oneTimeActionState) clearBoundary() time.Time {
+	if s.SightedAt.After(s.ToldAt) {
+		return s.SightedAt
+	}
+	return s.ToldAt
 }
 
 // oneTimeRowKept reports whether a row still has something to remember. A told
@@ -156,7 +169,7 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 		// A kind the report does not cover (kiro, opencode) says nothing about the
 		// need, so it can neither show it gone nor clear it.
 		harness, covered := report.Harnesses[key.kind]
-		if key.machine != machine || !covered || !report.CheckedAt.After(state.ToldAt) {
+		if key.machine != machine || !covered || !report.CheckedAt.After(state.clearBoundary()) {
 			continue
 		}
 		// An unmeasured login (the probe failed or was rate limited) says nothing

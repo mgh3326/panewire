@@ -82,6 +82,16 @@ func (h *HubServer) loadOneTimeActions() {
 	}
 	var owed []oneTimeActionKey
 	h.oneTimeMu.Lock()
+	// A restored login row has no sighting time (SightedAt is not stored), so it
+	// counts only reports newer than this start: a conservative bound that can
+	// only delay a clear.
+	started := h.now().UTC()
+	for key, state := range told {
+		if key.need == oneTimeLoginMissing {
+			state.SightedAt = started
+			told[key] = state
+		}
+	}
 	h.oneTimeActions = told
 	h.refreshLoginNeedsLocked()
 	for key, state := range told {
