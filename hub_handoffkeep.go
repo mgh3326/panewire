@@ -477,10 +477,15 @@ func (c *handoffkeepRelayClient) listRelayEvents(ctx context.Context, kind strin
 	return result.Events, nil
 }
 
-// The one-time-action operator wait (hk 5250) drives three handoffkeep
+// The one-time-action operator wait (hk 5250) drives four handoffkeep
 // routes: POST /v1/intake anchors each need to one task, POST
-// /v1/tasks/{id}/waits holds its open operator wait, and POST
-// /v1/tasks/{id}/waits/{wait}/clear ends it. docs/placement.md, "Readiness".
+// /v1/tasks/{id}/waits holds its open operator wait, POST
+// /v1/tasks/{id}/waits/{wait}/clear ends it, and GET /v1/waits reads the open
+// waits back to learn an id without writing one. docs/placement.md, "Readiness".
+
+// handoffkeepWaitsNeedsOperator is the GET /v1/waits section that lists every
+// open hand wait with on_kind "operator" (hk task_waits read, decision 402).
+const handoffkeepWaitsNeedsOperator = "needs_operator"
 
 var (
 	// errHandoffkeepTaskNotFound is a 404 not_found on a task route: the anchor
@@ -603,10 +608,65 @@ func (c *handoffkeepRelayClient) clearTaskWait(ctx context.Context, taskID, wait
 	return nil
 }
 
-// handoffkeepRefusal is a non-2xx answer to a task route. A 4xx means hk did
-// not commit the write, so the caller may retry it or drop what it recorded;
-// a 5xx or a transport error may have committed it, so the caller keeps its
-// record and retries the idempotent write (hub_one_time_wait.go).
+// findOperatorWait reads GET /v1/waits, section needs_operator, and returns the
+// lowest open operator wait id on taskID. The read has no task filter, so it
+// names every open operator wait, and it writes nothing. found is proof of
+// absence only with a nil error: a needs_operator section whose count does not
+// match its rows is an incomplete read, and it is an error.
+func (c *handoffkeepRelayClient) findOperatorWait(ctx context.Context, taskID int64) (int64, bool, error) {
+	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/waits")+"?open=true&section="+handoffkeepWaitsNeedsOperator, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	if status != http.StatusOK {
+		return 0, false, handoffkeepRefusal{status: status}
+	}
+	var view struct {
+		Sections []struct {
+			Key   string `json:"key"`
+			Count int    `json:"count"`
+			Rows  []struct {
+				Key    string `json:"key"`
+				TaskID int64  `json:"task_id"`
+				OnKind string `json:"on_kind"`
+			} `json:"rows"`
+		} `json:"sections"`
+	}
+	if json.Unmarshal(payload, &view) != nil {
+		return 0, false, errors.New("handoffkeep returned an unusable waits read")
+	}
+	for _, section := range view.Sections {
+		if section.Key != handoffkeepWaitsNeedsOperator {
+			continue
+		}
+		if section.Count != len(section.Rows) {
+			return 0, false, errors.New("handoffkeep waits read is incomplete")
+		}
+		var lowest int64
+		for _, row := range section.Rows {
+			if row.TaskID != taskID || row.OnKind != oneTimeWaitOperator {
+				continue
+			}
+			digits, ok := strings.CutPrefix(row.Key, "wait:")
+			id, perr := strconv.ParseInt(digits, 10, 64)
+			if !ok || perr != nil || id < 1 {
+				return 0, false, errors.New("handoffkeep returned an unusable waits row")
+			}
+			if lowest == 0 || id < lowest {
+				lowest = id
+			}
+		}
+		return lowest, lowest != 0, nil
+	}
+	return 0, false, errors.New("handoffkeep waits read has no needs_operator section")
+}
+
+// handoffkeepRefusal is a non-2xx answer to a task route. A 4xx says this write
+// committed nothing, but an earlier ambiguous write on the same task may have, so
+// the caller reads the wait back before it drops what it recorded
+// (findOperatorWait). A 5xx or a transport error may have committed this write,
+// so the caller keeps its record and retries the idempotent write
+// (hub_one_time_wait.go).
 type handoffkeepRefusal struct{ status int }
 
 func (e handoffkeepRefusal) Error() string {
