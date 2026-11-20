@@ -17,6 +17,11 @@ import (
 type socketCutHerdr struct {
 	path     string
 	cutCount int
+	// holdOpen keeps a cut connection open after its bytes, so the reader sees a
+	// read timeout instead of EOF; release ends the hold at cleanup.
+	holdOpen bool
+	cutAt    int
+	release  chan struct{}
 	mu       sync.Mutex
 	paneList int
 }
@@ -29,6 +34,14 @@ var socketCutPaneRow = map[string]any{
 
 func newSocketCutHerdr(t *testing.T, cutCount int) *socketCutHerdr {
 	t.Helper()
+	return newSocketCutHerdrMode(t, cutCount, false, 8192)
+}
+
+// newSocketCutHerdrMode is newSocketCutHerdr, with holdOpen set when a cut
+// connection must stay open after its bytes, and cutAt the byte count a cut
+// reply stops at.
+func newSocketCutHerdrMode(t *testing.T, cutCount int, holdOpen bool, cutAt int) *socketCutHerdr {
+	t.Helper()
 	// unix sockets cap sun_path near 104 bytes, so the socket lives in short /tmp.
 	dir, err := os.MkdirTemp("/tmp", "t5790")
 	if err != nil {
@@ -40,7 +53,8 @@ func newSocketCutHerdr(t *testing.T, cutCount int) *socketCutHerdr {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	server := &socketCutHerdr{path: listener.Addr().String(), cutCount: cutCount}
+	server := &socketCutHerdr{path: listener.Addr().String(), cutCount: cutCount, holdOpen: holdOpen, cutAt: cutAt, release: make(chan struct{})}
+	t.Cleanup(func() { close(server.release) })
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -88,7 +102,10 @@ func (s *socketCutHerdr) serve(conn net.Conn) {
 	}
 	if cut {
 		// The reply stops at the boundary with no newline; the connection closes.
-		_, _ = conn.Write(raw[:8192])
+		_, _ = conn.Write(raw[:s.cutAt])
+		if s.holdOpen {
+			<-s.release
+		}
 		return
 	}
 	_, _ = conn.Write(append(raw, '\n'))

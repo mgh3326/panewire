@@ -235,6 +235,16 @@ type fleetCensusLocalView struct {
 	tabsOK     bool
 }
 
+// paneListFirstAttempt bounds the first pane.list attempt to half the time the
+// census has left. A cut answer held open ends at that bound, and the one retry
+// still runs on the census budget rather than on a spent deadline.
+func paneListFirstAttempt(ctx context.Context) (context.Context, context.CancelFunc) {
+	if d, ok := ctx.Deadline(); ok {
+		return context.WithTimeout(ctx, time.Until(d)/2)
+	}
+	return ctx, func() {}
+}
+
 // readFleetCensusLocal performs the three read-only herdr calls. agent.list
 // failure means the local node is unobservable (the probe could not run either).
 // pane.list failure degrades the row set to live agents and is recorded;
@@ -265,8 +275,15 @@ func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensus
 	// The socket's pane.list goes through the same cut rules as the CLI list
 	// (herdrpanes); an unreadable one leaves paneListOK false, never "no panes".
 	var listedPanes []map[string]any
+	attempts := 0
 	if _, err := herdrpanes.Read(ctx, func(ctx context.Context) ([]byte, error) {
-		return client.Call(ctx, "pane.list", map[string]any{})
+		attempts++
+		if attempts > 1 {
+			return client.Call(ctx, "pane.list", map[string]any{})
+		}
+		first, cancel := paneListFirstAttempt(ctx)
+		defer cancel()
+		return client.Call(first, "pane.list", map[string]any{})
 	}, func(raw []byte) error {
 		var paneList struct {
 			Panes []map[string]any `json:"panes"`
