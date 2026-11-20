@@ -338,6 +338,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if !handOff.active {
 			if stop, ok := view.Announced(); ok {
 				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
+				if stop.PaneSeq != 0 {
+					seq := stop.PaneSeq
+					handOff.seq = &seq
+				}
 			}
 		}
 		credit, creditPending := pendingCreditRejection(j)
@@ -366,6 +370,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				return err
 			}
 			continue
+		}
+		if e != nil && !creditPending && handOff.active && !view.Reaped && !workerEscalated(j) {
+			// An announced hand-off outlives a herdr outage: the job's hk record and
+			// lease stay with this watcher until the grace ends, which the old close
+			// intent also guaranteed. The pane reads as unseen meanwhile, so nothing
+			// is revived or ended early (hk 5690 review).
+			a.warn("quota hand-off continues without a herdr answer: %v", e)
+			agents, e = nil, nil
 		}
 		if e != nil && !creditPending {
 			if workerEscalated(j) {

@@ -38,6 +38,18 @@ func quotaStopReasonSeq(reason string) (seq int64, ok bool) {
 	return 0, false
 }
 
+// quotaStopReasonAt returns when the stop was announced ("... at=<unix>"), ok
+// false when the reason names none.
+func quotaStopReasonAt(reason string) (time.Time, bool) {
+	for _, field := range strings.Fields(reason) {
+		if value, found := strings.CutPrefix(field, "at="); found {
+			n, err := strconv.ParseInt(value, 10, 64)
+			return time.Unix(n, 0), err == nil && n > 0
+		}
+	}
+	return time.Time{}, false
+}
+
 // quotaStopReasonAccount returns the account a quota_stop reason names
 // ("quota_stop pool=<p> account=<key>"), or "" when it names none. A
 // commandcode credit stop is scoped to one account, so its successor excludes

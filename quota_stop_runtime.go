@@ -88,6 +88,14 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	// role and owner are the job's role and owner lane when the wake was
 	// reserved: the role decides whether the manager acts in shadow mode (hk
 	// 3334) and the owner receives the one info lane event.
+	// herdr_seq is herdr's own state_change_seq of the pane when the stop was
+	// reserved (the wake's local counter is panewire's, not herdr's): the
+	// hand-over announces it so the hub's close is fenced to that state (hk 5690).
+	if !storeHasColumn(s.db, "quota_stop_decisions", "herdr_seq") {
+		if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN herdr_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return nil, err
+		}
+	}
 	for _, column := range []string{"role", "owner", "attempt"} {
 		if !storeHasColumn(s.db, "quota_stop_decisions", column) {
 			if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -593,6 +601,9 @@ func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandid
 		return false, false, err
 	}
 	if n, _ := result.RowsAffected(); n == 1 {
+		// herdr's sequence for the state this wake observed; zero when the pane
+		// has moved on locally or herdr reported none.
+		_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET herdr_seq=COALESCE((SELECT upstream_state_change_seq FROM idle_wake_panes WHERE pane_id=? AND state_change_seq=?),0) WHERE event_id=?`, c.PaneID, c.StateChangeSeq, c.EventID)
 		return true, false, nil
 	}
 	if err := q.store.db.QueryRowContext(ctx, `SELECT decision FROM quota_stop_decisions WHERE event_id=?`, c.EventID).Scan(&decision); err != nil {
@@ -969,19 +980,18 @@ func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, re
 }
 
 // observedSeq is the herdr state_change_seq of the pane when the stop decided
-// under event id was observed, zero when the wake kept none. The announcement
-// carries it so the hub's close is fenced to that pane state (hk 5690).
+// under event id was reserved, zero when none was known. The announcement
+// carries it so the hub's close is fenced to that pane state (hk 5690). It is
+// herdr's own sequence, recorded with the decision for every wake source
+// (idle, stall, blocked), never the wake table's local counter.
 func (q *quotaStopManager) observedSeq(ctx context.Context, id string) int64 {
 	var seq int64
 	q.store.mu.Lock()
 	defer q.store.mu.Unlock()
-	if q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM idle_wake_candidates WHERE event_id=?`, id).Scan(&seq) == nil {
-		return seq
+	if q.store.db.QueryRowContext(ctx, `SELECT herdr_seq FROM quota_stop_decisions WHERE event_id=?`, id).Scan(&seq) != nil {
+		return 0
 	}
-	if q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM quota_stall_wakes WHERE event_id=?`, id).Scan(&seq) == nil {
-		return seq
-	}
-	return 0
+	return seq
 }
 
 // infoToOwner sends the owner one info lane event about the job notice names

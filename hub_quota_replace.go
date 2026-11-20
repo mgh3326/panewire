@@ -141,6 +141,10 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude
 	// A hub-built successor was never typed by a submitter: it must not
 	// arm its parent's close, whatever the replaced request carried (hk 5195).
 	next.ParentJobExplicit = false
+	// The stopped job already started, so any start condition it waited on was
+	// met. Carried over, it would park the successor in waiting, where it could
+	// be admitted after the review is given up (hk 5690).
+	next.StartConditions = nil
 	if next.DeadlineSeconds < 1 || next.DeadlineSeconds > int(quotaReplaceDeadline/time.Second) {
 		next.DeadlineSeconds = int(quotaReplaceDeadline / time.Second)
 	}
@@ -246,6 +250,13 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	budget := h.quotaReplaceBudget
 	if budget <= 0 {
 		budget = quotaReplaceBudget
+	}
+	// The watcher ends an unchanged stopped job itself when its grace runs out,
+	// and hk never rewrites a lost record: a replacement that cannot finish inside
+	// what is left of the grace could place a successor after that plain loss
+	// (hk 5690 review). A stop announced too long ago is left to the watcher.
+	if announced, ok := quotaStopReasonAt(event.Reason); ok && h.now().Sub(announced) > fleet.QuotaStopHandOffGrace-budget {
+		return skip("announcement_stale", "age", h.now().Sub(announced).Round(time.Second))
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -430,12 +441,19 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 		// duplicate work. An operation that was never bound to a node
 		// (accepted) can never place a job, and one that settled as a failure
 		// did not.
+		withdrawn := false
 		if !settled && !spawnMayStillRun(task) && task.Status == "accepted" {
 			// A successor still queued at the wait's end could bind later and
 			// run with no pointer to it. Withdraw it before the review is given
-			// up (hk 5690 review); when the withdrawal does not apply the
-			// operation moved on, and the state read afresh decides.
-			if changed, _ := h.withdrawHandoverSuccessor(ctx, task, "quota_giveup"); !changed {
+			// up (hk 5690 review).
+			withdrawn, _ = h.withdrawHandoverSuccessor(ctx, task, "quota_giveup")
+			if !withdrawn {
+				// The withdrawal did not commit: the operation moved on, or is
+				// held. The state read afresh decides, and a successor that can
+				// still run is pointed to (a pointer to one that later fails is a
+				// recoverable chain; a running successor nobody points to is
+				// duplicate work). A given-up review needs the proof that it
+				// cannot.
 				if fresh, err := store.spawnTask(ctx, request.RequestID); err == nil {
 					task = fresh
 					outcome = task.Outcome
@@ -443,7 +461,10 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 				}
 			}
 		}
-		if settled && outcome.RC != 0 || !settled && !spawnMayStillRun(task) {
+		if !withdrawn && !settled && spawnStatusActive(task.Status) {
+			// Still live (accepted or waiting, unwithdrawn): it may yet run.
+			h.logger.Warn("quota-stop successor could not be withdrawn; writing its pointer", "job", event.JobID, "replacement", newJob, "status", task.Status)
+		} else if settled && outcome.RC != 0 || !settled && !spawnMayStillRun(task) {
 			h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "status", task.Status, "rc", outcome.RC, "reason", outcome.Reason)
 			h.giveUpQuotaStop(ctx, holder, prior.Owner, event, "not_placed")
 			return "", false

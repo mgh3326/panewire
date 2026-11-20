@@ -947,3 +947,76 @@ func TestWatcherRetriesAnAnnouncementThatTimedOutOnTheEndLock(t *testing.T) {
 		t.Fatalf("job.lost payload=%v, want the retried announcement", p)
 	}
 }
+
+// hk 5690 review: an adopted hand-off keeps the pane state the stop was observed
+// in. A watcher started on an announced ledger (a restart, or a manager's
+// announcement) sees the pane idle again at another sequence: the stop is over,
+// the job is revived instead of being written lost at the grace's end.
+func TestAdoptedHandOffKeepsTheAnnouncedPaneState(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
+	a.QuotaHandOffGrace = QuotaStopHandOffGrace
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	// Announced at herdr sequence 3; the pane is idle at 7 (the fixture's).
+	if e := a.event(context.Background(), "j", "job.lost", map[string]any{"pane_id": "w:p1", "reason": "quota_stop", "pool": "devin-free", "state_change_seq": 3}); e != nil {
+		t.Fatal(e)
+	}
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop, ok := announcedQuotaStop(j)
+	if !ok || stop.PaneSeq != 3 {
+		t.Fatalf("announced stop %+v ok=%v, want PaneSeq 3 restored from the ledger", stop, ok)
+	}
+	// The reviewer resumed and finished: its screen no longer shows the limit.
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && len(c.Args) > 1 && c.Args[0] == "agent" && c.Args[1] == "read" {
+			return Result{Out: "I resumed and finished the review.\n"}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if str(h.record(t, "j"), "state") == "lost" {
+		t.Fatalf("a pane that moved on (seq 7, announced at 3) was written lost: %v", h.record(t, "j"))
+	}
+	revived := false
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.reprompted" {
+			revived = true
+		}
+	}
+	if !revived {
+		t.Fatal("the pane's changed sequence did not retire the stale stop")
+	}
+}
+
+// hk 5690 review: a herdr outage during an announced hand-off does not end the
+// watcher. The hk record and the lease stay with it until the grace runs out.
+func TestWatcherKeepsAnAnnouncedHandOffThroughAHerdrOutage(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
+	a.QuotaHandOffGrace = QuotaStopHandOffGrace
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			if lists >= 3 && lists < 8 {
+				return Result{Code: 1, Err: "herdr down"}
+			}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatalf("a transient herdr failure stopped the watcher: %v", e)
+	}
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" {
+		t.Fatalf("hk record %v: the grace did not run to its end", rec)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota %s, want released at the end of the grace", st)
+	}
+}

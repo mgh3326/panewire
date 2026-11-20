@@ -236,3 +236,29 @@ func TestQuotaReviewerUnprovenHandoverIsNotEndedWhenActing(t *testing.T) {
 		t.Fatalf("an unproven reviewer hand-over ended the reviewer: %+v", rig.announce)
 	}
 }
+
+// hk 5690 review: the pane state a manager hand-over announces is herdr's own
+// state_change_seq of the stop, not the wake table's local counter (which counts
+// from 1 and is independent). A pane first seen working at herdr sequence 3 and
+// stopped at 4 has local sequence 2; the announcement must carry 4, or the hub's
+// fenced close refuses an unchanged stopped pane.
+func TestManagerHandOverAnnouncesHerdrsSequenceNotTheLocalCounter(t *testing.T) {
+	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2h.txt")
+	if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", WorkspaceID: "workspace", Label: "worker-synthetic", Status: "working", Revision: 1, SourceStateChangeSeq: 3}}, rig.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", WorkspaceID: "workspace", Label: "worker-synthetic", Status: "idle", Revision: 2, SourceStateChangeSeq: 4}}, rig.now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Second))
+	rig.route(0, "owner")
+	rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(5*time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Minute))
+	if len(rig.announce) != 1 {
+		t.Fatalf("announcements=%d, want one", len(rig.announce))
+	}
+	if got := rig.announce[0].PaneSeq; got != 4 {
+		t.Fatalf("announced PaneSeq=%d, want herdr's 4 (the local counter is not it)", got)
+	}
+}

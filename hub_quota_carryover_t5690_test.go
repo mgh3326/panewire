@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -319,5 +320,48 @@ func TestFencedStopOnANodeWithoutTheFenceClosesNothing(t *testing.T) {
 	}
 	if len(commands) != 1 {
 		t.Fatalf("commands=%d, want only the probe", len(commands))
+	}
+}
+
+// hk 5690 review: the watcher ends an unchanged stopped job itself when its
+// 10 min grace runs out. A resent announcement that is too old for a replacement
+// to finish before that is left to the watcher: nothing is probed, closed or
+// claimed, because a successor placed after the plain loss would have no pointer.
+func TestStaleResentAnnouncementIsLeftToTheWatcher(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-18-p1")
+	event := relayedQuotaStop(f.job, "claude")
+	event.Reason += " at=" + strconv.FormatInt(time.Now().Add(-9*time.Minute).Unix(), 10)
+	acked := false
+	job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked = true })
+	if ok || job != "" {
+		t.Fatalf("a stale announcement was replaced: %q", job)
+	}
+	if !acked {
+		t.Fatal("a stale announcement was left unacknowledged: the node would resend it forever")
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-18-p1-q1"); err == nil {
+		t.Fatal("a successor was claimed for a stale announcement")
+	}
+	if at, ok := quotaStopReasonAt(event.Reason); !ok || time.Since(at) < 8*time.Minute {
+		t.Fatalf("at=%v ok=%v", at, ok)
+	}
+}
+
+// hk 5690 review: a replacement starts as soon as the successor is placed, so it
+// never inherits the start conditions the stopped job already met: they would
+// park the successor in waiting, where it could be admitted after the review was
+// given up.
+func TestReplacementDropsTheStoppedJobsStartConditions(t *testing.T) {
+	old := quotaHolderRequest("reviewer", "mwr-19-p1")
+	old.StartConditions = []fleet.StartCondition{{Kind: "task_state", TaskID: "42", State: "merged"}}
+	next, err := quotaReplacementRequest(old, "mwr-19-p1", "mwr-19-p1-q1", "claude", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.StartConditions) != 0 {
+		t.Fatalf("the successor inherited start conditions: %+v", next.StartConditions)
+	}
+	if len(old.StartConditions) != 1 {
+		t.Fatal("the stopped job's own request was changed")
 	}
 }

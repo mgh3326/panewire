@@ -336,6 +336,9 @@ func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job 
 				reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
 			}
 			reason += " pool=" + event.Payload.Pool + " reset_at=" + reset
+			// When the stop was announced: the hub does not start a replacement
+			// the watcher's grace would end before it finished (hk 5690).
+			reason += " at=" + strconv.FormatInt(eventTime.Unix(), 10)
 			if event.Payload.StateChangeSeq != 0 {
 				// The pane state the stop was observed in: the hub fences its
 				// close with it (hk 5690).
