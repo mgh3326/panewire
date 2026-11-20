@@ -37,11 +37,17 @@ func paneReadyPrefix(kind, shell string) (string, error) {
 		return "unset " + strings.Join(agySSHEnv, " ") + ` && [ -z "${SSH_CONNECTION+x}${SSH_CLIENT+x}${SSH_TTY+x}" ] && echo`, nil
 	case "fish":
 		var b strings.Builder
+		// The checks start after a plain ";", not "and": fish's "and" takes the
+		// status of the command before it, and set -e on a variable that is not
+		// set need not return 0. Only the set -q checks decide whether to echo.
 		for _, k := range agySSHEnv {
 			b.WriteString("set -e " + k + "; ")
 		}
-		for _, k := range agySSHEnv {
-			b.WriteString("and not set -q " + k + "; ")
+		for i, k := range agySSHEnv {
+			if i > 0 {
+				b.WriteString("and ")
+			}
+			b.WriteString("not set -q " + k + "; ")
 		}
 		b.WriteString("and echo")
 		return b.String(), nil

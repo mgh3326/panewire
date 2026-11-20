@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -100,6 +101,49 @@ func TestAgySpawnFishPaneRemovesVariablesInTheReadinessLine(t *testing.T) {
 	for _, want := range []string{"set -e SSH_CONNECTION; ", "set -e SSH_TTY; ", "and not set -q SSH_CLIENT; ", "and echo"} {
 		if !strings.Contains(prefix, want) {
 			t.Fatalf("fish readiness prefix %q lacks %q", prefix, want)
+		}
+	}
+}
+
+// The fish absence checks follow a plain ";" after the set -e statements, not an
+// "and": the chain must not depend on the status of set -e (hk 5699 review).
+func TestAgyFishReadinessChecksAreNotGatedOnErase(t *testing.T) {
+	prefix, err := paneReadyPrefix("agy", "fish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prefix, "and not set -q SSH_CONNECTION") {
+		t.Fatalf("fish readiness prefix gates the first check on set -e: %q", prefix)
+	}
+	if !strings.Contains(prefix, "set -e SSH_TTY; not set -q SSH_CONNECTION; and not set -q SSH_CLIENT; and not set -q SSH_TTY; and echo") {
+		t.Fatalf("fish readiness prefix = %q, want the absence checks after set -e", prefix)
+	}
+}
+
+// Run the fish readiness prefix in a real fish, with each subset of the three
+// variables in the environment: the token must print every time, since the
+// removal leaves none of them set. Skipped where fish is not installed.
+func TestAgyFishReadinessPrintsTokenWithEveryVariableSubset(t *testing.T) {
+	fish, err := exec.LookPath("fish")
+	if err != nil {
+		t.Skip("fish is not installed on this host; the structure test covers the chain")
+	}
+	prefix, err := paneReadyPrefix("agy", "fish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "panewire-ready-fishfixture"
+	subsets := [][]string{nil, {"SSH_TTY"}, {"SSH_CONNECTION"}, {"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"}}
+	for _, set := range subsets {
+		env := []string{"PATH=/usr/bin:/bin:/usr/local/bin"}
+		for _, k := range set {
+			env = append(env, k+"=fixture")
+		}
+		cmd := exec.Command(fish, "-c", prefix+" "+token)
+		cmd.Env = env
+		out, runErr := cmd.Output()
+		if runErr != nil || !strings.Contains(string(out), token) {
+			t.Fatalf("fish with %v set printed %q (err %v); want the token", set, out, runErr)
 		}
 	}
 }
