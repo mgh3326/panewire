@@ -305,6 +305,41 @@ func TestEscalateAuthorCLIRefusalAfterTheCloseSaysTheAuthorIsGone(t *testing.T) 
 	}
 }
 
+// Every refusal line ends with the hub's notice state, so a caller reads from
+// the line whether the owner lane got the event.
+func TestEscalateAuthorCLIPrintsNotifiedOnRefusal(t *testing.T) {
+	cases := []struct {
+		name   string
+		result EscalateAuthorResult
+		rc     int
+		want   string
+	}{
+		{"no owner", EscalateAuthorResult{Code: "job_unknown", Reason: "no spawn operation", Notified: "none"}, exitUsage, "job_unknown: no spawn operation notified=none"},
+		{"owner lane", EscalateAuthorResult{Code: "worktree_dirty", Reason: "dirty", Notified: "owner-lane"}, exitUsage, "worktree_dirty: dirty notified=owner-lane"},
+		{"author ended", EscalateAuthorResult{Code: "quota_refused", Reason: "no account admits it", AuthorEnded: true, Notified: "owner-lane"}, exitFailure, "quota_refused: no account admits it (the author's pane was closed; no confirmed author runs on task 42) notified=owner-lane"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+			hub.result = c.result
+			err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+			if exitCode(err) != c.rc || err.Error() != c.want {
+				t.Fatalf("want rc %d %q, got rc %d %q", c.rc, c.want, exitCode(err), err)
+			}
+		})
+	}
+}
+
+// An older hub answers without the field: the refusal line is unchanged.
+func TestEscalateAuthorCLIOldHubLineHasNoNotifiedField(t *testing.T) {
+	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
+	hub.result = EscalateAuthorResult{Code: "quota_refused", Reason: "every eligible account is measured exhausted"}
+	err := a.escalateAuthorCmd(context.Background(), []string{"--task", "42", "--job", "job-a", "--pr", "mgh3326/panewire#77", "--round", "5", "--findings-file", writeFindings(t, `[]`)})
+	if want := "quota_refused: every eligible account is measured exhausted"; err == nil || err.Error() != want {
+		t.Fatalf("want %q, got %v", want, err)
+	}
+}
+
 func TestEscalateAuthorCLIPendingHasDistinctStatus(t *testing.T) {
 	a, hub := escalateCLIFixture(t, "sonnet", "high", true)
 	hub.result = EscalateAuthorResult{Code: "pending", Reason: "retry"}
