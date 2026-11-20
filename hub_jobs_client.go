@@ -337,7 +337,7 @@ func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job 
 			// five-minute default from the announcement time (at=) (hk 5777).
 			reason += " pool=" + event.Payload.Pool
 			if event.Payload.ResetAt != "" {
-				reason += " reset_at=" + event.Payload.ResetAt
+				reason += " reset_at=" + event.Payload.ResetAt + " reset_observed=1"
 			}
 			// When the stop was announced: the hub does not start a replacement
 			// the watcher's grace would end before it finished (hk 5690).

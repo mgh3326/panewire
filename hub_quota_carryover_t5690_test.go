@@ -58,7 +58,7 @@ func quotaGiveUpNotices(destination *hubAgent) []hubRelayInjectEvent {
 // relayedQuotaStop is the job.lost the node relays for an announced stop
 // (hub_jobs_client.go): the reason carries the pool and the reset.
 func relayedQuotaStop(job, pool string) hubJobEventPayload {
-	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop pool=" + pool + " reset_at=2026-11-19T05:59:11Z seq=7", OwnerLane: "parent"}
+	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop pool=" + pool + " reset_at=2026-11-19T05:59:11Z reset_observed=1 seq=7", OwnerLane: "parent"}
 }
 
 // hk 5690, the root cause of the 2026-11-19 losses: the hub began a replacement

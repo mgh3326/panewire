@@ -671,6 +671,12 @@ func (h *HubServer) giveUpQuotaStop(ctx context.Context, holder hubSpawnTask, ow
 	if stopPool == "" || !spawnargs.ValuePattern.MatchString(stopPool) {
 		stopPool = pool
 	}
+	if !quotaStopReasonResetObserved(event.Reason) {
+		// Only a reset the node observed is written. A previous-release node
+		// relays its own default as reset_at (hk 5777 review), and that value
+		// must not reach the immutable end_reason.
+		resetAt = ""
+	}
 	var reset time.Time
 	if at, err := time.Parse(time.RFC3339, resetAt); err == nil {
 		reset = at
