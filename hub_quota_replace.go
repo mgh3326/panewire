@@ -377,7 +377,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			if !quotaLineageHolds(successor, predecessor, event.JobID) {
 				return skip("successor_name_collision", "job", claimed)
 			}
-			if quotaSuccessorPlaceable(successor) {
+			if quotaSuccessorSent(successor) {
 				app, err := h.newSpawnApp(io.Discard, io.Discard)
 				if err != nil {
 					return retryLater("spawn_config_unavailable")
@@ -537,7 +537,10 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			return retryLater("pane_not_closed", "pane", holder.Outcome.Pane)
 		}
 	}
-	mark := func() bool {
+	// mark writes the old record's pointer. A reviewer's pointer passes a start
+	// proof read afresh before every write attempt (hk 5776): a refusal, a fence or
+	// an unbind that landed since the wait read the successor leaves it unwritten.
+	mark := func(proven func() bool) bool {
 		// The pointer can only be written once and the watcher's fallback
 		// would write a plain record, so a transient failure is retried
 		// inside the grace.
@@ -554,6 +557,10 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 				case <-ctx.Done():
 				}
 			}
+			if proven != nil && !proven() {
+				reason = "start_unproven"
+				break
+			}
 			lost, reason = h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
 		}
 		if !lost {
@@ -567,7 +574,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// record must end before the successor is admitted. When the spawn then
 	// fails the pointer names a job that never ran, and the owner is told by
 	// the spawn failure notice.
-	if role != "reviewer" && !mark() {
+	if role != "reviewer" && !mark(nil) {
 		return "", false
 	}
 	if prior.HoldsTaskRole() {
@@ -627,8 +634,9 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			}
 		}
 		if !withdrawn && !settled && spawnStatusActive(task.Status) {
-			// Still live (accepted or waiting, unwithdrawn): it may yet run.
-			h.logger.Warn("quota-stop successor could not be withdrawn; writing its pointer", "job", event.JobID, "replacement", newJob, "status", task.Status)
+			// Still live (accepted or waiting, unwithdrawn): it may yet run, but its
+			// pointer waits for a start proof (below).
+			h.logger.Warn("quota-stop successor could not be withdrawn; its pointer waits for a start proof", "job", event.JobID, "replacement", newJob, "status", task.Status)
 		} else if settled && outcome.RC != 0 || !settled && !spawnMayStillRun(task) {
 			h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "status", task.Status, "rc", outcome.RC, "reason", outcome.Reason)
 			if h.giveUpQuotaStop(ctx, holder, prior.Owner, event, "not_placed") {
@@ -636,10 +644,22 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			}
 			return "", false
 		}
+		// The pointer is written only for a successor with a start proof, read
+		// afresh: one still queued, bound, refused, fenced or unbound at the wait's
+		// end has none, and its job may never start (hk 5776). The announcement stays
+		// with its node; a later delivery or the reconcile pass writes the pointer
+		// once the proof exists, or gives the review up when the successor ends.
+		proven := func() bool {
+			_, ok := h.quotaStartProof(ctx, app, request.RequestID)
+			return ok
+		}
+		if !proven() {
+			return retryLater("successor_start_unproven", "replacement", newJob, "status", task.Status)
+		}
 		if !settled {
 			h.logger.Warn("quota-stop replacement undecided; writing its pointer", "job", event.JobID, "replacement", newJob, "status", task.Status)
 		}
-		if !mark() {
+		if !mark(proven) {
 			return "", false
 		}
 	} else if settled && outcome.RC != 0 {
@@ -852,7 +872,7 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 		// (accepted, waiting), only bound (never sent) or ended unplaced is not a
 		// pointer target: it may never start, and the replay or the give-up owns it
 		// (hk 5690).
-		if !quotaSuccessorPlaceable(successor) {
+		if !quotaSuccessorSent(successor) {
 			continue
 		}
 		old := successor.ReplacedFrom
@@ -864,15 +884,11 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	return written
 }
 
-// quotaSuccessorPlaceable reports whether a claimed successor is placed, or has
-// durable evidence that its start was sent to a node: the only states a replaced_by
-// pointer to it may be written in. A row that is merely bound has never been sent
-// (beginSpawnSend moves it to dispatching first), and the coordinator may settle it
-// as a timeout or return it to accepted without taking the predecessor's lock; a
-// reconciling row with no node binding is returned to placement. hk cannot replace
-// the pointer with a plain loss afterwards, so a pointer to such a row would send the
-// requester to a job that never reports (hk 5690 review).
-func quotaSuccessorPlaceable(successor hubSpawnTask) bool {
+// quotaSuccessorSent reports whether a claimed successor's snapshot is placed or
+// was sent to a node. It is necessary for a replaced_by pointer, never enough: a
+// snapshot goes stale, and a sent row may be refused, fenced or unbound. Only
+// quotaStartProof, which reads the row afresh, decides a pointer (hk 5776).
+func quotaSuccessorSent(successor hubSpawnTask) bool {
 	if successor.Status == "succeeded" {
 		return true
 	}
@@ -886,29 +902,74 @@ func quotaSuccessorPlaceable(successor hubSpawnTask) bool {
 	return false
 }
 
+// quotaStartProof is the one gate of a replaced_by pointer (hk 5776). It reads the
+// successor's operation afresh, so a snapshot taken before the lock or the wait
+// never decides, and answers true only when the successor started or must:
+//
+//   - the operation succeeded (placed, its job landed), or
+//   - it is bound to a node and was sent (dispatching, reconciling or past its
+//     deadline with that node), is not fenced (a fenced attempt can never be
+//     granted, so never starts), and hk holds its job claim.
+//
+// hk's job claim is the claim receipt. The node claims the job only after the
+// hub granted its start, and from the claim on hk holds the job id for that
+// host, so a later refusal keeps the claim pinned and the job is retried
+// there: a pointer taken on this proof names a job with an hk record whatever
+// the dispatching worker does next. A row that is accepted, waiting, only
+// bound, refused or unbound has no proof, whatever an earlier read said. The
+// dispatch worker holds the request's action fence for the whole attempt, so
+// this gate cannot share that lock; the receipt is what makes the read
+// sufficient. An unreadable row or record is no proof.
+func (h *HubServer) quotaStartProof(ctx context.Context, app *fleet.App, requestID string) (hubSpawnTask, bool) {
+	if h.inbox == nil || app == nil {
+		return hubSpawnTask{}, false
+	}
+	task, err := h.inbox.store.spawnTask(ctx, requestID)
+	if err != nil {
+		return hubSpawnTask{}, false
+	}
+	if task.Status == "succeeded" {
+		return task, true
+	}
+	if !quotaSuccessorSent(task) {
+		return task, false
+	}
+	if task.Node.GrantRequired {
+		if fenced, err := h.inbox.store.spawnAttemptFenced(ctx, task.Node.RequestID); err != nil || fenced {
+			return task, false
+		}
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	_, exists, err := app.ExistingJob(readCtx, task.Job)
+	cancel()
+	return task, err == nil && exists
+}
+
 // reconcileQuotaReplacement finishes one claimed successor's pointer. It never
 // waits for the predecessor's lock: a replacement that holds it is working the job,
 // and the pass revisits it next time, so the jobs behind it are reached before
-// their grace ends. The successor is read again under the lock, since the snapshot
-// the scan took may have been withdrawn since (hk 5690 review).
+// their grace ends. The successor is read again by finishQuotaReplacement, since
+// the snapshot the scan took may have been withdrawn since (hk 5690 review).
 func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string) bool {
 	unlock, free := h.tryLockWithoutPoolAction(ctx, old)
 	if !free {
 		return false
 	}
 	defer unlock()
-	current, err := h.inbox.store.spawnTask(ctx, successor.Request.RequestID)
-	if err != nil {
-		return false
-	}
-	return h.finishQuotaReplacement(ctx, app, current, old, nil)
+	return h.finishQuotaReplacement(ctx, app, successor, old, nil)
 }
 
 // finishQuotaReplacement writes the replaced_by record for a claimed successor
 // whose predecessor is still live. The caller holds the job's pool-action lock.
+//
+// successor is only the caller's snapshot: it names the request, and the start
+// proof is read afresh from the store, before the predecessor's pane is touched
+// and again right before the write, which comes after a pane probe and close that
+// can take seconds (hk 5776).
 func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string, stopSeq *int64) bool {
-	// The one rule for a pointer, whoever calls: the successor is placed or was sent.
-	if !quotaSuccessorPlaceable(successor) {
+	// The one rule for a pointer, whoever calls: the successor has a start proof.
+	successor, proven := h.quotaStartProof(ctx, app, successor.Request.RequestID)
+	if !proven {
 		return false
 	}
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
@@ -944,6 +1005,9 @@ func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, 
 			return false
 		}
 	case probe.state != heldPaneAbsent:
+		return false
+	}
+	if _, proven := h.quotaStartProof(ctx, app, successor.Request.RequestID); !proven {
 		return false
 	}
 	if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); lost {

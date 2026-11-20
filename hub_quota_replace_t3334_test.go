@@ -627,20 +627,19 @@ func TestQuotaStopWaitsThroughReconcilingForTheSuccessor(t *testing.T) {
 
 // When the wait for the successor ends with the operation still undecided
 // (reconciling, or past its deadline), a late node result can still make it
-// run, and hk cannot repair the old record afterwards. So the hub writes the
-// pointer anyway: a pointer to a successor that later fails is a recoverable
-// chain, a running successor nobody points to is not (review finding).
-func TestQuotaStopUndecidedSuccessorStillGetsItsPointer(t *testing.T) {
+// run, and hk cannot repair the old record afterwards. The pointer waits for a
+// start proof (hk 5776): an undecided successor with no node binding and no hk
+// claim gets none, and the stop is kept for a retry, not given up.
+func TestQuotaStopUndecidedSuccessorWithoutAProofGetsNoPointerYet(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-10-p1")
 	f.hub.quotaWait = 150 * time.Millisecond
+	acked := make(chan struct{}, 1)
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"))
+		job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked <- struct{}{} }, nil)
 		done <- quotaReplaceResult{job, ok}
 	}()
-	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
-	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
-	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
+	f.serveCommands(t, 3) // probe, capture, close
 	var successor hubSpawnTask
 	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
 		var err error
@@ -650,12 +649,47 @@ func TestQuotaStopUndecidedSuccessorStillGetsItsPointer(t *testing.T) {
 	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "unknown"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	// It stays reconciling past the wait: the pointer is written regardless.
+	select {
+	case result := <-done:
+		if result.ok {
+			t.Fatalf("an unproven undecided successor got a pointer: %+v", result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement did not finish")
+	}
+	select {
+	case <-acked:
+		t.Fatal("the stop was acknowledged with its successor undecided")
+	default:
+	}
+	f.requireRecordUntouched(t)
+}
+
+// The same undecided successor, sent to its node with its job claimed in hk, is
+// pointed to: a late node result may still land it, and a pointer to one that
+// later fails is a recoverable chain.
+func TestQuotaStopUndecidedClaimedSuccessorStillGetsItsPointer(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-10-p2")
+	f.hub.quotaWait = 150 * time.Millisecond
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"))
+		done <- quotaReplaceResult{job, ok}
+	}()
+	f.serveCommands(t, 3)
+	var successor hubSpawnTask
+	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
+		var err error
+		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-10-p2-q1")
+		return err == nil
+	})
+	f.bindSuccessor(t, successor, true)
+	f.holdsClaim(successor.Job)
 	command := nodeCommandRead(t, f.node)
 	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}})
 	select {
 	case result := <-done:
-		if !result.ok || result.job != "mwr-10-p1-q1" || endReasonOf(t, command) != "quota_stop pool=claude replaced_by=mwr-10-p1-q1" {
+		if !result.ok || result.job != "mwr-10-p2-q1" || endReasonOf(t, command) != "quota_stop pool=claude replaced_by=mwr-10-p2-q1" {
 			t.Fatalf("result %+v end_reason %q", result, endReasonOf(t, command))
 		}
 	case <-time.After(3 * time.Second):
