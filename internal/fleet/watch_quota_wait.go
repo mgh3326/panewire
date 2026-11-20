@@ -234,24 +234,36 @@ func (a *App) adoptQuotaWait(ctx context.Context, j Job, view ledgerView, held, 
 	if !ok || !w.until.After(now) || w.until.Equal(held) {
 		return deadline, held
 	}
-	extended := deadline.Add(w.until.Sub(now))
-	if !w.acked {
-		payload := map[string]any{"pane_id": j.Pane, "attempt": w.attempt, "pool": w.pool, "until": w.until.UTC().Format(time.RFC3339), "deadline": extended.UTC().Format(time.RFC3339Nano), "adopted_at": now.UTC().Format(time.RFC3339Nano)}
-		if w.reset != "" {
-			payload["reset_at"] = w.reset
-		}
-		err := a.eventIf(ctx, j.ID, quotaWaitAdoptedKind, payload, func(v ledgerView) error {
-			if v.Superseded(j.Pane, w.attempt) || v.Ended != "" {
-				return errQuotaStopSuperseded
-			}
-			return nil
-		})
-		if err != nil {
-			if !errors.Is(err, errQuotaStopSuperseded) {
-				a.warn("quota-stop wait not adopted, retrying: %v", err)
-			}
-			return deadline, held
-		}
+	if w.acked {
+		return deadline.Add(w.until.Sub(now)), w.until
 	}
-	return extended, w.until
+	// adopted_at and the deadline are read inside the guard, under the events
+	// lock, so the ack carries the moment it is committed (hk 5815). The payload is
+	// encoded after the guard runs, so the stamp it sets is the one written.
+	payload := map[string]any{"pane_id": j.Pane, "attempt": w.attempt, "pool": w.pool, "until": w.until.UTC().Format(time.RFC3339)}
+	if w.reset != "" {
+		payload["reset_at"] = w.reset
+	}
+	var adopted time.Time
+	err := a.eventIf(ctx, j.ID, quotaWaitAdoptedKind, payload, func(v ledgerView) error {
+		if v.Superseded(j.Pane, w.attempt) || v.Ended != "" {
+			return errQuotaStopSuperseded
+		}
+		adopted = a.Now()
+		if !w.until.After(adopted) {
+			// The wait ran out while the lock was waited for: nothing to adopt, and
+			// a negative extension would pull the deadline in.
+			return errQuotaStopSuperseded
+		}
+		payload["adopted_at"] = adopted.UTC().Format(time.RFC3339Nano)
+		payload["deadline"] = deadline.Add(w.until.Sub(adopted)).UTC().Format(time.RFC3339Nano)
+		return nil
+	})
+	if err != nil {
+		if !errors.Is(err, errQuotaStopSuperseded) {
+			a.warn("quota-stop wait not adopted, retrying: %v", err)
+		}
+		return deadline, held
+	}
+	return deadline.Add(w.until.Sub(adopted)), w.until
 }
