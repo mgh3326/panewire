@@ -149,12 +149,20 @@ func TestCreditClosureSurvivesHubFailureAndReopensOnNewEntry(t *testing.T) {
 	}
 }
 
-// orderedCreditStore models hk's measured_at conditional latest pointer.
+// orderedCreditStore models hk's measured_at conditional latest pointer. It
+// serves one account only: a lease, observation or latest read on any other
+// account path is refused, so a wrong fingerprint on either side of the
+// store fails the call instead of landing on the right account.
 type orderedCreditStore struct {
-	latest *shared.Observation
+	account string
+	latest  *shared.Observation
 }
 
 func (s *orderedCreditStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.URL.Path, "/v1/quota/accounts/"+s.account+"/") {
+		http.Error(w, "unexpected account", http.StatusNotFound)
+		return
+	}
 	switch {
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/lease"):
 		var req struct {
@@ -188,7 +196,7 @@ func (s *orderedCreditStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestCreditReplayDoesNotUndoNewManualEntry(t *testing.T) {
-	store := &orderedCreditStore{}
+	store := &orderedCreditStore{account: "anthropic-api:0123456789abcdef"}
 	srv := httptest.NewServer(store)
 	defer srv.Close()
 	a := benchFakeApp(t, srv)

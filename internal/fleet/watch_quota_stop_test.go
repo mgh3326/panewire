@@ -21,6 +21,14 @@ import (
 func quotaStopFixture(t *testing.T, role, status, screen string) (*App, *fakeRunner, *fakeHK, string) {
 	t.Helper()
 	a := testApp(t)
+	f, h, report := quotaStopFixtureOn(t, a, role, status, screen)
+	return a, f, h, report
+}
+
+// quotaStopFixtureOn is quotaStopFixture on an app the caller built, so a test
+// can seat a live job on an app whose placement fixture it already set up.
+func quotaStopFixtureOn(t *testing.T, a *App, role, status, screen string) (*fakeRunner, *fakeHK, string) {
+	t.Helper()
 	f := ledgerRunner(t, a)
 	h := newFakeHK(t)
 	h.claimJob("j", float64(42), "test-host")
@@ -46,7 +54,7 @@ func quotaStopFixture(t *testing.T, role, status, screen string) (*App, *fakeRun
 	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "report": report, "role": role})
 	seedLedger(t, a, "j")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
-	return a, f, h, report
+	return f, h, report
 }
 
 // announceQuotaStopEvent records the job.lost a quota-stop announcement leaves
