@@ -556,17 +556,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			missing++
 		}
 		// An idle reviewer pane stopped by a quota screen with no report will
-		// not finish: end the job at once with the reason, so mergewake
-		// respawns the review on another model instead of waiting out a
-		// grace (hk 4507). The hub's replacement needs a live hk record, so a
-		// reviewer stopped on its screen is not replaced there; only an implementer
-		// the manager announced, and a credit stop, get the grace.
-		// The lost record is what mergewake acts on, so job.lost and the lease
-		// release wait for it. The close is a durable intent (watch_quota_stop.go
-		// quotaIntent): recorded before the first hk write with the exact
-		// end_reason, reconciled on every poll past the completion deadline,
-		// across read errors, herdr outages and restarts. Only a successful
-		// contradictory look at the pane cancels it.
+		// not finish on its own pool. Its stop is announced (job.lost, hk record
+		// left live) and the hub carries the review on to another pool, closes the
+		// pane and writes lost with replaced_by (hk 5690, docs/quota-stop.md). The
+		// hand-off grace below is the hub's time; when it runs out with no
+		// successor the watcher ends the job itself, which is mergewake's lost
+		// record. Before hk 5690 this ended the job at once through a close
+		// intent (hk 4507) and nothing could replace it.
 		// Not while a hand-off is active: its stop is already announced.
 		// A held reviewer stop (hk 5355) ends with its hold when the pane is gone,
 		// has written a report, or moved on: the next look decides afresh.
@@ -597,13 +593,22 @@ func (a *App) watch(ctx context.Context, args []string) error {
 					// The wait ran out with the pane still on the stop: end the
 					// job as hk 4507 does (hk 5355).
 					if !a.Now().Before(reviewerHold.until) {
-						if err := a.recordQuotaIntent(ctx, j, reviewerHold.stop); errors.Is(err, errQuotaStopSuperseded) {
-							return nil
-						} else if err != nil {
+						held := reviewerHold.stop
+						reviewerHold = reviewerQuotaHold{}
+						next, outcome, err := a.handOffReviewerStop(ctx, j, held, paneAgent)
+						if err != nil {
 							return err
 						}
-						reviewerHold = reviewerQuotaHold{}
-						quotaRetry = true
+						switch outcome {
+						case reviewerHandOffEnded:
+							return nil
+						case reviewerHandOffRetry:
+							if err := a.Sleep(ctx, 5*time.Second); err != nil {
+								return err
+							}
+							continue
+						}
+						handOff = next
 					}
 				} else if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
 					resumed, resumable := reviewerWaitResume(j, stop, a.Now())
@@ -628,14 +633,20 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						deadline = deadline.Add(resumed.Sub(a.Now()))
 						fmt.Fprintln(a.Err, "quota-stop reviewer hold re-armed after restart")
 					} else {
-						if err := a.recordQuotaIntent(ctx, j, stop); errors.Is(err, errQuotaStopSuperseded) {
-							// The hub ended the job on its posted result.
-							return nil
-						} else if err != nil {
+						next, outcome, err := a.handOffReviewerStop(ctx, j, stop, paneAgent)
+						if err != nil {
 							return err
 						}
-						// The next poll reconciles it with a fresh look.
-						quotaRetry = true
+						switch outcome {
+						case reviewerHandOffEnded:
+							return nil
+						case reviewerHandOffRetry:
+							if err := a.Sleep(ctx, 5*time.Second); err != nil {
+								return err
+							}
+							continue
+						}
+						handOff = next
 					}
 				}
 			}

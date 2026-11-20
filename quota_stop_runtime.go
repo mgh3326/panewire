@@ -36,9 +36,6 @@ type quotaStopManager struct {
 	// announce records job.lost reason quota_stop for a handed-over job, which
 	// the hub then replaces (hub_quota_replace.go).
 	announce func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error
-	// endReviewer hands a reviewer's quota stop to the job's watcher, which
-	// ends it as hk 4507 does (hk 5355). Tests substitute it.
-	endReviewer func(ctx context.Context, job, pane string, stop quotastop.Stop) error
 	// recordRung and publishRung keep the rung a stop spent out of new
 	// placements until its reset (fleet.RecordLimitObserved and
 	// PublishLimitObserved, hk 5562). Tests substitute them.
@@ -107,9 +104,6 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	}
 	q.recordRung = fleet.RecordLimitObserved
 	q.publishRung = fleet.PublishLimitObserved
-	q.endReviewer = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
-		return fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(root, "jobs"), job, pane, q.session(job, pane), stop)
-	}
 	q.read = func(ctx context.Context, pane string) (string, error) {
 		session := ""
 		if q.session != nil {
@@ -863,20 +857,10 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			q.update(ctx, r.id, "action_recorded", 1)
 			continue
 		}
-		// A reviewer's hand-over ends it through its watcher's intent, as hk 4507
-		// does; the implementer's announce would have the hub replace it (hk 5355).
-		if r.decision == "handover" && r.role == "reviewer" && quotaActsOn(r.role, r.pool) {
-			stop := quotastop.Stop{Pool: r.pool}
-			if at, err := time.Parse(time.RFC3339, r.reset); err == nil {
-				stop.Reset = at
-			}
-			if err := q.endReviewer(ctx, r.job, r.pane, stop); err != nil {
-				q.backoffAction(ctx, r.id, now)
-			} else {
-				q.update(ctx, r.id, "action_recorded", 1)
-			}
-			continue
-		}
+		// A reviewer's hand-over is announced like an implementer's: the hub
+		// carries it on to another pool and writes replaced_by on the old record
+		// (hk 5690). It used to end through the watcher's intent (hk 4507), which
+		// wrote lost with no successor.
 		if r.decision == "handover" && quotaActsOn(r.role, r.pool) {
 			q.handOver(ctx, r.id, r.job, r.pane, r.pool, r.reset, r.attempt, now)
 			continue

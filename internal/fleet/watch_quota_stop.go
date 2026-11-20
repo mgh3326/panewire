@@ -25,17 +25,18 @@ import (
 var quotaStopRoles = []string{"reviewer"}
 
 // QuotaStopHandOffGrace is how long a watcher leaves the hub to replace a job
-// whose quota stop was announced (an implementer the quota-stop manager
-// handed over, or a credit-stopped job) before it ends the job itself, without
-// a replacement. The hub places the replacement, closes the pane and writes the
+// whose quota stop was announced (a stopped reviewer, an implementer the
+// quota-stop manager handed over, or a credit-stopped job) before it ends the
+// job itself, without a replacement. The hub places the replacement, closes the pane and writes the
 // hk record with replaced_by or handed_over_to (hk never rewrites a lost record,
-// so the pointer can only be written once). Zero ends the job at once. It must
+// so the pointer can only be written once). Zero expires it at the next poll. It must
 // outlast the hub's whole replacement (hub_quota_replace.go quotaReplaceBudget,
 // a hard deadline) plus the relay to the hub, or the watcher writes a terminal
 // record without the successor pointer while the hub is still placing it.
 //
-// A reviewer on a visible quota screen has no grace: its watcher ends the job
-// at once (hk 4507) and mergewake respawns the review.
+// A reviewer on a visible quota screen gets the same grace (hk 5690): its
+// watcher announces the stop and the hub carries the review on. Until hk 5690 it
+// was ended at once (hk 4507) and nothing could replace it.
 const QuotaStopHandOffGrace = 10 * time.Minute
 
 // QuotaStopEndReason is the hk end_reason of a quota-stopped job:
@@ -334,33 +335,6 @@ func AnnounceQuotaStop(ctx context.Context, jobs, job, pane, attempt string, sto
 
 // announceStartWatch starts the job's re-armed watcher; tests replace it.
 var announceStartWatch = func(a *App, job string) error { return a.startWatchMode(job, true) }
-
-// RecordReviewerQuotaIntent hands a safety-net observation to the reviewer's
-// existing durable close and watcher reconciliation path.
-func RecordReviewerQuotaIntent(ctx context.Context, jobs, job, pane, session string, stop quotastop.Stop) error {
-	home, _ := os.UserHomeDir()
-	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}, HerdrSession: session}
-	j, err := a.job(job)
-	if err != nil {
-		return err
-	}
-	if j.Terminal || j.Reaped {
-		return nil
-	}
-	if j.Pane != pane || j.QuotaRole() != "reviewer" {
-		return fmt.Errorf("reviewer pane changed")
-	}
-	if err := a.recordQuotaIntent(ctx, j, stop); err != nil {
-		if errors.Is(err, errQuotaStopSuperseded) {
-			return nil
-		}
-		return err
-	}
-	if !a.watchActive(job) {
-		return announceStartWatch(a, job)
-	}
-	return nil
-}
 
 // announcedQuotaStop returns the quota stop a job.lost of this attempt
 // announced, if the job's newest end is one: the ledger's view in sequence
@@ -749,27 +723,6 @@ func pendingQuotaIntent(j Job) (quotaIntent, bool) {
 	return cur, open
 }
 
-func (a *App) recordQuotaIntent(ctx context.Context, j Job, stop quotastop.Stop) error {
-	unlock, err := a.lockJobOperation(ctx, j.ID, quotaRecordLockWait)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if fresh, err := a.job(j.ID); err == nil {
-		if _, exists := pendingQuotaIntent(fresh); exists {
-			return nil
-		}
-	}
-	if ended, _ := a.endedByResultPosted(ctx, j.ID, false); ended {
-		return errQuotaStopSuperseded
-	}
-	payload := map[string]any{"pane_id": j.Pane, "pool": stop.Pool, "end_reason": QuotaStopEndReason(stop.Pool, stop.Reset, "", "")}
-	if !stop.Reset.IsZero() {
-		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)
-	}
-	return a.event(ctx, j.ID, quotaIntentKind, payload)
-}
-
 // quotaIntentOutcome is what one reconciliation of a close intent did.
 type quotaIntentOutcome int
 
@@ -870,4 +823,36 @@ func (a *App) hkJobState(ctx context.Context, id string) (state, endReason strin
 func (a *App) hkJobEnded(ctx context.Context, id string) bool {
 	state, _, ok := a.hkJobState(ctx, id)
 	return ok && (state == "completed" || state == "lost" || state == "escalated")
+}
+
+// reviewerHandOffOutcome is what announcing a reviewer's quota stop did.
+type reviewerHandOffOutcome int
+
+const (
+	// reviewerHandOffActive: the stop is announced and the grace runs.
+	reviewerHandOffActive reviewerHandOffOutcome = iota
+	// reviewerHandOffEnded: the job is over (the hub ended it on its posted
+	// result, or there is no grace and the watcher ended it now).
+	reviewerHandOffEnded
+	// reviewerHandOffRetry: the end lock stayed held past its bound; the next
+	// poll looks again.
+	reviewerHandOffRetry
+)
+
+// handOffReviewerStop announces a stopped reviewer for the hub to carry on to
+// another pool (hk 5690), the way a credit-stopped job is announced. It returns
+// the hand-off the watcher then keeps: the announced stop, the grace's end and
+// the pane state the stop was read in. A zero grace expires at the next poll.
+func (a *App) handOffReviewerStop(ctx context.Context, j Job, stop quotastop.Stop, ag Agent) (quotaHandOff, reviewerHandOffOutcome, error) {
+	switch err := a.quotaStopAnnounce(ctx, j, stop); {
+	case errors.Is(err, errQuotaStopSuperseded):
+		// The hub ended the job on its posted result: nothing to hand over.
+		return quotaHandOff{}, reviewerHandOffEnded, nil
+	case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
+		a.warn("reviewer quota hand-off waits for the job end lock: %v", err)
+		return quotaHandOff{}, reviewerHandOffRetry, nil
+	case err != nil:
+		return quotaHandOff{}, reviewerHandOffEnded, err
+	}
+	return quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), seq: ag.StateChangeSeq, active: true}, reviewerHandOffActive, nil
 }

@@ -27,18 +27,18 @@ func TestStallForegroundProcess(t *testing.T) {
 	}
 }
 
-func TestStallReviewerQuotaUsesWatcherIntent(t *testing.T) {
+func TestStallReviewerQuotaIsAnnouncedForTheHub(t *testing.T) {
 	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "I stopped here.\n")
 	old := announceStartWatch
-	announceStartWatch = func(a *App, _ string) error {
-		if a.HerdrSession != "session-a" {
-			t.Fatalf("watcher session=%q", a.HerdrSession)
-		}
-		return nil
-	}
+	started := 0
+	announceStartWatch = func(*App, string) error { started++; return nil }
 	t.Cleanup(func() { announceStartWatch = old })
 	for i := 0; i < 2; i++ {
-		if err := RecordReviewerQuotaIntent(context.Background(), a.Jobs, "j", "w:p1", "session-a", quotastop.Stop{Pool: "claude"}); err != nil {
+		attempt, err := CurrentAttempt(a.Jobs, "j")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", attempt, quotastop.Stop{Pool: "claude"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -46,17 +46,14 @@ func TestStallReviewerQuotaUsesWatcherIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	count := 0
-	for _, event := range j.Events {
-		if event.Kind == quotaIntentKind {
-			count++
-		}
+	if _, ok := announcedQuotaStop(j); !ok {
+		t.Fatal("the reviewer's stop is not announced for the hub")
 	}
-	if count != 1 {
-		t.Fatalf("quota intents=%d, want 1", count)
+	if _, ok := pendingQuotaIntent(j); ok {
+		t.Fatal("a reviewer's stop recorded a close intent: nothing could replace it")
 	}
-	if _, ok := pendingQuotaIntent(j); !ok {
-		t.Fatal("watcher has no pending quota intent")
+	if started == 0 {
+		t.Fatal("no watcher was started for the announced stop")
 	}
 }
 
