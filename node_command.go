@@ -308,6 +308,28 @@ func nodePaneCloseOpFields(raw json.RawMessage) bool {
 	return true
 }
 
+// nodeHandoverSnapshotFields accepts worktree.handover_snapshot's required fields
+// plus the optional stop_seq (hk 5780).
+func nodeHandoverSnapshotFields(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return false
+	}
+	for _, name := range nodeCommandArgFields[nodeCommandHandoverSnapshot] {
+		value, found := fields[name]
+		if !found || isJSONNull(value) {
+			return false
+		}
+		delete(fields, name)
+	}
+	for key, value := range fields {
+		if key != "stop_seq" || isJSONNull(value) {
+			return false
+		}
+	}
+	return true
+}
+
 // nodeCloseStatusFields accepts pane.close_status's required fields plus any
 // subset of the optional ack (hk 5073) and epoch (hk 5296).
 func nodeCloseStatusFields(raw json.RawMessage) bool {
@@ -425,7 +447,7 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
 	optionalAck := op == nodeCommandPaneCloseStatus && nodeCloseStatusFields(raw)
-	optionalHandover := op == nodeCommandPaneCloseOp && nodePaneCloseOpFields(raw)
+	optionalHandover := op == nodeCommandPaneCloseOp && nodePaneCloseOpFields(raw) || op == nodeCommandHandoverSnapshot && nodeHandoverSnapshotFields(raw)
 	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover) {
 		return nil, false
 	}
@@ -1333,6 +1355,20 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	// write during the final pane and question checks must still be seen.
 	if result, code, stop := runHook(lastCheck); stop {
 		return result, code
+	}
+	if args.StopSeq != nil {
+		// The worktree check above can take seconds: a pane that resumed during it
+		// has another sequence, and the close is the next step (hk 5780 review).
+		outcome, last, err := client.nodePaneMatchInSession(ctx, session, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true, args.AllowUnnamed)
+		if err != nil {
+			return nodePaneCloseResult{}, "herdr_failed"
+		}
+		if outcome != "" {
+			return nodePaneCloseResult{Outcome: outcome}, ""
+		}
+		if last.StateChangeSeq == nil || *last.StateChangeSeq != *args.StopSeq {
+			return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
+		}
 	}
 	if _, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "close", args.PaneID); err != nil {
 		return nodePaneCloseResult{}, "close_failed"

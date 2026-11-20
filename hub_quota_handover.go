@@ -36,11 +36,15 @@ const (
 )
 
 // handOverAnnouncedImplementer routes the stop the node announced for holder, an
-// implementer the hub spawned on machine. A node that cannot close a pane at the
-// stop's own sequence (no pane_close_op_stop_seq_v1, or a stop that names none)
-// cannot prove the pane is still the stopped one, and its stop is filed as a
-// loss as it was before hk 5780; so is a node without the hand-over
-// capabilities.
+// implementer the hub spawned on machine. The caller holds the job's pool-action
+// lock for the whole call, so overlapping deliveries of one announcement are
+// serialized: the second finds the first's row or refusal (hk 5780 review).
+//
+// A connected node that cannot close a pane at the stop's own sequence (no
+// pane_close_op_stop_seq_v1, or a stop that names none) cannot prove the pane is
+// still the stopped one, and its stop is filed as a loss as it was before hk
+// 5780; so is one without the hand-over capabilities. A node that is not
+// connected says nothing about what it can do: the stop stays with it.
 func (h *HubServer) handOverAnnouncedImplementer(ctx context.Context, machine string, event hubJobEventPayload, holder hubSpawnTask, prior fleet.Spawn, announced *quotaAnnouncement) quotaStopOutcome {
 	const role = "implementer"
 	if h.spawnGrantDrain || h.spawnRollbackDrain || h.inbox.store.spawnFrozen {
@@ -48,7 +52,15 @@ func (h *HubServer) handOverAnnouncedImplementer(ctx context.Context, machine st
 		return quotaStopRetry
 	}
 	stopSeq, fenced := quotaStopSeq(event.Reason)
-	if !fenced || !h.nodeHasCapability(machine, hubCapabilityCloseOps) || !h.nodeHasCapability(machine, hubCapabilityHandoverCheck) || !h.nodeHasCapability(machine, hubCapabilityCloseOpStopSeq) {
+	capable := fenced
+	for _, capability := range []string{hubCapabilityCloseOps, hubCapabilityHandoverCheck, hubCapabilityCloseOpStopSeq} {
+		connected, has := h.nodeCapability(machine, capability)
+		if !connected {
+			return quotaStopRetry
+		}
+		capable = capable && has
+	}
+	if !capable {
 		h.logger.Info("quota-stop hand-over needs a node with close ops, the hand-over check and a stop-sequence fence", "job", event.JobID, "node", machine, "fenced", fenced)
 		announced.fileLoss(ctx)
 		return quotaStopFiled
@@ -56,22 +68,31 @@ func (h *HubServer) handOverAnnouncedImplementer(ctx context.Context, machine st
 	// A resend finds its own outcome before anything is probed or prepared: the
 	// worktree may have changed since the first delivery (an owner who read the
 	// refusal committed and pushed), and a second answer would contradict it.
-	owner := poolNoticeOwner(holder)
+	// The refusal is a row of its own, so it is found whatever the owner-notice
+	// policy files in the lane inbox.
 	noticeID := poolStopNoticeID(holder.Job, event.EventID)
+	exhaustion := poolExhaustion{Cause: poolCauseQuotaStop, StopSeq: stopSeq, StopEvent: event.EventID}
 	if event.EventID != "" {
 		rows, err := h.inbox.store.poolActionsOf(ctx, holder.Job)
 		if err != nil {
 			return quotaStopRetry
 		}
 		for _, row := range rows {
-			if handover := row.Data.Handover; row.Data.Kind == poolActionKindHandover && handover != nil && handover.StopEvent == event.EventID {
-				return quotaStopSettled
+			handover := row.Data.Handover
+			if handover == nil || handover.StopEvent != event.EventID {
+				continue
 			}
-		}
-		if owned, err := h.inbox.store.poolNoticeOwned(ctx, owner, noticeID); err != nil {
-			return quotaStopRetry
-		} else if owned {
-			return quotaStopSettled
+			switch row.Data.Kind {
+			case poolActionKindHandover:
+				return quotaStopSettled
+			case poolActionKindRefusal:
+				// The refusal is stored; the notice is repeated until it is owned.
+				exhaustion.Pool = handover.Pool
+				if result := h.notifyPoolExhaustedAs(ctx, exhaustion, holder, role, handover.Reason, noticeID); result.acted() {
+					return quotaStopSettled
+				}
+				return quotaStopRetry
+			}
 		}
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
@@ -100,7 +121,7 @@ func (h *HubServer) handOverAnnouncedImplementer(ctx context.Context, machine st
 	}
 	// The stop's own band is the pool the successor leaves; an account-scoped
 	// stop leaves only the account (handoverExclude).
-	exhaustion := poolExhaustion{Pool: pool, Account: quotaStopReasonAccount(event.Reason), Cause: poolCauseQuotaStop, StopSeq: stopSeq, StopEvent: event.EventID}
+	exhaustion.Pool, exhaustion.Account = pool, quotaStopReasonAccount(event.Reason)
 	if stopPool, _ := quotaStopReasonFields(event.Reason); stopPool != "" && spawnargs.ValuePattern.MatchString(stopPool) {
 		exhaustion.Band = fleet.BandKey(stopPool)
 	}
@@ -114,9 +135,9 @@ func (h *HubServer) handOverAnnouncedImplementer(ctx context.Context, machine st
 	if in.bound != holder.Job {
 		// Another job holds the task now; replacing this one would start a second
 		// implementer beside it.
-		result = h.notifyPoolExhaustedAs(ctx, exhaustion, holder, role, "task_rebound", noticeID)
+		result = h.refuseAnnouncedHandover(ctx, exhaustion, holder, role, "task_rebound")
 	} else {
-		result = h.queueImplementerHandover(ctx, exhaustion, holder, prior, app, record, taskID)
+		result = h.queueImplementerHandover(ctx, exhaustion, holder, prior, app, record, taskID, true)
 	}
 	h.logger.Info("quota-stop implementer hand-over", "job", event.JobID, "node", machine, "action", result.action, "reason", result.why)
 	if result.acted() || result.why == "already_replaced" {
@@ -125,15 +146,20 @@ func (h *HubServer) handOverAnnouncedImplementer(ctx context.Context, machine st
 	return quotaStopRetry
 }
 
-// handoverRowOwns reports whether a hand-over row that is not final owns job: a
-// resend of the announcement that opened it, or a later one, has its outcome.
-func (h *HubServer) handoverRowOwns(ctx context.Context, job string) bool {
+// handoverRowOwns reports whether a hand-over row that is not final owns job and
+// was opened by this very announcement (its producer event id): only that
+// delivery has its outcome. Another stop of the job stays retryable until the
+// incumbent row settles (hk 5780 review).
+func (h *HubServer) handoverRowOwns(ctx context.Context, job, stopEvent string) bool {
+	if stopEvent == "" {
+		return false
+	}
 	rows, err := h.inbox.store.poolActionsOf(ctx, job)
 	if err != nil {
 		return false
 	}
 	for _, row := range rows {
-		if row.Data.Kind == poolActionKindHandover && row.Phase != poolActionDone && row.Phase != poolActionRefused {
+		if handover := row.Data.Handover; row.Data.Kind == poolActionKindHandover && row.Phase != poolActionDone && row.Phase != poolActionRefused && handover != nil && handover.StopEvent == stopEvent {
 			return true
 		}
 	}

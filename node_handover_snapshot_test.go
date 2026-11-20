@@ -402,7 +402,7 @@ func TestHandoverSnapshotPushPublishesVerifiedTrackedWork(t *testing.T) {
 	work, origin, _ := handoverRepo(t)
 	writeSnapshotFile(t, work, "a.txt", "snapshot")
 	writeSnapshotFile(t, work, "private.txt", "local")
-	snapshot, err := handoverSnapshotPush(t.Context(), work, t.TempDir(), "job-a")
+	snapshot, err := handoverSnapshotPush(t.Context(), work, t.TempDir(), "job-a", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +417,7 @@ func TestHandoverSnapshotPushPublishesVerifiedTrackedWork(t *testing.T) {
 func TestHandoverSnapshotPushRefusesFailedOrigin(t *testing.T) {
 	work, _, _ := handoverRepo(t)
 	handoverGit(t, work, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing"))
-	snapshot, err := handoverSnapshotPush(t.Context(), work, t.TempDir(), "job-a")
+	snapshot, err := handoverSnapshotPush(t.Context(), work, t.TempDir(), "job-a", nil)
 	if err == nil || snapshot != (handoverSnapshotCommit{}) {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}

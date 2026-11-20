@@ -311,20 +311,13 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// it with pool-action admission so neither can overwrite the other's end.
 	unlockJob, free := h.lockWithoutPoolAction(ctx, event.JobID)
 	if !free {
-		if announced != nil && h.handoverRowOwns(ctx, event.JobID) {
-			// A hand-over row already owns the job: the announcement has its outcome.
+		if announced != nil && h.handoverRowOwns(ctx, event.JobID, event.EventID) {
+			// This announcement's own hand-over row owns the job: it has its outcome.
 			return skip("handover_owned")
 		}
 		return retryLater("pool_action_pending")
 	}
-	released := false
-	unlock := func() {
-		if !released {
-			released = true
-			unlockJob()
-		}
-	}
-	defer unlock()
+	defer unlockJob()
 	store := h.inbox.store
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -429,8 +422,8 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 		return skip("holder_state", "status", holder.Status)
 	}
 	if guarded {
-		// createPoolAction takes the job's lock itself.
-		unlock()
+		// The job's lock is held through the hand-over: it serializes overlapping
+		// deliveries of one announcement.
 		switch h.handOverAnnouncedImplementer(ctx, machine, event, holder, prior, announced) {
 		case quotaStopSettled:
 			return "", false

@@ -39,6 +39,10 @@ const (
 	// poolActionKindWait is a final row recording that a stop was waited
 	// out, so a later stop with another reset counts as the second one.
 	poolActionKindWait = "wait"
+	// poolActionKindRefusal is a final row recording that an announced stop was
+	// refused a hand-over (hk 5780): the durable outcome a resend finds, whatever
+	// the owner's notice policy keeps in the lane inbox.
+	poolActionKindRefusal = "handover_refused"
 
 	// poolWaitReason is the wait reason a replayed wait reports.
 	poolWaitReason = "reset_within_expected"
@@ -237,7 +241,7 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 	if decision == "wait" {
 		return h.waitPoolStop(ctx, exhaustion, task, why)
 	}
-	result := h.queueImplementerHandover(ctx, exhaustion, task, prior, app, record, taskID)
+	result := h.queueImplementerHandover(ctx, exhaustion, task, prior, app, record, taskID, false)
 	if result.action == poolJobQueued {
 		result.why = why
 	}
@@ -249,11 +253,9 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 // gives the owner today's notice with the reason it could not. The sweep calls
 // it after its §Implementer decision, and so does an announced screen stop
 // (hub_quota_handover.go, hk 5780), whose decision the node's manager made.
-func (h *HubServer) queueImplementerHandover(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, app *fleet.App, record map[string]any, taskID string) poolJobResult {
+func (h *HubServer) queueImplementerHandover(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, app *fleet.App, record map[string]any, taskID string, locked bool) poolJobResult {
 	const role = "implementer"
-	notice := func(why string) poolJobResult {
-		return h.notifyPoolExhaustedAs(ctx, exhaustion, task, role, why, poolStopNoticeID(task.Job, exhaustion.StopEvent))
-	}
+	notice := func(why string) poolJobResult { return h.refuseAnnouncedHandover(ctx, exhaustion, task, role, why) }
 	newJob, n, ok := quotaReplacementJob(task.Job)
 	if !ok {
 		h.logger.Info("pool hand-over past the replacement limit", "job", task.Job, "replacements", n-1)
@@ -267,7 +269,11 @@ func (h *HubServer) queueImplementerHandover(ctx context.Context, exhaustion poo
 		}
 		return notice(refusal)
 	}
-	if err := h.createPoolAction(ctx, exhaustion, task, app, handover); err != nil {
+	create := h.createPoolAction
+	if locked {
+		create = h.createPoolActionLocked
+	}
+	if err := create(ctx, exhaustion, task, app, handover); err != nil {
 		return poolJobSkip(role, "handover_not_queued")
 	}
 	return poolJobResult{action: poolJobQueued, role: role}
@@ -314,6 +320,34 @@ func poolStopNoticeID(job, stopEvent string) string {
 	}
 	sum := sha256.Sum256([]byte(stopEvent))
 	return "pool-exhausted:" + job + ":" + hex.EncodeToString(sum[:8])
+}
+
+// refuseAnnouncedHandover is the refusal of a hand-over: the owner's one
+// decision. For an announced stop (exhaustion.StopEvent) the refusal is first
+// stored as a final row keyed by that event, so a resend finds it even when the
+// owner-notice policy files no lane-inbox row, and the notice is repeated
+// idempotently until it is owned.
+func (h *HubServer) refuseAnnouncedHandover(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, role, why string) poolJobResult {
+	if exhaustion.StopEvent != "" {
+		id, err := fleet.NewRequestID()
+		if err != nil {
+			return poolJobSkip(role, "request_id")
+		}
+		h.mu.Lock()
+		epoch := uint64(1)
+		if job := h.jobs[task.Job]; job != nil && job.Epoch > 0 {
+			epoch = job.Epoch
+		}
+		h.mu.Unlock()
+		row := poolAction{ID: id, Job: task.Job, Node: spawnHolderHost(task), Epoch: epoch, Phase: poolActionDone, Data: poolActionData{
+			Owner: task.Owner, Kind: poolActionKindRefusal,
+			Handover: &poolHandover{Pool: exhaustion.Pool, Cause: exhaustion.Cause, StopSeq: exhaustion.StopSeq, StopEvent: exhaustion.StopEvent, Outcome: handoverFailed, Reason: why},
+		}}
+		if err := h.inbox.store.insertPoolAction(ctx, row, h.now().UTC()); err != nil {
+			return poolJobSkip(role, "store_unavailable")
+		}
+	}
+	return h.notifyPoolExhaustedAs(ctx, exhaustion, task, role, why, poolStopNoticeID(task.Job, exhaustion.StopEvent))
 }
 
 // poolNoticeOwner is the lane a job's pool notices go to.
@@ -438,7 +472,7 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 	var snapshot *poolHandoverSnapshot
 	if read.Outcome == handoverDirty || read.Outcome == handoverUnpushed {
 		var refusal string
-		snapshot, read, refusal = h.handoverSnapshot(ctx, host, task.Job, probe.row.Cwd, checkout, read.Outcome)
+		snapshot, read, refusal = h.handoverSnapshot(ctx, host, task.Job, probe.row.Cwd, checkout, read.Outcome, exhaustion.StopSeq)
 		if refusal != "" {
 			return nil, refusal
 		}
@@ -480,9 +514,14 @@ func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhausti
 // prepareHandover builds on: the snapshot commit stands in for the pushed tip.
 // A node without handover_snapshot_v1 keeps the check's refusal; a failed or
 // refused snapshot is the refusal the owner notice names, with no close.
-func (h *HubServer) handoverSnapshot(ctx context.Context, host, job, cwd string, checkout *fleet.HubCheckout, why string) (*poolHandoverSnapshot, nodeHandoverCheckResult, string) {
+func (h *HubServer) handoverSnapshot(ctx context.Context, host, job, cwd string, checkout *fleet.HubCheckout, why string, stopSeq *int64) (*poolHandoverSnapshot, nodeHandoverCheckResult, string) {
 	if !h.nodeHasCapability(host, hubCapabilityHandoverSnapshot) {
 		return nil, nodeHandoverCheckResult{}, why
+	}
+	if stopSeq != nil && !h.nodeHasCapability(host, hubCapabilitySnapshotStopSeq) {
+		// A snapshot publishes the worktree to origin before any close: for a stop
+		// it must be bound to the pane state, and this node cannot (hk 5780).
+		return nil, nodeHandoverCheckResult{}, "snapshot_stop_seq_unsupported"
 	}
 	h.mu.Lock()
 	epoch := uint64(0)
@@ -494,7 +533,7 @@ func (h *HubServer) handoverSnapshot(ctx context.Context, host, job, cwd string,
 		return nil, nodeHandoverCheckResult{}, "worktree_unavailable"
 	}
 	var snap nodeHandoverSnapshotResult
-	if !h.nodeCall(ctx, host, nodeCommandHandoverSnapshot, nodeHandoverSnapshotArgs{Job: job, Epoch: epoch, Cwd: cwd, Origin: checkout.Origin, Branch: checkout.Branch}, hubNodeCommandWait, &snap) ||
+	if !h.nodeCall(ctx, host, nodeCommandHandoverSnapshot, nodeHandoverSnapshotArgs{Job: job, Epoch: epoch, Cwd: cwd, Origin: checkout.Origin, Branch: checkout.Branch, StopSeq: stopSeq}, hubNodeCommandWait, &snap) ||
 		!validNodeHandoverSnapshotResult(snap) || snap.Outcome == handoverSnapshotOK && snap.Ref != handoverSnapshotRef(job, snap.Commit) {
 		return nil, nodeHandoverCheckResult{}, "snapshot_failed"
 	}
@@ -887,7 +926,11 @@ func (h *HubServer) handoverBeforeClose(ctx context.Context, action *poolAction)
 			return withdraw("recovered")
 		}
 	}
-	if in := h.readHandoverInputs(ctx, handover.Task); in.bound != action.Job {
+	if in := h.readHandoverInputs(ctx, handover.Task); in.unreadable {
+		// A failed read says nothing about the binding: the row stays pending
+		// (hk 5780 review); only a confirmed change withdraws it.
+		return false, errors.New("task binding unreadable")
+	} else if in.bound != action.Job {
 		return withdraw("task_rebound")
 	}
 	probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)

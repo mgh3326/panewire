@@ -23,6 +23,12 @@ func (h *HubServer) createPoolAction(ctx context.Context, exhaustion poolExhaust
 		return err
 	}
 	defer unlock()
+	return h.createPoolActionLocked(ctx, exhaustion, task, app, handover)
+}
+
+// createPoolActionLocked is createPoolAction for a caller that already holds the
+// job's pool-action lock (an announced stop's hand-over, hk 5780).
+func (h *HubServer) createPoolActionLocked(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, app *fleet.App, handover *poolHandover) error {
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	record, exists, err := app.ExistingJob(readCtx, task.Job)
 	cancel()
@@ -271,6 +277,16 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 		// not started closing rather than strand it on the withdrawn node.
 		return h.releasePoolAction(ctx, action)
 	}
+	if handover := action.Data.Handover; (status.State == nodeCloseOpNone || status.State == fleet.CloseOpRegistered) && action.Data.Kind == poolActionKindHandover && handover != nil && handover.StopSeq != nil {
+		// A fenced hand-over outlives the capability check made when it was
+		// queued: a node that reconnects as an older binary still offers close ops
+		// but rejects stop_seq. A request not begun is released (the fence stays on
+		// the stored row) and the owner told, never retried against it (hk 5780).
+		if connected, has := h.nodeCapability(action.Node, hubCapabilityCloseOpStopSeq); connected && !has {
+			handover.Reason = "stop_seq_unsupported"
+			return h.releasePoolAction(ctx, action)
+		}
+	}
 	switch status.State {
 	case fleet.CloseOpRefused, fleet.CloseOpPreempted:
 		if action.Data.Kind == poolActionKindHandover && action.Data.Handover != nil {
@@ -407,7 +423,7 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 	// in-memory job after hub restart does not prevent replay of this binding.
 	allowed := func() bool {
 		job, node := h.jobs[action.Job], h.nodes[action.Node]
-		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps] && (action.Data.Kind != poolActionKindHandover || node.capabilities[hubCapabilityHandoverCheck])
+		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps] && (action.Data.Kind != poolActionKindHandover || node.capabilities[hubCapabilityHandoverCheck]) && (args.StopSeq == nil || node.capabilities[hubCapabilityCloseOpStopSeq])
 	}
 	var result nodePaneCloseOpResult
 	if !h.nodeCallWhere(ctx, action.Node, nodeCommandPaneCloseOp, *args, hubNodeCommandWait, &result, allowed) {

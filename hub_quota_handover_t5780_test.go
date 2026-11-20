@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,23 @@ func announcedFixture(t *testing.T, job string) *quotaReplaceFixture {
 	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseOpStopSeq] = true
 	f.hub.mu.Unlock()
 	return f
+}
+
+// handoverRowsOf is the hand-over rows of job: the refusal rows an announced stop
+// leaves are final records, not hand-overs.
+func handoverRowsOf(t *testing.T, f *quotaReplaceFixture, job string) []poolAction {
+	t.Helper()
+	rows, err := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []poolAction
+	for _, row := range rows {
+		if row.Data.Kind == poolActionKindHandover {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 // stopEvent is the announcement a node relays, with its producer event id.
@@ -139,8 +157,8 @@ func TestAnnouncedImplementerStopOnADirtyWorktreeIsRefusedWithOneDecision_t5780(
 	if settled != 1 || filed != 0 {
 		t.Fatalf("settled=%d filed=%d, want the stop settled and no loss filed", settled, filed)
 	}
-	if rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job); len(rows) != 0 {
-		t.Fatalf("a refused hand-over left rows: %+v", rows)
+	if rows := handoverRowsOf(t, f, job); len(rows) != 0 {
+		t.Fatalf("a refused hand-over left a hand-over row: %+v", rows)
 	}
 	lines := ownerLines(t, f.hub, "pool-exhausted:")
 	if len(lines) != 1 || !strings.Contains(lines[0], handoverDirty) || !strings.Contains(lines[0], job) {
@@ -167,7 +185,7 @@ func TestAnnouncedStopResendFindsItsOutcomeBeforeProbing_t5780(t *testing.T) {
 	if settled != 1 || filed != 0 {
 		t.Fatalf("resend: settled=%d filed=%d, want settled by the first delivery's decision", settled, filed)
 	}
-	if rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job); len(rows) != 0 {
+	if rows := handoverRowsOf(t, f, job); len(rows) != 0 {
 		t.Fatalf("the resend queued a hand-over after the refusal: %+v", rows)
 	}
 	if lines := ownerLines(t, f.hub, "pool-exhausted:"); len(lines) != 1 {
@@ -175,7 +193,7 @@ func TestAnnouncedStopResendFindsItsOutcomeBeforeProbing_t5780(t *testing.T) {
 	}
 	// Another stop (new producer event) is decided afresh, and the clean branch now hands over.
 	deliver(t, f, stopEvent(job, "ev-2"), func() { answerHandoverCheck(t, f, handoverReadReply(job)) })
-	if rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job); len(rows) != 1 {
+	if rows := handoverRowsOf(t, f, job); len(rows) != 1 {
 		t.Fatalf("a later stop was not handed over: %+v", rows)
 	}
 	// And a resend of that one finds the row that owns the job, with no command and no new row.
@@ -300,4 +318,202 @@ func TestAnnouncedQuotaStopReaderDoesNoStoreIO_t5780(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the websocket reader waited on the store")
 	}
+}
+
+// queueAnnouncedRow stores a clean hand-over row for the announcement ev.
+func queueAnnouncedRow(t *testing.T, f *quotaReplaceFixture, ev string) {
+	t.Helper()
+	deliver(t, f, stopEvent(f.job, ev), func() { answerHandoverCheck(t, f, handoverReadReply(f.job)) })
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), f.job)
+	if len(rows) != 1 || rows[0].Data.Kind != poolActionKindHandover || rows[0].Data.Handover.StopEvent != ev {
+		t.Fatalf("rows=%+v", rows)
+	}
+}
+
+// hk 5780 review: a hand-over row that is queued owns the job, but only for the
+// announcement that opened it. Another stop of the job (the pane resumed and
+// stopped again) is not acknowledged on its account: its own outcome does not
+// exist yet, and the node's resend is how it is decided once the row settles.
+func TestAnotherStopIsNotAcknowledgedOnAQueuedRowsAccount_t5780(t *testing.T) {
+	const job = "pw-two-stops-5780"
+	f := announcedFixture(t, job)
+	queueAnnouncedRow(t, f, "ev-1")
+	if settled, filed := deliver(t, f, stopEvent(job, "ev-2"), nil); settled != 0 || filed != 0 {
+		t.Fatalf("another stop: settled=%d filed=%d, want it left with its node", settled, filed)
+	}
+	if settled, _ := deliver(t, f, stopEvent(job, "ev-1"), nil); settled != 1 {
+		t.Fatalf("the row's own announcement was not acknowledged: settled=%d", settled)
+	}
+}
+
+// hk 5780 review: overlapping deliveries of one announcement (a reconnect starts a
+// second worker while the first is still probing) are serialized by the job's
+// lock, held through preparation and the refusal. The second finds the first's
+// refusal and probes nothing: it could otherwise queue a close once the owner has
+// committed and pushed, contradicting the decision they hold.
+func TestOverlappingDeliveriesOfOneAnnouncementAreSerialized_t5780(t *testing.T) {
+	const job = "pw-overlap-5780"
+	f := announcedFixture(t, job)
+	var mu sync.Mutex
+	settled := 0
+	done := make(chan struct{}, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", stopEvent(job, "ev-1"), func() { mu.Lock(); settled++; mu.Unlock() }, &quotaAnnouncement{})
+			done <- struct{}{}
+		}()
+	}
+	// One probe and one worktree check for the two deliveries; a second worker
+	// that did not wait would send its own and block the node script below.
+	answerHandoverCheck(t, f, map[string]any{"outcome": handoverDirty})
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a delivery did not finish: it probed the node on its own")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if settled != 2 {
+		t.Fatalf("settled=%d, want both deliveries settled", settled)
+	}
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if len(rows) != 1 || rows[0].Data.Kind != poolActionKindRefusal || rows[0].Data.Handover.StopEvent != "ev-1" || rows[0].Data.Handover.Reason != handoverDirty || rows[0].Phase != poolActionDone {
+		t.Fatalf("rows=%+v, want one final refusal row keyed by the announcement", rows)
+	}
+	if lines := ownerLines(t, f.hub, "pool-exhausted:"); len(lines) != 1 {
+		t.Fatalf("owner decisions=%q, want one", lines)
+	}
+}
+
+// hk 5780 review: a node that is not connected says nothing about what it can do.
+// A capable node's stop that reaches the worker across a disconnect stays with its
+// node; it is filed as a loss only for a node connected without the capability.
+func TestAnnouncedStopAcrossADisconnectIsNotFiledAsALoss_t5780(t *testing.T) {
+	const job = "pw-disconnect-5780"
+	f := announcedFixture(t, job)
+	f.hub.mu.Lock()
+	agent := f.hub.nodes["machine-a"].agent
+	f.hub.nodes["machine-a"].agent = nil
+	f.hub.mu.Unlock()
+	settled, filed := deliver(t, f, stopEvent(job, "ev-1"), nil)
+	f.hub.mu.Lock()
+	f.hub.nodes["machine-a"].agent = agent
+	f.hub.mu.Unlock()
+	if settled != 0 || filed != 0 {
+		t.Fatalf("across a disconnect: settled=%d filed=%d, want the stop left with its node", settled, filed)
+	}
+}
+
+// hk 5780 review: a queued, fenced hand-over outlives the capability check made at
+// the announcement. A node that reconnects as an older binary still offers close
+// ops but rejects stop_seq; a request not begun is released and the owner told,
+// not retried against it for ever with the job fenced.
+func TestFencedHandoverIsReleasedWhenTheNodeCanNoLongerFenceTheClose_t5780(t *testing.T) {
+	const job = "pw-downgrade-5780"
+	f := announcedFixture(t, job)
+	queueAnnouncedRow(t, f, "ev-1")
+	f.hub.mu.Lock()
+	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseOpStopSeq)
+	f.hub.mu.Unlock()
+	action := readOnlyPoolAction(t, f.hub)
+	if err := runPoolActionStep(t, f.hub, f.node, action, poolStatus(nodeCloseOpNone, false, false), releasedReply); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if len(rows) != 1 || rows[0].Phase != poolActionRefused || rows[0].Data.Handover.Reason != "stop_seq_unsupported" || rows[0].Data.Handover.StopSeq == nil {
+		t.Fatalf("rows=%+v, want a refused row with the reason and the stored fence", rows)
+	}
+	if lines := ownerLines(t, f.hub, "pool-handover:"); len(lines) != 1 || !strings.Contains(lines[0], "stop_seq_unsupported") {
+		t.Fatalf("owner notice=%q", lines)
+	}
+}
+
+// hk 5780 review: the second read of the task, before the close, can fail
+// transiently after the first succeeded and the stop was acknowledged. An
+// unreadable binding keeps the row pending; only a confirmed change withdraws it.
+func TestQueuedHandoverSurvivesAnUnreadableTaskBeforeTheClose_t5780(t *testing.T) {
+	const job = "pw-reread-5780"
+	f := announcedFixture(t, job)
+	queueAnnouncedRow(t, f, "ev-1")
+	f.hub.handoverInputs = func(context.Context, string) handoverInputs { return handoverInputs{unreadable: true} }
+	action := readOnlyPoolAction(t, f.hub)
+	if err := runPoolActionStep(t, f.hub, f.node, action, poolStatus(nodeCloseOpNone, false, false)); err == nil {
+		t.Fatal("an unreadable task binding was taken for a decision")
+	}
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if len(rows) != 1 || rows[0].Phase == poolActionRefused || rows[0].Phase == poolActionDone || rows[0].Data.Handover.Reason != "" {
+		t.Fatalf("the row was withdrawn on an unreadable read: %+v", rows)
+	}
+}
+
+// answerCheckThenSnapshot plays the node for a dirty worktree: the pane probe, the
+// worktree check, and (when snapshot is set) the snapshot, whose args it hands to
+// seen. Any other command fails the test.
+func answerCheckThenSnapshot(t *testing.T, f *quotaReplaceFixture, snapshot map[string]any, seen func(nodeHandoverSnapshotArgs)) {
+	t.Helper()
+	for finished := false; !finished; {
+		command := nodeCommandRead(t, f.node)
+		switch string(command["op"]) {
+		case `"agents.list"`:
+			roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+		case `"worktree.handover_check"`:
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": handoverDirty}})
+			finished = snapshot == nil
+		case `"worktree.handover_snapshot"`:
+			if snapshot == nil {
+				t.Fatal("a snapshot was asked of a node that cannot fence it")
+			}
+			var args nodeHandoverSnapshotArgs
+			if err := json.Unmarshal(command["args"], &args); err != nil {
+				t.Fatal(err)
+			}
+			seen(args)
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": snapshot})
+			finished = true
+		default:
+			t.Fatalf("unexpected node command %s", command["op"])
+		}
+	}
+}
+
+// hk 5780 review: a snapshot publishes the worktree to origin before any close, so
+// for a stop it is bound to the pane state itself. The announcement's sequence goes
+// to the node with the snapshot command, and a node that cannot check it is not
+// asked: the dirty worktree is refused with the owner's one decision instead.
+func TestSnapshotOfAScreenStopIsBoundToTheStopSequence_t5780(t *testing.T) {
+	t.Run("the sequence travels with the snapshot", func(t *testing.T) {
+		const job = "pw-snap-seq-5780"
+		f := announcedFixture(t, job)
+		f.hub.mu.Lock()
+		f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
+		f.hub.nodes["machine-a"].capabilities[hubCapabilitySnapshotStopSeq] = true
+		f.hub.mu.Unlock()
+		var got *int64
+		deliver(t, f, stopEvent(job, "ev-1"), func() {
+			answerCheckThenSnapshot(t, f, handoverSnapshotReply(job), func(a nodeHandoverSnapshotArgs) { got = a.StopSeq })
+		})
+		if got == nil || *got != 7 {
+			t.Fatalf("snapshot stop_seq=%v, want 7", got)
+		}
+		if rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job); len(rows) != 1 || rows[0].Data.Handover.Snapshot == nil {
+			t.Fatalf("rows=%+v", rows)
+		}
+	})
+	t.Run("a node that cannot check it is not asked", func(t *testing.T) {
+		const job = "pw-snap-old-5780"
+		f := announcedFixture(t, job)
+		f.hub.mu.Lock()
+		f.hub.nodes["machine-a"].capabilities[hubCapabilityHandoverSnapshot] = true
+		f.hub.mu.Unlock()
+		settled, _ := deliver(t, f, stopEvent(job, "ev-1"), func() { answerCheckThenSnapshot(t, f, nil, nil) })
+		if settled != 1 {
+			t.Fatalf("settled=%d", settled)
+		}
+		lines := ownerLines(t, f.hub, "pool-exhausted:")
+		if len(lines) != 1 || !strings.Contains(lines[0], "snapshot_stop_seq_unsupported") {
+			t.Fatalf("owner decisions=%q", lines)
+		}
+	})
 }
