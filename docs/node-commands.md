@@ -152,7 +152,9 @@ that pass no job are unaffected.
 observed in, which the announcement carries (docs/quota-stop.md, "Carrying a stop
 on"). The node compares it with the first guarded look, taken after the hub's
 capture, and answers `pane-changed` for a pane in any other state: a reviewer that
-resumed and went idle again is never closed on a late announcement. The hub sends
+resumed and went idle again is never closed on a late announcement. A pane blocked at
+the verified `stop_seq` (the stop's own "Choose an option" dialog, which has no
+composer) is closed without the empty-composer proof: the sequence fence is the proof. The hub sends
 it only to a node that advertised `pane_close_stop_seq_v1` and closes nothing on
 a fenced stop for any other node.
 

@@ -632,3 +632,97 @@ func TestReplayAfterRestartFinishesAClaimedSuccessor(t *testing.T) {
 		t.Fatalf("acked=%d, want the replayed announcement acknowledged once", acked)
 	}
 }
+
+// hk 5690 review: the claimed-successor shortcut matches by lineage, not by name. A
+// job that merely carries the next name in the chain (no replaced_from) is a name
+// collision: it is refused, the record is kept, and the predecessor's pane is never
+// closed on its account.
+func TestSuccessorNameCollisionIsRefusedWithoutClosingTheTarget(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-28-p1")
+	next, _, _ := quotaReplacementJob(f.job)
+	request, err := quotaReplacementRequest(f.holder.Request, f.job, next, "claude", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Claimed under the replacement's name but not as replacing the job.
+	collision, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, next, "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), collision, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	acked := 0
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked++ }); ok || job != "" {
+		t.Fatalf("a name collision was taken for a replacement: %q", job)
+	}
+	f.hub.mu.Lock()
+	sent := len(f.hub.nodeCommands)
+	f.hub.mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("%d node commands sent on a name collision: the target's pane would be closed", sent)
+	}
+	if state := f.jobs.records[f.job]["state"]; state != "spawned" {
+		t.Fatalf("the colliding name changed the job's record: %v", state)
+	}
+	if acked != 1 {
+		t.Fatalf("acked=%d, want the refusal final", acked)
+	}
+}
+
+// hk 5690 review: an acknowledgement follows finishQuotaReplacement's result. When the
+// replaced_by write could not be made (hk unreadable here), the claimed successor's
+// stop is retried with no acknowledgement; once hk is back the same delivery finishes.
+func TestClaimedSuccessorIsAcknowledgedOnlyOnceItsPointerIsWritten(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-29-p1")
+	next, _, _ := quotaReplacementJob(f.job)
+	request, err := quotaReplacementRequest(f.holder.Request, f.job, next, "claude", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, _, err := f.hub.inbox.store.claimSpawnFrom(t.Context(), request, next, "parent", time.Now(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.paneClosed = true
+	f.jobs.failGets = 1 // the pointer write cannot read the old record
+	acked := 0
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked++ }); ok || job != "" || acked != 0 {
+		t.Fatalf("finish failed: job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked++ })
+	}()
+	f.serveCommands(t, 2) // probe (pane gone), mark_lost
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delivery did not finish")
+	}
+	if acked != 1 {
+		t.Fatalf("acked=%d once the pointer was written, want 1", acked)
+	}
+}
+
+// hk 5690 review: a spawn operation that cannot be read (a store error) is unknown,
+// not "not running": the wait keeps the last status it read and says it is not
+// known, which the replacement turns into a retry and never a give-up.
+func TestSpawnOutcomeThatCannotBeReadIsUnknown(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-30-p1")
+	if _, _, known := f.hub.awaitSpawnOutcomeKnown(t.Context(), f.holder.Request.RequestID, 50*time.Millisecond); !known {
+		t.Fatal("a readable operation reported as unknown")
+	}
+	if err := f.hub.inbox.store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	task, settled, known := f.hub.awaitSpawnOutcomeKnown(t.Context(), f.holder.Request.RequestID, 50*time.Millisecond)
+	if known || settled {
+		t.Fatalf("an unreadable operation: settled=%v known=%v, want unknown", settled, known)
+	}
+	_ = task
+}

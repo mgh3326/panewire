@@ -60,6 +60,22 @@ func (h *HubServer) reviewerQuotaAnnouncement(ctx context.Context, event hubJobE
 	return err == nil && prior.Role == "reviewer", true
 }
 
+// quotaLineageHolds reports whether successor is a replacement of predecessor (the
+// job named old): it was claimed as replacing it (replaced_from) for the same owner
+// and the same task or parent job. A job that merely carries the next name in the
+// chain is not (hk 5690 review).
+func quotaLineageHolds(successor, predecessor hubSpawnTask, old string) bool {
+	if successor.ReplacedFrom != old || successor.Owner != predecessor.Owner {
+		return false
+	}
+	for _, flag := range []string{"--task", "--parent-job"} {
+		if hubSpawnArg(successor.Request.Args, flag) != hubSpawnArg(predecessor.Request.Args, flag) {
+			return false
+		}
+	}
+	return true
+}
+
 // quotaStopSeq reads the pane state a stop was observed in from the relayed reason:
 // the pointer to pass as pane.close's stop_seq, and whether there was one.
 func quotaStopSeq(reason string) (*int64, bool) {
@@ -306,9 +322,27 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// periodic pass would otherwise leave until its own age (hk 5690 review).
 	if claimed, _, ok := quotaReplacementJob(event.JobID); ok {
 		if successor, err := store.latestSpawnForJob(ctx, claimed); err == nil {
+			// A job with that name is a replacement only with the lineage: it
+			// replaces this job (replaced_from) for the same task and owner. A name
+			// collision is refused and the record kept; the predecessor is never
+			// closed without the lineage and a verified stop sequence (hk 5690).
+			predecessor, perr := store.latestSpawnForJob(ctx, event.JobID)
+			if perr != nil {
+				return retryLater("holder_unavailable", "error", perr.Error())
+			}
+			if !quotaLineageHolds(successor, predecessor, event.JobID) {
+				return skip("successor_name_collision", "job", claimed)
+			}
 			if successor.Status == "succeeded" || spawnMayStillRun(successor) {
-				if app, err := h.newSpawnApp(io.Discard, io.Discard); err == nil {
-					h.finishQuotaReplacement(ctx, app, successor, event.JobID)
+				app, err := h.newSpawnApp(io.Discard, io.Discard)
+				if err != nil {
+					return retryLater("spawn_config_unavailable")
+				}
+				stopSeq, _ := quotaStopSeq(event.Reason)
+				if !h.finishQuotaReplacement(ctx, app, successor, event.JobID, stopSeq) {
+					// The pointer is not written yet: the node keeps the announcement
+					// and the next delivery tries again.
+					return retryLater("successor_finish_pending", "replacement", claimed)
 				}
 			}
 			return skip("already_replaced", "replacement", claimed)
@@ -498,7 +532,14 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	if wait <= 0 {
 		wait = quotaReplaceWait
 	}
-	task, settled := h.awaitSpawnOutcome(ctx, request.RequestID, wait)
+	task, settled, known := h.awaitSpawnOutcomeKnown(ctx, request.RequestID, wait)
+	if !known && !settled {
+		// The successor is claimed but its state could not be read (a store error):
+		// that is unknown, not "not running". It is never given up; the stop stays
+		// with its node and the next delivery finds the claimed successor and
+		// finishes it (hk 5690 review).
+		return retryLater("successor_state_unknown", "replacement", newJob)
+	}
 	outcome := task.Outcome
 	if role == "reviewer" {
 		// A reviewer is replaced only when the successor is placed (no other
@@ -668,28 +709,41 @@ func spawnStatusActive(status string) bool {
 // (settled) and returns it; settled is false when the wait ended with the
 // operation still running.
 func (h *HubServer) awaitSpawnOutcome(ctx context.Context, requestID string, limit time.Duration) (hubSpawnTask, bool) {
+	task, settled, _ := h.awaitSpawnOutcomeKnown(ctx, requestID, limit)
+	return task, settled
+}
+
+// awaitSpawnOutcomeKnown is awaitSpawnOutcome that also says whether the last read
+// of the operation worked. A store error leaves the last status read (the operation
+// is not "not running" because it could not be read): known is false then, and the
+// caller treats the state as unknown (hk 5690).
+func (h *HubServer) awaitSpawnOutcomeKnown(ctx context.Context, requestID string, limit time.Duration) (task hubSpawnTask, settled, known bool) {
 	poll := h.quotaReplacePoll
 	if poll <= 0 {
 		poll = quotaReplacePoll
 	}
 	deadline := time.Now().Add(limit)
 	for {
-		task, err := h.inbox.store.spawnTask(ctx, requestID)
+		read, err := h.inbox.store.spawnTask(ctx, requestID)
+		known = err == nil
+		if known {
+			task = read
+		}
 		// accepted, dispatching, reconciling and deadline_exceeded are the
 		// states the coordinator still retries (pendingSpawns), and waiting is
 		// held by the start-condition queue; a node may yet complete the
 		// successor from reconciling. Only succeeded, failed and retryable are
 		// final.
-		if err == nil && !spawnStatusActive(task.Status) {
-			return task, true
+		if known && !spawnStatusActive(task.Status) {
+			return task, true, true
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {
-			return task, false
+			return task, false, known
 		}
 		select {
 		case <-time.After(poll):
 		case <-ctx.Done():
-			return task, false
+			return task, false, known
 		}
 	}
 }
@@ -753,14 +807,14 @@ func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.Ap
 		return false
 	}
 	defer unlock()
-	return h.finishQuotaReplacement(ctx, app, successor, old)
+	return h.finishQuotaReplacement(ctx, app, successor, old, nil)
 }
 
 // finishQuotaReplacement writes the replaced_by record for a claimed successor
 // whose predecessor is still live. The caller holds the job's pool-action lock.
-func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string) bool {
+func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string, stopSeq *int64) bool {
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
-	if err != nil || holder.Status != "succeeded" {
+	if err != nil || holder.Status != "succeeded" || !quotaLineageHolds(successor, holder, old) {
 		return false
 	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
@@ -782,8 +836,13 @@ func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, 
 	name := heldAgentName(holder, record)
 	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 	switch {
-	case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
-		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, old); !closed {
+	case probe.state == heldPanePresent && quotaPaneStopped(probe.row.AgentStatus, stopSeq != nil) && validNodeCommandPath(probe.row.Cwd):
+		// The predecessor's pane is closed only fenced to a verified stop sequence;
+		// the periodic pass has none and leaves a present pane alone (hk 5690).
+		if stopSeq == nil {
+			return false
+		}
+		if closed, _ := h.closeHeldPaneStopped(ctx, holder, name, probe.row, old, stopSeq); !closed {
 			return false
 		}
 	case probe.state != heldPaneAbsent:

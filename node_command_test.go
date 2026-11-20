@@ -673,3 +673,41 @@ func TestNodeCommandPaneCloseFencedToTheStopsPaneState(t *testing.T) {
 		})
 	}
 }
+
+// hk 5690 review: a reviewer blocked on its limit dialog ("Choose an option") has
+// no composer to read, so the empty-composer proof cannot be asked of it. At the
+// verified stop sequence the node closes it, through the real node path with the
+// real dialog fixture; without the sequence, or at another one, it is refused.
+func TestNodeCommandPaneCloseBlockedOnTheLimitDialogAtTheStopSequence(t *testing.T) {
+	dialog, err := os.ReadFile("testdata/quota-stop/claude.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		seq     any
+		outcome string
+	}{
+		{"at the verified sequence", 5, nodePaneClosed},
+		{"another sequence", 3, nodePaneChanged},
+		{"no sequence", nil, nodePaneChanged},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inbox := t.TempDir()
+			markLostJobEvents(t, inbox, "job-a", map[string]any{"kind": "job.claimed", "payload": map[string]any{"role": "reviewer"}})
+			args := map[string]any{"pane_id": "w1:p1", "name": "job-a", "agent_status": "blocked", "cwd": "/work/a"}
+			if test.seq != nil {
+				args["stop_seq"] = test.seq
+			}
+			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "blocked", 5)), nodeAgentList(nodeAgentSeqJSON("w1:p1", "blocked", 5))}, read: string(dialog)}
+			client := &HubClient{jobsInboxRoot: inbox, nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}
+			result, code := nodeRun(t, client, nodeCommandPaneClose, args)
+			if code != "" || result["outcome"] != test.outcome {
+				t.Fatalf("result=%v code=%q, want %s", result, code, test.outcome)
+			}
+			if closes := fake.called("pane", "close"); (test.outcome == nodePaneClosed) != (closes == 1) {
+				t.Fatalf("outcome=%s but closes=%d", test.outcome, closes)
+			}
+		})
+	}
+}

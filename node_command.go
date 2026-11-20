@@ -1236,7 +1236,11 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	if args.StopSeq != nil && (first.StateChangeSeq == nil || *first.StateChangeSeq != *args.StopSeq) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
-	if !composerEmpty(first) {
+	// A blocked pane at the verified stop sequence is the stop's own dialog (a
+	// "Choose an option" menu has no composer to read): the sequence fence is the
+	// proof, so the empty-composer proof is not asked of it (hk 5690).
+	blockedAtStop := args.AgentStatus == "blocked" && args.StopSeq != nil
+	if !blockedAtStop && !composerEmpty(first) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	settle := client.nodeCloseSettle
@@ -1280,7 +1284,7 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	if first.StateChangeSeq != nil && second.StateChangeSeq != nil && *first.StateChangeSeq != *second.StateChangeSeq {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
-	if !composerEmpty(second) {
+	if !blockedAtStop && !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	// A pane that asked a question and is idle is waiting for an answer, not
