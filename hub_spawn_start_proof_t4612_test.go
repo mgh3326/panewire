@@ -597,11 +597,25 @@ func TestSpawnShortReplayFencesPastStartBy_t4612(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	h.executeSpawnTask(ctx, sent)
+	// The fence commits on the hub's close context, so the short replay proves
+	// it whatever its budget. The settle after the fence (exclusion and
+	// re-place) runs on the same 50 ms budget, which a race-slowed runner can
+	// spend before it finishes. The row then stays fenced and dispatching until
+	// the next replay settles it (TestSpawnCommittedFenceSettlesOnReplayWithoutResend_t4612).
+	// So the re-place is checked from that replay on a live context, not from
+	// the 50 ms budget. The replay is synchronous: nothing here is asynchronous.
 	if fenced, err := h.inbox.store.spawnAttemptFenced(t.Context(), node.RequestID); err != nil || !fenced {
 		t.Fatalf("short replay fenced=%v err=%v", fenced, err)
 	}
+	current, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status == "dispatching" {
+		h.executeSpawnTask(t.Context(), current)
+	}
 	after, err := h.inbox.store.spawnTask(t.Context(), task.Request.RequestID)
 	if err != nil || after.Status != "accepted" || len(after.Exclusions) != 1 || after.Exclusions[0].Reason != "deadline_not_started" {
-		t.Fatalf("after short replay: status=%s exclusions=%+v err=%v", after.Status, after.Exclusions, err)
+		t.Fatalf("after replay: status=%s exclusions=%+v err=%v", after.Status, after.Exclusions, err)
 	}
 }
