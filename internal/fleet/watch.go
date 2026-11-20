@@ -338,6 +338,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if !handOff.active {
 			if stop, ok := view.Announced(); ok {
 				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
+				if stop.PaneSeq != 0 {
+					seq := stop.PaneSeq
+					handOff.seq = &seq
+				}
 			}
 		}
 		credit, creditPending := pendingCreditRejection(j)
@@ -512,7 +516,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				pending = false
 			}
 		}
-		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
+		if waiting != nil && !hasIntent && !handOff.active && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
 			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
 				if e := a.putJobRecord(withJobEpoch(ctx, j), id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 					if IsJobReassigned(e) {

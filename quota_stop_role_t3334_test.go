@@ -23,9 +23,7 @@ type roleStopRig struct {
 	sends     int
 	announce  []quotastop.Stop
 	announced []string
-	// ended is each reviewer stop the manager handed to the watcher (hk 5355).
-	ended []quotastop.Stop
-	owner []hubScannedRelayEvent
+	owner     []hubScannedRelayEvent
 }
 
 func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task string) *roleStopRig {
@@ -83,10 +81,6 @@ func newRoleStopRigScreen(t *testing.T, role string, startedAgo time.Duration, t
 	q.announce = func(_ context.Context, job, pane, _ string, stop quotastop.Stop) error {
 		rig.announce = append(rig.announce, stop)
 		rig.announced = append(rig.announced, job+" "+pane)
-		return nil
-	}
-	q.endReviewer = func(_ context.Context, _, _ string, stop quotastop.Stop) error {
-		rig.ended = append(rig.ended, stop)
 		return nil
 	}
 	return rig

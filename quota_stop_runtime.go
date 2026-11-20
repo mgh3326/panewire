@@ -36,9 +36,6 @@ type quotaStopManager struct {
 	// announce records job.lost reason quota_stop for a handed-over job, which
 	// the hub then replaces (hub_quota_replace.go).
 	announce func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error
-	// endReviewer hands a reviewer's quota stop to the job's watcher, which
-	// ends it as hk 4507 does (hk 5355). Tests substitute it.
-	endReviewer func(ctx context.Context, job, pane string, stop quotastop.Stop) error
 	// recordRung and publishRung keep the rung a stop spent out of new
 	// placements until its reset (fleet.RecordLimitObserved and
 	// PublishLimitObserved, hk 5562). Tests substitute them.
@@ -91,6 +88,14 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	// role and owner are the job's role and owner lane when the wake was
 	// reserved: the role decides whether the manager acts in shadow mode (hk
 	// 3334) and the owner receives the one info lane event.
+	// herdr_seq is herdr's own state_change_seq of the pane when the stop was
+	// reserved (the wake's local counter is panewire's, not herdr's): the
+	// hand-over announces it so the hub's close is fenced to that state (hk 5690).
+	if !storeHasColumn(s.db, "quota_stop_decisions", "herdr_seq") {
+		if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN herdr_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return nil, err
+		}
+	}
 	for _, column := range []string{"role", "owner", "attempt"} {
 		if !storeHasColumn(s.db, "quota_stop_decisions", column) {
 			if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -107,9 +112,6 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	}
 	q.recordRung = fleet.RecordLimitObserved
 	q.publishRung = fleet.PublishLimitObserved
-	q.endReviewer = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
-		return fleet.RecordReviewerQuotaIntent(ctx, filepath.Join(root, "jobs"), job, pane, q.session(job, pane), stop)
-	}
 	q.read = func(ctx context.Context, pane string) (string, error) {
 		session := ""
 		if q.session != nil {
@@ -594,7 +596,17 @@ func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandid
 	if err != nil {
 		return false, false, err
 	}
-	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner,attempt) VALUES(?,?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane, attempt)
+	// A stall examination's candidate keeps its local sequence in the stall wake
+	// row, not in the candidate (job_inactivity.go).
+	local := int64(c.StateChangeSeq)
+	if local == 0 {
+		_ = q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM quota_stall_wakes WHERE event_id=?`, c.EventID).Scan(&local)
+	}
+	// herdr's own sequence for the state this wake observed goes in with the
+	// reservation, in the one statement: a row reserved without it would announce
+	// with no pane state to fence the hub's close with (hk 5690). Zero when the
+	// pane has moved on locally or herdr reported none.
+	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner,attempt,herdr_seq) VALUES(?,?,?,?,?,?,?,?,COALESCE((SELECT upstream_state_change_seq FROM idle_wake_panes WHERE pane_id=? AND state_change_seq=?),0))`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane, attempt, c.PaneID, local)
 	if err != nil {
 		return false, false, err
 	}
@@ -747,7 +759,10 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 		decision, reason = quotaDecisionJob(policy, policyOK, priority, expected, started, waits, stop, now)
 	}
 	if job.Role == "reviewer" {
-		decision, reason = quotaDecisionReviewer(policy, policyOK, priority, started, expected, waits, stop, now)
+		// A reviewer never waits (hk 5690): every reviewer limit stop is announced
+		// for the hub to carry on to another pool, through the same path as an
+		// implementer's. The short-reset resume (hk 5355) is follow-up hk 5749.
+		decision, reason = "handover", "reviewer_hands_over"
 	}
 	if !taskOK || waitErr != nil {
 		decision, reason = "handover", "task_unavailable"
@@ -863,20 +878,6 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			q.update(ctx, r.id, "action_recorded", 1)
 			continue
 		}
-		// A reviewer's hand-over ends it through its watcher's intent, as hk 4507
-		// does; the implementer's announce would have the hub replace it (hk 5355).
-		if r.decision == "handover" && r.role == "reviewer" && quotaActsOn(r.role, r.pool) {
-			stop := quotastop.Stop{Pool: r.pool}
-			if at, err := time.Parse(time.RFC3339, r.reset); err == nil {
-				stop.Reset = at
-			}
-			if err := q.endReviewer(ctx, r.job, r.pane, stop); err != nil {
-				q.backoffAction(ctx, r.id, now)
-			} else {
-				q.update(ctx, r.id, "action_recorded", 1)
-			}
-			continue
-		}
 		if r.decision == "handover" && quotaActsOn(r.role, r.pool) {
 			q.handOver(ctx, r.id, r.job, r.pane, r.pool, r.reset, r.attempt, now)
 			continue
@@ -972,7 +973,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 // cannot, the job's watcher ends the job after its grace, without a
 // replacement. A write that fails is retried after a backoff.
 func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, reset, attempt string, now time.Time) {
-	stop := quotastop.Stop{Pool: pool}
+	stop := quotastop.Stop{Pool: pool, PaneSeq: q.observedSeq(ctx, id)}
 	if at, err := time.Parse(time.RFC3339, reset); err == nil {
 		stop.Reset = at
 	}
@@ -982,6 +983,21 @@ func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, re
 	}
 	q.update(ctx, id, "action_recorded", 1)
 	q.clearQuotaWait(ctx, pane, now)
+}
+
+// observedSeq is the herdr state_change_seq of the pane when the stop decided
+// under event id was reserved, zero when none was known. The announcement carries
+// it so the hub's close is fenced to that pane state (hk 5690). It is herdr's own
+// sequence, recorded with the decision for every wake source (idle, stall, blocked),
+// never the wake table's local counter.
+func (q *quotaStopManager) observedSeq(ctx context.Context, id string) int64 {
+	var seq int64
+	q.store.mu.Lock()
+	defer q.store.mu.Unlock()
+	if q.store.db.QueryRowContext(ctx, `SELECT herdr_seq FROM quota_stop_decisions WHERE event_id=?`, id).Scan(&seq) != nil {
+		return 0
+	}
+	return seq
 }
 
 // infoToOwner sends the owner one info lane event about the job notice names

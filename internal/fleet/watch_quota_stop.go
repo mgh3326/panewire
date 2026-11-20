@@ -22,7 +22,13 @@ import (
 // replace. An implementer is not here: the quota-stop manager decides
 // whether it waits for the reset or is handed over (hk 3334,
 // docs/quota-stop.md), so the watcher leaves its job live.
-var quotaStopRoles = []string{"reviewer"}
+//
+// A reviewer is not here either (hk 5690): its limit stop is decided by the
+// quota-stop manager (hand over, or wait and resume once for a short reset) and
+// announced through the same path as an implementer's, so the watcher has one
+// announced-stop path (the grace, recordQuotaResume, the missing-pane rules) and
+// no stop detection of its own for a reviewer.
+var quotaStopRoles = []string{}
 
 // QuotaStopHandOffGrace is how long a watcher leaves the hub to replace a job
 // whose quota stop was announced (an implementer the quota-stop manager
@@ -221,6 +227,13 @@ func (a *App) quotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaS
 	if !slices.Contains(quotaStopRoles, j.QuotaRole()) {
 		return quotastop.Stop{}, quotaNotStopped
 	}
+	return a.readQuotaStopScreen(ctx, j, ag, seen)
+}
+
+// readQuotaStopScreen is quotaStopScreen's read of the idle pane, without the role
+// gate: the legacy close intent's reconcile verifies a stop a watcher already
+// decided on, for a role the watcher no longer detects (hk 5690).
+func (a *App) readQuotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, quotaSeen) {
 	if seen != nil && ag.StateChangeSeq != nil && seen.read && seen.seq == *ag.StateChangeSeq {
 		return quotastop.Stop{}, quotaNotStopped
 	}
@@ -273,10 +286,16 @@ type quotaHandOff struct {
 // unchanged reports whether the pane is still in the state the stop was read
 // in. A pane that went back to work is not stopped any more.
 func (h quotaHandOff) unchanged(ag Agent) bool {
+	sameSeq := h.seq == nil || ag.StateChangeSeq == nil || *h.seq == *ag.StateChangeSeq
+	// A blocked dialog at exactly the announced sequence is the stop's own dialog,
+	// not movement: only a blocked pane at another sequence has moved (hk 5690).
+	if ag.Status == "blocked" && h.seq != nil && ag.StateChangeSeq != nil && sameSeq {
+		return true
+	}
 	if ag.Status != "idle" && ag.Status != "done" {
 		return false
 	}
-	return h.seq == nil || ag.StateChangeSeq == nil || *h.seq == *ag.StateChangeSeq
+	return sameSeq
 }
 
 // expired reports whether the grace has run out with the stop still standing:
@@ -292,6 +311,11 @@ func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
 	}
 	if !stop.CreditExhaustedAt.IsZero() {
 		payload["credit_exhausted_at"] = stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if stop.PaneSeq != 0 {
+		// The pane state the stop was observed in: the hub's close is fenced to it
+		// (pane.close stop_seq, hk 5690).
+		payload["state_change_seq"] = stop.PaneSeq
 	}
 	return payload
 }
@@ -832,11 +856,18 @@ func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, h
 	if !present {
 		return cancel("pane_gone")
 	}
-	stop, seen := a.quotaStopScreen(ctx, j, ag, nil)
-	switch {
-	case seen == quotaScreenUnavailable:
-		return quotaIntentRetry, nil
-	case seen != quotaStopFound || !stop.CreditExhaustedAt.IsZero():
+	// An intent with the hk record still live is conditional: the pane may have
+	// moved on since the older watcher recorded it. The screen is read here for the
+	// reconcile only; reviewer detection in general stays with the manager (hk 5690).
+	if ag.Status == "idle" || ag.Status == "done" {
+		stop, seen := a.readQuotaStopScreen(ctx, j, ag, nil)
+		switch {
+		case seen == quotaScreenUnavailable:
+			return quotaIntentRetry, nil
+		case seen != quotaStopFound || !stop.CreditExhaustedAt.IsZero():
+			return cancel("pane_moved_on")
+		}
+	} else {
 		return cancel("pane_moved_on")
 	}
 	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.reason, "at": a.Now().UTC()}); e != nil {

@@ -106,6 +106,12 @@ type nodePaneCloseArgs struct {
 	// QuestionJob names the job whose open question the node must rule out
 	// before it closes. Empty keeps the pre-question behaviour.
 	QuestionJob string `json:"question_job,omitempty"`
+	// StopSeq is the herdr state_change_seq the pane was in when a quota stop
+	// was observed on it (hk 5690). The node closes only a pane still in that
+	// state, read under its own guard just before the close: a reviewer that
+	// resumed and went idle again has a newer sequence, so a late announcement
+	// cannot close it. Nil leaves the pane unfenced.
+	StopSeq *int64 `json:"stop_seq,omitempty"`
 	// target, when set, is the job attempt a close operation proved from the
 	// job's own ledger: its role is authoritative (an empty role is unknown,
 	// never looked up under the label) and its herdr session is used for
@@ -258,7 +264,7 @@ var nodeCommandArgFields = map[string][]string{
 // nodeCommandHasFields reports whether raw is an object holding exactly the
 // named fields, none of them null.
 // nodeCommandPaneCloseFields accepts the required fields plus any subset of the
-// optional allow_unnamed and question_job, which travel independently.
+// optional allow_unnamed, question_job and stop_seq, which travel independently.
 func nodeCommandPaneCloseFields(raw json.RawMessage) bool {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil {
@@ -272,7 +278,7 @@ func nodeCommandPaneCloseFields(raw json.RawMessage) bool {
 		delete(fields, name)
 	}
 	for key, value := range fields {
-		if (key != "allow_unnamed" && key != "question_job") || isJSONNull(value) {
+		if (key != "allow_unnamed" && key != "question_job" && key != "stop_seq") || isJSONNull(value) {
 			return false
 		}
 	}
@@ -1224,7 +1230,17 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		screen, err := client.nodeHerdrRunnerForSession(session)(ctx, "pane", "read", args.PaneID, "--source", "visible", "--format", "ansi")
 		return err == nil && nodeComposerState(row.Agent, string(screen)) == nodeComposerEmpty
 	}
-	if !composerEmpty(first) {
+	// The stop's pane state is checked against this first look, which happens
+	// after the hub's screen capture: a pane that left the stopped state at any
+	// point since the observation has another sequence.
+	if args.StopSeq != nil && (first.StateChangeSeq == nil || *first.StateChangeSeq != *args.StopSeq) {
+		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
+	}
+	// A blocked pane at the verified stop sequence is the stop's own dialog (a
+	// "Choose an option" menu has no composer to read): the sequence fence is the
+	// proof, so the empty-composer proof is not asked of it (hk 5690).
+	blockedAtStop := args.AgentStatus == "blocked" && args.StopSeq != nil
+	if !blockedAtStop && !composerEmpty(first) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	settle := client.nodeCloseSettle
@@ -1268,7 +1284,7 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 	if first.StateChangeSeq != nil && second.StateChangeSeq != nil && *first.StateChangeSeq != *second.StateChangeSeq {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
-	if !composerEmpty(second) {
+	if !blockedAtStop && !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	// A pane that asked a question and is idle is waiting for an answer, not

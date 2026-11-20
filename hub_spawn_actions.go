@@ -45,7 +45,9 @@ type hubKeyedLock struct {
 	users int
 }
 
-func (a *hubKeyedLocks) lock(ctx context.Context, key string) (func(), error) {
+// enter registers a user of key's lock and returns the entry with the function
+// that drops that registration.
+func (a *hubKeyedLocks) enter(key string) (*hubKeyedLock, func()) {
 	a.mu.Lock()
 	if a.keys == nil {
 		a.keys = make(map[string]*hubKeyedLock)
@@ -57,7 +59,7 @@ func (a *hubKeyedLocks) lock(ctx context.Context, key string) (func(), error) {
 	}
 	entry.users++
 	a.mu.Unlock()
-	releaseRef := func() {
+	return entry, func() {
 		a.mu.Lock()
 		entry.users--
 		if entry.users == 0 {
@@ -65,6 +67,26 @@ func (a *hubKeyedLocks) lock(ctx context.Context, key string) (func(), error) {
 		}
 		a.mu.Unlock()
 	}
+}
+
+// tryLock takes key's lock only if nobody holds it, and never waits: ok is false
+// while another holder has it.
+func (a *hubKeyedLocks) tryLock(key string) (unlock func(), ok bool) {
+	entry, releaseRef := a.enter(key)
+	select {
+	case entry.gate <- struct{}{}:
+		return func() {
+			<-entry.gate
+			releaseRef()
+		}, true
+	default:
+		releaseRef()
+		return nil, false
+	}
+}
+
+func (a *hubKeyedLocks) lock(ctx context.Context, key string) (func(), error) {
+	entry, releaseRef := a.enter(key)
 	select {
 	case entry.gate <- struct{}{}:
 		return func() {

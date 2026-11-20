@@ -286,6 +286,24 @@ func (h *HubServer) lockWithoutPoolAction(ctx context.Context, job string) (func
 	if err != nil {
 		return nil, false
 	}
+	return h.withoutPoolAction(ctx, job, unlock)
+}
+
+// tryLockWithoutPoolAction is lockWithoutPoolAction that never waits for the job's
+// lock: false when another holder has it (a live replacement, say), as well as
+// when a pool action owns the job or the store cannot say. The caller revisits the
+// job later (hk 5690 review).
+func (h *HubServer) tryLockWithoutPoolAction(ctx context.Context, job string) (func(), bool) {
+	unlock, ok := h.poolActionLocks.tryLock(job)
+	if !ok {
+		return nil, false
+	}
+	return h.withoutPoolAction(ctx, job, unlock)
+}
+
+// withoutPoolAction keeps unlock (the job's held lock) only if no pool action
+// owns the job.
+func (h *HubServer) withoutPoolAction(ctx context.Context, job string, unlock func()) (func(), bool) {
 	if h.inbox == nil {
 		unlock()
 		return nil, false

@@ -2,6 +2,8 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -14,18 +16,84 @@ import (
 )
 
 // A quota-stopped job is handled by role (hk 3334, docs/quota-stop.md): a
-// reviewer whose stop is announced on a live job (a credit rejection) is
-// replaced on another pool at once; an implementer the quota-stop manager
-// has handed over is replaced the same way. A reviewer on a visible quota
-// screen is ended by its watcher before any announcement, with no grace (hk
-// 4507), so the record is no longer live here and mergewake respawns it. The node
-// announces the stop with job.lost reason "quota_stop" and leaves the hk
+// reviewer whose stop is announced on a live job (its watcher saw a limit screen
+// or a credit rejection, hk 5690) is replaced on another pool at once; an
+// implementer the quota-stop manager has handed over is replaced the same way.
+// The node announces the stop with job.lost reason "quota_stop" and leaves the hk
 // record alone, because hk never rewrites a lost record and the pointer to the
 // successor can only be written with it. The hub places the successor, then
 // closes the old pane with a screen capture and writes the old hk record lost
 // with end_reason "quota_stop pool=<p> replaced_by=<job>" (an implementer:
-// handed_over_to=<job>). When no other pool can take the work the hub does
-// nothing more, and the node ends the job itself without a successor.
+// handed_over_to=<job>); a reviewer's requester is told nothing. When no other
+// pool can take a reviewer the hub gives it up at once (giveUpQuotaStop): the
+// record ends with the plain reason and the owner gets one notice. An implementer
+// that cannot be placed is left to the watcher's grace and the spawn failure
+// notice.
+
+// isQuotaStopReason reports whether reason is a relayed quota stop: the bare
+// "quota_stop" an older node sends, or the form the node's relay builds from the
+// announcement (hub_jobs_client.go), "quota_stop pool=<p> reset_at=<t>". The hub
+// compared the bare word only until hk 5690, so no announced stop was ever
+// replaced: the relayed reason always carries the pool.
+func isQuotaStopReason(reason string) bool {
+	return reason == "quota_stop" || strings.HasPrefix(reason, "quota_stop ")
+}
+
+// reviewerQuotaAnnouncement reports whether event is a reviewer's announced quota
+// stop: the job the hub spawned as a reviewer, stopped on a provider limit. known
+// is false when the hub could not tell: its store failed. A job the hub did not
+// spawn has no stored submission and is known not to be one. Only a known answer
+// is acted on, so a transient store failure never relays a loss for a reviewer the
+// hub is about to carry on.
+func (h *HubServer) reviewerQuotaAnnouncement(ctx context.Context, event hubJobEventPayload) (reviewer, known bool) {
+	if h.inbox == nil || !isQuotaStopReason(event.Reason) {
+		return false, true
+	}
+	holder, err := h.inbox.store.latestSpawnForJob(ctx, event.JobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, true
+	}
+	if err != nil {
+		return false, false
+	}
+	prior, err := fleet.ValidateSubmission(holder.Request)
+	return err == nil && prior.Role == "reviewer", true
+}
+
+// quotaLineageHolds reports whether successor is a replacement of predecessor (the
+// job named old): its claim wrote replaced_from as replacing it, for the same owner
+// and the same task or parent job. A job that merely carries the next name in the
+// chain is not (hk 5690 review).
+func quotaLineageHolds(successor, predecessor hubSpawnTask, old string) bool {
+	// replaced_from counts only when the claim itself wrote it (replaced_reason):
+	// the startup backfill derives it from the job's name, which is no proof.
+	if successor.ReplacedFrom != old || successor.ReplacedReason != "claim" || successor.Owner != predecessor.Owner {
+		return false
+	}
+	for _, flag := range []string{"--task", "--parent-job"} {
+		if hubSpawnArg(successor.Request.Args, flag) != hubSpawnArg(predecessor.Request.Args, flag) {
+			return false
+		}
+	}
+	return true
+}
+
+// quotaStopSeq reads the pane state a stop was observed in from the relayed reason:
+// the pointer to pass as pane.close's stop_seq, and whether there was one.
+func quotaStopSeq(reason string) (*int64, bool) {
+	seq, ok := quotaStopReasonSeq(reason)
+	if !ok {
+		return nil, false
+	}
+	return &seq, true
+}
+
+// quotaPaneStopped reports whether a held pane's status is one a quota stop's close
+// may act on: idle (or done), or, for a close fenced to the stop's own sequence, a
+// blocked dialog at exactly that sequence is the stop (hk 5690 review).
+func quotaPaneStopped(status string, fenced bool) bool {
+	return nodePaneIdleStatus[status] || fenced && status == "blocked"
+}
 
 // quotaReplaceMax is the replacements one task role (one review pass) gets.
 const quotaReplaceMax = 2
@@ -70,7 +138,14 @@ const (
 const quotaReplacePoll = 500 * time.Millisecond
 
 func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPayload) {
-	if h.inbox == nil || event.Reason != "quota_stop" {
+	h.startQuotaReplacementAck(machine, event, nil)
+}
+
+// startQuotaReplacementAck is startQuotaReplacement for a stop whose node still
+// owes the hub an acknowledgement: settled runs once the replacement no longer
+// depends on the node resending it (replaceQuotaStoppedAck).
+func (h *HubServer) startQuotaReplacementAck(machine string, event hubJobEventPayload, settled func()) {
+	if h.inbox == nil || !isQuotaStopReason(event.Reason) {
 		return
 	}
 	if h.spawnGrantDrain || h.spawnRollbackDrain {
@@ -88,7 +163,21 @@ func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPaylo
 	h.closeMu.Unlock()
 	go func() {
 		defer h.spawnWorkers.Done()
-		h.replaceQuotaStopped(h.closeCtx, machine, event)
+		// Only a reviewer is carried on from a relayed stop: its pane holds no work.
+		// The legacy close this path takes has none of the hand-over checks an
+		// implementer's worktree needs (dirty or unpushed work, hk 4633), so an
+		// implementer's relayed stop stays as it was (docs/quota-stop.md). The
+		// check runs here, off the node's reader, and a stop that is not a
+		// reviewer's is acknowledged: a resend would change nothing.
+		if reviewer, known := h.reviewerQuotaAnnouncement(h.closeCtx, event); !known {
+			return // unknown: left unacknowledged, the node sends it again
+		} else if !reviewer {
+			if settled != nil {
+				settled()
+			}
+			return
+		}
+		h.replaceQuotaStoppedAck(h.closeCtx, machine, event, settled)
 	}()
 }
 
@@ -109,6 +198,10 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude
 	// A hub-built successor was never typed by a submitter: it must not
 	// arm its parent's close, whatever the replaced request carried (hk 5195).
 	next.ParentJobExplicit = false
+	// The stopped job already started, so any start condition it waited on was
+	// met. Carried over, it would park the successor in waiting, where it could
+	// be admitted after the review is given up (hk 5690).
+	next.StartConditions = nil
 	if next.DeadlineSeconds < 1 || next.DeadlineSeconds > int(quotaReplaceDeadline/time.Second) {
 		next.DeadlineSeconds = int(quotaReplaceDeadline / time.Second)
 	}
@@ -180,9 +273,36 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude
 // replaceQuotaStopped answers one job.lost reason "quota_stop" from machine.
 // It reports the successor's job id when one was placed and the old job closed.
 func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, event hubJobEventPayload) (string, bool) {
+	return h.replaceQuotaStoppedAck(ctx, machine, event, nil)
+}
+
+// replaceQuotaStoppedAck is replaceQuotaStopped that calls ackStop, once, when
+// the stop is durably owned: the successor is claimed (the reconcile pass
+// repairs the rest) or the replacement reached a decision that a resend cannot
+// change. Every exit is an explicit outcome: a final one (skip, giveUp) settles
+// the stop, a retry (retryLater) does not, and a claim settles it too (hk 5690).
+func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, event hubJobEventPayload, ackStop func()) (string, bool) {
+	settle := func() {
+		if ackStop != nil {
+			ackStop()
+			ackStop = nil
+		}
+	}
+	retry := false
+	defer func() {
+		if !retry {
+			settle()
+		}
+	}()
 	skip := func(reason string, kv ...any) (string, bool) {
 		h.logger.Info("quota-stop replacement skipped", append([]any{"job", event.JobID, "node", machine, "reason", reason}, kv...)...)
 		return "", false
+	}
+	// retryLater leaves the announcement with its node: the hub could not look or
+	// act yet, nothing is claimed, and a later delivery decides.
+	retryLater := func(reason string, kv ...any) (string, bool) {
+		retry = true
+		return skip(reason, kv...)
 	}
 	budget := h.quotaReplaceBudget
 	if budget <= 0 {
@@ -194,13 +314,79 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	// it with pool-action admission so neither can overwrite the other's end.
 	unlock, free := h.lockWithoutPoolAction(ctx, event.JobID)
 	if !free {
-		return skip("pool_action_pending")
+		return retryLater("pool_action_pending")
 	}
 	defer unlock()
 	store := h.inbox.store
+	// A successor already claimed for this job (a replay after a hub restart, or a
+	// second delivery) is finished before anything else, and before the age gate: a
+	// claimed successor that may still run needs its replaced_by write, which the
+	// periodic pass would otherwise leave until its own age (hk 5690 review).
+	if claimed, _, ok := quotaReplacementJob(event.JobID); ok {
+		successor, err := store.latestSpawnForJob(ctx, claimed)
+		switch {
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			// One finalizer: while a successor claim may exist the stop is never
+			// acknowledged as stale or replaced on a failed read.
+			return retryLater("successor_lookup_unavailable", "error", err.Error())
+		case err == nil:
+			// A job with that name is a replacement only with the claim's own
+			// lineage: replaced_from written by the claim (not the name backfill),
+			// for the same owner and task. A name collision is refused and the
+			// record kept; the predecessor is never closed without the lineage and a
+			// verified stop sequence (hk 5690).
+			predecessor, perr := store.latestSpawnForJob(ctx, event.JobID)
+			if perr != nil && !errors.Is(perr, sql.ErrNoRows) {
+				return retryLater("holder_unavailable", "error", perr.Error())
+			}
+			if perr != nil || !quotaLineageHolds(successor, predecessor, event.JobID) {
+				return skip("successor_name_collision", "job", claimed)
+			}
+			if quotaSuccessorPlaceable(successor) {
+				app, err := h.newSpawnApp(io.Discard, io.Discard)
+				if err != nil {
+					return retryLater("spawn_config_unavailable")
+				}
+				stopSeq, _ := quotaStopSeq(event.Reason)
+				if !h.finishQuotaReplacement(ctx, app, successor, event.JobID, stopSeq) {
+					// The pointer is not written yet: the node keeps the announcement
+					// and the next delivery tries again.
+					return retryLater("successor_finish_pending", "replacement", claimed)
+				}
+				return skip("already_replaced", "replacement", claimed)
+			}
+			if spawnStatusActive(successor.Status) {
+				// A claim still queued (accepted, waiting) is not terminal: the
+				// worker that made it, or the periodic pass, owns it. Not
+				// acknowledged, never taken for stale or replaced.
+				return retryLater("successor_in_flight", "status", successor.Status)
+			}
+			// The claimed successor ended without being placed: no other pool could
+			// take the review, and this delivery finishes the give-up.
+			if predecessor.Status == "succeeded" {
+				if prior, verr := fleet.ValidateSubmission(predecessor.Request); verr == nil && prior.Role == "reviewer" {
+					if h.giveUpQuotaStop(ctx, predecessor, prior.Owner, event, "not_placed") {
+						return retryLater("successor_give_up_pending", "replacement", claimed)
+					}
+				}
+			}
+			return skip("already_replaced", "replacement", claimed)
+		}
+	}
+	// The watcher ends an unchanged stopped job itself when its grace runs out,
+	// and hk never rewrites a lost record: a replacement that cannot finish inside
+	// what is left of the grace could place a successor after that plain loss
+	// (hk 5690 review). A stop announced too long ago is left to the watcher.
+	if announced, ok := quotaStopReasonAt(event.Reason); ok && h.now().Sub(announced) > fleet.QuotaStopHandOffGrace-budget {
+		return skip("announcement_stale", "age", h.now().Sub(announced).Round(time.Second))
+	}
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return skip("unknown_job")
+	}
+	if err != nil {
+		// An operational failure says nothing about the job: retry.
+		return retryLater("holder_unavailable", "error", err.Error())
 	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
@@ -217,26 +403,45 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if prior.Task == "" && prior.ParentJob == "" || (prior.Profile != "" && prior.Profile != "auto") {
 		return skip("not_replaceable")
 	}
+	// An original spawn still settling (bound, dispatching, reconciling, past its
+	// deadline with a node) can still become the placed holder: keep the stop
+	// retryable and look again on the next delivery. A terminal status or another
+	// host is final.
+	if holder.Status != "succeeded" && spawnMayStillRun(holder) {
+		return retryLater("holder_unsettled", "status", holder.Status)
+	}
 	if holder.Status != "succeeded" || spawnHolderHost(holder) != machine {
 		return skip("holder_state", "status", holder.Status)
 	}
+	// A reviewer the hub cannot carry on is given up: its record ends lost now
+	// (not after the watcher's grace) and the owner is told once (hk 5690).
+	// An implementer's record is already written before its successor is
+	// claimed, and a spawn that fails tells its owner itself.
+	giveUp := func(reason string, kv ...any) (string, bool) {
+		if role == "reviewer" && h.giveUpQuotaStop(ctx, holder, prior.Owner, event, reason) {
+			return retryLater("give_up_"+reason+"_retry", kv...)
+		}
+		return skip(reason, kv...)
+	}
 	newJob, n, ok := quotaReplacementJob(event.JobID)
 	if !ok {
-		return skip("replacement_limit", "replacements", n-1)
-	}
-	if _, err := store.latestSpawnForJob(ctx, newJob); err == nil {
-		return skip("already_replaced", "replacement", newJob)
+		return giveUp("replacement_limit", "replacements", n-1)
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
-		return skip("spawn_config_unavailable")
+		return retryLater("spawn_config_unavailable")
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	record, exists, err := app.ExistingJob(readCtx, event.JobID)
 	cancel()
 	state, _ := record["state"].(string)
 	pool, _ := record["pool"].(string)
-	if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
+	if err != nil {
+		// hk could not be read (a timeout, a 503): the job may be live and carriable,
+		// so nothing is decided and the node keeps the announcement (hk 5690).
+		return retryLater("job_record_unavailable", "error", err.Error())
+	}
+	if !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
 		return skip("job_record", "state", state)
 	}
 	// The band that stopped comes from the stop's own pool, not the record:
@@ -261,15 +466,26 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if role != "reviewer" {
 		key, verb = "handed_over_to", "handed over"
 	}
+	// The carried-on record keeps the pool the job record names (the catalog
+	// pool, devin for both Devin bands, hk 4582) as every hand-over writer does;
+	// the band that stopped is in the stop's job.lost and the carry-over log line.
+	stopBand, _ := quotaStopReasonFields(event.Reason)
+	if stopBand == "" || !spawnargs.ValuePattern.MatchString(stopBand) {
+		stopBand = pool
+	}
 	endReason := fleet.QuotaStopEndReason(pool, time.Time{}, key, newJob)
 	if !validNodeEndReason(endReason) {
-		return skip("end_reason_too_long", "length", len(endReason))
+		return giveUp("end_reason_too_long", "length", len(endReason))
 	}
 	// Place nothing while the old pane is busy or unreadable.
 	name := heldAgentName(holder, record)
 	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
-	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
-		return skip("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
+	// A reviewer's close is fenced to the pane state its stop was observed in
+	// (stop_seq); a stop that carries none (a row reserved before the upgrade) never
+	// closes a pane and is left to the watcher's grace (hk 5690 review).
+	stopSeq, fenced := quotaStopSeq(event.Reason)
+	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!quotaPaneStopped(probe.row.AgentStatus, role == "reviewer" && fenced) || !validNodeCommandPath(probe.row.Cwd)) {
+		return retryLater("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
 	}
 	request, err := quotaReplacementRequest(holder.Request, event.JobID, newJob, pool, exclude, role)
 	if err != nil {
@@ -277,15 +493,18 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	}
 	next, err := fleet.ValidateSubmission(request)
 	if err != nil || !validLaneReference(next.Owner) {
-		return skip("invalid_replacement")
+		return giveUp("invalid_replacement")
 	}
 	// Close the old pane before the successor exists, so a single job holds
 	// the task: a pane that changed since the probe is refused by pane.close
 	// and nothing is placed. A closed pane with no successor is ended by the
 	// node's watcher after its grace, as a quota stop with no replacement.
 	if probe.state == heldPanePresent {
-		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, event.JobID); !closed {
-			return skip("pane_not_closed", "pane", holder.Outcome.Pane)
+		if role == "reviewer" && !fenced {
+			return retryLater("stop_seq_unknown", "pane", holder.Outcome.Pane)
+		}
+		if closed, _ := h.closeHeldPaneStopped(ctx, holder, name, probe.row, event.JobID, stopSeq); !closed {
+			return retryLater("pane_not_closed", "pane", holder.Outcome.Pane)
 		}
 	}
 	mark := func() bool {
@@ -328,7 +547,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		}
 	}
 	if _, _, err := store.claimSpawnFrom(ctx, request, newJob, next.Owner, h.now().UTC(), event.JobID); err != nil {
-		return skip("claim_refused", "error", err.Error())
+		return giveUp("claim_refused", "error", err.Error())
 	}
 	select {
 	case h.spawnKick <- struct{}{}:
@@ -338,7 +557,14 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if wait <= 0 {
 		wait = quotaReplaceWait
 	}
-	task, settled := h.awaitSpawnOutcome(ctx, request.RequestID, wait)
+	task, settled, known := h.awaitSpawnOutcomeKnown(ctx, request.RequestID, wait)
+	if !known && !settled {
+		// The successor is claimed but its state could not be read (a store error):
+		// that is unknown, not "not running". It is never given up; the stop stays
+		// with its node and the next delivery finds the claimed successor and
+		// finishes it (hk 5690 review).
+		return retryLater("successor_state_unknown", "replacement", newJob)
+	}
 	outcome := task.Outcome
 	if role == "reviewer" {
 		// A reviewer is replaced only when the successor is placed (no other
@@ -350,8 +576,34 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		// duplicate work. An operation that was never bound to a node
 		// (accepted) can never place a job, and one that settled as a failure
 		// did not.
-		if settled && outcome.RC != 0 || !settled && !spawnMayStillRun(task) {
+		withdrawn := false
+		if !settled && !spawnMayStillRun(task) && task.Status == "accepted" {
+			// A successor still queued at the wait's end could bind later and
+			// run with no pointer to it. Withdraw it before the review is given
+			// up (hk 5690 review).
+			withdrawn, _ = h.withdrawHandoverSuccessor(ctx, task, "quota_giveup")
+			if !withdrawn {
+				// The withdrawal did not commit: the operation moved on, or is
+				// held. The state read afresh decides, and a successor that can
+				// still run is pointed to (a pointer to one that later fails is a
+				// recoverable chain; a running successor nobody points to is
+				// duplicate work). A given-up review needs the proof that it
+				// cannot.
+				if fresh, err := store.spawnTask(ctx, request.RequestID); err == nil {
+					task = fresh
+					outcome = task.Outcome
+					settled = !spawnStatusActive(task.Status)
+				}
+			}
+		}
+		if !withdrawn && !settled && spawnStatusActive(task.Status) {
+			// Still live (accepted or waiting, unwithdrawn): it may yet run.
+			h.logger.Warn("quota-stop successor could not be withdrawn; writing its pointer", "job", event.JobID, "replacement", newJob, "status", task.Status)
+		} else if settled && outcome.RC != 0 || !settled && !spawnMayStillRun(task) {
 			h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "status", task.Status, "rc", outcome.RC, "reason", outcome.Reason)
+			if h.giveUpQuotaStop(ctx, holder, prior.Owner, event, "not_placed") {
+				retry = true
+			}
 			return "", false
 		}
 		if !settled {
@@ -365,6 +617,12 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		return "", false
 	}
 	h.logger.Info("quota-stop replacement", "job", event.JobID, "replacement", newJob, "role", role, "pool", pool, "host", outcome.Host, "profile", outcome.Profile)
+	h.logger.Info("quota-stop carry-over", "outcome", "carried_on", "job", event.JobID, "successor", newJob, "role", role, "pool", stopBand, "record_pool", pool, "host", outcome.Host, "profile", outcome.Profile)
+	if role == "reviewer" {
+		// The requester resolves the old job to its successor through the old
+		// record's replaced_by and hears nothing else on a carry-over (hk 5690).
+		return newJob, true
+	}
 	to, place := "with", fmt.Sprintf("%s/%s", outcome.Host, outcome.Profile)
 	if role != "reviewer" {
 		to = "to"
@@ -375,6 +633,74 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	text := fmt.Sprintf("%s %s (%s quota) %s %s on %s", verb, event.JobID, pool, to, newJob, place)
 	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "quota-replace:" + newJob, JobID: newJob, OwnerLane: next.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(newJob, "quota_replace", false)}, nil)
 	return newJob, true
+}
+
+// giveUpQuotaStop ends a reviewer's quota stop that no other pool could take:
+// the pane is closed if it is still there, the old record is written lost with
+// the plain end_reason "quota_stop pool=<pool> reset_at=<t>" (mergewake hk 3302,
+// no replaced_by), and the owner is told once. The notice's event id is the
+// job's, so a repeat of the replacement (a hub restart, a second announcement)
+// sends no second one. A pane that is busy or unreadable is not given up: the
+// stop may be over, and the node's watcher decides when its grace runs out. The
+// record and the log line are what a count of carried on and given up reads
+// (docs/quota-stop.md, "The record of a carry-over").
+func (h *HubServer) giveUpQuotaStop(ctx context.Context, holder hubSpawnTask, owner string, event hubJobEventPayload, why string) (retry bool) {
+	if !validLaneReference(owner) {
+		return false
+	}
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		return true
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	record, exists, err := app.ExistingJob(readCtx, event.JobID)
+	cancel()
+	state, _ := record["state"].(string)
+	pool, _ := record["pool"].(string)
+	if err != nil {
+		// hk could not be read: the give-up is not decided on a guess, and the
+		// announcement stays with its node (hk 5690 review).
+		return true
+	}
+	if !exists || (state != "claimed" && state != "spawned") {
+		return false
+	}
+	stopPool, resetAt := quotaStopReasonFields(event.Reason)
+	if stopPool == "" || !spawnargs.ValuePattern.MatchString(stopPool) {
+		stopPool = pool
+	}
+	var reset time.Time
+	if at, err := time.Parse(time.RFC3339, resetAt); err == nil {
+		reset = at
+	}
+	endReason := fleet.QuotaStopEndReason(stopPool, reset, "", "")
+	if !validNodeEndReason(endReason) {
+		endReason = fleet.QuotaStopEndReason(stopPool, time.Time{}, "", "")
+	}
+	name := heldAgentName(holder, record)
+	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
+	stopSeq, fenced := quotaStopSeq(event.Reason)
+	switch {
+	case probe.state == heldPanePresent && quotaPaneStopped(probe.row.AgentStatus, fenced) && validNodeCommandPath(probe.row.Cwd):
+		if !fenced {
+			// No verified stop sequence: this close is never made; the
+			// announcement stays with its node and the watcher's grace ends it.
+			return true
+		}
+		if closed, _ := h.closeHeldPaneStopped(ctx, holder, name, probe.row, event.JobID, stopSeq); !closed {
+			return false
+		}
+	case probe.state != heldPaneAbsent:
+		return false
+	}
+	if lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); !lost {
+		h.logger.Warn("quota-stop give-up: the stopped job's record was not written", "job", event.JobID, "reason", why)
+		return false
+	}
+	h.logger.Info("quota-stop carry-over", "outcome", "given_up", "job", event.JobID, "role", "reviewer", "pool", stopPool, "reason", why)
+	text := fmt.Sprintf("gave up %s (%s quota): no other pool could take the review (%s)", event.JobID, stopPool, why)
+	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "quota-giveup:" + event.JobID, JobID: event.JobID, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(event.JobID, "quota_giveup", true)}, nil)
+	return false
 }
 
 // spawnMayStillRun reports whether an operation that has not settled can still
@@ -408,28 +734,41 @@ func spawnStatusActive(status string) bool {
 // (settled) and returns it; settled is false when the wait ended with the
 // operation still running.
 func (h *HubServer) awaitSpawnOutcome(ctx context.Context, requestID string, limit time.Duration) (hubSpawnTask, bool) {
+	task, settled, _ := h.awaitSpawnOutcomeKnown(ctx, requestID, limit)
+	return task, settled
+}
+
+// awaitSpawnOutcomeKnown is awaitSpawnOutcome that also says whether the last read
+// of the operation worked. A store error leaves the last status read (the operation
+// is not "not running" because it could not be read): known is false then, and the
+// caller treats the state as unknown (hk 5690).
+func (h *HubServer) awaitSpawnOutcomeKnown(ctx context.Context, requestID string, limit time.Duration) (task hubSpawnTask, settled, known bool) {
 	poll := h.quotaReplacePoll
 	if poll <= 0 {
 		poll = quotaReplacePoll
 	}
 	deadline := time.Now().Add(limit)
 	for {
-		task, err := h.inbox.store.spawnTask(ctx, requestID)
+		read, err := h.inbox.store.spawnTask(ctx, requestID)
+		known = err == nil
+		if known {
+			task = read
+		}
 		// accepted, dispatching, reconciling and deadline_exceeded are the
 		// states the coordinator still retries (pendingSpawns), and waiting is
 		// held by the start-condition queue; a node may yet complete the
 		// successor from reconciling. Only succeeded, failed and retryable are
 		// final.
-		if err == nil && !spawnStatusActive(task.Status) {
-			return task, true
+		if known && !spawnStatusActive(task.Status) {
+			return task, true, true
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {
-			return task, false
+			return task, false, known
 		}
 		select {
 		case <-time.After(poll):
 		case <-ctx.Done():
-			return task, false
+			return task, false, known
 		}
 	}
 }
@@ -470,12 +809,13 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	written := 0
 	for _, successor := range successors {
-		if !spawnMayStillRun(successor) && successor.Status != "succeeded" {
-			continue
-		}
-		// A replacement younger than its own budget is still being finished by
-		// replaceQuotaStopped.
-		if h.now().Sub(successor.Created) < quotaReplaceBudget {
+		// A successor that is placed or was sent to a node, at any age: a restart
+		// between the claim and the pointer is repaired well inside the watcher's
+		// grace instead of after the replacement budget. A claim still queued
+		// (accepted, waiting), only bound (never sent) or ended unplaced is not a
+		// pointer target: it may never start, and the replay or the give-up owns it
+		// (hk 5690).
+		if !quotaSuccessorPlaceable(successor) {
 			continue
 		}
 		old := successor.ReplacedFrom
@@ -487,14 +827,55 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	return written
 }
 
+// quotaSuccessorPlaceable reports whether a claimed successor is placed, or has
+// durable evidence that its start was sent to a node: the only states a replaced_by
+// pointer to it may be written in. A row that is merely bound has never been sent
+// (beginSpawnSend moves it to dispatching first), and the coordinator may settle it
+// as a timeout or return it to accepted without taking the predecessor's lock; a
+// reconciling row with no node binding is returned to placement. hk cannot replace
+// the pointer with a plain loss afterwards, so a pointer to such a row would send the
+// requester to a job that never reports (hk 5690 review).
+func quotaSuccessorPlaceable(successor hubSpawnTask) bool {
+	if successor.Status == "succeeded" {
+		return true
+	}
+	if successor.Node == nil {
+		return false
+	}
+	switch successor.Status {
+	case "dispatching", "reconciling", "deadline_exceeded":
+		return true
+	}
+	return false
+}
+
+// reconcileQuotaReplacement finishes one claimed successor's pointer. It never
+// waits for the predecessor's lock: a replacement that holds it is working the job,
+// and the pass revisits it next time, so the jobs behind it are reached before
+// their grace ends. The successor is read again under the lock, since the snapshot
+// the scan took may have been withdrawn since (hk 5690 review).
 func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string) bool {
-	unlock, free := h.lockWithoutPoolAction(ctx, old)
+	unlock, free := h.tryLockWithoutPoolAction(ctx, old)
 	if !free {
 		return false
 	}
 	defer unlock()
+	current, err := h.inbox.store.spawnTask(ctx, successor.Request.RequestID)
+	if err != nil {
+		return false
+	}
+	return h.finishQuotaReplacement(ctx, app, current, old, nil)
+}
+
+// finishQuotaReplacement writes the replaced_by record for a claimed successor
+// whose predecessor is still live. The caller holds the job's pool-action lock.
+func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string, stopSeq *int64) bool {
+	// The one rule for a pointer, whoever calls: the successor is placed or was sent.
+	if !quotaSuccessorPlaceable(successor) {
+		return false
+	}
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, old)
-	if err != nil || holder.Status != "succeeded" {
+	if err != nil || holder.Status != "succeeded" || !quotaLineageHolds(successor, holder, old) {
 		return false
 	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
@@ -516,8 +897,13 @@ func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.Ap
 	name := heldAgentName(holder, record)
 	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 	switch {
-	case probe.state == heldPanePresent && nodePaneIdleStatus[probe.row.AgentStatus] && validNodeCommandPath(probe.row.Cwd):
-		if closed, _ := h.closeHeldPane(ctx, holder, name, probe.row, old); !closed {
+	case probe.state == heldPanePresent && quotaPaneStopped(probe.row.AgentStatus, stopSeq != nil) && validNodeCommandPath(probe.row.Cwd):
+		// The predecessor's pane is closed only fenced to a verified stop sequence;
+		// the periodic pass has none and leaves a present pane alone (hk 5690).
+		if stopSeq == nil {
+			return false
+		}
+		if closed, _ := h.closeHeldPaneStopped(ctx, holder, name, probe.row, old, stopSeq); !closed {
 			return false
 		}
 	case probe.state != heldPaneAbsent:

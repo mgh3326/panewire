@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"maps"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,31 @@ func quotaStopReasonFields(reason string) (pool, reset string) {
 		reset = strings.TrimPrefix(fields[2], "reset_at=")
 	}
 	return strings.TrimPrefix(fields[1], "pool="), reset
+}
+
+// quotaStopReasonSeq returns the pane state the stop was observed in
+// ("quota_stop pool=<p> reset_at=<t> seq=<n>"), ok false when the reason names
+// none (a node that predates the field, or a stop with no known state).
+func quotaStopReasonSeq(reason string) (seq int64, ok bool) {
+	for _, field := range strings.Fields(reason) {
+		if value, found := strings.CutPrefix(field, "seq="); found {
+			n, err := strconv.ParseInt(value, 10, 64)
+			return n, err == nil && n != 0
+		}
+	}
+	return 0, false
+}
+
+// quotaStopReasonAt returns when the stop was announced ("... at=<unix>"), ok
+// false when the reason names none.
+func quotaStopReasonAt(reason string) (time.Time, bool) {
+	for _, field := range strings.Fields(reason) {
+		if value, found := strings.CutPrefix(field, "at="); found {
+			n, err := strconv.ParseInt(value, 10, 64)
+			return time.Unix(n, 0), err == nil && n > 0
+		}
+	}
+	return time.Time{}, false
 }
 
 // quotaStopReasonAccount returns the account a quota_stop reason names
