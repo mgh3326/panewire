@@ -1,7 +1,8 @@
--- hk 5250: the handoffkeep operator wait behind a told one-time action need
--- (hub_one_time_wait.go). wait_task_id and wait_id stay 0 until the wait write
--- is confirmed; confirmed_ms marks the moment anti-flap clearing confirmed the
--- need gone. The row is deleted only after the wait is closed, so a restart
+-- hk 5250: the handoffkeep operator wait behind a one-time action need
+-- (hub_one_time_wait.go). wait_task_id is the anchor written ahead of the wait
+-- write; wait_id is that wait once hk answers; anchor_ref is where the anchor
+-- walk last reached; confirmed_ms marks the moment anti-flap clearing confirmed
+-- the need gone.
 -- finishes either direction.
 -- applied-if: SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='one_time_action_notices' AND column_name='wait_id'
 ALTER TABLE one_time_action_notices
