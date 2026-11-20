@@ -27,6 +27,15 @@ import (
 // handed_over_to=<job>). When no other pool can take the work the hub does
 // nothing more, and the node ends the job itself without a successor.
 
+// isQuotaStopReason reports whether reason is a relayed quota stop: the bare
+// "quota_stop" an older node sends, or the form the node's relay builds from the
+// announcement (hub_jobs_client.go), "quota_stop pool=<p> reset_at=<t>". The hub
+// compared the bare word only, so no announced stop was ever replaced: the
+// relayed reason always carries the pool (hk 5690).
+func isQuotaStopReason(reason string) bool {
+	return reason == "quota_stop" || strings.HasPrefix(reason, "quota_stop ")
+}
+
 // quotaReplaceMax is the replacements one task role (one review pass) gets.
 const quotaReplaceMax = 2
 
@@ -70,7 +79,7 @@ const (
 const quotaReplacePoll = 500 * time.Millisecond
 
 func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPayload) {
-	if h.inbox == nil || event.Reason != "quota_stop" {
+	if h.inbox == nil || !isQuotaStopReason(event.Reason) {
 		return
 	}
 	if h.spawnGrantDrain || h.spawnRollbackDrain {
