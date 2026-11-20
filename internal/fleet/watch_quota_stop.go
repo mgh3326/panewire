@@ -331,12 +331,15 @@ func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
 // current attempt is another one. An empty attempt is a decision recorded
 // before attempts were bound (or without one): it cannot be verified, so it is
 // dropped as superseded rather than announced for whatever attempt runs now.
-func AnnounceQuotaStop(ctx context.Context, jobs, job, pane, attempt string, stop quotastop.Stop) error {
+//
+// session is the herdr session the pane lives in. The watcher this starts reads
+// the pane through it, so it must not fall back to the default session (hk 5777).
+func AnnounceQuotaStop(ctx context.Context, jobs, job, pane, session, attempt string, stop quotastop.Stop) error {
 	if attempt == "" {
 		return nil
 	}
 	home, _ := os.UserHomeDir()
-	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
+	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}, HerdrSession: session}
 	if e := a.quotaStopAnnounceAttempt(ctx, Job{ID: job, Pane: pane}, stop, attempt); e != nil {
 		if errors.Is(e, errQuotaStopSuperseded) {
 			// The hub ended the job on its posted result: nothing to announce,

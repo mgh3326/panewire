@@ -291,7 +291,7 @@ func TestAnnounceQuotaStopRefusesAnUnboundOrStaleDecision_t5224(t *testing.T) {
 	}
 	before, _ := a.job("j")
 	for name, attempt := range map[string]string{"unbound": "", "stale": observed} {
-		if err := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", attempt, quotastop.Stop{Pool: "claude"}); err != nil {
+		if err := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", "", attempt, quotastop.Stop{Pool: "claude"}); err != nil {
 			t.Fatalf("%s: %v, want the decision dropped without an error", name, err)
 		}
 	}

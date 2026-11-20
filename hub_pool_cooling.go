@@ -38,6 +38,18 @@ func quotaStopReasonSeq(reason string) (seq int64, ok bool) {
 	return 0, false
 }
 
+// quotaStopReasonResetObserved reports whether the node observed the stop's reset
+// ("... reset_observed=1"). A node that predates the token relays its own default
+// as reset_at, so the give-up writes only a reset the marker vouches for (hk 5777).
+func quotaStopReasonResetObserved(reason string) bool {
+	for _, field := range strings.Fields(reason) {
+		if field == "reset_observed=1" {
+			return true
+		}
+	}
+	return false
+}
+
 // quotaStopReasonAt returns when the stop was announced ("... at=<unix>"), ok
 // false when the reason names none.
 func quotaStopReasonAt(reason string) (time.Time, bool) {
@@ -78,6 +90,11 @@ func (h *HubServer) observePoolCooling(reason string, now time.Time) bool {
 		return false
 	}
 	until := now.Add(5 * time.Minute)
+	if announced, ok := quotaStopReasonAt(reason); ok && reset == "" {
+		// A stop with no observed reset cools for five minutes from when it was
+		// announced (hk 5777): the relay no longer writes that default itself.
+		until = announced.Add(5 * time.Minute)
+	}
 	if reset != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, reset)
 		if err != nil {

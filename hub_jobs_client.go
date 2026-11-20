@@ -331,11 +331,14 @@ func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job 
 		}
 		reason := event.reason()
 		if kind == "job.lost" && reason == "quota_stop" && event.Payload.Pool != "" {
-			reset := event.Payload.ResetAt
-			if reset == "" {
-				reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
+			// reset_at is written only when the node observed the reset. An
+			// unknown reset stays unknown: the hub's give-up writes the reason's
+			// reset into an immutable end_reason, and hub cooling applies its
+			// five-minute default from the announcement time (at=) (hk 5777).
+			reason += " pool=" + event.Payload.Pool
+			if event.Payload.ResetAt != "" {
+				reason += " reset_at=" + event.Payload.ResetAt + " reset_observed=1"
 			}
-			reason += " pool=" + event.Payload.Pool + " reset_at=" + reset
 			// When the stop was announced: the hub does not start a replacement
 			// the watcher's grace would end before it finished (hk 5690).
 			reason += " at=" + strconv.FormatInt(eventTime.Unix(), 10)
