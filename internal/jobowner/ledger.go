@@ -120,23 +120,44 @@ func appendRevocation(dir, id string, epoch uint64) error {
 }
 
 func withLock(jobs, id string, fn func(string) error) error {
-	if jobs == "" || !validID.MatchString(id) || id == "." || id == ".." {
-		return errors.New("invalid job id")
-	}
-	dir := filepath.Join(jobs, id)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(filepath.Join(dir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0666)
+	dir, unlock, err := lock(jobs, id)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer unlock()
 	return fn(dir)
+}
+
+// Lock takes the job's ownership lock, which Assign, Revoke and RevokeIfEpoch
+// also take, and returns its release. A caller that must act on the strength of
+// the job's current grant (a pane close) holds it from its last check until the
+// action returns, so a grant or revocation cannot land in between: it lands
+// before the check or after the action.
+func Lock(jobs, id string) (unlock func(), err error) {
+	_, unlock, err = lock(jobs, id)
+	return unlock, err
+}
+
+func lock(jobs, id string) (string, func(), error) {
+	if jobs == "" || !validID.MatchString(id) || id == "." || id == ".." {
+		return "", nil, errors.New("invalid job id")
+	}
+	dir := filepath.Join(jobs, id)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", nil, err
+	}
+	file, err := os.OpenFile(filepath.Join(dir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0666)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		file.Close()
+		return "", nil, err
+	}
+	return dir, func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		file.Close()
+	}, nil
 }
 
 // JobEnv and EpochEnv name the launch environment that binds a worker process

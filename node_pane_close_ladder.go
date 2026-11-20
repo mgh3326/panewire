@@ -187,6 +187,30 @@ func (client *HubClient) ladderAttempt(job string) (string, error) {
 	return target.attempt, nil
 }
 
+// ladderOwnerStale reports why the request no longer holds the job: the node
+// durably recorded a higher grant (job.assigned), or a hub revocation at or
+// above the request's epoch (job.revoked, which leaves the grant file as it
+// was). Empty means the request still owns the job.
+func (client *HubClient) ladderOwnerStale(args nodeLadderCloseArgs) (string, error) {
+	jobs := filepath.Join(client.jobsInboxRoot, "jobs")
+	stored, err := jobowner.Epoch(jobs, args.Job)
+	if err != nil {
+		return "", err
+	}
+	if stored > args.Epoch {
+		return "epoch_changed", nil
+	}
+	revoked, err := jobowner.Revoked(jobs, args.Job)
+	if err != nil {
+		return "", err
+	}
+	// A grant at or above the revocation's epoch supersedes it (jobowner.Revoked).
+	if revoked > stored && revoked >= args.Epoch {
+		return "revoked", nil
+	}
+	return "", nil
+}
+
 // ladderBound reports that the job's current ledger still binds the request:
 // the attempt is the one the hub decided on, and a spawn receipt, when the
 // attempt has one, names this pane and label. An ended attempt is allowed: an
@@ -305,17 +329,21 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 	if owned > args.Epoch {
 		return nil, "epoch_mismatch"
 	}
+	if reason, err := client.ladderOwnerStale(args); err != nil || reason != "" {
+		return nil, "epoch_mismatch"
+	}
 	record = nodeLadderRecord{RequestID: args.RequestID, Job: args.Job, Node: args.Node, Epoch: args.Epoch, Attempt: args.Attempt, PaneID: args.PaneID, State: nodeLadderClosing}
 	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, QuestionJob: args.Job}
 	// The intent is written after the guarded look and before the last look
 	// that precedes `herdr pane close`: a pane that was never going to be
 	// closed leaves no intent, and one that may have been leaves one.
 	stale := ""
+	releaseOwner := func() {}
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
 		// Read the ledger again after the first look and the settle, immediately
 		// before the intent: an attempt that moved on, or another pane, is not
 		// closed. The epoch is read again too.
-		if stored, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job); err != nil || stored > args.Epoch {
+		if reason, err := client.ladderOwnerStale(args); err != nil || reason != "" {
 			return nodeCloseHookStop{code: "epoch_mismatch"}
 		}
 		bound, err := client.ladderBound(args)
@@ -328,10 +356,24 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 		return writeNodeLadderRecord(root, record)
 	}, func() error {
 		// The last check before `herdr pane close`: a grant a job.assigned
-		// recorded, or an attempt a re-prompt started, while the final look ran
-		// leaves the pane open and the refusal stored.
-		if stored, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job); err != nil || stored > args.Epoch {
-			stale = "epoch_changed"
+		// recorded, a hub revocation, or an attempt a re-prompt started while the
+		// final look ran leaves the pane open and the refusal stored. The job's
+		// ownership lock is taken first and held until the close returns, so a
+		// grant or revocation lands before this check or after the close, never
+		// between them. A job with no directory has no ownership ledger to race.
+		if _, _, found, err := client.openNodeJobDir(args.Job); err != nil {
+			return err
+		} else if found {
+			unlock, err := jobowner.Lock(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+			if err != nil {
+				return err
+			}
+			releaseOwner = unlock
+		}
+		if reason, err := client.ladderOwnerStale(args); err != nil {
+			return err
+		} else if reason != "" {
+			stale = reason
 			return nodeCloseHookStop{outcome: nodePaneChanged}
 		}
 		bound, err := client.ladderBound(args)
@@ -344,6 +386,7 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 		}
 		return nil
 	})
+	releaseOwner()
 	if code != "" {
 		// A failed command leaves whatever the journal holds: no record, or
 		// the closing intent a repeat settles as unknown.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -290,5 +291,78 @@ func TestNodeLadderCloseRechecksOwnershipAndAttemptAtTheFinalLook(t *testing.T) 
 			again, code := nodeRun(t, client, nodeCommandLadderClose, args)
 			wantLadder(t, again, code, nodeLadderRefused, true)
 		})
+	}
+}
+
+// The ownership check and the close are one step against a revocation: the
+// job's ownership lock is held from the last check until herdr's close returns,
+// so a revocation arriving then waits, and lands after the close.
+func TestNodeLadderCloseHoldsTheOwnershipLockAcrossTheClose(t *testing.T) {
+	root := t.TempDir()
+	seedCloseOpJob(t, root)
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	run := fake.run
+	revoked := make(chan struct{})
+	earlyRevocation := false
+	client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) >= 2 && strings.Join(args[:2], " ") == "pane close" {
+			go func() {
+				_ = jobowner.Revoke(filepath.Join(root, "jobs"), closeOpJob, 3)
+				close(revoked)
+			}()
+			// A window that proves nothing more happens: the revocation must not
+			// complete while the close is in flight.
+			select {
+			case <-revoked:
+				earlyRevocation = true
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+		return run(ctx, args...)
+	}
+	args := ladderArgs(ladderRequest)
+	args["attempt"] = closeOpAttempt
+	result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+	wantLadder(t, result, code, nodeLadderClosed, false)
+	if earlyRevocation {
+		t.Fatal("a revocation landed between the last ownership check and the close")
+	}
+	select {
+	case <-revoked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the revocation never completed after the close")
+	}
+}
+
+// job.revoked leaves the grant file as it was, so the grant alone cannot say
+// the node lost the job: the ownership check reads the revocation too, at the
+// request, before the intent and at the last check. (A revocation that lands
+// before the question scan stops the close there; the check covers the window
+// after it.)
+func TestNodeLadderOwnershipCheckReadsAHubRevocation(t *testing.T) {
+	root := t.TempDir()
+	seedCloseOpJob(t, root)
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	args := nodeLadderCloseArgs{Job: closeOpJob, Epoch: 1}
+	if reason, err := client.ladderOwnerStale(args); err != nil || reason != "" {
+		t.Fatalf("a fresh job: %q %v", reason, err)
+	}
+	if err := jobowner.Revoke(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
+		t.Fatal(err)
+	}
+	if reason, err := client.ladderOwnerStale(args); err != nil || reason != "revoked" {
+		t.Fatalf("a revoked job: %q %v", reason, err)
+	}
+	if _, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest)); code != "epoch_mismatch" || fake.called("pane", "close") != 0 {
+		t.Fatalf("a revoked request closed: code=%q %v", code, fake.calls)
+	}
+	// A later grant at the revocation's epoch supersedes it.
+	if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
+		t.Fatal(err)
+	}
+	if reason, err := client.ladderOwnerStale(nodeLadderCloseArgs{Job: closeOpJob, Epoch: 3}); err != nil || reason != "" {
+		t.Fatalf("epoch 3 after its own grant: %q %v", reason, err)
 	}
 }
