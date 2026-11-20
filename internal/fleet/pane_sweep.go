@@ -405,6 +405,10 @@ type TaskPaneSweeper struct {
 	staleOpen int
 
 	idleSince map[string]time.Time
+	// reviveIdle maps a completed job to its completion time once its pane was
+	// seen not working after that completion: the armed state a busy pane needs
+	// before the job is revived (completed_revive.go, hk 5799).
+	reviveIdle map[string]time.Time
 	// endedSince is the first pass each pane's end held: the close deadline of
 	// an end the job record does not date (a task-derived end) starts there.
 	endedSince map[string]time.Time
@@ -541,21 +545,37 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		return nil, err
 	}
 	now := a.Now()
-	var candidates, abandoned []Job
+	var candidates, abandoned, all []Job
+	unreadable := false
 	for _, entry := range entries {
 		if !entry.IsDir() || !validID(entry.Name()) {
 			continue
 		}
 		j, err := a.job(entry.Name())
 		if err != nil {
+			// A submitter's own record (submission.json, no events/) is not this
+			// node's ledger: it does not make the node's jobs unreadable.
+			if !submissionOnlyDir(a, entry.Name()) {
+				unreadable = true
+			}
 			continue
 		}
+		all = append(all, j)
 		switch {
 		case paneSweepAbandoned(j):
 			abandoned = append(abandoned, j)
 		case paneSweepCandidate(j) || paneSweepKeepCandidate(j, now):
 			candidates = append(candidates, j)
 		}
+	}
+	// A completed job whose pane is busy again is revived before any close
+	// decision (completed_revive.go, hk 5799): the pass neither closes that
+	// pane nor judges the job as ended.
+	revived := s.reviveCompletedPanes(ctx, a, all, unreadable)
+	s.restartRevivedWatchers(a, all, revived)
+	if len(revived) > 0 {
+		candidates = withoutRevivedJobs(candidates, revived)
+		abandoned = withoutRevivedJobs(abandoned, revived)
 	}
 	counts := map[string]int{}
 	defer s.reportEndedPanes(a, counts)
