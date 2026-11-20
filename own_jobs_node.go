@@ -108,9 +108,6 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 	if target.owner != args.Lane {
 		return nodeJobReapResult{Outcome: nodeJobReapOwnerMismatch, Pane: target.pane}, ""
 	}
-	if target.keep {
-		return nodeJobReapResult{Outcome: nodeJobReapProtected, Pane: target.pane}, ""
-	}
 	if target.pane == "" {
 		return nodeJobReapResult{Outcome: nodeJobReapPaneGone}, ""
 	}
@@ -119,7 +116,13 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 		return nil, "herdr_failed"
 	}
 	if !found {
+		// A kept job whose pane is gone has nothing left to protect, so its
+		// record settles like any other job's (hk 5295).
 		return nodeJobReapResult{Outcome: nodeJobReapPaneGone, Pane: target.pane}, ""
+	}
+	// A kept job's pane that still exists is protected, with or without force.
+	if target.keep {
+		return nodeJobReapResult{Outcome: nodeJobReapProtected, Pane: target.pane}, ""
 	}
 	// A pane id is host-local and reused, so the label the job's own receipt
 	// names is what proves the pane still runs this job.

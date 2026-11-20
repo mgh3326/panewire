@@ -47,6 +47,8 @@ func TestNodeJobReapSafety(t *testing.T) {
 		{name: "blocked pane needs force", events: []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", false)}, listed: "blocked", outcome: nodeJobReapPaneBlocked},
 		{name: "blocked pane with force closes", events: []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", false)}, listed: "blocked", force: true, outcome: nodeJobReapClosed},
 		{name: "protected job is never closed", events: []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", true)}, listed: "idle", force: true, outcome: nodeJobReapProtected},
+		{name: "protected job without force is never closed", events: []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", true)}, listed: "idle", outcome: nodeJobReapProtected},
+		{name: "protected job whose pane is gone settles", events: []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", true)}, listed: "idle", pane: "w9:p9", force: true, outcome: nodeJobReapPaneGone},
 		{name: "another lane's job", events: []map[string]any{nodeJobReapClaim("lane-b"), nodeJobReapSpawn("lane-b", false)}, listed: "idle", outcome: nodeJobReapOwnerMismatch},
 		{name: "a pane that is not the job's", events: []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", false)}, listed: "idle", label: "job-other", outcome: nodeJobReapPaneChanged},
 		{name: "pane gone", events: []map[string]any{nodeJobReapClaim("lane-a"), nodeJobReapSpawn("lane-a", false)}, listed: "idle", pane: "w9:p9", outcome: nodeJobReapPaneGone},

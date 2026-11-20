@@ -1279,6 +1279,49 @@ func TestEscalateAuthorRefusesLegacyWorkerWithOwnerESC(t *testing.T) {
 	}
 }
 
+// TestEscalateAuthorRefusesAKeptAuthor: the ladder never closes a pane spawned
+// with --keep. The step is refused as author_kept before any close is asked of
+// the node, nothing is staged, and the owner gets one decision (ESC) (hk 5295).
+func TestEscalateAuthorRefusesAKeptAuthor(t *testing.T) {
+	f := newEscalateFixture(t, "kept-author")
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder.Request.Args = append(holder.Request.Args, "--keep")
+	raw, err := json.Marshal(holder.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.hub.inbox.store.db.ExecContext(t.Context(), f.hub.inbox.store.q(`UPDATE spawn_operations SET payload=? WHERE request_id=?`), string(raw), holder.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	result, commands := f.escalate(t, nil)
+	if result.Code != "author_kept" || result.AuthorEnded || len(commands) != 0 {
+		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("a kept author's refusal staged a successor")
+	}
+	f.awaitInfo(t, "ESC", "author_kept")
+	items, err := f.hub.inbox.store.list("parent", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisions := 0
+	for _, item := range items {
+		if strings.Contains(item.Event.Text, "author_kept") {
+			if item.Event.NotifyType != "decision" {
+				t.Fatalf("author_kept filed as %q, want decision", item.Event.NotifyType)
+			}
+			decisions++
+		}
+	}
+	if decisions != 1 {
+		t.Fatalf("owner received %d author_kept events, want 1", decisions)
+	}
+}
+
 // A node whose hello predates pane_close_question_v1 cannot check the pane's
 // open question, so the close is refused and the escalation keeps the author
 // pane rather than close it unguarded (hk 4658).
