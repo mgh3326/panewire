@@ -36,6 +36,9 @@ type quotaStopManager struct {
 	// announce records job.lost reason quota_stop for a handed-over job, which
 	// the hub then replaces (hub_quota_replace.go).
 	announce func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error
+	// announceNode is the session an announced job with no binding of its pane
+	// reads in: the node's own, set by the daemon (hk 5808); nil is "".
+	announceNode func(job string) string
 	// wait is the manager's side of a reviewer's short-reset wait handshake (hk
 	// 5749); tests substitute it.
 	wait quotaWaitLink
@@ -123,7 +126,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
 		// The announced job's own binding names its session (hk 5808); the
 		// pane-only q.session would read another job's pane after a reuse.
-		session, err := quotaAnnounceSession(root, job, pane)
+		session, err := quotaAnnounceSession(root, job, pane, q.announceNode)
 		if err != nil {
 			q.logger.Warn("quota-stop hand-over refused", "job", job, "pane", pane, "error", err)
 			return err
@@ -1157,12 +1160,30 @@ func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, re
 	if at, err := time.Parse(time.RFC3339, reset); err == nil {
 		stop.Reset = at
 	}
-	if q.announce == nil || q.announce(ctx, job, pane, attempt, stop) != nil {
+	if q.announce == nil {
+		q.backoffAction(ctx, id, now)
+		return
+	}
+	if err := q.announce(ctx, job, pane, attempt, stop); err != nil {
+		if errors.Is(err, errQuotaStopPaneReused) {
+			// The pane is another job's now: a terminal refusal, never retried
+			// (hk 5808). The pane's wait token is left to its own expiry.
+			q.retireAction(ctx, id, "pane_reused")
+			return
+		}
 		q.backoffAction(ctx, id, now)
 		return
 	}
 	q.update(ctx, id, "action_recorded", 1)
 	q.clearQuotaWait(ctx, pane, now)
+}
+
+// retireAction records a hand-over that will never be announced for this
+// decision: the row is done with result, so no tick selects it again (hk 5808).
+func (q *quotaStopManager) retireAction(ctx context.Context, id, result string) {
+	q.store.mu.Lock()
+	defer q.store.mu.Unlock()
+	_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET action_recorded=1,result=? WHERE event_id=?`, result, id)
 }
 
 // observedSeq is the herdr state_change_seq of the pane when the stop decided
