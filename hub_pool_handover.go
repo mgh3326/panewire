@@ -951,6 +951,23 @@ func (h *HubServer) handoverBeforeClose(ctx context.Context, action *poolAction)
 	} else if in.bound != action.Job {
 		return withdraw("task_rebound")
 	}
+	// A job that has ended (its watcher wrote it lost after the grace) needs no
+	// close, whatever its pane now shows: a plain shell left in the pane has no
+	// closable status, and waiting on one would hold the task role for ever.
+	// Read before any wait on the pane (hk 5780 review).
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		return false, err
+	}
+	readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
+	record, exists, err := app.ExistingJob(readCtx, action.Job)
+	cancelRead()
+	if err != nil {
+		return false, err
+	}
+	if state, _ := record["state"].(string); exists && hkTerminalState(state) {
+		return withdraw("job_ended")
+	}
 	probe := h.probeHeldPane(ctx, action.Node, action.Data.Pane, action.Data.Label)
 	switch {
 	case probe.state == heldPaneAbsent || probe.state == heldPanePresent && (probe.row.PaneID != action.Data.Pane || probe.row.Cwd != handover.Cwd):

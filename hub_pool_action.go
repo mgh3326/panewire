@@ -336,6 +336,11 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 			// before a restart: the last point the hand-over can still be
 			// withdrawn without a trace. The job's lock is held through the
 			// close command, so the checks bind the close (hk 4633).
+			if action.Data.TargetAttempt != "" && status.Attempt != action.Data.TargetAttempt {
+				// The job moved on since the stop was admitted: nothing waits on a
+				// pane that is no longer the stopped one (hk 5780 review).
+				return h.releasePoolAction(ctx, action)
+			}
 			unlock, err := h.poolActionLocks.lock(ctx, action.Job)
 			if err != nil {
 				return err
@@ -410,6 +415,15 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 		if action.Data.Args == nil {
 			return errors.New("close arguments unavailable")
 		}
+		if handover := action.Data.Handover; status.State == fleet.CloseOpClosing && action.Data.Kind == poolActionKindHandover && handover != nil && handover.StopSeq != nil {
+			if connected, has := h.nodeCapability(action.Node, hubCapabilityCloseOpStopSeq); connected && !has {
+				// The node came back without the close fence while its journal holds
+				// this close as closing. Nothing is sent to it that could close
+				// unfenced, no retry is made, and no successor is started: the row is
+				// given up with one owner notice (hk 5780 round 4).
+				return h.giveUpClosingFencedHandover(ctx, action)
+			}
+		}
 	default:
 		return errors.New("unknown close status")
 	}
@@ -420,25 +434,14 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 	if action.Data.Kind == poolActionKindHandover && args.Handover == nil {
 		return errors.New("handover close guard unavailable")
 	}
-	// A close the node journaled as closing is settled by repeating its request:
-	// the node answers it from the journal (closing becomes unknown) and never
-	// starts a close for an entry it holds. A node that came back without
-	// stop-sequence support rejects the fence field, so the repeat omits it, for
-	// that case only: nothing here can start an unfenced close (hk 5780 review).
-	send := *args
-	if send.StopSeq != nil && status.State == fleet.CloseOpClosing {
-		if connected, has := h.nodeCapability(action.Node, hubCapabilityCloseOpStopSeq); connected && !has {
-			send.StopSeq = nil
-		}
-	}
 	// Once the action is stored, I1 prevents its ownership changing. An absent
 	// in-memory job after hub restart does not prevent replay of this binding.
 	allowed := func() bool {
 		job, node := h.jobs[action.Job], h.nodes[action.Node]
-		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps] && (action.Data.Kind != poolActionKindHandover || node.capabilities[hubCapabilityHandoverCheck]) && (send.StopSeq == nil || node.capabilities[hubCapabilityCloseOpStopSeq])
+		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps] && (action.Data.Kind != poolActionKindHandover || node.capabilities[hubCapabilityHandoverCheck]) && (args.StopSeq == nil || node.capabilities[hubCapabilityCloseOpStopSeq])
 	}
 	var result nodePaneCloseOpResult
-	if !h.nodeCallWhere(ctx, action.Node, nodeCommandPaneCloseOp, send, hubNodeCommandWait, &result, allowed) {
+	if !h.nodeCallWhere(ctx, action.Node, nodeCommandPaneCloseOp, *args, hubNodeCommandWait, &result, allowed) {
 		return errors.New("close ownership, capability or answer unavailable")
 	}
 	switch result.Outcome {
@@ -484,6 +487,22 @@ func (h *HubServer) finishMissingJobAction(ctx context.Context, action poolActio
 			return errors.New("owner notice unavailable")
 		}
 	}
+	return h.refusePoolAction(ctx, action)
+}
+
+// giveUpClosingFencedHandover retires a fenced hand-over whose close the node
+// journaled as closing and can no longer be fenced after a downgrade. The release
+// is the existing one (a best effort here: the node's journal cannot settle a
+// closing request, and the answer is not waited on for the fence); the row is
+// refused, which frees the job's fence and sends the owner exactly one notice
+// (refusePoolAction's, deduplicated by the hand-over's id). No close, no retry row
+// and no successor.
+func (h *HubServer) giveUpClosingFencedHandover(ctx context.Context, action poolAction) error {
+	handover := action.Data.Handover
+	handover.Reason = "stop_seq_unsupported"
+	action.Data.Text = fmt.Sprintf("the hand-over is unsettled after a node downgrade, pane %s may still be open", action.Data.Pane)
+	var status nodeCloseOpStatusResult
+	_ = h.nodeCall(ctx, action.Node, nodeCommandPaneCloseRelease, nodeCloseOpRefArgs{RequestID: action.ID, Job: action.Job}, hubNodeCommandWait, &status)
 	return h.refusePoolAction(ctx, action)
 }
 

@@ -647,7 +647,7 @@ func TestHandoverCloseIsBoundToTheAdmittedAttempt_t5780(t *testing.T) {
 		t.Fatalf("row not bound to the admitted attempt: target=%q", action.Data.TargetAttempt)
 	}
 	moved := poolActionReply{op: nodeCommandPaneCloseStatus, result: map[string]any{"state": nodeCloseOpNone, "released": false, "settled": false, "attempt": "00009-job.reprompted.json"}}
-	if err := runPoolActionStep(t, f.hub, f.node, action, moved, idlePane(job, "/work/project.checkout", "idle"), releasedReply); err != nil {
+	if err := runPoolActionStep(t, f.hub, f.node, action, moved, releasedReply); err != nil {
 		t.Fatal(err)
 	}
 	if rows := handoverRowsOf(t, f, job); len(rows) != 1 || rows[0].Phase != poolActionRefused {
@@ -655,12 +655,12 @@ func TestHandoverCloseIsBoundToTheAdmittedAttempt_t5780(t *testing.T) {
 	}
 }
 
-// hk 5780 review: a close the node journaled as closing, on a node that came back
-// without stop-sequence support, is recovered by repeating its request without the
-// fence field: the node answers a request it holds from its journal (closing
-// becomes unknown) and starts no close for it. The row keeps its stored fence and
-// the job stays fenced until that settles.
-func TestClosingJournalIsRecoveredAcrossARollback_t5780(t *testing.T) {
+// hk 5780 round 4: a close the node journaled as closing, on a node that came back
+// without the close fence, with the pane still present. Nothing is sent that could
+// close unfenced and no retry row is made: the original row is given up (released
+// through the existing path), the owner gets exactly one notice, and no successor
+// is started.
+func TestClosingFencedHandoverOnADowngradedNodeIsGivenUpNotReplayed_t5780(t *testing.T) {
 	const job = "pw-closing-5780"
 	f := announcedFixture(t, job)
 	queueAnnouncedRow(t, f, "ev-1")
@@ -677,26 +677,53 @@ func TestClosingJournalIsRecoveredAcrossARollback_t5780(t *testing.T) {
 	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseOpStopSeq)
 	f.hub.mu.Unlock()
 	action = readOnlyPoolAction(t, f.hub)
-	if action.Data.Args == nil || action.Data.Args.StopSeq == nil {
-		t.Fatalf("the stored close lost its fence: %+v", action.Data.Args)
-	}
-	done := make(chan error, 1)
-	go func() { done <- f.hub.reconcilePoolAction(t.Context(), action) }()
-	status := nodeCommandRead(t, f.node)
-	if string(status["op"]) != `"pane.close_status"` {
-		t.Fatalf("first command %s", status["op"])
-	}
-	nodeCommandReplyTo(t, f.node, status, map[string]any{"result": map[string]any{"state": fleet.CloseOpClosing, "released": false, "settled": false, "attempt": "00002-job.spawned.json"}})
-	repeat := nodeCommandRead(t, f.node)
-	if string(repeat["op"]) != `"pane.close_op"` || strings.Contains(string(repeat["args"]), "stop_seq") {
-		t.Fatalf("the repeat for the closing journal is %s %s, want pane.close_op without stop_seq", repeat["op"], repeat["args"])
-	}
-	nodeCommandReplyTo(t, f.node, repeat, map[string]any{"result": map[string]any{"outcome": fleet.CloseOpUnknown, "replayed": false}})
-	if err := <-done; err != nil {
+	closing := poolActionReply{op: nodeCommandPaneCloseStatus, result: map[string]any{"state": fleet.CloseOpClosing, "released": false, "settled": false, "attempt": "00002-job.spawned.json"}}
+	// The only commands: the status read and the release of the original request.
+	// A close (pane.close_op) or a probe for a retry would fail the script.
+	if err := runPoolActionStep(t, f.hub, f.node, action, closing, poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpClosing, "released": false, "settled": false, "attempt": "00002-job.spawned.json"}}); err != nil {
 		t.Fatal(err)
 	}
-	if after := readOnlyPoolAction(t, f.hub); after.Data.Args == nil || after.Data.Args.StopSeq == nil {
-		t.Fatalf("the saved fence was dropped: %+v", after.Data.Args)
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if len(rows) != 1 || rows[0].ID != action.ID || rows[0].Phase != poolActionRefused || rows[0].Data.Handover.Reason != "stop_seq_unsupported" || rows[0].Data.Handover.StopSeq == nil {
+		t.Fatalf("rows=%+v, want the original row given up with its fence recorded and no retry row", rows)
+	}
+	if owner, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job); len(owner) != 1 {
+		t.Fatalf("a new request id was made: %+v", owner)
+	}
+	lines := ownerLines(t, f.hub, "pool-handover:")
+	if len(lines) != 1 || !strings.Contains(lines[0], "unsettled after a node downgrade") || !strings.Contains(lines[0], roleHeldPane) {
+		t.Fatalf("owner notices=%q, want exactly one naming the pane", lines)
+	}
+	if ids := spawnOperations(t, f.hub, job+"-q1"); len(ids) != 0 {
+		t.Fatalf("a successor was started: %v", ids)
+	}
+	if owns, _ := f.hub.inbox.store.poolActionOwns(t.Context(), job); owns != "" {
+		t.Fatalf("the job is still fenced by %s", owns)
+	}
+}
+
+// hk 5780 round 4: the worker exits before the first close and leaves a plain shell
+// in the same pane and cwd. The shell has no closable agent status, so the row
+// must not wait on it: the job's ended state is read before any wait on the pane,
+// the unstarted request is released, and a manual respawn meets no role conflict.
+func TestHandoverOfAnEndedJobIsReleasedNotHeldForAShell_t5780(t *testing.T) {
+	const job = "pw-shell-5780"
+	f := announcedFixture(t, job)
+	queueAnnouncedRow(t, f, "ev-1")
+	f.jobs.mu.Lock()
+	f.jobs.records[job]["state"] = "lost"
+	f.jobs.mu.Unlock()
+	action := readOnlyPoolAction(t, f.hub)
+	// No pane probe at all: the shell is never looked at.
+	if err := runPoolActionStep(t, f.hub, f.node, action, poolStatus(nodeCloseOpNone, false, false), releasedReply); err != nil {
+		t.Fatal(err)
+	}
+	rows := handoverRowsOf(t, f, job)
+	if len(rows) != 1 || rows[0].Phase != poolActionRefused || rows[0].Data.Handover.Reason != "job_ended" {
+		t.Fatalf("rows=%+v, want the row released as job_ended", rows)
+	}
+	if owns, _ := f.hub.inbox.store.poolActionOwns(t.Context(), job); owns != "" {
+		t.Fatalf("the row still owns the job (a respawn would meet a role conflict): %s", owns)
 	}
 }
 
