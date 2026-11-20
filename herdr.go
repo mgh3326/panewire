@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/agybusy"
+	"github.com/mgh3326/panewire/internal/herdrpanes"
 )
 
 // Herdr's ordinary API is one request per connection. Subscription is the
@@ -91,7 +92,14 @@ func readResponseKeeping(ctx context.Context, r *bufio.Reader, id string) (json.
 			return nil, pending, e
 		}
 		var msg map[string]json.RawMessage
-		if json.Unmarshal(line, &msg) != nil {
+		if err := json.Unmarshal(line, &msg); err != nil {
+			// The connection ended inside a frame at a byte boundary: herdr
+			// cut the reply, so it is a typed cut, not a lost line (herdrpanes).
+			if e != nil {
+				if cut := herdrpanes.SocketCut(len(line), err); cut != nil {
+					return nil, pending, cut
+				}
+			}
 			continue
 		}
 		var got string
