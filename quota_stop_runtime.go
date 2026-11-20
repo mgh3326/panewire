@@ -121,7 +121,14 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		return nodeJobHerdrSessionByPaneFromRoot(root, pane)
 	}
 	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
-		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, q.session(job, pane), attempt, stop)
+		// The announced job's own binding names its session (hk 5808); the
+		// pane-only q.session would read another job's pane after a reuse.
+		session, err := quotaAnnounceSession(root, job, pane)
+		if err != nil {
+			q.logger.Warn("quota-stop hand-over refused", "job", job, "pane", pane, "error", err)
+			return err
+		}
+		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, session, attempt, stop)
 	}
 	jobs := filepath.Join(root, "jobs")
 	q.wait = quotaWaitLink{
