@@ -115,6 +115,12 @@ func readResponseKeeping(ctx context.Context, r *bufio.Reader, id string) (json.
 	}
 }
 func (c *HerdrClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	// A call whose deadline has already passed sends nothing and installs no
+	// deadline, so a retry on a spent budget fails as the budget does, not as an
+	// I/O timeout on the socket.
+	if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {
+		return nil, context.DeadlineExceeded
+	}
 	conn, err := net.DialTimeout("unix", c.path, 2*time.Second)
 	if err != nil {
 		return nil, err
