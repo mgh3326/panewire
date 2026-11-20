@@ -102,6 +102,16 @@ event). So the step looks at the pane, not at the record's state:
 - Both the first call and every recovery read hk's live task binding
   (`refs.job_id`): a task that no longer names the author is `job_mismatch` and
   a closed one `task_closed`, with the pane left open.
+- One shared staged-handoff reconciler reads that binding immediately before
+  every path that can activate a staged successor: the handler, the replay of a
+  lost record and the expiry pass. A task that moved to another job, or closed,
+  releases the stage and it is never dispatched; an unreadable binding is a
+  retry that keeps the stage. When the refused author is live
+  (`claimed`/`spawned`), the refusal releases the stage at once with
+  `cancelStagedSpawn`, which restores the holder's task role: the refusal is
+  the stage's one event, and the expiry pass files no later `staged_expired`
+  for it. A predecessor that ended (lost or completed) has no role to restore,
+  so its stage is discarded instead.
 
 The CLI no longer judges the job's state or task binding. It reads the record
 only for the rung to step from; `job_not_live` (lost, escalated), `job_mismatch`
@@ -146,8 +156,10 @@ checkout and its pane. It:
    host; it does not reserve capacity or guarantee later placement. A refusal before close cancels the staged row and restores
    the reservation atomically. An expired stage is cancelled on replay or by the periodic reconciler only
    after the original pane is confirmed present.
-4. Closes the pane, marks the old job lost, then activates the staged
-   successor. Once the pane is closed, replay moves the step forward.
+4. Closes the pane, marks the old job lost, then re-reads the task's binding
+   and activates the staged successor only while the task still names the
+   author and is open; a task that moved on releases the stage unplaced. Once
+   the pane is closed, replay moves the step forward.
 5. Waits for placement and confirms the task's job binding; it retries an
    unconfirmed rebind before reporting `rebind_unconfirmed`.
 
@@ -163,7 +175,7 @@ checkout. A newly resolved rung is ignored for the same staged job, round and PR
 is gone or the job is already lost, replay finishes the mark and activation.
 Active placement returns `pending` until it settles, and a placed successor is
 successful only after the task binding is confirmed. A staged step's identity
-must match the same job, round and PR. If the predecessor ended for a different reason, the hub discards the stage and releases its reservation; if it ended for this step, reconciliation activates the staged successor.
+must match the same job, round and PR. If the predecessor ended for a different reason, the hub discards the stage and releases its reservation; if it ended for this step, reconciliation activates the staged successor only while the task still names the author and is open.
 
 The policy allows one ladder step per job chain; a job whose id already
 carries a ladder step (`-l1`, with or without later quota-stop `-q<n>`
