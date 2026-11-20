@@ -36,6 +36,9 @@ type quotaStopManager struct {
 	// announce records job.lost reason quota_stop for a handed-over job, which
 	// the hub then replaces (hub_quota_replace.go).
 	announce func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error
+	// wait is the manager's side of a reviewer's short-reset wait handshake (hk
+	// 5749); tests substitute it.
+	wait quotaWaitLink
 	// recordRung and publishRung keep the rung a stop spent out of new
 	// placements until its reset (fleet.RecordLimitObserved and
 	// PublishLimitObserved, hk 5562). Tests substitute them.
@@ -96,6 +99,16 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 			return nil, err
 		}
 	}
+	// wait_until, wait_requested and wait_adopted are a reviewer wait's handshake
+	// (hk 5749): when the watcher is asked to hold the job until, when the request
+	// was written and when its acknowledgement was seen, in milliseconds.
+	for _, column := range []string{"wait_until", "wait_requested", "wait_adopted"} {
+		if !storeHasColumn(s.db, "quota_stop_decisions", column) {
+			if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, column := range []string{"role", "owner", "attempt"} {
 		if !storeHasColumn(s.db, "quota_stop_decisions", column) {
 			if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -109,6 +122,19 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	}
 	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
 		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, q.session(job, pane), attempt, stop)
+	}
+	jobs := filepath.Join(root, "jobs")
+	q.wait = quotaWaitLink{
+		request: func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop, until time.Time) (bool, error) {
+			return fleet.RequestQuotaWait(ctx, jobs, job, pane, attempt, stop, until)
+		},
+		adopted: func(job, attempt string, until time.Time) (bool, error) {
+			return fleet.QuotaWaitAdopted(jobs, job, attempt, until)
+		},
+		live: func(job string) bool { return fleet.QuotaWatcherLive(jobs, job) },
+		keep: func(_ context.Context, job, pane string) error {
+			return fleet.KeepQuotaWatcher(jobs, job, q.session(job, pane))
+		},
 	}
 	q.recordRung = fleet.RecordLimitObserved
 	q.publishRung = fleet.PublishLimitObserved
@@ -164,6 +190,24 @@ type quotaStopHK struct {
 	job    func(context.Context, string) (map[string]any, error)
 	note   func(ctx context.Context, key, job, body string) error
 }
+
+// quotaWaitLink is how the manager asks a reviewer's watcher to adopt a wait and
+// learns that it did (hk 5749). A reviewer is resumed at its reset only after
+// adopted says the current attempt's watcher acknowledged the wait, and only
+// while live says a watcher still holds the job's watch lock. request is
+// false, with no error, when the attempt is over. keep starts a watcher when none
+// is running.
+type quotaWaitLink struct {
+	request func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop, until time.Time) (bool, error)
+	adopted func(job, attempt string, until time.Time) (bool, error)
+	live    func(job string) bool
+	keep    func(ctx context.Context, job, pane string) error
+}
+
+// quotaWaitAdoptBound is how long a reviewer's wait may stay unacknowledged
+// before the stop is handed over: counted from the decision, whether or not the
+// request could be written.
+const quotaWaitAdoptBound = 30 * time.Second
 
 const (
 	quotaStopPolicyKey = "policy/quota-stop"
@@ -759,10 +803,11 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 		decision, reason = quotaDecisionJob(policy, policyOK, priority, expected, started, waits, stop, now)
 	}
 	if job.Role == "reviewer" {
-		// A reviewer never waits (hk 5690): every reviewer limit stop is announced
-		// for the hub to carry on to another pool, through the same path as an
-		// implementer's. The short-reset resume (hk 5355) is follow-up hk 5749.
-		decision, reason = "handover", "reviewer_hands_over"
+		// A reviewer's limit stop is announced for the hub to carry on to another
+		// pool (hk 5690), through the same path as an implementer's, unless the
+		// reset is short: then it may wait and be resumed once, after the job's
+		// watcher has adopted the wait (hk 5355, hk 5749).
+		decision, reason = quotaDecisionReviewer(policy, policyOK, priority, started, expected, waits, stop, now)
 	}
 	if !taskOK || waitErr != nil {
 		decision, reason = "handover", "task_unavailable"
@@ -784,6 +829,21 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 	recorded, err := q.recordDecisionFor(dbCtx, c, job.Role, now, stop.Pool, reset, decision, reason, policy.ResumeText, due)
 	if err != nil || !recorded || decision != "wait" {
 		return err
+	}
+	if job.Role == "reviewer" {
+		// The watcher is asked to hold the job until the grace after the reset,
+		// whenever it adopts: the time is fixed here, so a repeated request is the
+		// same request.
+		hold := stop.Reset
+		if hold.Before(now) {
+			hold = now
+		}
+		q.store.mu.Lock()
+		_, err = q.store.db.ExecContext(dbCtx, `UPDATE quota_stop_decisions SET wait_until=? WHERE event_id=?`, hold.Add(fleet.QuotaReviewerWaitGrace).UnixMilli(), c.EventID)
+		q.store.mu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	// The wait is visible on the pane from the moment it is decided; tick
 	// refreshes a token that outlives one report and the resume or hand-over
@@ -832,7 +892,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 	q.retryQuotaClears(ctx, now)
 	// The outbox is drained separately from the one-per-wake screen read.
 	q.store.mu.Lock()
-	rows, err := q.store.db.QueryContext(ctx, `SELECT event_id,job,pane,label,pool,reset,decision,reason,resume_text,due,attempted,hk_recorded,action_recorded,created,action_retry,role,owner,attempt FROM quota_stop_decisions WHERE decision<>'' AND ((hk_recorded=0 AND hk_retry<=?) OR (action_recorded=0 AND action_retry<=? AND (decision='handover' OR due<=?))) ORDER BY action_recorded, event_id LIMIT 1`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
+	rows, err := q.store.db.QueryContext(ctx, `SELECT event_id,job,pane,label,pool,reset,decision,reason,resume_text,due,attempted,hk_recorded,action_recorded,created,action_retry,role,owner,attempt,wait_until,wait_requested,wait_adopted FROM quota_stop_decisions WHERE decision<>'' AND ((hk_recorded=0 AND hk_retry<=?) OR (action_recorded=0 AND action_retry<=? AND (decision='handover' OR due<=? OR (decision='wait' AND role='reviewer' AND wait_adopted=0)))) ORDER BY action_recorded, event_id LIMIT 1`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		q.store.mu.Unlock()
 		return
@@ -840,12 +900,13 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 	type row struct {
 		id, job, pane, label, pool, reset, decision, reason, text, role, owner, attempt string
 		due, created, actionRetry                                                       int64
+		waitUntil, waitRequested, waitAdopted                                           int64
 		attempted, hk, action                                                           int
 	}
 	var pending []row
 	for rows.Next() {
 		var r row
-		if rows.Scan(&r.id, &r.job, &r.pane, &r.label, &r.pool, &r.reset, &r.decision, &r.reason, &r.text, &r.due, &r.attempted, &r.hk, &r.action, &r.created, &r.actionRetry, &r.role, &r.owner, &r.attempt) == nil {
+		if rows.Scan(&r.id, &r.job, &r.pane, &r.label, &r.pool, &r.reset, &r.decision, &r.reason, &r.text, &r.due, &r.attempted, &r.hk, &r.action, &r.created, &r.actionRetry, &r.role, &r.owner, &r.attempt, &r.waitUntil, &r.waitRequested, &r.waitAdopted) == nil {
 			pending = append(pending, r)
 		}
 	}
@@ -895,6 +956,12 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			}
 			continue
 		}
+		// A reviewer's wait is resumed only once its watcher has adopted it (hk
+		// 5749): until then the tick asks, and hands the stop over if nobody answers.
+		if r.decision == "wait" && r.role == "reviewer" && r.waitAdopted == 0 {
+			q.negotiateReviewerWait(ctx, r.id, r.job, r.pane, r.pool, r.reset, r.attempt, r.created, r.waitUntil, r.waitRequested, now)
+			continue
+		}
 		if r.due > now.UnixMilli() {
 			continue
 		}
@@ -904,6 +971,15 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		if !ok || job.JobID != r.job || job.AgentLabel != r.label {
 			q.failResume(ctx, r.id, r.pane, "target_changed", now)
 			continue
+		}
+		if r.role == "reviewer" {
+			// The handshake must still stand at the reset: the attempt is the one that
+			// adopted, and a watcher holds the job now. A watcher that exited after
+			// adopting leaves the stop to be handed over (hk 5749).
+			if reason := q.reviewerWaitStands(r.job, r.attempt, r.waitUntil); reason != "" {
+				q.failResume(ctx, r.id, r.pane, reason, now)
+				continue
+			}
 		}
 		if r.attempted != 0 {
 			q.failResume(ctx, r.id, r.pane, "submission_unproven", now)
@@ -964,6 +1040,81 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			q.failResume(ctx, r.id, r.pane, "submission_unproven", now)
 		}
 	}
+}
+
+// negotiateReviewerWait is the manager's side of a reviewer wait's handshake
+// (hk 5749). It asks the job's watcher to adopt the wait (the request is a ledger
+// event; a watcher is started when none holds the watch lock), then looks for
+// the watcher's acknowledgement; the row is resumed at its reset only once one is
+// seen. Without an acknowledgement within quotaWaitAdoptBound of the decision,
+// or when the request cannot be written within it, the row becomes a hand-over,
+// as every reviewer stop without a wait is. An attempt that is over has nothing
+// left to wait for or hand over.
+func (q *quotaStopManager) negotiateReviewerWait(ctx context.Context, id, job, pane, pool, reset, attempt string, created, until, requested int64, now time.Time) {
+	giveUp := !now.Before(time.UnixMilli(created).Add(quotaWaitAdoptBound))
+	again := func() {
+		if giveUp {
+			q.failResume(ctx, id, pane, "wait_not_adopted", now)
+			return
+		}
+		q.store.mu.Lock()
+		_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET action_retry=? WHERE event_id=?`, now.Add(time.Second).UnixMilli(), id)
+		q.store.mu.Unlock()
+	}
+	if until == 0 || q.wait.request == nil || q.wait.adopted == nil {
+		again()
+		return
+	}
+	untilAt := time.UnixMilli(until)
+	if requested == 0 {
+		stop := quotastop.Stop{Pool: pool}
+		if at, err := time.Parse(time.RFC3339, reset); err == nil {
+			stop.Reset = at
+		}
+		sent, err := q.wait.request(ctx, job, pane, attempt, stop, untilAt)
+		if err != nil {
+			q.logger.Warn("quota-stop wait request failed", "job", job, "error", err)
+			again()
+			return
+		}
+		if !sent {
+			q.update(ctx, id, "action_recorded", 1)
+			q.clearQuotaWait(ctx, pane, now)
+			return
+		}
+		q.store.mu.Lock()
+		_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET wait_requested=? WHERE event_id=?`, now.UnixMilli(), id)
+		q.store.mu.Unlock()
+		if q.wait.keep != nil {
+			if err := q.wait.keep(ctx, job, pane); err != nil {
+				q.logger.Warn("quota-stop watcher could not be started for the wait", "job", job, "error", err)
+			}
+		}
+	}
+	if adopted, err := q.wait.adopted(job, attempt, untilAt); err == nil && adopted {
+		q.store.mu.Lock()
+		_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET wait_adopted=? WHERE event_id=?`, now.UnixMilli(), id)
+		q.store.mu.Unlock()
+		return
+	}
+	again()
+}
+
+// reviewerWaitStands says why a reviewer's adopted wait no longer holds at its
+// reset, or "" when it does: the acknowledgement still names the attempt the
+// manager observed and the until it asked for, and a watcher holds the job's
+// watch lock now.
+func (q *quotaStopManager) reviewerWaitStands(job, attempt string, until int64) string {
+	if q.wait.adopted == nil || q.wait.live == nil {
+		return "wait_not_adopted"
+	}
+	if adopted, err := q.wait.adopted(job, attempt, time.UnixMilli(until)); err != nil || !adopted {
+		return "wait_lost"
+	}
+	if !q.wait.live(job) {
+		return "watcher_gone"
+	}
+	return ""
 }
 
 // handOver announces job.lost reason quota_stop for an implementer the
