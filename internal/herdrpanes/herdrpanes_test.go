@@ -188,3 +188,58 @@ func TestIsCutOnlyAtBoundaries(t *testing.T) {
 		}
 	}
 }
+
+const cutExitDiagnostic = "Error: EOF while parsing a string, line 1, column 8192"
+
+// herdr's CLI exits nonzero on a cut reply, with the diagnostic on stderr and
+// no stdout. The retry runs on that exit, and a second cut exit is ErrCut.
+func TestReadRetriesCutExitOnce(t *testing.T) {
+	fetches := 0
+	out, err := Read(t.Context(), func(context.Context) ([]byte, error) {
+		fetches++
+		if fetches == 1 {
+			return nil, exitWithStderr(t, cutExitDiagnostic)
+		}
+		return []byte(wholeAnswer), nil
+	}, strictDecode)
+	if err != nil || string(out) != wholeAnswer || fetches != 2 {
+		t.Fatalf("out=%q err=%v fetches=%d, want the whole answer after one retry", out, err, fetches)
+	}
+}
+
+func TestReadCutExitTwiceIsErrCut(t *testing.T) {
+	fetches := 0
+	_, err := Read(t.Context(), func(context.Context) ([]byte, error) {
+		fetches++
+		return nil, exitWithStderr(t, cutExitDiagnostic)
+	}, strictDecode)
+	if !errors.Is(err, ErrCut) || fetches != 2 {
+		t.Fatalf("err=%v fetches=%d, want ErrCut after exactly one retry", err, fetches)
+	}
+}
+
+// A nonzero exit whose diagnostic is not a boundary cut is an ordinary error.
+func TestReadNonBoundaryExitIsNotRetried(t *testing.T) {
+	fetches := 0
+	_, err := Read(t.Context(), func(context.Context) ([]byte, error) {
+		fetches++
+		return nil, exitWithStderr(t, "Error: EOF while parsing a string, line 1, column 100")
+	}, strictDecode)
+	if err == nil || errors.Is(err, ErrCut) || fetches != 1 {
+		t.Fatalf("err=%v fetches=%d, want the exit error after one fetch", err, fetches)
+	}
+}
+
+func TestListRetriesCutExitOnce(t *testing.T) {
+	calls := 0
+	run := func(_ context.Context, args ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, exitWithStderr(t, cutExitDiagnostic)
+		}
+		return []byte(wholeAnswer), nil
+	}
+	if _, err := List(t.Context(), run, strictDecode); err != nil || calls != 2 {
+		t.Fatalf("err=%v calls=%d, want success after one retry", err, calls)
+	}
+}

@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 )
 
 // Runner runs herdr with args and returns its stdout, as exec.Cmd.Output does.
@@ -28,14 +30,41 @@ var ErrCut = errors.New("herdr pane list answer cut at a byte boundary")
 // ErrUnreadable reports a `pane get` answer that does not name the pane asked for.
 var ErrUnreadable = errors.New("herdr pane get answer does not name the pane")
 
+// cutDiagnostic is the message herdr's CLI prints when its own JSON parse of
+// the reply stops at a boundary: "EOF while parsing a string, line 1, column
+// 8192". herdr 0.9.5 parses the socket reply before it prints anything, so a
+// cut reply is a nonzero exit with this text on stderr and no stdout.
+var cutDiagnostic = regexp.MustCompile(`EOF while parsing [^\n]*?line \d+, column (\d+)`)
+
+// cutExit reports whether a failed herdr call failed on the CLI's boundary
+// diagnostic (see cutDiagnostic), read from the error text or from the stderr
+// that exec.Cmd.Output captures.
+func cutExit(err error) bool {
+	texts := []string{err.Error()}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		texts = append(texts, string(exitErr.Stderr))
+	}
+	for _, text := range texts {
+		for _, m := range cutDiagnostic.FindAllStringSubmatch(text, -1) {
+			if column, convErr := strconv.Atoi(m[1]); convErr == nil && atBoundary(column) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // IsCut reports whether an answer of size bytes that failed to decode stopped
 // at a byte boundary, which is how herdr's cut answer presents.
 func IsCut(size int, decodeErr error) bool {
-	if decodeErr == nil {
-		return false
-	}
+	return decodeErr != nil && atBoundary(size)
+}
+
+// atBoundary reports whether n is one of the byte counts a cut answer stops at.
+func atBoundary(n int) bool {
 	for _, boundary := range cutBoundaries {
-		if size == boundary {
+		if n == boundary {
 			return true
 		}
 	}
@@ -52,7 +81,15 @@ func Read(ctx context.Context, fetch func(context.Context) ([]byte, error), deco
 	for attempt := 1; ; attempt++ {
 		out, err := fetch(ctx)
 		if err != nil {
-			return nil, err
+			// herdr's CLI exits nonzero on a cut reply: the cut is the failure,
+			// with no stdout to decode.
+			if !cutExit(err) {
+				return nil, err
+			}
+			if attempt >= 2 {
+				return nil, fmt.Errorf("%w: %v", ErrCut, err)
+			}
+			continue
 		}
 		decodeErr := decode(out)
 		if decodeErr == nil {

@@ -125,3 +125,43 @@ func TestHubClosePaneListedAsksForTheKnownPane(t *testing.T) {
 		t.Fatalf("herdr calls %q, want two pane get calls and no pane list", got)
 	}
 }
+
+// herdrCutExit is what herdr's CLI does on a reply cut at 8192 bytes: exit
+// nonzero, the diagnostic on stderr, and no stdout (herdr 0.9.5).
+func herdrCutExit(t *testing.T) error {
+	t.Helper()
+	_, err := exec.CommandContext(t.Context(), "sh", "-c", `printf '%s' "$0" >&2; exit 1`, "Error: EOF while parsing a string, line 1, column 8192").Output()
+	if err == nil {
+		t.Fatal("want a failed command")
+	}
+	return err
+}
+
+// The real cut: the first `pane list` exits nonzero with the boundary
+// diagnostic, and the retry reads the landed pane. The spawn settles landed.
+func TestSpawnSettleRetriesCutPaneListExit(t *testing.T) {
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "working", "/work/a"))}, panes: settlePanes("w1:p1", "label-a")}
+	lists := 0
+	run := func(ctx context.Context, args ...string) ([]byte, error) {
+		if strings.Join(args, " ") == "pane list" {
+			lists++
+			if lists == 1 {
+				return nil, herdrCutExit(t)
+			}
+		}
+		return fake.run(ctx, args...)
+	}
+	f := newSettleFixture(t, run)
+	f.recordSpawn(t, "w1:p1")
+	// One settle pass, not runSpawnSettle's loop: the loop would settle on a
+	// later pass without the retry, and this test must fail without it.
+	if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 1 || left != 0 {
+		t.Fatalf("settled=%d left=%d, want the landed spawn settled in one pass", settled, left)
+	}
+	if result := f.stored(t); result == nil || result.RC != 0 || result.Pane != "w1:p1" {
+		t.Fatalf("settled as %+v, want landed on w1:p1", result)
+	}
+	if lists != 2 {
+		t.Fatalf("pane list ran %d times, want one retry", lists)
+	}
+}
