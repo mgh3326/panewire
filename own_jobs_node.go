@@ -120,14 +120,14 @@ func (client *HubClient) nodeJobReap(ctx context.Context, args nodeJobReapArgs) 
 		// record settles like any other job's (hk 5295).
 		return nodeJobReapResult{Outcome: nodeJobReapPaneGone, Pane: target.pane}, ""
 	}
-	// A kept job's pane that still exists is protected, with or without force.
-	if target.keep {
-		return nodeJobReapResult{Outcome: nodeJobReapProtected, Pane: target.pane}, ""
-	}
 	// A pane id is host-local and reused, so the label the job's own receipt
 	// names is what proves the pane still runs this job.
 	if target.label == "" || row.Name != target.label {
 		return nodeJobReapResult{Outcome: nodeJobReapPaneChanged, Pane: target.pane}, ""
+	}
+	// A kept job's pane that is still the job's is protected, with or without force.
+	if target.keep {
+		return nodeJobReapResult{Outcome: nodeJobReapProtected, Pane: target.pane}, ""
 	}
 	if args.Force && args.Expect != "" {
 		// A forced close that carries what an earlier proof saw re-reads
