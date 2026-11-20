@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/mgh3326/panewire/internal/filelock"
 )
 
 // emitRelayKinds is the closed set of relay record kinds, and the node
@@ -339,6 +341,10 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 	return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, timeout))
 }
 
+// emitEventsLockWait bounds the wait for a job's .wrk-events.lock in
+// writeEmitRecord.
+const emitEventsLockWait = 5 * time.Second
+
 // writeEmitRecord recognizes a byte-for-byte equivalent relay record already
 // written by another producer as the durable half of the same event. It returns that path so
 // emit can still make the immediate socket notification. A same-key record with
@@ -350,6 +356,17 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
 		return "", err
 	}
+	// The sequence is chosen and the record published under the job's
+	// .wrk-events.lock, the same lock completionEvent and the flat writers
+	// take, so two writers cannot pick one seq and drop a record. The wait is
+	// bounded: a stuck holder fails this emit instead of stalling it.
+	ctx, cancel := context.WithTimeout(context.Background(), emitEventsLockWait)
+	defer cancel()
+	release, err := filelock.Acquire(ctx, filepath.Join(filepath.Dir(eventsDir), ".wrk-events.lock"))
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
 		return "", err

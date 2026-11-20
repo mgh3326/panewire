@@ -617,9 +617,17 @@ func hubEventSequence(name string) (uint64, bool) {
 	return value, err == nil
 }
 
+// hubRevocationLockWait bounds the wait for a job's .wrk-events.lock before a
+// hub revocation is refused. The inbound dispatcher is ordered, so a stuck
+// holder must not stall it; on the error the caller sends no ack and the hub
+// retries. A var only so a test can shorten it.
+var hubRevocationLockWait = 5 * time.Second
+
 func writeHubRevocation(inboxRoot string, revoked hubJobRevokedEvent) error {
 	if inboxRoot == "" {
 		return fmt.Errorf("invalid job revocation")
 	}
-	return jobowner.Revoke(filepath.Join(inboxRoot, "jobs"), revoked.JobID, revoked.Epoch)
+	ctx, cancel := context.WithTimeout(context.Background(), hubRevocationLockWait)
+	defer cancel()
+	return jobowner.RevokeWithin(ctx, filepath.Join(inboxRoot, "jobs"), revoked.JobID, revoked.Epoch)
 }
