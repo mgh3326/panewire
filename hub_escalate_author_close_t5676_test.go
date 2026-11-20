@@ -112,6 +112,13 @@ func (f *escalateFixture) withLadderNode(t *testing.T) *ladderNodeFake {
 // operation and then stopped: the hub restarted before it sent the request.
 func (f *escalateFixture) stageOpBound(t *testing.T, createdAt time.Time) hubSpawnTask {
 	t.Helper()
+	return f.stageOpBoundReplacing(t, createdAt, "")
+}
+
+// stageOpBoundReplacing is stageOpBound for a live author, whose reservation
+// the stage takes over (previousID is its request id).
+func (f *escalateFixture) stageOpBoundReplacing(t *testing.T, createdAt time.Time, previousID string) hubSpawnTask {
+	t.Helper()
 	next, err := escalateAuthorSubmission(escalateHolderRequest(f.job), f.request(), f.job+"-l1")
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +127,7 @@ func (f *escalateFixture) stageOpBound(t *testing.T, createdAt time.Time) hubSpa
 	next.Repository.Checkout.Sha = strings.Repeat("b", 40)
 	next.Repository.Checkout.VerifyReuse = true
 	next.LadderStep = &fleet.LadderStepIdentity{Parent: f.job, Round: 5, PR: f.request().PR, Profile: "sonnet", Effort: "xhigh"}
-	staged, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", createdAt, "", "42:implementer", "staged", "")
+	staged, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", createdAt, previousID, "42:implementer", "staged", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,5 +329,137 @@ func TestExpiredLadderStageStaysWhileTheFenceIsUnanswered(t *testing.T) {
 	f.hub.expireStagedLadderSteps(t.Context())
 	if _, ok := f.stageStatus(t); ok {
 		t.Fatal("the fenced stage must be released")
+	}
+}
+
+// preseed makes the node hold a stored result for the stage's request.
+func (n *ladderNodeFake) preseed(id, state string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.records == nil {
+		n.records = map[string]nodeLadderCloseResult{}
+	}
+	n.records[id] = nodeLadderCloseResult{State: state}
+}
+
+func (f *escalateFixture) stageOpBoundKeepsTheStage(t *testing.T, what string) {
+	t.Helper()
+	if status, ok := f.stageStatus(t); !ok || status != "staged" {
+		t.Fatalf("%s: the stage must stay staged: %q %v", what, status, ok)
+	}
+}
+
+// A live record's author whose pane the node closed, with the node's result
+// unknown and its reply lost: the replay reads the journal before it marks the
+// job lost and activates. Unknown stays staged and asks the owner once.
+func TestEscalateAuthorLiveAuthorWithUnknownCloseStaysStagedOnReplay(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-87")
+	node := f.withLadderNode(t)
+	node.state, node.dropReply = nodeLadderUnknown, true
+	if result, _ := f.escalate(t, nil); result.Code != "pending" {
+		t.Fatalf("result=%+v", result)
+	}
+	for range 2 {
+		result, commands := f.escalate(t, nil)
+		if result.Code != "pending" || result.Job != "" {
+			t.Fatalf("a replay with an unknown close must not activate: %+v", result)
+		}
+		if slices.Contains(commandOps(commands), "job.mark_lost") {
+			t.Fatalf("the author was marked lost over an unknown close: %v", commandOps(commands))
+		}
+		f.stageOpBoundKeepsTheStage(t, "live replay")
+	}
+	f.awaitInfo(t, "authorless?")
+	if extra := f.decisionCount(); extra != 0 {
+		t.Fatalf("replays raised %d more decisions", extra)
+	}
+}
+
+// The expiry pass probed the pane present, and the close finished before the
+// fence: the fence's verdict, not the probe, decides. A close that ran keeps
+// the successor; the next pass, which finds the pane gone, activates it.
+func TestExpiredLadderStageKeepsTheSuccessorWhenTheFenceFindsAClose(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-88")
+	f.completeAuthorRecord(t)
+	node := f.withLadderNode(t)
+	staged := f.stageOpBound(t, time.Now().Add(-10*time.Minute))
+	node.preseed(staged.Request.RequestID, nodeLadderClosed)
+	f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	f.hub.expireStagedLadderSteps(t.Context())
+	f.stageOpBoundKeepsTheStage(t, "pane still listed")
+	if slices.ContainsFunc(f.infoTexts(), func(text string) bool { return strings.Contains(text, "staged_expired") }) {
+		t.Fatal("a closed author was reported as remaining present")
+	}
+	f.paneAbsent = true
+	f.hub.expireStagedLadderSteps(t.Context())
+	if status, ok := f.stageStatus(t); !ok || status == "staged" {
+		t.Fatalf("the next pass must activate the successor: %q %v", status, ok)
+	}
+}
+
+// A node that stopped after writing its intent leaves the pane listed and the
+// record unknown: expiry keeps the stage and asks the owner, and does not report
+// an author that remained.
+func TestExpiredLadderStageKeepsAnUnknownCloseForTheOwner(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-89")
+	f.completeAuthorRecord(t)
+	node := f.withLadderNode(t)
+	staged := f.stageOpBound(t, time.Now().Add(-10*time.Minute))
+	node.preseed(staged.Request.RequestID, nodeLadderUnknown)
+	f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	f.hub.expireStagedLadderSteps(t.Context())
+	f.stageOpBoundKeepsTheStage(t, "unknown close")
+	f.awaitInfo(t, "authorless?")
+}
+
+// A live author's expired stage reads the same verdict.
+func TestExpiredLadderStageOfALiveAuthorKeepsAnUnknownClose(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-90")
+	node := f.withLadderNode(t)
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := f.stageOpBoundReplacing(t, time.Now().Add(-10*time.Minute), holder.Request.RequestID)
+	node.preseed(staged.Request.RequestID, nodeLadderUnknown)
+	f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	f.hub.expireStagedLadderSteps(t.Context())
+	f.stageOpBoundKeepsTheStage(t, "live unknown close")
+	f.awaitInfo(t, "authorless?")
+}
+
+// An operation-bound stage whose node cannot be asked about the journal (the
+// pane list is unreadable and the node holds nothing) raises no decision: no
+// close is known to have been sent.
+func TestExpiredLadderStageWithUnreadablePaneAndNoRecordRaisesNoDecision(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-91")
+	f.completeAuthorRecord(t)
+	f.withLadderNode(t)
+	f.stageOpBound(t, time.Now().Add(-10*time.Minute))
+	f.panesUnknown = true
+	f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	f.hub.expireStagedLadderSteps(t.Context())
+	f.stageOpBoundKeepsTheStage(t, "unreadable panes")
+	if n := f.decisionCount(); n != 0 {
+		t.Fatalf("a decision was raised for a close nobody sent: %d", n)
+	}
+}
+
+// The close protocol is the stage's: an operation-bound stage is never closed
+// with a plain pane.close because the node's hello lost the capability.
+func TestEscalateAuthorOperationBoundStageDoesNotFallBackToAPlainClose(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-92")
+	f.completeAuthorRecord(t)
+	staged := f.stageOpBound(t, time.Now())
+	result, commands := f.escalate(t, nil)
+	if result.Code != "pending" {
+		t.Fatalf("result=%+v", result)
+	}
+	if slices.Contains(commandOps(commands), "pane.close") {
+		t.Fatalf("a plain close was sent for an operation-bound stage: %v", commandOps(commands))
+	}
+	kind, err := f.hub.inbox.store.stagedCloseKind(t.Context(), staged.Request.RequestID)
+	if err != nil || kind != stagedCloseNodeOp {
+		t.Fatalf("the stage's binding was overwritten: %v %v", kind, err)
 	}
 }

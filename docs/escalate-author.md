@@ -200,7 +200,13 @@ inferring it from a pane that is gone. Contract: [node-commands.md](node-command
   request and reads the stored result.
 - Before any path releases a stage that was bound to an operation (a refusal,
   a moved or closed task, the expiry pass, an ended predecessor), the hub
-  fences the request on the node. After the fence a delayed close command
+  fences the request on the node and acts on the verdict: a release made
+  because the author remains (a refusal, an expiry) never discards a stage whose
+  fence finds a close that ran (the step goes on to activation) or one that may
+  have run (the stage stays, one owner decision). The protocol is the stage's own
+  once it is marked: an operation-bound stage is never closed with a plain
+  `pane.close`, and stays pending while its node cannot answer the operation.
+  A live record's replay and the expiry pass read the same result. After the fence a delayed close command
   answers `fenced` and touches no pane. A fence the node does not answer keeps
   the stage and the step is retried.
 

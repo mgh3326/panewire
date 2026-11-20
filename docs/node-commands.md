@@ -760,8 +760,9 @@ request id). It is not `pane.close_op`: that journal binds an attempt that has
 not ended, and a ladder step also replaces an author whose hk record completed.
 
 Arguments, all required: `request_id`, `job`, `node` (the node's own machine
-id), `epoch` (the hub's ownership epoch for the job), `attempt` (a job-id-shaped
-token, the predecessor's spawn attempt), `pane_id`, `name`, `agent_status`
+id), `epoch` (the hub's ownership epoch for the job), `attempt` (the token
+`pane.ladder_close_status` answered: the job's current attempt in its own ledger,
+or `none` for a job the node holds no ledger for), `pane_id`, `name`, `agent_status`
 (`idle`, `done` or `blocked`, as `pane.close`), `cwd`, `allow_unnamed`.
 
 Result: `{"state": S, "replayed": bool, "reason": R}` where `S` is `closed`
@@ -778,11 +779,21 @@ fsynced before it is visible) holding the binding and the state. It writes
 same binding answers the stored state with `replayed: true` and touches no
 pane; a repeat that names another job, epoch, attempt or pane is
 `invalid_args`. A record left `closing` (a node stop, or a result that could
-not be written) is settled `unknown` by the next repeat or fence. A node whose
-job has a higher assigned epoch than the request answers `epoch_mismatch`.
+not be written) is settled `unknown` by the next repeat or fence. The epoch is the larger of the node's in-memory
+assignment and the one `job.assigned` recorded on disk; a higher one than the
+request's answers `epoch_mismatch`, at first sight and again immediately before
+the intent. Immediately before the intent the node also reads the job's ledger
+again: the request's `attempt` must still be the current one, and the attempt's
+spawn receipt, when it has one, must name this pane and label, or the pane is
+left open and `refused` (`pane_changed`) is stored. An ended attempt is allowed:
+an author's first READY completes its record and the pane goes on working. The
+journal directory and the jobs root are fsynced on every open, so a created
+directory entry, and a record whose own sync failed, are durable before a result
+or a fence is acknowledged.
 
 `pane.ladder_close_status` (`request_id`, `job`) reads the record: the stored
-state, or `none` when the node holds nothing. `pane.ladder_close_fence`
+state, or `none` when the node holds nothing, with `attempt` set to the stored
+record's or else the job's current attempt. `pane.ladder_close_fence`
 (`request_id`, `job`) ends a request nobody will repeat: with no record it
 writes a `fenced` one, so a close delayed in transit finds it and acts on no
 pane; with a record left `closing` it settles it `unknown`; with a final record

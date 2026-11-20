@@ -32,9 +32,19 @@ const (
 	ladderAmbiguous
 )
 
-// errLadderFencePending stops a stage release whose node operation could not
-// be fenced: the stage stays, and the next pass or replay tries again.
-var errLadderFencePending = errors.New("the node close operation could not be fenced; retry")
+var (
+	// errLadderFencePending stops a stage release whose node operation could not
+	// be fenced: the stage stays, and the next pass or replay tries again.
+	errLadderFencePending = errors.New("the node close operation could not be fenced; retry")
+	// errLadderCloseRan stops a release made on the ground that the author
+	// remains: the fence found the node's close had run, so the author is gone
+	// and the step goes on to activation on its next pass.
+	errLadderCloseRan = errors.New("the node close operation closed the pane; retry")
+	// errLadderCloseAmbiguous stops the same release when the fence found a close
+	// that may have run with no result recorded: the stage stays and the owner
+	// decides.
+	errLadderCloseAmbiguous = errors.New("the node close operation is unresolved")
+)
 
 func readLadderClose(result nodeLadderCloseResult) (ladderClose, string) {
 	switch result.State {
@@ -57,8 +67,9 @@ func readLadderClose(result nodeLadderCloseResult) (ladderClose, string) {
 // job, the node, the ownership epoch, the attempt and the pane. The epoch is the
 // hub's current ownership of the job; a node that never assigned one (a job
 // the hub has not indexed) starts at 1, as pane.close_op's first request does.
-// The attempt is the predecessor's spawn attempt.
-func (h *HubServer) ladderCloseArgs(holder hubSpawnTask, name string, row nodeAgentRow, stageID string) (nodeLadderCloseArgs, bool) {
+// The attempt is the one the node's status named: its own ledger's current
+// attempt for the job, or the one the request was first bound to.
+func (h *HubServer) ladderCloseArgs(holder hubSpawnTask, name string, row nodeAgentRow, stageID, attempt string) (nodeLadderCloseArgs, bool) {
 	machine, epoch := spawnHolderHost(holder), uint64(1)
 	h.mu.Lock()
 	if job := h.jobs[holder.Job]; job != nil {
@@ -73,7 +84,7 @@ func (h *HubServer) ladderCloseArgs(holder hubSpawnTask, name string, row nodeAg
 	h.mu.Unlock()
 	args := nodeLadderCloseArgs{
 		RequestID: stageID, Job: holder.Job, Node: machine, Epoch: epoch,
-		Attempt: fmt.Sprintf("spawn-%d", max(holder.Attempt, 1)),
+		Attempt: firstNonempty(attempt, nodeLadderNoAttempt),
 		PaneID:  row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd, AllowUnnamed: row.Name == "",
 	}
 	return args, validNodeLadderCloseArgs(args)
@@ -91,7 +102,11 @@ func (h *HubServer) captureHeldPane(ctx context.Context, machine, name string, r
 // the command, so a stage that was ever sent one is fenced before its release.
 func (h *HubServer) closeHeldPaneLadder(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, stageID string) (ladderClose, string) {
 	machine := spawnHolderHost(holder)
-	args, ok := h.ladderCloseArgs(holder, name, row, stageID)
+	var status nodeLadderCloseResult
+	if !h.nodeCall(ctx, machine, nodeCommandLadderCloseStatus, nodeLadderRefArgs{RequestID: stageID, Job: holder.Job}, spawnHeldPaneActWait, &status) {
+		return ladderCloseRetry, "status_unreadable"
+	}
+	args, ok := h.ladderCloseArgs(holder, name, row, stageID, status.Attempt)
 	if !ok {
 		return ladderCloseRetry, "ownership_unavailable"
 	}
@@ -122,33 +137,61 @@ func (h *HubServer) ladderCloseFence(ctx context.Context, machine, stageID, job 
 	return readLadderClose(result)
 }
 
-// fenceLadderStage reports that the staged request's node operation, if the
-// step ever sent one, can no longer act, so its stage may be released. A stage
-// with no operation needs nothing. An unreadable stage or a node that does not
-// answer the fence keeps the stage.
-func (h *HubServer) fenceLadderStage(ctx context.Context, stageID, job string) bool {
+// ladderCloseStatus reads the stage's operation without ending it.
+func (h *HubServer) ladderCloseStatus(ctx context.Context, machine, stageID, job string) (ladderClose, string) {
+	if !h.nodeHasCapability(machine, hubCapabilityLadderClose) {
+		return ladderCloseRetry, ""
+	}
+	var result nodeLadderCloseResult
+	if !h.nodeCall(ctx, machine, nodeCommandLadderCloseStatus, nodeLadderRefArgs{RequestID: stageID, Job: job}, spawnHeldPaneActWait, &result) {
+		return ladderCloseRetry, ""
+	}
+	return readLadderClose(result)
+}
+
+// fenceLadderStage ends the staged request's node operation, if the step ever
+// sent one, and reports what the node held. ok is false when it could not be
+// ended (an unreadable stage, or a node that does not answer): the stage must
+// then be kept. A stage with no operation answers ladderCloseRetry, ok true.
+func (h *HubServer) fenceLadderStage(ctx context.Context, stageID, job string) (verdict ladderClose, ok bool) {
 	kind, err := h.inbox.store.stagedCloseKind(ctx, stageID)
 	if err != nil {
-		return false
+		return ladderCloseRetry, false
 	}
 	if kind != stagedCloseNodeOp {
-		return true
+		return ladderCloseRetry, true
 	}
 	stage, err := h.inbox.store.spawnTask(ctx, stageID)
 	if err != nil {
-		return false
+		return ladderCloseRetry, false
 	}
-	verdict, _ := h.ladderCloseFence(ctx, hubSpawnArg(stage.Request.Args, "--host"), stageID, job)
-	return verdict != ladderCloseRetry
+	verdict, _ = h.ladderCloseFence(ctx, hubSpawnArg(stage.Request.Args, "--host"), stageID, job)
+	return verdict, verdict != ladderCloseRetry
 }
 
 // releaseLadderStage releases a staged successor after fencing its close
 // operation: a delayed close command can never close the author's pane once the
 // stage is gone. liveHolder names the predecessor to hand its reservation back
 // to, or "" to discard the stage.
-func (h *HubServer) releaseLadderStage(ctx context.Context, stageID, job, roleKey, liveHolder string) error {
-	if !h.fenceLadderStage(ctx, stageID, job) {
+//
+// authorRemains is true for a release made because the author is still there
+// (a refusal, an expiry). The fence's verdict then decides: a close that ran
+// means the author is gone and the stage is still needed (errLadderCloseRan),
+// and one that may have run keeps the stage for the owner
+// (errLadderCloseAmbiguous). A release for another reason (the task moved on,
+// the predecessor ended) needs only the fence.
+func (h *HubServer) releaseLadderStage(ctx context.Context, stageID, job, roleKey, liveHolder string, authorRemains bool) error {
+	verdict, ok := h.fenceLadderStage(ctx, stageID, job)
+	if !ok {
 		return errLadderFencePending
+	}
+	if authorRemains {
+		switch verdict {
+		case ladderClosed:
+			return errLadderCloseRan
+		case ladderAmbiguous:
+			return errLadderCloseAmbiguous
+		}
 	}
 	if liveHolder != "" {
 		return h.inbox.store.cancelStagedSpawn(ctx, stageID, liveHolder, roleKey)
@@ -157,10 +200,14 @@ func (h *HubServer) releaseLadderStage(ctx context.Context, stageID, job, roleKe
 }
 
 // releaseFailed is the handler's answer to a failed stage release: a fence the
-// node did not answer is a retry, anything else a hub error.
-func releaseFailed(err error) (hubEscalateAuthorResult, error) {
-	if errors.Is(err, errLadderFencePending) {
+// node did not answer, or a close that ran, is a retry; one that may have run
+// asks the owner once; anything else is a hub error.
+func (h *HubServer) releaseFailed(ctx context.Context, err error, parent string, round int, pr, owner string) (hubEscalateAuthorResult, error) {
+	switch {
+	case errors.Is(err, errLadderFencePending), errors.Is(err, errLadderCloseRan):
 		return hubEscalateAuthorResult{Code: "pending", Reason: err.Error()}, nil
+	case errors.Is(err, errLadderCloseAmbiguous):
+		return h.escalateAuthorAmbiguousClose(ctx, parent, round, pr, owner), nil
 	}
 	return hubEscalateAuthorResult{}, fmt.Errorf("cannot release staged step: %w", err)
 }
@@ -209,8 +256,8 @@ func (h *HubServer) closeAuthorPaneByNode(ctx context.Context, request hubEscala
 		if !finished {
 			return hubEscalateAuthorResult{}, false, nil
 		}
-		if err := h.releaseLadderStage(ctx, stageID, request.Job, roleKey, ""); err != nil {
-			result, err := releaseFailed(err)
+		if err := h.releaseLadderStage(ctx, stageID, request.Job, roleKey, "", false); err != nil {
+			result, err := h.releaseFailed(ctx, err, request.Job, request.Round, request.PR, owner)
 			return result, true, err
 		}
 		return h.escalateAuthorParentEnded(ctx, request, owner), true, nil

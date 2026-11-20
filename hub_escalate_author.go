@@ -242,8 +242,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	}
 	if state != "claimed" && state != "spawned" && !resume && !finished {
 		if staged && hkTerminalState(state) {
-			if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, ""); err != nil {
-				return releaseFailed(err)
+			if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, "", false); err != nil {
+				return h.releaseFailed(ctx, err, request.Job, request.Round, request.PR, owner)
 			}
 			return h.escalateAuthorParentEnded(ctx, request, owner), nil
 		}
@@ -259,6 +259,25 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 		if probe.state == heldPaneUnknown {
 			return hubEscalateAuthorResult{Code: "pending", Reason: "the author pane state is unknown; retry"}, nil
+		}
+	}
+	if staged && !resume && !finished && probe.state != heldPanePresent {
+		// A live record's author whose pane is gone: if the stage is bound to a
+		// node operation, its stored result is read before the record is marked
+		// lost and the successor activated. A close that may have run with no
+		// result stays staged for the owner (hk 5676). Whether the pane closed or
+		// went on its own, a live record's author is still replaced.
+		kind, err := h.inbox.store.stagedCloseKind(ctx, prior.Request.RequestID)
+		if err != nil {
+			return hubEscalateAuthorResult{}, err
+		}
+		if kind == stagedCloseNodeOp {
+			switch verdict, _ := h.ladderCloseFence(ctx, spawnHolderHost(holder), prior.Request.RequestID, request.Job); verdict {
+			case ladderCloseRetry:
+				return hubEscalateAuthorResult{Code: "pending", Reason: "the node's close result is unreadable; retry"}, nil
+			case ladderAmbiguous:
+				return h.escalateAuthorAmbiguousClose(ctx, request.Job, request.Round, request.PR, owner), nil
+			}
 		}
 	}
 	if finished && probe.state != heldPanePresent {
@@ -287,8 +306,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			closedByStep = verdict == ladderClosed
 		}
 		if !closedByStep {
-			if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, ""); err != nil {
-				return releaseFailed(err)
+			if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, "", false); err != nil {
+				return h.releaseFailed(ctx, err, request.Job, request.Round, request.PR, owner)
 			}
 			return h.escalateAuthorParentEnded(ctx, request, owner), nil
 		}
@@ -297,8 +316,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		// closed task releases the stage; an unreadable one keeps it pending.
 		if result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner); stop {
 			if result.Code == "job_mismatch" || result.Code == "task_closed" {
-				if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, ""); err != nil {
-					return releaseFailed(err)
+				if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, "", false); err != nil {
+					return h.releaseFailed(ctx, err, request.Job, request.Round, request.PR, owner)
 				}
 			}
 			return result, nil
@@ -388,13 +407,13 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		// reservation is never restored to a terminal job.
 		releaseStage := func() error {
 			if finished {
-				return h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, "")
+				return h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, "", true)
 			}
-			return h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, holder.Request.RequestID)
+			return h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, holder.Request.RequestID, true)
 		}
 		cancel := func(code, why string) (hubEscalateAuthorResult, error) {
 			if err := releaseStage(); err != nil {
-				return releaseFailed(err)
+				return h.releaseFailed(ctx, err, request.Job, request.Round, request.PR, owner)
 			}
 			return h.escalateAuthorRefusal(ctx, request, owner, code, why, false)
 		}
@@ -418,11 +437,25 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		// the retry stages it again.
 		if result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner); stop {
 			if err := releaseStage(); err != nil {
-				return releaseFailed(err)
+				return h.releaseFailed(ctx, err, request.Job, request.Round, request.PR, owner)
 			}
 			return result, nil
 		}
-		if h.nodeHasCapability(spawnHolderHost(holder), hubCapabilityLadderClose) {
+		// The protocol is the stage's own once it is marked: a stage bound to a
+		// node operation is answered only by that operation, whatever the node's
+		// hello says now, and one with the legacy marker keeps the marker path.
+		kind := stagedCloseNone
+		if staged {
+			var err error
+			if kind, err = h.inbox.store.stagedCloseKind(ctx, prior.Request.RequestID); err != nil {
+				return hubEscalateAuthorResult{}, err
+			}
+		}
+		capable := h.nodeHasCapability(spawnHolderHost(holder), hubCapabilityLadderClose)
+		if kind == stagedCloseNodeOp && !capable {
+			return hubEscalateAuthorResult{Code: "pending", Reason: "the node cannot answer the stage's close operation; retry"}, nil
+		}
+		if kind == stagedCloseNodeOp || kind == stagedCloseNone && capable {
 			if result, stop, err := h.closeAuthorPaneByNode(ctx, request, owner, holder, name, probe.row, prior.Request.RequestID, roleKey, finished, cancel); stop || err != nil {
 				return result, err
 			}
@@ -457,8 +490,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 				return hubEscalateAuthorResult{Code: "pending", Reason: "the predecessor's end reason is unconfirmed; retry"}, nil
 			}
 			if hkTerminalState(escalateAuthorStr(current, "state")) && !(escalateAuthorStr(current, "state") == "lost" && escalateAuthorStr(current, "end_reason") == endReason) {
-				if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, ""); err != nil {
-					return releaseFailed(err)
+				if err := h.releaseLadderStage(ctx, prior.Request.RequestID, request.Job, roleKey, "", false); err != nil {
+					return h.releaseFailed(ctx, err, request.Job, request.Round, request.PR, owner)
 				}
 				return h.escalateAuthorParentEnded(ctx, request, owner), nil
 			}
@@ -532,7 +565,7 @@ func (h *HubServer) reconcileStagedLadderStage(ctx context.Context, app *fleet.A
 	if !stop || stageID == "" || result.Code != "job_mismatch" && result.Code != "task_closed" {
 		return result, stop, nil
 	}
-	if err := h.releaseLadderStage(ctx, stageID, request.Job, roleKey, liveHolder); err != nil {
+	if err := h.releaseLadderStage(ctx, stageID, request.Job, roleKey, liveHolder, false); err != nil {
 		if errors.Is(err, errLadderFencePending) {
 			return hubEscalateAuthorResult{Code: "pending", Reason: err.Error()}, true, nil
 		}
@@ -698,9 +731,15 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 			}
 			marked := kind != stagedCloseNone
 			request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
+			if kind == stagedCloseNodeOp {
+				if h.expireNodeOpStage(ctx, app, task, holder, record, taskID, roleKey) {
+					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
+				}
+				continue
+			}
 			switch h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state {
 			case heldPanePresent:
-				if h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, "") == nil {
+				if h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, "", true) == nil {
 					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 					_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 				}
@@ -713,26 +752,6 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 				}
 				continue
 			default:
-				if kind == stagedCloseNodeOp {
-					// The node's stored result, not the marker, says whether this
-					// step closed the pane (the fence reads it, or ends a request
-					// that never acted).
-					switch verdict, _ := h.ladderCloseFence(ctx, spawnHolderHost(holder), task.Request.RequestID, id.Parent); verdict {
-					case ladderCloseRetry:
-					case ladderAmbiguous:
-						h.escalateAuthorAmbiguousClose(ctx, id.Parent, id.Round, id.PR, task.Owner)
-					case ladderClosed:
-						if h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey) {
-							h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-						}
-					default:
-						if h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, "") == nil {
-							h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-							h.escalateAuthorParentEnded(ctx, request, task.Owner)
-						}
-					}
-					continue
-				}
 				if marked {
 					// The pane is gone and the step asked for the close: finish
 					// it only while the task still names this author and is open.
@@ -748,7 +767,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 			}
 		}
 		if hkTerminalState(state) {
-			if h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, "") == nil {
+			if h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, "", false) == nil {
 				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 				request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 				h.escalateAuthorParentEnded(ctx, request, task.Owner)
@@ -761,13 +780,64 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		if h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state != heldPanePresent {
 			continue
 		}
-		if err := h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, holder.Request.RequestID); err != nil {
+		if err := h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, holder.Request.RequestID, true); err != nil {
+			if errors.Is(err, errLadderCloseAmbiguous) {
+				h.escalateAuthorAmbiguousClose(ctx, id.Parent, id.Round, id.PR, task.Owner)
+			}
 			continue
 		}
 		h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 		request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 		_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 	}
+}
+
+// expireNodeOpStage settles an expired stage of a completed author that is
+// bound to a node close operation. The node's stored result decides, never the
+// marker and never the pane alone: a close that ran activates the stage, one
+// that may have run keeps it and asks the owner once, and an author that was
+// not closed releases it. An unanswered node, or a pane that cannot be read,
+// keeps the stage without a decision. It reports true when the stage is settled.
+func (h *HubServer) expireNodeOpStage(ctx context.Context, app *fleet.App, task hubSpawnTask, holder hubSpawnTask, record map[string]any, taskID, roleKey string) bool {
+	id := task.Request.LadderStep
+	request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
+	machine := spawnHolderHost(holder)
+	switch h.probeHeldPane(ctx, machine, holder.Outcome.Pane, heldAgentName(holder, record)).state {
+	case heldPanePresent:
+		err := h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, "", true)
+		switch {
+		case err == nil:
+			_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
+			return true
+		case errors.Is(err, errLadderCloseAmbiguous):
+			h.escalateAuthorAmbiguousClose(ctx, id.Parent, id.Round, id.PR, task.Owner)
+		}
+		return false
+	case heldPaneUnknown:
+		// The pane cannot be read, so the stage is not fenced: read the stored
+		// result without ending the request.
+		switch verdict, _ := h.ladderCloseStatus(ctx, machine, task.Request.RequestID, id.Parent); verdict {
+		case ladderAmbiguous:
+			h.escalateAuthorAmbiguousClose(ctx, id.Parent, id.Round, id.PR, task.Owner)
+		case ladderClosed:
+			return h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey)
+		}
+		return false
+	}
+	switch verdict, _ := h.ladderCloseFence(ctx, machine, task.Request.RequestID, id.Parent); verdict {
+	case ladderCloseRetry:
+		return false
+	case ladderAmbiguous:
+		h.escalateAuthorAmbiguousClose(ctx, id.Parent, id.Round, id.PR, task.Owner)
+		return false
+	case ladderClosed:
+		return h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey)
+	}
+	if h.releaseLadderStage(ctx, task.Request.RequestID, id.Parent, roleKey, "", false) != nil {
+		return false
+	}
+	h.escalateAuthorParentEnded(ctx, request, task.Owner)
+	return true
 }
 
 func (h *HubServer) escalateAuthorParentEnded(ctx context.Context, request hubEscalateAuthorRequest, owner string) hubEscalateAuthorResult {
