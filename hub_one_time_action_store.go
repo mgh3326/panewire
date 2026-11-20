@@ -5,11 +5,17 @@ import (
 	"time"
 )
 
-// oneTimeActionSchema is also installed by Postgres migration 0026. The
-// milliseconds are UTC; gone_ms is 0 while the need shows.
+// oneTimeActionSchema is also installed by Postgres migrations 0026 and 0032.
+// The milliseconds are UTC; gone_ms is 0 while the need shows. wait_task_id
+// and wait_id name the handoffkeep anchor task and operator wait; both are 0
+// until the wait write is confirmed (hub_one_time_wait.go). confirmed_ms is
+// when anti-flap clearing confirmed the need gone; the row then only carries
+// the wait-close obligation.
 const oneTimeActionSchema = `CREATE TABLE IF NOT EXISTS one_time_action_notices (
  machine TEXT NOT NULL, kind TEXT NOT NULL, need TEXT NOT NULL,
  told_ms BIGINT NOT NULL, gone_ms BIGINT NOT NULL DEFAULT 0,
+ wait_task_id BIGINT NOT NULL DEFAULT 0, wait_id BIGINT NOT NULL DEFAULT 0,
+ confirmed_ms BIGINT NOT NULL DEFAULT 0,
  PRIMARY KEY(machine, kind, need))`
 
 const oneTimeActionStoreTimeout = 5 * time.Second
@@ -64,8 +70,8 @@ func (h *HubServer) loadOneTimeActions() {
 func (s *laneInboxStore) putOneTimeAction(parent context.Context, key oneTimeActionKey, state oneTimeActionState) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO one_time_action_notices(machine,kind,need,told_ms,gone_ms) VALUES(?,?,?,?,?) ON CONFLICT(machine,kind,need) DO UPDATE SET told_ms=excluded.told_ms, gone_ms=excluded.gone_ms`),
-		key.machine, key.kind, key.need, state.ToldAt.UnixMilli(), goneMilli(state.GoneSince))
+	_, err := s.db.ExecContext(ctx, s.q(`INSERT INTO one_time_action_notices(machine,kind,need,told_ms,gone_ms,wait_task_id,wait_id,confirmed_ms) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(machine,kind,need) DO UPDATE SET told_ms=excluded.told_ms, gone_ms=excluded.gone_ms, wait_task_id=excluded.wait_task_id, wait_id=excluded.wait_id, confirmed_ms=excluded.confirmed_ms`),
+		key.machine, key.kind, key.need, state.ToldAt.UnixMilli(), goneMilli(state.GoneSince), state.WaitTaskID, state.WaitID, confirmedMilli(state.ConfirmedAt))
 	return err
 }
 
@@ -80,7 +86,7 @@ func (s *laneInboxStore) deleteOneTimeAction(parent context.Context, key oneTime
 func (s *laneInboxStore) oneTimeActions(parent context.Context) (map[oneTimeActionKey]oneTimeActionState, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT machine,kind,need,told_ms,gone_ms FROM one_time_action_notices`))
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT machine,kind,need,told_ms,gone_ms,wait_task_id,wait_id,confirmed_ms FROM one_time_action_notices`))
 	if err != nil {
 		return nil, err
 	}
@@ -88,13 +94,17 @@ func (s *laneInboxStore) oneTimeActions(parent context.Context) (map[oneTimeActi
 	told := map[oneTimeActionKey]oneTimeActionState{}
 	for rows.Next() {
 		var key oneTimeActionKey
-		var toldMS, goneMS int64
-		if err := rows.Scan(&key.machine, &key.kind, &key.need, &toldMS, &goneMS); err != nil {
+		var state oneTimeActionState
+		var toldMS, goneMS, confirmedMS int64
+		if err := rows.Scan(&key.machine, &key.kind, &key.need, &toldMS, &goneMS, &state.WaitTaskID, &state.WaitID, &confirmedMS); err != nil {
 			return nil, err
 		}
-		state := oneTimeActionState{ToldAt: time.UnixMilli(toldMS).UTC()}
+		state.ToldAt = time.UnixMilli(toldMS).UTC()
 		if goneMS != 0 {
 			state.GoneSince = time.UnixMilli(goneMS).UTC()
+		}
+		if confirmedMS != 0 {
+			state.ConfirmedAt = time.UnixMilli(confirmedMS).UTC()
 		}
 		told[key] = state
 	}
@@ -106,4 +116,11 @@ func goneMilli(gone time.Time) int64 {
 		return 0
 	}
 	return gone.UnixMilli()
+}
+
+func confirmedMilli(confirmed time.Time) int64 {
+	if confirmed.IsZero() {
+		return 0
+	}
+	return confirmed.UnixMilli()
 }
