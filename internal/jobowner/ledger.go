@@ -156,6 +156,21 @@ func Lock(jobs, id string) (unlock func(), err error) {
 	return LockContext(context.Background(), jobs, id)
 }
 
+// ErrLockBusy is TryLock's answer while another writer holds the lock.
+var ErrLockBusy = errors.New("job ownership lock busy")
+
+// TryLock is Lock that does not wait: a lock another writer holds answers
+// ErrLockBusy at once.
+func TryLock(jobs, id string) (unlock func(), err error) {
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	unlock, err = LockContext(done, jobs, id)
+	if errors.Is(err, context.Canceled) {
+		return nil, ErrLockBusy
+	}
+	return unlock, err
+}
+
 // LockContext is Lock that gives up when ctx ends: a stalled writer holding the
 // lock cannot keep a bounded command waiting past its deadline.
 func LockContext(ctx context.Context, jobs, id string) (unlock func(), err error) {

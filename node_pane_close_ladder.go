@@ -180,11 +180,23 @@ func (client *HubClient) ladderAttempt(job string) (string, error) {
 		return nodeLadderNoAttempt, err
 	}
 	defer root.Close()
-	target, err := readNodeCloseTarget(root)
+	target, err := readLadderTarget(root)
 	if err != nil || target.attempt == "" {
 		return nodeLadderNoAttempt, err
 	}
 	return target.attempt, nil
+}
+
+// readLadderTarget is readNodeCloseTarget for a job directory that may hold
+// nothing but the ownership lock: an ownership writer creates the directory
+// before it writes, so a directory with no events folder is an empty ledger,
+// which only the attempt "none" names.
+func readLadderTarget(job *os.Root) (nodeCloseTarget, error) {
+	target, err := readNodeCloseTarget(job)
+	if errors.Is(err, os.ErrNotExist) {
+		return nodeCloseTarget{}, nil
+	}
+	return target, err
 }
 
 // ladderOwnerStale reports why the request no longer holds the job: the node
@@ -224,7 +236,7 @@ func (client *HubClient) ladderBound(args nodeLadderCloseArgs) (bool, error) {
 		return args.Attempt == nodeLadderNoAttempt, nil
 	}
 	defer root.Close()
-	target, err := readNodeCloseTarget(root)
+	target, err := readLadderTarget(root)
 	if err != nil {
 		return false, err
 	}
@@ -338,60 +350,82 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 	// that precedes `herdr pane close`: a pane that was never going to be
 	// closed leaves no intent, and one that may have been leaves one.
 	stale := ""
-	releaseOwner := func() {}
-	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
-		// The job's ownership lock is taken here, before the final pane, composer
-		// and question checks, and held until `herdr pane close` returns: a grant
-		// or revocation lands before the checks or after the close, never between
-		// them, and what the checks saw is what the close acts on. The wait is
-		// bounded by the command's own context, so a stalled event writer cannot
-		// keep the node's acting lock past its deadline; a timed-out wait closes
-		// nothing. A job with no directory has no ownership ledger to race.
-		if _, _, found, err := client.openNodeJobDir(args.Job); err != nil {
-			return err
-		} else if found {
-			unlock, err := jobowner.LockContext(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+	jobs := filepath.Join(client.jobsInboxRoot, "jobs")
+	var result nodePaneCloseResult
+	var code string
+	for {
+		busy, releaseOwner := false, func() {}
+		result, code = client.nodePaneCloseWith(ctx, closeArgs, func() error {
+			// Read the ledger again after the first look and the settle,
+			// immediately before the intent: an attempt that moved on, or another
+			// pane, is not closed. The epoch is read again too.
+			if reason, err := client.ladderOwnerStale(args); err != nil {
+				return err
+			} else if reason != "" {
+				stale = reason
+				return nodeCloseHookStop{outcome: nodePaneChanged}
+			}
+			bound, err := client.ladderBound(args)
 			if err != nil {
 				return err
 			}
+			if !bound {
+				stale = "attempt_changed"
+				return nodeCloseHookStop{outcome: nodePaneChanged}
+			}
+			return writeNodeLadderRecord(root, record)
+		}, func() error {
+			// The last check before `herdr pane close`, under the job's ownership
+			// lock (the one job.assigned and job.revoked take, taken even for a job
+			// with no directory yet, as those writers create it): a grant, a hub
+			// revocation, or an attempt a re-prompt started while the final look
+			// ran leaves the pane open and the refusal stored. The lock is held
+			// until the close returns, so none lands between the check and the
+			// close. It is taken without waiting, after the final pane, composer
+			// and question checks and not before them, so a job event writer (an
+			// author's completion) is never held off by a slow pane read; a lock
+			// that is busy sends the close back through those checks.
+			unlock, err := jobowner.TryLock(jobs, args.Job)
+			if errors.Is(err, jobowner.ErrLockBusy) {
+				busy = true
+				return nodeCloseHookStop{outcome: nodePaneChanged}
+			} else if err != nil {
+				return err
+			}
 			releaseOwner = unlock
+			if reason, err := client.ladderOwnerStale(args); err != nil {
+				return err
+			} else if reason != "" {
+				stale = reason
+				return nodeCloseHookStop{outcome: nodePaneChanged}
+			}
+			bound, err := client.ladderBound(args)
+			if err != nil {
+				return err
+			}
+			if !bound {
+				stale = "attempt_changed"
+				return nodeCloseHookStop{outcome: nodePaneChanged}
+			}
+			return nil
+		})
+		releaseOwner()
+		if !busy {
+			break
 		}
-		// Read the ledger again after the first look and the settle, immediately
-		// before the intent: an attempt that moved on, or another pane, is not
-		// closed. The epoch is read again too.
-		if reason, err := client.ladderOwnerStale(args); err != nil || reason != "" {
-			return nodeCloseHookStop{code: "epoch_mismatch"}
-		}
-		bound, err := client.ladderBound(args)
+		// A writer holds the lock: wait for it within the command's deadline,
+		// without holding it, and repeat the pane checks before the next try. A
+		// wait that runs out closed nothing, and the refusal is stored.
+		unlock, err := jobowner.LockContext(ctx, jobs, args.Job)
 		if err != nil {
-			return err
+			record.State, record.Reason = nodeLadderRefused, "lock_busy"
+			if writeNodeLadderRecord(root, record) != nil {
+				return nil, "journal_failed"
+			}
+			return nodeLadderAnswer(record, false), ""
 		}
-		if !bound {
-			return nodeCloseHookStop{outcome: nodePaneChanged}
-		}
-		return writeNodeLadderRecord(root, record)
-	}, func() error {
-		// The last check before `herdr pane close`, under the ownership lock the
-		// pre-intent hook took: a grant a job.assigned recorded, a hub revocation,
-		// or an attempt a re-prompt started while the final look ran leaves the
-		// pane open and the refusal stored.
-		if reason, err := client.ladderOwnerStale(args); err != nil {
-			return err
-		} else if reason != "" {
-			stale = reason
-			return nodeCloseHookStop{outcome: nodePaneChanged}
-		}
-		bound, err := client.ladderBound(args)
-		if err != nil {
-			return err
-		}
-		if !bound {
-			stale = "attempt_changed"
-			return nodeCloseHookStop{outcome: nodePaneChanged}
-		}
-		return nil
-	})
-	releaseOwner()
+		unlock()
+	}
 	if code != "" {
 		// A failed command leaves whatever the journal holds: no record, or
 		// the closing intent a repeat settles as unknown.
