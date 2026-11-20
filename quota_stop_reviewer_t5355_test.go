@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// A reviewer on a quota stop (hk 5690): every stop is announced for the hub to
-// carry on to another pool; a reviewer never waits (the hk 5355 short-reset resume
-// is follow-up hk 5749).
+// A reviewer on a quota stop (hk 5690): a stop is announced for the hub to carry
+// on to another pool, unless its reset is short: then it may wait and be resumed
+// once, after its watcher adopted the wait (hk 5355, hk 5749).
 // The rig is the implementer rig with the spawn receipt naming a reviewer. The
 // manager runs in shadow mode, and a reviewer is still acted on.
 
@@ -51,32 +51,29 @@ func decisionFor(t *testing.T, rig *roleStopRig, eventID string) (decision, reas
 	return
 }
 
-// A reviewer never waits (hk 5690): every reviewer limit stop is a hand-over,
-// announced once for the hub to carry on to another pool, whatever its reset (the
-// short-reset resume of hk 5355 is follow-up hk 5749). The reviewer is never
-// resumed, and no wait is recorded for its watcher.
-func TestQuotaReviewerAlwaysHandsOver(t *testing.T) {
-	for name, screen := range map[string]string{"a 2 minute reset": "testdata/quota-stop/devin-reset-2min.txt", "a 2 hour reset": "testdata/quota-stop/devin-reset-2h.txt"} {
-		t.Run(name, func(t *testing.T) {
-			rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, screen)
-			rig.run()
-			if d, reason := rig.decision(t); d != "handover" || reason != "reviewer_hands_over" {
-				t.Fatalf("decision=%s reason=%s, want handover reviewer_hands_over", d, reason)
-			}
-			if rig.sends != 0 {
-				t.Fatalf("a reviewer was resumed: sends=%d", rig.sends)
-			}
-			if len(rig.announce) != 1 || rig.announce[0].Pool != "devin-free" {
-				t.Fatalf("announced=%+v, want one devin-free announcement", rig.announce)
-			}
-			if reviewerLedgerHas(t, rig, "job.quota_stop_wait") {
-				t.Fatal("a wait was recorded for a reviewer's watcher")
-			}
-			rig.manager.Tick(context.Background(), rig.now.Add(10*time.Minute))
-			if len(rig.announce) != 1 {
-				t.Fatalf("the reviewer was announced again: %d", len(rig.announce))
-			}
-		})
+// A reviewer whose reset is beyond the reviewer wait is handed over at once
+// (hk 5690): announced once for the hub to carry on to another pool. It is never
+// resumed, and no wait is requested of its watcher (hk 5749,
+// quota_stop_reviewer_wait_t5749_test.go: a short reset may wait, behind the
+// watcher's acknowledgement).
+func TestQuotaReviewerLongResetIsHandedOver(t *testing.T) {
+	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2h.txt")
+	rig.run()
+	if d, reason := rig.decision(t); d != "handover" || reason != "reset_beyond_reviewer_wait" {
+		t.Fatalf("decision=%s reason=%s, want handover reset_beyond_reviewer_wait", d, reason)
+	}
+	if rig.sends != 0 {
+		t.Fatalf("a reviewer was resumed: sends=%d", rig.sends)
+	}
+	if len(rig.announce) != 1 || rig.announce[0].Pool != "devin-free" {
+		t.Fatalf("announced=%+v, want one devin-free announcement", rig.announce)
+	}
+	if reviewerLedgerHas(t, rig, "job.quota_stop_wait_request") {
+		t.Fatal("a wait was requested of a reviewer's watcher for a long reset")
+	}
+	rig.manager.Tick(context.Background(), rig.now.Add(10*time.Minute))
+	if len(rig.announce) != 1 {
+		t.Fatalf("the reviewer was announced again: %d", len(rig.announce))
 	}
 }
 

@@ -27,8 +27,8 @@ type quotaPolicy struct {
 	// policy has no max_wait line and only the expected time decides (hk 4503).
 	MaxWait time.Duration
 	// ReviewerWait is the longest reset a reviewer's stop may have and still be
-	// waited out (hk 5355). Defaults to fleet.QuotaReviewerWait when the policy
-	// has no line; reviewerWaitLimit clamps it to MaxWait.
+	// waited out (hk 5355, hk 5749). Defaults to fleet.QuotaReviewerWait when the
+	// policy has no line; reviewerWaitLimit clamps it to that ceiling and MaxWait.
 	ReviewerWait time.Duration
 	ResumeText   string
 }
@@ -37,6 +37,20 @@ type quotaPolicy struct {
 // max_wait allows. A policy without the line never reports it.
 func (p quotaPolicy) resetBeyondMaxWait(reset, now time.Time) bool {
 	return p.MaxWait > 0 && reset.Sub(now) > p.MaxWait
+}
+
+// reviewerWaitLimit is the longest reset a reviewer's stop may have and still be
+// waited out: the policy's reviewer_wait (default fleet.QuotaReviewerWait), never
+// above that ceiling and never above max_wait (hk 5355).
+func (p quotaPolicy) reviewerWaitLimit() time.Duration {
+	limit := p.ReviewerWait
+	if limit > fleet.QuotaReviewerWait {
+		limit = fleet.QuotaReviewerWait
+	}
+	if p.MaxWait > 0 && p.MaxWait < limit {
+		limit = p.MaxWait
+	}
+	return limit
 }
 
 func quotaDuration(v string) (time.Duration, bool) {
@@ -206,6 +220,53 @@ func quotaDecisionJob(policy quotaPolicy, policyOK bool, priority int, expected 
 		return "handover", "reset_too_late"
 	}
 	return "wait", reason
+}
+
+// quotaDecisionReviewer is the decision for a reviewer on a quota stop (hk 5355,
+// restored behind the handshake of hk 5749). The reviewer waits and is resumed
+// once at its reset when the reset is within the reviewer bound (reviewerWaitLimit)
+// and before the review deadline, which is the job's start plus the task's
+// expected time, or the policy's default when the task names none. A reset
+// already past is due at once. A wait is only a decision: the manager resumes
+// the pane only after the job's watcher has adopted it. Everything else is
+// handed over, as every reviewer stop is without a wait: an urgent priority, a
+// second stop after one resume, a dialog, an unknown reset, a reset beyond the
+// bound or past the deadline, or a start the job does not show.
+func quotaDecisionReviewer(policy quotaPolicy, policyOK bool, priority int, started time.Time, expected time.Duration, waits int, stop quotaStop, now time.Time) (string, string) {
+	if !policyOK {
+		return "handover", "policy_unavailable"
+	}
+	if policy.Urgent[priority] {
+		return "handover", "urgent"
+	}
+	if waits >= policy.MaxWaits {
+		return "handover", "resume_limit"
+	}
+	if stop.Choice {
+		return "handover", "choice_dialog"
+	}
+	if stop.Reset.IsZero() {
+		return "handover", "reset_unknown"
+	}
+	// A reset already past is due at once, whatever the start says: the stop is
+	// over and the pane is resumed, not handed over (hk 5349, as quotaDecisionJob).
+	if !stop.Reset.After(now) {
+		return "wait", "reset_passed"
+	}
+	if stop.Reset.Sub(now) > policy.reviewerWaitLimit() {
+		return "handover", "reset_beyond_reviewer_wait"
+	}
+	if started.IsZero() {
+		return "handover", "start_unknown"
+	}
+	budget := expected
+	if budget <= 0 {
+		budget = policy.Expected
+	}
+	if stop.Reset.After(started.Add(budget)) {
+		return "handover", "reset_past_review_deadline"
+	}
+	return "wait", "reset_within_reviewer_wait"
 }
 
 func quotaDecision(policy quotaPolicy, policyOK bool, priority int, expected time.Duration, waits int, stop quotaStop, now time.Time) (string, string) {
