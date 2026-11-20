@@ -163,11 +163,11 @@ func legacyScanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hu
 			}
 			reason := event.reason()
 			if kind == "job.lost" && reason == "quota_stop" && event.Payload.Pool != "" {
-				reset := event.Payload.ResetAt
-				if reset == "" {
-					reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
+				reason += " pool=" + event.Payload.Pool
+				if event.Payload.ResetAt != "" {
+					reason += " reset_at=" + event.Payload.ResetAt
 				}
-				reason += " pool=" + event.Payload.Pool + " reset_at=" + reset + " at=" + strconv.FormatInt(eventTime.Unix(), 10)
+				reason += " at=" + strconv.FormatInt(eventTime.Unix(), 10)
 				if event.Payload.StateChangeSeq != 0 {
 					reason += " seq=" + strconv.FormatInt(event.Payload.StateChangeSeq, 10)
 				}

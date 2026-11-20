@@ -108,7 +108,7 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		return nodeJobHerdrSessionByPaneFromRoot(root, pane)
 	}
 	q.announce = func(ctx context.Context, job, pane, attempt string, stop quotastop.Stop) error {
-		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, attempt, stop)
+		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, q.session(job, pane), attempt, stop)
 	}
 	q.recordRung = fleet.RecordLimitObserved
 	q.publishRung = fleet.PublishLimitObserved

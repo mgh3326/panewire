@@ -32,7 +32,8 @@ import (
 
 // isQuotaStopReason reports whether reason is a relayed quota stop: the bare
 // "quota_stop" an older node sends, or the form the node's relay builds from the
-// announcement (hub_jobs_client.go), "quota_stop pool=<p> reset_at=<t>". The hub
+// announcement (hub_jobs_client.go), "quota_stop pool=<p> [reset_at=<t>]" (the
+// reset only when the node observed it, hk 5777). The hub
 // compared the bare word only until hk 5690, so no announced stop was ever
 // replaced: the relayed reason always carries the pool.
 func isQuotaStopReason(reason string) bool {
@@ -637,8 +638,9 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 
 // giveUpQuotaStop ends a reviewer's quota stop that no other pool could take:
 // the pane is closed if it is still there, the old record is written lost with
-// the plain end_reason "quota_stop pool=<pool> reset_at=<t>" (mergewake hk 3302,
-// no replaced_by), and the owner is told once. The notice's event id is the
+// the plain end_reason "quota_stop pool=<pool>" with reset_at=<t> only when the
+// node observed the reset (hk 5777; mergewake hk 3302, no replaced_by), and the
+// owner is told once. The notice's event id is the
 // job's, so a repeat of the replacement (a hub restart, a second announcement)
 // sends no second one. A pane that is busy or unreadable is not given up: the
 // stop may be over, and the node's watcher decides when its grace runs out. The

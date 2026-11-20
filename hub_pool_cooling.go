@@ -78,6 +78,11 @@ func (h *HubServer) observePoolCooling(reason string, now time.Time) bool {
 		return false
 	}
 	until := now.Add(5 * time.Minute)
+	if announced, ok := quotaStopReasonAt(reason); ok && reset == "" {
+		// A stop with no observed reset cools for five minutes from when it was
+		// announced (hk 5777): the relay no longer writes that default itself.
+		until = announced.Add(5 * time.Minute)
+	}
 	if reset != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, reset)
 		if err != nil {
