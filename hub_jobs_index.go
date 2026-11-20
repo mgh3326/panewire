@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const (
@@ -99,6 +101,19 @@ type hubJobReduction struct {
 	// profile is the profile the job's newest run was spawned on, from its
 	// job.spawned receipt; the pool cap counts the job under it (hk 3399).
 	profile string
+	// ended is the run an end event last cleared. A completed job whose pane the
+	// sweep revives (fleet.CompletedPaneReviveReason, hk 5799) is live again on
+	// that run, so the reprompt restores it.
+	ended hubEndedRun
+}
+
+// hubEndedRun is the live run an end event cleared, kept so a revive can
+// restore it.
+type hubEndedRun struct {
+	active    HubActiveJob
+	claimTime time.Time
+	paneID    string
+	profile   string
 }
 
 // hubIndexedJob is the retained view of one job's events directory. Once
@@ -334,8 +349,25 @@ func reduceHubJobEvents(jobID string, events []hubIndexedEvent) hubJobReduction 
 			// placed profile are named.
 			r.paneID = ev.event.paneID()
 			r.profile = ev.event.profile()
+		case "job.reprompted":
+			// A revive of a completed job whose pane is busy again (hk 5799) is
+			// the same run continuing: restore the run its end cleared.
+			if ev.event.reason() == fleet.CompletedPaneReviveReason && !validHubActiveJob(r.active) && validHubActiveJob(r.ended.active) {
+				// The active window judges the revive, not the original claim: a
+				// pane kept on an open PR can outlive the window (hk 5799 review).
+				// The claim metadata is kept as it was.
+				claimed := ev.eventTime
+				if claimed.IsZero() {
+					claimed = r.ended.claimTime
+				}
+				r.active, r.claimTime, r.paneID, r.profile = r.ended.active, claimed, r.ended.paneID, r.ended.profile
+				r.ended = hubEndedRun{}
+			}
 		default:
 			if hubJobEndKind(ev.kind) {
+				if validHubActiveJob(r.active) {
+					r.ended = hubEndedRun{active: r.active, claimTime: r.claimTime, paneID: r.paneID, profile: r.profile}
+				}
 				r.active, r.claimTime, r.paneID = HubActiveJob{}, time.Time{}, ""
 				r.profile = ""
 			}

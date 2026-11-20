@@ -180,10 +180,12 @@ and the `login_missing` placement drop are unchanged.
   dropped from the next placement. Without verified cleanup, or without a complete
   matching capture, the node keeps rc=76 and the original refusal. The saved
   capture and job record are unchanged. The screens are the
-  `harnessLoginScreens` table in `relay_harness_adapter.go`; every listed line
-  must appear. Only agy has a row: it comes from the 2026-11-10 mac-dev
-  captures ("Open the URL below in your browser:" and "After authenticating,
-  copy the code displayed in the browser and paste it below:"). claude and
+  `harnessLoginScreens` table in `relay_harness_adapter.go`; a capture matches
+  when every line of any one listed screen appears. Only agy has rows: the
+  2026-11-10 mac-dev screen ("Open the URL below in your browser:" and "After
+  authenticating, copy the code displayed in the browser and paste it below:")
+  and the 2026-11-20 mac-dev screen ("Copy and paste the URL or click on the
+  link below:" and "paste the authorization code below:"). claude and
   codex have none until someone records their login screen. When the daemon
   publishes state and polls this measurable pool through
   `--state-quota-pools`, the mark stays until a passing login probe, a

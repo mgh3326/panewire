@@ -58,6 +58,17 @@ first: the pane sweep never sees a `job.lost` hk does not hold, and a committed
 hk end whose ledger event failed is repaired with hk's own reason. Each end logs
 once with the job and the reason.
 
+## Completed job revived
+
+Before any close decision, a pass revives a completed job whose pane is busy
+again (`internal/fleet/completed_revive.go`, hk 5799). The pane must have been
+seen not working after the job's completion, and must now be working on the
+job's own agent session and cwd, with no other job bound to it since. The revive
+writes `job.reprompted` with reason `completed_pane_busy` and starts the job's
+watcher rearmed; a revived pane is not closed in that pass. The rule and its
+limits are in `docs/quota-stop.md` ("A completed job that its owner
+re-prompts").
+
 ## Candidate selection
 
 The local pass considers jobs that are not reaped whose role is `implementer`,
