@@ -267,9 +267,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	holdTaken := false
 	var creditAttempts int
 	quotaRetry := false
-	// announceRetry: a reviewer's announcement timed out on a lock and is still
-	// owed; the completion deadline must not end the watcher before the next look.
-	announceRetry := false
 	var lastCredit time.Time
 	var watchedAttempt string
 	for {
@@ -341,15 +338,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if !handOff.active {
 			if stop, ok := view.Announced(); ok {
 				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
-				if stop.PaneSeq != 0 {
-					seq := stop.PaneSeq
-					handOff.seq = &seq
-				}
 			}
 		}
 		credit, creditPending := pendingCreditRejection(j)
 		intent, hasIntent := pendingQuotaIntent(j)
-		quotaRetry = hasIntent || announceRetry
+		quotaRetry = hasIntent
 		agents, e := a.agents(ctx)
 		if e != nil && hasIntent && !creditPending && !view.Reaped {
 			// An open close intent outlives a herdr outage: hk alone can
@@ -373,15 +366,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				return err
 			}
 			continue
-		}
-		herdrUnseen := false
-		if e != nil && !creditPending && handOff.active && !view.Reaped && !workerEscalated(j) {
-			// An announced hand-off outlives a herdr outage: the job's hk record and
-			// lease stay with this watcher until the grace ends, which the old close
-			// intent also guaranteed. The pane reads as unseen meanwhile, so nothing
-			// is revived or ended early (hk 5690 review).
-			a.warn("quota hand-off continues without a herdr answer: %v", e)
-			agents, e, herdrUnseen = nil, nil, true
 		}
 		if e != nil && !creditPending {
 			if workerEscalated(j) {
@@ -459,9 +443,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						// up closing nothing hands it back to this path.
 						continue
 					}
-					if current.StateChangeSeq != nil {
-						credit.PaneSeq = *current.StateChangeSeq
-					}
 					switch err := a.quotaStopAnnounce(ctx, j, credit); {
 					case errors.Is(err, errQuotaStopSuperseded):
 						// The hub ended the job on its posted result: no hand-over
@@ -531,7 +512,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				pending = false
 			}
 		}
-		if waiting != nil && !hasIntent && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
+		if waiting != nil && !hasIntent && !handOff.active && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
 			deferred, err := a.endUnlessHubClose(id, j, func(j Job) error {
 				if e := a.putJobRecord(withJobEpoch(ctx, j), id, map[string]any{"state": "lost", "at": a.Now().UTC()}); e != nil {
 					if IsJobReassigned(e) {
@@ -575,13 +556,17 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			missing++
 		}
 		// An idle reviewer pane stopped by a quota screen with no report will
-		// not finish on its own pool. Its stop is announced (job.lost, hk record
-		// left live) and the hub carries the review on to another pool, closes the
-		// pane and writes lost with replaced_by (hk 5690, docs/quota-stop.md). The
-		// hand-off grace below is the hub's time; when it runs out with no
-		// successor the watcher ends the job itself, which is mergewake's lost
-		// record. Before hk 5690 this ended the job at once through a close
-		// intent (hk 4507) and nothing could replace it.
+		// not finish: end the job at once with the reason, so mergewake
+		// respawns the review on another model instead of waiting out a
+		// grace (hk 4507). The hub's replacement needs a live hk record, so a
+		// reviewer stopped on its screen is not replaced there; only an implementer
+		// the manager announced, and a credit stop, get the grace.
+		// The lost record is what mergewake acts on, so job.lost and the lease
+		// release wait for it. The close is a durable intent (watch_quota_stop.go
+		// quotaIntent): recorded before the first hk write with the exact
+		// end_reason, reconciled on every poll past the completion deadline,
+		// across read errors, herdr outages and restarts. Only a successful
+		// contradictory look at the pane cancels it.
 		// Not while a hand-off is active: its stop is already announced.
 		// A held reviewer stop (hk 5355) ends with its hold when the pane is gone,
 		// has written a report, or moved on: the next look decides afresh.
@@ -612,27 +597,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 					// The wait ran out with the pane still on the stop: end the
 					// job as hk 4507 does (hk 5355).
 					if !a.Now().Before(reviewerHold.until) {
-						held := reviewerHold.stop
-						reviewerHold = reviewerQuotaHold{}
-						next, outcome, err := a.handOffReviewerStop(ctx, j, held, paneAgent)
-						if err != nil {
+						if err := a.recordQuotaIntent(ctx, j, reviewerHold.stop); errors.Is(err, errQuotaStopSuperseded) {
+							return nil
+						} else if err != nil {
 							return err
 						}
-						switch outcome {
-						case reviewerHandOffEnded:
-							return nil
-						case reviewerHandOffRetry:
-							// The screen was read and cached for this pane state: look
-							// again next poll, or an unchanged stop is never retried.
-							screenRead = quotaStopWatch{}
-							announceRetry = true
-							if err := a.Sleep(ctx, 5*time.Second); err != nil {
-								return err
-							}
-							continue
-						}
-						handOff = next
-						announceRetry = false
+						reviewerHold = reviewerQuotaHold{}
+						quotaRetry = true
 					}
 				} else if stop, seen := a.quotaStopScreen(ctx, j, paneAgent, &screenRead); seen == quotaStopFound && stop.CreditExhaustedAt.IsZero() {
 					resumed, resumable := reviewerWaitResume(j, stop, a.Now())
@@ -657,57 +628,26 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						deadline = deadline.Add(resumed.Sub(a.Now()))
 						fmt.Fprintln(a.Err, "quota-stop reviewer hold re-armed after restart")
 					} else {
-						next, outcome, err := a.handOffReviewerStop(ctx, j, stop, paneAgent)
-						if err != nil {
+						if err := a.recordQuotaIntent(ctx, j, stop); errors.Is(err, errQuotaStopSuperseded) {
+							// The hub ended the job on its posted result.
+							return nil
+						} else if err != nil {
 							return err
 						}
-						switch outcome {
-						case reviewerHandOffEnded:
-							return nil
-						case reviewerHandOffRetry:
-							// The screen was read and cached for this pane state: look
-							// again next poll, or an unchanged stop is never retried.
-							screenRead = quotaStopWatch{}
-							announceRetry = true
-							if err := a.Sleep(ctx, 5*time.Second); err != nil {
-								return err
-							}
-							continue
-						}
-						handOff = next
-						announceRetry = false
+						// The next poll reconciles it with a fresh look.
+						quotaRetry = true
 					}
 				}
 			}
 		}
 
 		if handOff.active {
-			// A pane that herdr could not be asked about is unseen, not gone: the
-			// reviewer may have resumed meanwhile, and a plain loss cannot be
-			// taken back. The deadline waits for an answer, except when hk already
-			// holds a terminal record, which only needs settling here.
-			if handOff.expired(a.Now(), paneAgent, present) && (!herdrUnseen || a.hkJobEnded(ctx, id)) {
+			if handOff.expired(a.Now(), paneAgent, present) {
 				deferred, err := a.endUnlessHubClose(id, j, func(j Job) error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
-				if errors.Is(err, errQuotaLostPending) {
-					// hk did not take the record: the job stays live and leased
-					// and the next poll writes it again.
-					if err := a.Sleep(ctx, 5*time.Second); err != nil {
-						return err
-					}
-					continue
-				}
 				if !deferred {
 					return err
 				}
 				continue
-			}
-			if present && !handOff.unchanged(paneAgent) && j.QuotaRole() == "reviewer" {
-				// A reviewer's hand-over decision is terminal for its pane (hk
-				// 5690): there is no resume, re-prompt or completion path after the
-				// announcement. The hub's close refuses a pane that changed, and
-				// then the job stays alive and is not lost; the watcher's part is
-				// over.
-				return nil
 			}
 			if present && !handOff.unchanged(paneAgent) {
 				// The pane moved on during the grace (someone resumed it): the

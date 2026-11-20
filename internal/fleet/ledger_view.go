@@ -109,10 +109,6 @@ func (v *ledgerView) apply(ev Event) {
 		v.Ended, v.closed, v.quota, v.Settled = "", false, nil, false
 	case "job.completed", "job.joined", "job.handed_off":
 		v.Ended, v.closed = ev.Kind, true
-	case quotaSettledKind:
-		// An announced quota stop ended with hk's lost record: nothing is left
-		// to hand over, and the stop is no hand-off to adopt again.
-		v.closed, v.quota = true, nil
 	case "job.completion", eventRecordSettled, "job.escalate":
 		// Ends for quota actions that the watcher still reads as a live run:
 		// report recovery and credit publication follow them.
@@ -135,12 +131,6 @@ func (v *ledgerView) apply(ev Event) {
 				stop.Reset = reset
 			}
 			stop.CreditExhaustedAt, _ = time.Parse(time.RFC3339Nano, str(p, "credit_exhausted_at"))
-			// The pane state the stop was observed in (hk 5690): an adopted
-			// hand-off keeps it, so a pane that resumed and went idle again no
-			// longer reads as the same stop.
-			if n, ok := p["state_change_seq"].(float64); ok {
-				stop.PaneSeq = int64(n)
-			}
 			v.quota = &stop
 			return
 		}
