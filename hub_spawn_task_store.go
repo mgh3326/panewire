@@ -297,7 +297,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// are hk 5124's (postgres: 0022), task_fail_notice_ms is hk 5137's
 	// (postgres: 0023), task_fail_retry_ms is hk 5137's (postgres: 0024), and
 	// replaced_from is hk 5300's (postgres: 0031), and replaced_reason is hk 5690's (postgres: 0035).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`, `replaced_reason TEXT NOT NULL DEFAULT ''`} {
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`, `replaced_reason TEXT NOT NULL DEFAULT ''`, `start_receipt_ms BIGINT NOT NULL DEFAULT 0`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -663,7 +663,7 @@ func (s *laneInboxStore) bindSpawnPlaced(parent context.Context, id string, atte
 	if accountKey != "" {
 		placedAttempt = attempt
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, id, attempt, node.Machine)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,start_receipt_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, id, attempt, node.Machine)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -1166,52 +1166,48 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 // was placed on. A restart must not count that job again, even if it finished
 // before the restart and no heartbeat will show it.
 //
-// The stamp is also the claim receipt of a quota successor's pointer (hk 5776),
-// so it is written only to the binding the heartbeat can have been about: the row
-// is bound to machine and was bound at or before observed, the instant the
-// heartbeat was read. The write is a compare-and-set on that row's attempt and
-// node request id, so a refusal that unbinds attempt A and a bind of attempt B
-// that lands before this write is never stamped with A's heartbeat.
-func (s *laneInboxStore) markSpawnClaimed(parent context.Context, job, machine string, observed, now time.Time) error {
+// It is placement accounting only. A heartbeat names a job, not the request that
+// claimed it, so it is no evidence that a given attempt started (hk 5776): see
+// markSpawnStarted.
+func (s *laneInboxStore) markSpawnClaimed(parent context.Context, job string, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id,attempt,node_id,node_payload FROM spawn_operations WHERE job=? AND node_id IS NOT NULL AND claimed_ms=0 AND placed_ms<=?`), job, observed.UnixMilli())
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE job=? AND node_id IS NOT NULL AND claimed_ms=0`), now.UnixMilli(), job)
+	return err
+}
+
+// markSpawnStarted records the start receipt of the attempt bound to nodeID
+// (hk 5776): the node's own report, from the durable landing point of that
+// execution (job.spawned committed), carrying the unique node request id the
+// hub bound. It is accepted idempotently, only from the machine the attempt is
+// bound to and only while the attempt is sent; a receipt for an id that is no
+// longer bound (a refusal unbound it and another attempt was bound) matches no row.
+func (s *laneInboxStore) markSpawnStarted(parent context.Context, nodeID, machine string, now time.Time) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var payload string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT node_payload FROM spawn_operations WHERE node_id=?`), nodeID).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	type binding struct {
-		requestID, nodeID string
-		attempt           int
+	var node hubSpawnRequest
+	if json.Unmarshal([]byte(payload), &node) != nil || node.Machine != machine || node.RequestID != nodeID {
+		return false, nil
 	}
-	var bound []binding
-	for rows.Next() {
-		var b binding
-		var payload string
-		if err = rows.Scan(&b.requestID, &b.attempt, &b.nodeID, &payload); err != nil {
-			rows.Close()
-			return err
-		}
-		var node hubSpawnRequest
-		if json.Unmarshal([]byte(payload), &node) == nil && node.Machine == machine {
-			bound = append(bound, b)
-		}
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET start_receipt_ms=? WHERE node_id=? AND start_receipt_ms=0 AND status IN ('dispatching','reconciling','deadline_exceeded','dispatching_grant','reconciling_grant','deadline_exceeded_grant')`), now.UnixMilli(), nodeID)
+	if err != nil {
+		return false, err
 	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	for _, b := range bound {
-		if _, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE request_id=? AND attempt=? AND node_id=? AND claimed_ms=0 AND placed_ms<=?`), now.UnixMilli(), b.requestID, b.attempt, b.nodeID, observed.UnixMilli()); err != nil {
-			return err
-		}
-	}
-	return nil
+	n, err := s.dialect.rowsMatched(result)
+	return n == 1, err
 }
 
 // spawnStartReceipt reports whether attempt `attempt` of the request, bound to
-// nodeID, is a sent attempt that carries the claim receipt (hk 5776): the hub saw
-// the node it is bound to report the job claimed (markSpawnClaimed), and, for a
+// nodeID, is a sent attempt that carries the start receipt (hk 5776): the node it
+// is bound to reported this node request id landed (markSpawnStarted), and, for a
 // grant-required attempt, the hub granted that node request id. The state and the
 // receipt are read in one statement, so a row a failure settled since a caller's
 // read, which keeps its node and its stamp, is not taken for a start.
@@ -1219,7 +1215,7 @@ func (s *laneInboxStore) spawnStartReceipt(parent context.Context, requestID str
 	ctx, done := s.op(parent)
 	defer done()
 	var n int
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM spawn_operations o WHERE o.request_id=? AND o.attempt=? AND o.node_id=? AND o.claimed_ms>0 AND o.status IN ('dispatching','reconciling','deadline_exceeded','dispatching_grant','reconciling_grant','deadline_exceeded_grant') AND (o.status NOT LIKE '%\_grant'`+s.dialect.escapeClause()+` OR EXISTS (SELECT 1 FROM spawn_attempt_grants g WHERE g.node_id=o.node_id AND g.state='granted'))`), requestID, attempt, nodeID).Scan(&n)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM spawn_operations o WHERE o.request_id=? AND o.attempt=? AND o.node_id=? AND o.start_receipt_ms>0 AND o.status IN ('dispatching','reconciling','deadline_exceeded','dispatching_grant','reconciling_grant','deadline_exceeded_grant') AND (o.status NOT LIKE '%\_grant'`+s.dialect.escapeClause()+` OR EXISTS (SELECT 1 FROM spawn_attempt_grants g WHERE g.node_id=o.node_id AND g.state='granted'))`), requestID, attempt, nodeID).Scan(&n)
 	return n == 1, err
 }
 

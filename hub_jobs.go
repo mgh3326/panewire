@@ -307,9 +307,6 @@ func (h *HubServer) observeActiveJobsContext(parent context.Context, machineID s
 	seen := make(map[string]struct{}, len(active))
 	var claimed []claimedPlacement
 	h.mu.Lock()
-	// The instant the heartbeat is read: the claim it shows belongs to a binding
-	// made at or before it, never to one made while the store write waits.
-	observed := h.now().UTC()
 	record := h.nodes[machineID]
 	if record == nil {
 		h.mu.Unlock()
@@ -326,7 +323,7 @@ func (h *HubServer) observeActiveJobsContext(parent context.Context, machineID s
 		// node must not un-weigh the host the job is bound for.
 		if held, counted := h.placementCounts[job.JobID]; counted && held.machine == machineID {
 			delete(h.placementCounts, job.JobID)
-			claimed = append(claimed, claimedPlacement{job: job.JobID, held: held, observed: observed})
+			claimed = append(claimed, claimedPlacement{job: job.JobID, held: held})
 		}
 		current := h.jobs[job.JobID]
 		if current == nil {

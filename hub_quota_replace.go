@@ -915,23 +915,22 @@ func quotaSuccessorSent(successor hubSpawnTask) bool {
 //
 //   - the operation succeeded (placed, its job landed), or
 //   - it is bound to a node, was sent (dispatching, reconciling or past its
-//     deadline with that node), and carries the claim receipt: the hub saw the
-//     node it was bound to report the job claimed (claimed_ms, markSpawnClaimed),
-//     and, for a grant-required attempt, granted that node request id. The state
-//     and the receipt are read in one statement (spawnStartReceipt).
+//     deadline with that node), and carries the start receipt: the node it is
+//     bound to reported that this node request id landed (job.spawn.started,
+//     sent from the durable landing point of that execution), and, for a
+//     grant-required attempt, the hub granted that id. The state, the receipt and
+//     the grant are read in one statement (spawnStartReceipt).
 //
-// The receipt belongs to this spawn request and its bound node: the stamp is
-// written by a compare-and-set on the attempt and node request id the heartbeat
-// can have been about, and a new bind clears it. An hk record found by job id is not evidence, since a node-local launch
-// can leave one under the generated name without any operation of the hub's. A
-// fenced attempt can never be granted, so it never reports a claim. From the
-// claim on hk holds the job id for that host, so a later refusal keeps it
-// pinned and the job is retried there: a pointer taken on this proof names a job
-// with an hk record whatever the dispatch worker does next. A row that is
-// accepted, waiting, only bound, refused or unbound has no proof, whatever an
-// earlier read said. The dispatch worker holds the request's action fence for
-// the whole attempt, so this gate cannot share that lock; the receipt is what
-// makes the read sufficient. An unreadable row is no proof.
+// The receipt names the attempt: it is keyed by the unique node request id the
+// hub bound, accepted only from that machine while the attempt is sent, and a
+// bind clears it. A job-name heartbeat (claimed_ms) or an hk record found by job
+// id is no evidence: either can come from a node-local job under the generated
+// successor name. A fenced attempt never reports a landing. An older node sends
+// no receipt, so its successor has a proof only once its result succeeded. A row
+// that is accepted, waiting, only bound, refused or unbound has no proof,
+// whatever an earlier read said. The dispatch worker holds the request's action
+// fence for the whole attempt, so this gate cannot share that lock. An
+// unreadable row is no proof.
 func (h *HubServer) quotaStartProof(ctx context.Context, requestID string) (hubSpawnTask, bool) {
 	if h.inbox == nil {
 		return hubSpawnTask{}, false

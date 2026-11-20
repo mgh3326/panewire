@@ -3,9 +3,15 @@ package panewire
 import (
 	"context"
 	"io"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket/wsjson"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -16,9 +22,9 @@ import (
 // the job claimed (quotaStartProof). These tests are the four windows hk 5690 left
 // open; each one fails on the code before the change.
 
-// holdsClaim records the claim receipt as the node does: a grant-required attempt
-// is granted its start, then the hub sees the bound node report the job claimed
-// (claimed_ms).
+// holdsClaim records the start receipt as the node does: a grant-required attempt
+// is granted its start, then the node it is bound to reports its node request id
+// landed (job.spawn.started).
 func (f *quotaReplaceFixture) holdsClaim(t *testing.T, job string) {
 	t.Helper()
 	task, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), job)
@@ -30,14 +36,8 @@ func (f *quotaReplaceFixture) holdsClaim(t *testing.T, job string) {
 			t.Fatalf("grant: %v %v", granted, err)
 		}
 	}
-	f.sawClaim(t, job, task.Node.Machine, time.Now())
-}
-
-// sawClaim is the hub reading, at observed, a heartbeat of machine that lists the job.
-func (f *quotaReplaceFixture) sawClaim(t *testing.T, job, machine string, observed time.Time) {
-	t.Helper()
-	if err := f.hub.inbox.store.markSpawnClaimed(t.Context(), job, machine, observed, time.Now()); err != nil {
-		t.Fatal(err)
+	if stored, err := f.hub.inbox.store.markSpawnStarted(t.Context(), task.Node.RequestID, task.Node.Machine, time.Now()); err != nil || !stored {
+		t.Fatalf("start receipt: %v %v", stored, err)
 	}
 }
 
@@ -122,7 +122,7 @@ func TestQuotaReplaceWindow1StaleSnapshotOfAParkedSuccessorGetsNoPointer(t *test
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-51-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
 	sent := f.bindSuccessor(t, successor, true)
-	f.holdsClaim(t, successor.Job) // even a claim stamp does not make an unbound row a start
+	f.holdsClaim(t, successor.Job) // even a receipt does not make an unbound row a start
 	f.refuseBeforeClaim(t, sent)
 	f.paneClosed = true
 	app := f.spawnApp(t)
@@ -210,7 +210,7 @@ func TestQuotaReplaceWindow4BoundSuccessorAtTheEndOfTheWaitGetsNoPointer(t *test
 		return err == nil
 	})
 	f.bindSuccessor(t, successor, false)
-	f.holdsClaim(t, successor.Job) // not even a claim stamp turns a bound row into a start
+	f.independentHKRecord(successor.Job) // not even an hk record turns a bound row into a start
 	select {
 	case result := <-done:
 		if result.ok {
@@ -311,11 +311,14 @@ func TestQuotaStartProofByState(t *testing.T) {
 	}
 	sent := f.bindSuccessor(t, successor, false)
 	f.independentHKRecord(successor.Job)
-	f.holdsClaim(t, successor.Job)
 	if proof() {
 		t.Fatal("a bound, unsent successor was proven")
 	}
 	sent = sentSpawnFixture(t, f.hub.inbox.store, sent)
+	if proof() {
+		t.Fatal("a sent successor with no start receipt was proven")
+	}
+	f.holdsClaim(t, successor.Job)
 	if !proof() {
 		t.Fatal("a sent successor with the claim receipt was not proven")
 	}
@@ -419,86 +422,204 @@ func TestQuotaReplaceIndependentHKRecordIsNoStartProof(t *testing.T) {
 	f.requireRecordUntouched(t)
 }
 
-// hk 5776 review: a heartbeat read for attempt A must not stamp attempt B. A node
-// refusal unbinds A and the coordinator binds B (here on another host, and on the
-// same one) before the late store write of A's claim runs. B is not claimed: no
-// receipt, no pointer.
-func TestQuotaReplaceStaleHeartbeatDoesNotStampTheNextAttempt(t *testing.T) {
+// hk 5776 review: a job-name heartbeat names no request. A node-local job under the
+// successor's generated name on the selected host heartbeats the same job id, and
+// the node's grant is given before it executes anything, so a granted, sent
+// attempt with only the placement stamp (and an hk record) has no start proof.
+func TestQuotaReplaceHeartbeatStampIsNoStartProof(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-61-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
-	sent := f.bindSuccessor(t, successor, true)
-	observed := time.Now()            // the heartbeat of attempt A on machine-a
-	time.Sleep(20 * time.Millisecond) // fixture pacing: B's bind is later than the reading
-	f.refuseBeforeClaim(t, sent)
+	sent := f.bindGrantSuccessor(t, successor)
+	if granted, err := f.hub.inbox.store.decideSpawnGrant(t.Context(), sent.Node.RequestID, "machine-a", time.Now()); err != nil || !granted {
+		t.Fatalf("grant %v %v", granted, err)
+	}
+	f.independentHKRecord(successor.Job)
+	if err := f.hub.inbox.store.markSpawnClaimed(t.Context(), successor.Job, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.hub.inbox.store.spawnTask(t.Context(), sent.Request.RequestID); got.Status != "dispatching" {
+		t.Fatalf("setup: status %q", got.Status)
+	}
+	if _, proven := f.hub.quotaStartProof(t.Context(), sent.Request.RequestID); proven {
+		t.Fatal("a placement stamp and an hk record were taken for the attempt's start")
+	}
+	f.paneClosed = true
+	done := make(chan bool, 1)
+	go func() { done <- f.hub.reconcileQuotaReplacements(t.Context()) > 0 }()
+	f.expectNoNodeCommand(t, done, "heartbeat stamp")
+	f.requireRecordUntouched(t)
+}
+
+// hk 5776 review: the receipt names the attempt. A receipt for attempt A that
+// arrives after a refusal unbound A and B was bound (same host or another) matches
+// no row, so it can never prove B; B's own receipt does. One from another machine,
+// or for a row that is not sent, is ignored, and a replay is accepted once.
+func TestQuotaReplaceStartReceiptNamesTheAttempt(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-63-p1")
+	successor := f.quotaClaimedSuccessor(t, "accepted")
+	sentA := f.bindSuccessor(t, successor, true)
+	nodeA := sentA.Node.RequestID
+	store := f.hub.inbox.store
+	if stored, _ := store.markSpawnStarted(t.Context(), nodeA, "machine-b", time.Now()); stored {
+		t.Fatal("a receipt from another machine was stored")
+	}
+	f.refuseBeforeClaim(t, sentA)
 	proof := func() bool {
 		_, ok := f.hub.quotaStartProof(t.Context(), successor.Request.RequestID)
 		return ok
 	}
-	// B on another host with the reading older than its bind, B on the same host
-	// with the reading older than its bind, and B on another host with a reading
-	// taken after its bind but from A's host.
-	for _, c := range []struct {
-		machine   string
-		afterBind bool
-	}{{"machine-b", false}, {"machine-a", false}, {"machine-b", true}} {
-		machine := c.machine
-		if _, err := f.hub.inbox.store.db.Exec(`UPDATE spawn_operations SET park_reason='',next_check_ms=0 WHERE request_id=?`, successor.Request.RequestID); err != nil {
+	for i, machine := range []string{"machine-b", "machine-a"} {
+		if _, err := store.db.Exec(`UPDATE spawn_operations SET park_reason='',next_check_ms=0 WHERE request_id=?`, successor.Request.RequestID); err != nil {
 			t.Fatal(err)
 		}
-		current, err := f.hub.inbox.store.spawnTask(t.Context(), successor.Request.RequestID)
+		current, _ := store.spawnTask(t.Context(), successor.Request.RequestID)
+		nodeB := t14RequestID(333420 + i)
+		bound, err := store.bindSpawn(t.Context(), current.Request.RequestID, current.Attempt, hubSpawnRequest{RequestID: nodeB, Machine: machine}, time.Now().UTC())
 		if err != nil {
 			t.Fatal(err)
 		}
-		bound, err := f.hub.inbox.store.bindSpawn(t.Context(), current.Request.RequestID, current.Attempt, hubSpawnRequest{RequestID: t14RequestID(333410), Machine: machine}, time.Now().UTC())
-		if err != nil {
-			t.Fatal(err)
+		if stored, _ := store.markSpawnStarted(t.Context(), nodeB, machine, time.Now()); stored {
+			t.Fatal("a receipt for a bound, unsent attempt was stored")
 		}
-		sentB := sentSpawnFixture(t, f.hub.inbox.store, bound)
-		// The late write of A's claim: wrong host, or a binding made after the reading.
-		reading := observed
-		if c.afterBind {
-			reading = time.Now()
+		sentB := sentSpawnFixture(t, store, bound)
+		// Attempt A's late receipt, from A's machine.
+		if stored, _ := store.markSpawnStarted(t.Context(), nodeA, "machine-a", time.Now()); stored {
+			t.Fatalf("attempt A's receipt was stored against B on %s", machine)
 		}
-		f.sawClaim(t, successor.Job, "machine-a", reading)
 		if proof() {
-			t.Fatalf("attempt B on %s (reading after bind: %v) was stamped with attempt A's heartbeat", machine, c.afterBind)
+			t.Fatalf("attempt A's receipt proved B on %s", machine)
 		}
-		f.refuseBeforeClaim(t, sentB)
+		if stored, err := store.markSpawnStarted(t.Context(), nodeB, machine, time.Now()); err != nil || !stored {
+			t.Fatalf("B's own receipt: %v %v", stored, err)
+		}
+		if !proof() {
+			t.Fatalf("B's own receipt on %s did not prove it", machine)
+		}
+		if stored, _ := store.markSpawnStarted(t.Context(), nodeB, machine, time.Now()); stored {
+			t.Fatal("a replayed receipt changed the row again")
+		}
+		f.refuseBeforeClaim(t, sentB) // a refusal unbinds B; the next bind starts with no receipt
 	}
 }
 
-// hk 5776 review: a grant-required attempt needs its grant as well as the claim
-// stamp, and the state is read with the receipt: a row a failure settled keeps its
-// node and its stamp but is no start.
+// hk 5776 review: a grant-required attempt needs its grant as well as the receipt,
+// and the state is read with the receipt: a row a failure settled keeps its node
+// and its receipt but is no start.
 func TestQuotaStartReceiptNeedsTheGrantAndASentState(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-62-p1")
 	successor := f.quotaClaimedSuccessor(t, "accepted")
 	sent := f.bindGrantSuccessor(t, successor)
+	store := f.hub.inbox.store
 	receipt := func() bool {
-		ok, err := f.hub.inbox.store.spawnStartReceipt(t.Context(), sent.Request.RequestID, sent.Attempt, sent.Node.RequestID)
+		ok, err := store.spawnStartReceipt(t.Context(), sent.Request.RequestID, sent.Attempt, sent.Node.RequestID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return ok
 	}
-	f.sawClaim(t, successor.Job, "machine-a", time.Now())
-	if receipt() {
-		t.Fatal("a stamped grant-required attempt with no grant was a receipt")
+	if stored, err := store.markSpawnStarted(t.Context(), sent.Node.RequestID, "machine-a", time.Now()); err != nil || !stored {
+		t.Fatalf("receipt %v %v", stored, err)
 	}
-	if granted, err := f.hub.inbox.store.decideSpawnGrant(t.Context(), sent.Node.RequestID, "machine-a", time.Now()); err != nil || !granted {
+	if receipt() {
+		t.Fatal("a reported grant-required attempt with no grant was a receipt")
+	}
+	if granted, err := store.decideSpawnGrant(t.Context(), sent.Node.RequestID, "machine-a", time.Now()); err != nil || !granted {
 		t.Fatalf("grant %v %v", granted, err)
 	}
 	if !receipt() {
-		t.Fatal("a granted, stamped, sent attempt was no receipt")
+		t.Fatal("a granted, reported, sent attempt was no receipt")
 	}
-	// A node failure settles the row; it keeps attempt, node id and stamp.
-	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), sent, hubSpawnOutcome{RC: 81, Stage: "landing", Reason: "failed", Host: "machine-a", NodeResult: true}, time.Now()); err != nil {
+	// A node failure settles the row; it keeps attempt, node id and receipt.
+	if _, err := store.completeSpawn(t.Context(), sent, hubSpawnOutcome{RC: 81, Stage: "landing", Reason: "failed", Host: "machine-a", NodeResult: true}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := f.hub.inbox.store.spawnTask(t.Context(), sent.Request.RequestID); got.Node == nil || got.Status == "dispatching" {
+	if got, _ := store.spawnTask(t.Context(), sent.Request.RequestID); got.Node == nil || got.Status == "dispatching" {
 		t.Fatalf("setup: the failure left %q node=%v, want a settled row that keeps its node", got.Status, got.Node)
 	}
 	if receipt() {
 		t.Fatal("a row settled by a failure was a receipt")
+	}
+}
+
+// The hub accepts the node's job.spawn.started frame from the authenticated
+// machine and stores it for the bound attempt.
+func TestQuotaReplaceHubStoresTheStartReceiptFromTheNode(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-64-p1")
+	successor := f.quotaClaimedSuccessor(t, "accepted")
+	sent := f.bindSuccessor(t, successor, true)
+	if err := wsjson.Write(t.Context(), f.node, map[string]string{"type": "job.spawn.started", "request_id": sent.Node.RequestID}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 3*time.Second, "the hub to store the start receipt", func() bool {
+		_, ok := f.hub.quotaStartProof(t.Context(), successor.Request.RequestID)
+		return ok
+	})
+}
+
+// The node reports the start receipt from the landing point of its execution
+// (hk 5776): while the engine is still running after job.spawned is committed the
+// hub already holds the receipt of that node request id, and an execution that
+// never lands reports none.
+func TestSpawnNodeReportsTheStartReceiptFromTheLandingPoint(t *testing.T) {
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	conn := t14NamedNode(t, h, server, "machine-a", true, true)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	release := make(chan struct{})
+	releaseEngine := sync.OnceFunc(func() { close(release) })
+	defer releaseEngine()
+	var calls atomic.Int32
+	client := &HubClient{
+		spawnConfigPath: t14SpawnConfig(t, t.TempDir()),
+		spawnJournalDir: t.TempDir(),
+		fleetEvents:     (&fleetEventRecorder{}).write,
+		spawnEngine: func(engineCtx context.Context, _, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
+			if calls.Add(1) == 1 {
+				// The second request never lands: it fails before job.spawned.
+				fleet.NotifySpawnLanded(engineCtx)
+				<-release
+			}
+			return &hubSpawnOutput{}, fleet.Execution{RC: 1, Stage: "launch"}
+		},
+	}
+	peer := &hubClientConnection{connection: conn}
+	go func() {
+		for {
+			_, payload, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			message, valid := parseHubOutbound(payload)
+			if valid && message.Type == "job.spawn" {
+				go client.handleHubSpawn(ctx, peer, message)
+			}
+		}
+	}()
+	landing := boundDispatchFixture(t, h, 1300, "machine-a")
+	h.startSpawnCoordinator(t.Context())
+	receipt := func(task hubSpawnTask) bool {
+		ok, err := h.inbox.store.spawnStartReceipt(t.Context(), task.Request.RequestID, task.Attempt, task.Node.RequestID)
+		return err == nil && ok
+	}
+	// A legacy attempt (no grant) with the receipt, the engine still running.
+	eventually(t, 5*time.Second, "the hub to hold the start receipt while the engine runs", func() bool {
+		current, err := h.inbox.store.spawnTask(t.Context(), landing.Request.RequestID)
+		return err == nil && current.Status == "dispatching" && receipt(current)
+	})
+	releaseEngine()
+	failing := boundDispatchFixture(t, h, 1301, "machine-a")
+	eventually(t, 5*time.Second, "the failing attempt to settle", func() bool {
+		current, err := h.inbox.store.spawnTask(t.Context(), failing.Request.RequestID)
+		return err == nil && !spawnStatusActive(current.Status)
+	})
+	var stamp int64
+	if err := h.inbox.store.db.QueryRow(`SELECT start_receipt_ms FROM spawn_operations WHERE request_id=?`, failing.Request.RequestID).Scan(&stamp); err != nil || stamp != 0 {
+		t.Fatalf("an execution that never landed has a start receipt: %d %v", stamp, err)
 	}
 }

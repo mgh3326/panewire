@@ -204,7 +204,10 @@ type HubClient struct {
 	// executing entry missing from it was left by a restart.
 	spawnActiveMu sync.Mutex // also guards spawnWaiting
 	spawnActive   map[string]bool
-	spawnWaiting  map[string]*nodeSpawnWaiter
+	// spawnLanded holds the active requests whose landing was reported to the hub,
+	// so a replay of one is answered with the start receipt again (hk 5776).
+	spawnLanded  map[string]bool
+	spawnWaiting map[string]*nodeSpawnWaiter
 	// spawnGrants routes job.spawn.grant answers to the spawn waiting for them
 	// (node_spawn_grant.go).
 	spawnGrantMu sync.Mutex

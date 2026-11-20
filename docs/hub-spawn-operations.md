@@ -1165,6 +1165,29 @@ unsent.
    recovery reprobe whose context ends long before its own fence timer,
    therefore still fences an ungranted attempt.
 
+#### Start receipt
+
+A node reports that the attempt it executes landed (hk 5776): once the job's
+durable landing is committed (`job.spawned` written, the point after which the
+execution holds the job claims and can no longer be cleaned up and returned),
+it sends `{"type":"job.spawn.started","request_id":<node request id>}`. It sends
+the frame again when the hub replays the request while the execution is still
+running on that connection. The hub stores it as `start_receipt_ms` for the row
+bound to that node request id, once, only from the machine the attempt is bound
+to and only while the attempt is sent (`dispatching`, `reconciling` or
+`deadline_exceeded`). A bind clears it, and a receipt for an id that is no longer
+bound matches no row. It is not a result and changes no status; an older node
+sends none, and an older hub counts the frame as an unknown message.
+
+The quota-stop replacement is the reader (docs/quota-stop.md): a `replaced_by`
+pointer needs a succeeded operation, or a sent one with this receipt and, for a
+grant-required attempt, the grant, read in one statement. A job-name heartbeat
+or an hk record found by job id is no evidence, since a node-local job can carry
+the generated name. The receipt is not journaled: a restart of the node loses
+it, and the final result is the durable answer. A node restart that settles an
+executing row from a local `job.spawned` by job name (`settleExecutingSpawn`) is
+not attempt-bound; tracked in a follow-up task.
+
 #### Stored statuses that older hubs do not know
 
 A grant-required attempt is stored under its own status values from the
