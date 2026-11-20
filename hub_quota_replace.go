@@ -342,7 +342,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			if perr != nil || !quotaLineageHolds(successor, predecessor, event.JobID) {
 				return skip("successor_name_collision", "job", claimed)
 			}
-			if successor.Status == "succeeded" || spawnMayStillRun(successor) {
+			if quotaSuccessorPlaceable(successor) {
 				app, err := h.newSpawnApp(io.Discard, io.Discard)
 				if err != nil {
 					return retryLater("spawn_config_unavailable")
@@ -809,11 +809,12 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	written := 0
 	for _, successor := range successors {
-		// A successor that is bound to a node or placed, at any age: a restart
+		// A successor that is placed or was sent to a node, at any age: a restart
 		// between the claim and the pointer is repaired well inside the watcher's
 		// grace instead of after the replacement budget. A claim still queued
-		// (accepted, waiting) or ended unplaced is not a pointer target: it may never
-		// start, and the replay or the give-up owns it (hk 5690).
+		// (accepted, waiting), only bound (never sent) or ended unplaced is not a
+		// pointer target: it may never start, and the replay or the give-up owns it
+		// (hk 5690).
 		if !quotaSuccessorPlaceable(successor) {
 			continue
 		}
@@ -826,10 +827,26 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	return written
 }
 
-// quotaSuccessorPlaceable reports whether a claimed successor is bound to a node or
-// placed: the only states a replaced_by pointer to it may be written in.
+// quotaSuccessorPlaceable reports whether a claimed successor is placed, or has
+// durable evidence that its start was sent to a node: the only states a replaced_by
+// pointer to it may be written in. A row that is merely bound has never been sent
+// (beginSpawnSend moves it to dispatching first), and the coordinator may settle it
+// as a timeout or return it to accepted without taking the predecessor's lock; a
+// reconciling row with no node binding is returned to placement. hk cannot replace
+// the pointer with a plain loss afterwards, so a pointer to such a row would send the
+// requester to a job that never reports (hk 5690 review).
 func quotaSuccessorPlaceable(successor hubSpawnTask) bool {
-	return successor.Status == "succeeded" || spawnMayStillRun(successor)
+	if successor.Status == "succeeded" {
+		return true
+	}
+	if successor.Node == nil {
+		return false
+	}
+	switch successor.Status {
+	case "dispatching", "reconciling", "deadline_exceeded":
+		return true
+	}
+	return false
 }
 
 // reconcileQuotaReplacement finishes one claimed successor's pointer. It never
@@ -853,7 +870,7 @@ func (h *HubServer) reconcileQuotaReplacement(ctx context.Context, app *fleet.Ap
 // finishQuotaReplacement writes the replaced_by record for a claimed successor
 // whose predecessor is still live. The caller holds the job's pool-action lock.
 func (h *HubServer) finishQuotaReplacement(ctx context.Context, app *fleet.App, successor hubSpawnTask, old string, stopSeq *int64) bool {
-	// The one rule for a pointer, whoever calls: the successor is bound or placed.
+	// The one rule for a pointer, whoever calls: the successor is placed or was sent.
 	if !quotaSuccessorPlaceable(successor) {
 		return false
 	}

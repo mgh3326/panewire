@@ -920,19 +920,116 @@ func TestReconcileWritesNoPointerForAQueuedOrWithdrawnSuccessor(t *testing.T) {
 	}
 }
 
-// The states a pointer may be written in are bound and placed.
-func TestReconcileWritesThePointerForABoundSuccessor(t *testing.T) {
+// bindSuccessor binds a claimed successor to the fixture's destination node, and
+// sends it (the send boundary: dispatching) when sent is set.
+func (f *quotaReplaceFixture) bindSuccessor(t *testing.T, successor hubSpawnTask, sent bool) hubSpawnTask {
+	t.Helper()
+	bound, err := f.hub.inbox.store.bindSpawn(t.Context(), successor.Request.RequestID, successor.Attempt, hubSpawnRequest{RequestID: t14RequestID(333402), Machine: "machine-a"}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent {
+		return sentSpawnFixture(t, f.hub.inbox.store, bound)
+	}
+	return bound
+}
+
+// The states a pointer may be written in are placed and sent: a successor whose
+// start was handed to a node (dispatching) may still land.
+func TestReconcileWritesThePointerForASentSuccessor(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-35-p1")
-	successor := f.quotaClaimedSuccessor(t, "bound")
+	successor := f.quotaClaimedSuccessor(t, "accepted")
+	sent := f.bindSuccessor(t, successor, true)
+	if sent.Status != "dispatching" {
+		t.Fatalf("status %q, want dispatching", sent.Status)
+	}
 	f.paneClosed = true
 	wrote := make(chan int, 1)
 	go func() { wrote <- f.hub.reconcileQuotaReplacements(t.Context()) }()
 	commands := f.serveCommands(t, 2) // probe (pane gone), mark_lost
 	if reason := endReasonOf(t, commands[1]); reason != "quota_stop pool=claude replaced_by="+successor.Job {
-		t.Fatalf("end_reason=%q, want the pointer to the bound successor", reason)
+		t.Fatalf("end_reason=%q, want the pointer to the sent successor", reason)
 	}
 	if n := <-wrote; n != 1 {
 		t.Fatalf("wrote %d records, want 1", n)
+	}
+}
+
+// hk 5690 review (round 15): a successor that is only bound has never been sent. The
+// coordinator settles it as a timeout or returns it to accepted without the
+// predecessor's lock, so a pointer to it can name a job that never reports; so can
+// one that is reconciling with no node binding (returned to placement).
+func TestReconcileWritesNoPointerForAnUnsentSuccessor(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-40-p1")
+	successor := f.quotaClaimedSuccessor(t, "accepted")
+	f.bindSuccessor(t, successor, false)
+	f.paneClosed = true
+	if n := f.reconcileSendingNothing(t); n != 0 {
+		t.Fatalf("wrote %d records for a bound, unsent successor, want none", n)
+	}
+	if _, err := f.hub.inbox.store.unbindUnsentSpawn(t.Context(), successor.Request.RequestID, successor.Attempt, t14RequestID(333402)); err != nil {
+		t.Fatal(err)
+	}
+	f.setSuccessorStatus(t, successor, "reconciling")
+	if n := f.reconcileSendingNothing(t); n != 0 {
+		t.Fatalf("wrote %d records for a reconciling successor with no node, want none", n)
+	}
+	if state := f.jobs.records[f.job]["state"]; state != "spawned" {
+		t.Fatalf("the predecessor's record was changed: %v", state)
+	}
+}
+
+// A replayed stop whose successor is only bound is kept for a retry: never written
+// a pointer, never acknowledged.
+func TestReplayOfAStopWithABoundSuccessorIsRetried(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-41-p1")
+	successor := f.quotaClaimedSuccessor(t, "accepted")
+	f.bindSuccessor(t, successor, false)
+	f.paneClosed = true
+	acked := 0
+	if job, ok := f.replaceSendingNothing(t, quotaStopEvent(f.job, "claude"), func() { acked++ }); ok || job != "" || acked != 0 {
+		t.Fatalf("job=%q ok=%v acked=%d, want a retry with no acknowledgement and no node command", job, ok, acked)
+	}
+}
+
+// The coordinator returns a sent attempt to accepted (a node refusal) between the
+// scan's read and the pass: the row is read again under the lock and no pointer is
+// written to it.
+func TestReconcileWritesNoPointerOnceTheCoordinatorUnboundTheSuccessor(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-42-p1")
+	successor := f.quotaClaimedSuccessor(t, "accepted")
+	sent := f.bindSuccessor(t, successor, true)
+	snapshot, err := f.hub.inbox.store.spawnTask(t.Context(), successor.Request.RequestID)
+	if err != nil || snapshot.Status != "dispatching" {
+		t.Fatalf("snapshot %+v %v", snapshot, err)
+	}
+	if _, err := f.hub.inbox.store.unbindSpawn(t.Context(), successor.Request.RequestID, sent.Attempt, t14RequestID(333402), "dispatching"); err != nil {
+		t.Fatal(err)
+	}
+	f.paneClosed = true
+	app, err := f.hub.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan bool, 1)
+	go func() { done <- f.hub.reconcileQuotaReplacement(t.Context(), app, snapshot, f.job) }()
+	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
+	defer cancel()
+	read := make(chan []byte, 1)
+	go func() {
+		if _, payload, err := f.node.Read(ctx); err == nil {
+			read <- payload
+		}
+	}()
+	select {
+	case payload := <-read:
+		t.Fatalf("the hub sent the node %s for a successor returned to accepted", payload)
+	case wrote := <-done:
+		if wrote {
+			t.Fatal("a pointer was written for a successor returned to accepted")
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("the pass did not finish")
 	}
 }
 
