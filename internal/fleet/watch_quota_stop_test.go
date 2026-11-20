@@ -660,44 +660,6 @@ func TestAdoptedAnnouncementKeepsThePaneStateTheHubFencesWith(t *testing.T) {
 	}
 }
 
-// hk 5690 review: a reviewer the manager decided to WAIT on (a short reset) keeps
-// its watcher through the reset, past the ordinary completion deadline: the
-// resumed reviewer's report is committed by the watcher. With a 60 s completion
-// timeout and a reset 2 minutes out, a report written after the timeout still
-// completes the job.
-func TestWatcherStaysThroughAManagerWaitPastTheCompletionDeadline(t *testing.T) {
-	a, f, _, report := quotaStopFixture(t, "reviewer", "idle", "The reviewer is waiting on its reset.\n")
-	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
-	// The manager waits out a stop that resets in 2 minutes: reset plus the grace.
-	if e := RecordReviewerQuotaWait(context.Background(), a.Jobs, "j", "w:p1", "devin-free", a.Now().Add(2*time.Minute), a.Now()); e != nil {
-		t.Fatal(e)
-	}
-	lists := 0
-	do := f.Do
-	f.Do = func(c Command) Result {
-		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
-			lists++
-			if lists == 30 { // 150 s of polls: past the 60 s timeout, after the reset
-				writeReport(t, report, "# review\n")
-				putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(time.Minute))
-			}
-		}
-		return do(c)
-	}
-	if e := a.watch(context.Background(), []string{"j"}); e != nil {
-		t.Fatal(e)
-	}
-	completed := false
-	for _, kind := range eventKindsOf(t, a, "j") {
-		if kind == "job.completed" {
-			completed = true
-		}
-	}
-	if !completed {
-		t.Fatalf("the watcher ended before the resumed reviewer's report (polls=%d)", lists)
-	}
-}
-
 // hk 5690 review: a close intent an older watcher left is conditional while hk is
 // live: the pane may have moved on since. The watcher no longer detects a
 // reviewer's stop, but reconciling an existing intent still reads the screen. A
@@ -726,46 +688,5 @@ func TestLegacyCloseIntentIsVerifiedOnTheScreenWhileHkIsLive(t *testing.T) {
 				t.Fatalf("hk record %v, want the intent's frozen end_reason", rec)
 			}
 		})
-	}
-}
-
-// hk 5690 review: the manager's wait record is written with the daemon's resolved
-// home, as the other manager-side writers do. With XDG_DATA_HOME unset an App with
-// no Home opened the ledger under a relative .local/share path in the working
-// directory. It carries the stop's remaining duration for a detached older watcher.
-func TestReviewerQuotaWaitIsWrittenUnderTheResolvedHome(t *testing.T) {
-	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "The reviewer is waiting.\n")
-	t.Setenv("XDG_DATA_HOME", "")
-	cwd := t.TempDir()
-	old, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(cwd); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(old) })
-	now := a.Now()
-	if e := RecordReviewerQuotaWait(context.Background(), a.Jobs, "j", "w:p1", "devin-free", now.Add(2*time.Minute), now); e != nil {
-		t.Fatal(e)
-	}
-	if _, err := os.Stat(filepath.Join(cwd, ".local")); err == nil {
-		t.Fatal("the wait record opened a ledger under a relative .local path in the working directory")
-	}
-	j, err := a.job("j")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wait map[string]any
-	for _, ev := range j.Events {
-		if ev.Kind == quotaWaitKind {
-			wait = ev.Payload
-		}
-	}
-	if wait == nil {
-		t.Fatal("no job.quota_stop_wait in the job's ledger")
-	}
-	if got, ok := wait["remaining_s"].(float64); !ok || got != 120 {
-		t.Fatalf("remaining_s=%v, want 120", wait["remaining_s"])
 	}
 }

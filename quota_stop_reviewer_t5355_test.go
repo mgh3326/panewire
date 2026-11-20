@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,8 +9,9 @@ import (
 	"time"
 )
 
-// A reviewer on a quota stop (hk 5355): the manager waits out a short reset and
-// resumes the pane once; any other stop is announced for the hub to carry on at once (hk 5690).
+// A reviewer on a quota stop (hk 5690): every stop is announced for the hub to
+// carry on to another pool; a reviewer never waits (the hk 5355 short-reset resume
+// is follow-up hk 5749).
 // The rig is the implementer rig with the spawn receipt naming a reviewer. The
 // manager runs in shadow mode, and a reviewer is still acted on.
 
@@ -51,179 +51,32 @@ func decisionFor(t *testing.T, rig *roleStopRig, eventID string) (decision, reas
 	return
 }
 
-// A reset two minutes away: the reviewer waits and is resumed once at the reset.
-// The job is not lost and the watcher is not asked to end it (hk 5355).
-func TestQuotaReviewerShortResetIsResumedOnce(t *testing.T) {
-	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
-	rig.run()
-	if d, reason := rig.decision(t); d != "wait" || reason != "reset_within_reviewer_wait" {
-		t.Fatalf("decision=%s reason=%s, want wait reset_within_reviewer_wait", d, reason)
-	}
-	if rig.sends != 1 {
-		t.Fatalf("sends=%d, want one resume at the reset", rig.sends)
-	}
-	if len(rig.announce) != 0 {
-		t.Fatalf("a waited reviewer was announced: %+v", rig.announce)
-	}
-	if reviewerLedgerHas(t, rig, "job.lost") {
-		t.Fatal("job.lost recorded for a reviewer that was resumed")
-	}
-	// The job's watcher is told the manager waits, so it stays through the reset
-	// and the resume to commit the report that follows (hk 5690).
-	if !reviewerLedgerHas(t, rig, "job.quota_stop_wait") {
-		t.Fatal("no wait recorded for the reviewer's watcher: it would end at its completion deadline before the reset")
-	}
-	rig.manager.Tick(context.Background(), rig.now.Add(10*time.Minute))
-	if rig.sends != 1 {
-		t.Fatalf("resumed more than once: sends=%d", rig.sends)
-	}
-}
-
-// reviewer_wait is the policy's reviewer bound (hk 5355): default 10 min, never
-// above max_wait, and a malformed or repeated line makes the policy unavailable.
-func TestQuotaReviewerWaitPolicyLine(t *testing.T) {
-	base := quotaMaxWaitDoc()
-	for name, tc := range map[string]struct {
-		doc   string
-		want  time.Duration
-		valid bool
-	}{
-		"absent defaults to ten minutes": {base, 10 * time.Minute, true},
-		"explicit value":                 {quotaMaxWaitDoc("reviewer_wait: 3m"), 3 * time.Minute, true},
-		"clamped to max_wait":            {quotaMaxWaitDoc("max_wait: 5m", "reviewer_wait: 20m"), 5 * time.Minute, true},
-		// The watcher holds a reviewer's stop only within ten minutes, so a larger
-		// policy value is clamped to that ceiling (mergewake review, hk 5355).
-		"clamped to the watcher ceiling": {quotaMaxWaitDoc("reviewer_wait: 30m"), 10 * time.Minute, true},
-		"malformed fails the policy":     {quotaMaxWaitDoc("reviewer_wait: soon"), 0, false},
-		"zero fails the policy":          {quotaMaxWaitDoc("reviewer_wait: 0s"), 0, false},
-		"repeated line fails the policy": {quotaMaxWaitDoc("reviewer_wait: 2m", "reviewer_wait: 3m"), 0, false},
-	} {
+// A reviewer never waits (hk 5690): every reviewer limit stop is a hand-over,
+// announced once for the hub to carry on to another pool, whatever its reset (the
+// short-reset resume of hk 5355 is follow-up hk 5749). The reviewer is never
+// resumed, and no wait is recorded for its watcher.
+func TestQuotaReviewerAlwaysHandsOver(t *testing.T) {
+	for name, screen := range map[string]string{"a 2 minute reset": "testdata/quota-stop/devin-reset-2min.txt", "a 2 hour reset": "testdata/quota-stop/devin-reset-2h.txt"} {
 		t.Run(name, func(t *testing.T) {
-			p, ok := parseQuotaPolicy(tc.doc)
-			if ok != tc.valid {
-				t.Fatalf("valid=%v, want %v", ok, tc.valid)
+			rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, screen)
+			rig.run()
+			if d, reason := rig.decision(t); d != "handover" || reason != "reviewer_hands_over" {
+				t.Fatalf("decision=%s reason=%s, want handover reviewer_hands_over", d, reason)
 			}
-			if ok && p.reviewerWaitLimit() != tc.want {
-				t.Fatalf("reviewer wait=%v, want %v", p.reviewerWaitLimit(), tc.want)
+			if rig.sends != 0 {
+				t.Fatalf("a reviewer was resumed: sends=%d", rig.sends)
+			}
+			if len(rig.announce) != 1 || rig.announce[0].Pool != "devin-free" {
+				t.Fatalf("announced=%+v, want one devin-free announcement", rig.announce)
+			}
+			if reviewerLedgerHas(t, rig, "job.quota_stop_wait") {
+				t.Fatal("a wait was recorded for a reviewer's watcher")
+			}
+			rig.manager.Tick(context.Background(), rig.now.Add(10*time.Minute))
+			if len(rig.announce) != 1 {
+				t.Fatalf("the reviewer was announced again: %d", len(rig.announce))
 			}
 		})
-	}
-}
-
-// The policy's reviewer_wait bounds the manager's reviewer decision: a reset
-// inside the default ten minutes but beyond a policy of one minute is announced.
-func TestQuotaReviewerPolicyWaitBoundsTheDecision(t *testing.T) {
-	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
-	doc := quotaMaxWaitDoc("reviewer_wait: 1m")
-	rig.q.hk.policy = func(context.Context) ([]byte, error) { return []byte(quotaPolicyAnswer(doc)), nil }
-	rig.run()
-	if d, reason := rig.decision(t); d != "handover" || reason != "reset_beyond_reviewer_wait" {
-		t.Fatalf("decision=%s reason=%s, want handover reset_beyond_reviewer_wait", d, reason)
-	}
-	if rig.sends != 0 || len(rig.announce) != 1 {
-		t.Fatalf("sends=%d ended=%d, want no resume and one end", rig.sends, len(rig.announce))
-	}
-}
-
-// A reset two hours away is beyond the reviewer wait: the reviewer is announced
-// for the hub to carry on at once, with no resume (hk 5690). The same stop at the
-// reviewer's first prompt, which is how the 2026-11-19 Devin reviewers stopped,
-// is this case: a pane with no built-up work is handed over, never ended.
-func TestQuotaReviewerLongResetIsAnnouncedAtOnceForTheHub(t *testing.T) {
-	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2h.txt")
-	rig.run()
-	if d, reason := rig.decision(t); d != "handover" || reason != "reset_beyond_reviewer_wait" {
-		t.Fatalf("decision=%s reason=%s, want handover reset_beyond_reviewer_wait", d, reason)
-	}
-	if rig.sends != 0 {
-		t.Fatalf("resumed a reviewer on a long reset: sends=%d", rig.sends)
-	}
-	if len(rig.announce) != 1 || rig.announce[0].Pool != "devin-free" {
-		t.Fatalf("announced=%+v, want one devin-free announcement", rig.announce)
-	}
-	rig.manager.Tick(context.Background(), rig.now.Add(10*time.Minute))
-	if len(rig.announce) != 1 {
-		t.Fatalf("the reviewer was announced again: %d", len(rig.announce))
-	}
-}
-
-// A second stop after the one resume announces the reviewer at once and sends nothing.
-func TestQuotaReviewerSecondStopAfterResumeEndsAtOnce(t *testing.T) {
-	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
-	rig.run()
-	if rig.sends != 1 {
-		t.Fatalf("first stop: sends=%d, want one resume", rig.sends)
-	}
-	// The second stop is a new limit with its own reset. The ledger drops a
-	// repeat of a decided pane and reset, and a real second stop never repeats it.
-	secondScreen := []byte("Reached free model rate limit · reset in 3 minutes (at 00:13 UTC)\n")
-	rig.q.read = func(context.Context, string) (string, error) { return string(secondScreen), nil }
-	again := rig.now.Add(10 * time.Minute)
-	rig.observe("working", 3, again)
-	rig.observe("idle", 4, again.Add(time.Second))
-	rig.manager.Tick(context.Background(), again.Add(5*time.Second))
-	rig.route(1, "owner")
-	rig.manager.Tick(context.Background(), again.Add(6*time.Second))
-	rig.manager.Tick(context.Background(), again.Add(7*time.Second))
-	rig.manager.Tick(context.Background(), again.Add(3*time.Minute))
-	if len(rig.requests) != 2 {
-		t.Fatalf("settled stops=%d, want the second one routed too", len(rig.requests))
-	}
-	if d, reason := decisionFor(t, rig, rig.requests[1].EventID); d != "handover" || reason != "resume_limit" {
-		t.Fatalf("second stop decision=%s reason=%s, want handover resume_limit\nlogs:\n%s", d, reason, rig.logs.String())
-	}
-	if rig.sends != 1 {
-		t.Fatalf("resumed a second time: sends=%d", rig.sends)
-	}
-	if len(rig.announce) != 1 {
-		t.Fatalf("ended=%d, want the second stop ended once", len(rig.announce))
-	}
-}
-
-// A stop with no readable reset ends the reviewer at once, as before.
-func TestQuotaReviewerUnknownResetEndsAtOnce(t *testing.T) {
-	screen := filepath.Join(t.TempDir(), "screen.txt")
-	if err := os.WriteFile(screen, []byte("▲ Something went wrong — Reached free model rate limit\n❭ Ask Devin to build features, fix bugs, or work on your code\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, screen)
-	rig.run()
-	if d, reason := rig.decision(t); d != "handover" || reason != "reset_unknown" {
-		t.Fatalf("decision=%s reason=%s, want handover reset_unknown", d, reason)
-	}
-	if rig.sends != 0 || len(rig.announce) != 1 {
-		t.Fatalf("sends=%d ended=%d, want no resume and one end", rig.sends, len(rig.announce))
-	}
-}
-
-// A wait that would pass the review deadline (the job's start plus its expected
-// time) is ended at once. Here the deadline is a minute away and the reset two.
-func TestQuotaReviewerResetPastReviewDeadlineEndsAtOnce(t *testing.T) {
-	rig := newReviewerStopRig(t, 29*time.Minute, `{"tasks":[{"priority":3,"expected":"30m","refs":{"job_id":"job-active"}}]}`, "testdata/quota-stop/devin-reset-2min.txt")
-	rig.run()
-	if d, reason := rig.decision(t); d != "handover" || reason != "reset_past_review_deadline" {
-		t.Fatalf("decision=%s reason=%s, want handover reset_past_review_deadline", d, reason)
-	}
-	if rig.sends != 0 || len(rig.announce) != 1 {
-		t.Fatalf("sends=%d ended=%d, want no resume and one end", rig.sends, len(rig.announce))
-	}
-}
-
-// A reset already past is due at once even when the job's start is missing: the
-// stop is over and the pane is resumed, not ended (mergewake review, hk 5355).
-func TestQuotaReviewerResetPassedWithoutStartIsResumed(t *testing.T) {
-	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
-	policy, ok := parseQuotaPolicy(quotaMaxWaitDoc())
-	if !ok {
-		t.Fatal("policy did not parse")
-	}
-	passed := quotaStop{Pool: "devin-free", Reset: now.Add(-time.Minute)}
-	if d, reason := quotaDecisionReviewer(policy, true, 3, time.Time{}, 4*time.Hour, 0, passed, now); d != "wait" || reason != "reset_passed" {
-		t.Fatalf("passed reset without a start: decision=%s reason=%s, want wait reset_passed", d, reason)
-	}
-	future := quotaStop{Pool: "devin-free", Reset: now.Add(2 * time.Minute)}
-	if d, reason := quotaDecisionReviewer(policy, true, 3, time.Time{}, 4*time.Hour, 0, future, now); d != "handover" || reason != "start_unknown" {
-		t.Fatalf("future reset without a start: decision=%s reason=%s, want handover start_unknown", d, reason)
 	}
 }
 
@@ -298,68 +151,5 @@ func TestStallExaminationDecisionRecordsHerdrsSequence(t *testing.T) {
 	}
 	if got := rig.q.observedSeq(context.Background(), "stall-ev"); got != 4 {
 		t.Fatalf("recorded herdr sequence %d, want 4 (local %d)", got, local)
-	}
-}
-
-// hk 5690 review: the wait notification for a reviewer's watcher is retried, and
-// the resume does not go out until it is appended. The first append fails: nothing
-// is sent at the reset; once the append succeeds on a later tick, the resume goes.
-func TestReviewerResumeWaitsForTheWatchersWaitRecord(t *testing.T) {
-	rig := newReviewerStopRig(t, 5*time.Minute, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
-	appends, ledgerUp := 0, false
-	rig.q.recordWait = func(context.Context, string, string, string, time.Time, time.Time) error {
-		appends++
-		if !ledgerUp {
-			return errors.New("ledger unavailable")
-		}
-		return nil
-	}
-	rig.observe("working", 1, rig.now)
-	rig.observe("idle", 2, rig.now.Add(time.Second))
-	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Second))
-	rig.route(0, "owner")
-	rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second)) // the decision: the append fails
-	// The reset (2 minutes) is due and retried, but the watcher still has no wait.
-	rig.manager.Tick(context.Background(), rig.now.Add(2*time.Minute+10*time.Second))
-	if rig.sends != 0 {
-		t.Fatalf("resumed with the wait unappended: sends=%d", rig.sends)
-	}
-	failedAttempts := appends
-	if failedAttempts < 2 {
-		t.Fatalf("the append was not retried: %d attempts", failedAttempts)
-	}
-	// The ledger comes back: the next tick appends the wait and the resume follows.
-	ledgerUp = true
-	for i := 1; i <= 12 && rig.sends == 0; i++ {
-		rig.manager.Tick(context.Background(), rig.now.Add(3*time.Minute+time.Duration(i)*30*time.Second))
-	}
-	if rig.sends != 1 {
-		t.Fatalf("sends=%d, want one resume once the wait was appended", rig.sends)
-	}
-}
-
-// hk 5690 review: a reviewer resumed with no watcher loses its completion. When the
-// wait still has not reached the watcher after the watcher's own completion
-// deadline, the reviewer is handed over (announced) instead of resumed. With a 60 s
-// completion timeout and the ledger down until after it, the reset brings a
-// hand-over, not a resume.
-func TestReviewerWithNoWatcherLeftIsHandedOverNotResumed(t *testing.T) {
-	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
-	rig := newReviewerStopRig(t, 10*time.Second, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
-	rig.q.recordWait = func(context.Context, string, string, string, time.Time, time.Time) error {
-		return errors.New("ledger unavailable")
-	}
-	rig.observe("working", 1, rig.now)
-	rig.observe("idle", 2, rig.now.Add(time.Second))
-	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Second))
-	rig.route(0, "owner")
-	rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second)) // the wait decision: the append fails
-	rig.manager.Tick(context.Background(), rig.now.Add(2*time.Minute+10*time.Second))
-	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Minute))
-	if rig.sends != 0 {
-		t.Fatalf("a reviewer with no watcher left was resumed: sends=%d", rig.sends)
-	}
-	if len(rig.announce) != 1 {
-		t.Fatalf("announcements=%d, want one hand-over", len(rig.announce))
 	}
 }

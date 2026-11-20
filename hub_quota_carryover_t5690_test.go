@@ -449,3 +449,61 @@ func TestReviewerAnnouncementWithNoOwnerLaneIsNotAcknowledgedAtOnce(t *testing.T
 		}
 	}
 }
+
+// hk 5690 review: an acknowledgement follows durable responsibility. An original
+// spawn still settling (reconciling here) can still become the placed holder, so
+// the stop stays retryable and is not acknowledged; a terminal holder and a job the
+// hub never spawned are final and acknowledged.
+func TestAcknowledgementFollowsAnExplicitOutcome(t *testing.T) {
+	event := func(job string) hubJobEventPayload { return relayedQuotaStop(job, "claude") }
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-23-p1")
+	acked := 0
+	ack := func() { acked++ }
+
+	// A job the hub never spawned: no row, a final answer.
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event("never-spawned"), ack); ok || job != "" || acked != 1 {
+		t.Fatalf("unknown job: job=%q ok=%v acked=%d, want a final acknowledged skip", job, ok, acked)
+	}
+	// The original spawn is still settling: retry, no acknowledgement.
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE spawn_operations SET status='reconciling' WHERE job=?`, f.job); err != nil {
+		t.Fatal(err)
+	}
+	acked = 0
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event(f.job), ack); ok || job != "" || acked != 0 {
+		t.Fatalf("unsettled holder: job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
+	}
+	// The original spawn ended for good: final.
+	if _, err := f.hub.inbox.store.db.Exec(`UPDATE spawn_operations SET status='failed' WHERE job=?`, f.job); err != nil {
+		t.Fatal(err)
+	}
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event(f.job), ack); ok || job != "" || acked != 1 {
+		t.Fatalf("terminal holder: job=%q ok=%v acked=%d, want a final acknowledged skip", job, ok, acked)
+	}
+}
+
+// hk 5690 review: a reviewer's announcement whose role the hub could not look up
+// (its store failed) is neither relayed nor acknowledged by the generic pool-cooling
+// branch: the node keeps the row and sends it again.
+func TestUnknownRoleAnnouncementIsNotAcknowledgedByTheCoolingBranch(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-24-p1")
+	event := relayedQuotaStop(f.job, "devin-free")
+	raw, err := json.Marshal(map[string]any{"job_id": f.job, "epoch": 1, "reason": event.Reason, "pane_id": roleHeldPane})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.hub.inbox.store.db.Close(); err != nil { // every store read now fails: the role is unknown
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(t.Context(), f.node, hubClientWireEvent(hubClientEvent{Kind: "job.lost", Payload: raw})); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond) // proves nothing is sent back: no acknowledgement for an unknown role
+	defer cancel()
+	for {
+		_, payload, err := f.node.Read(ctx)
+		if err != nil {
+			return
+		}
+		t.Fatalf("the node received %s for an announcement whose role was unknown", payload)
+	}
+}

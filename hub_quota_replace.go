@@ -241,16 +241,11 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	return h.replaceQuotaStoppedAck(ctx, machine, event, nil)
 }
 
-// quotaRetryReasons are the replacement's exits that leave a stop for the node
-// to send again: the hub could not look or act yet, and nothing was claimed.
-// Every other exit is a decision (replaced, given up, nothing to replace), after
-// which a resend would change nothing.
-var quotaRetryReasons = map[string]bool{"pool_action_pending": true, "spawn_config_unavailable": true, "pane_not_idle": true, "pane_not_closed": true, "job_record_unavailable": true}
-
 // replaceQuotaStoppedAck is replaceQuotaStopped that calls ackStop, once, when
 // the stop is durably owned: the successor is claimed (the reconcile pass
 // repairs the rest) or the replacement reached a decision that a resend cannot
-// change. An exit in quotaRetryReasons does not call it.
+// change. Every exit is an explicit outcome: a final one (skip, giveUp) settles
+// the stop, a retry (retryLater) does not, and a claim settles it too (hk 5690).
 func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, event hubJobEventPayload, ackStop func()) (string, bool) {
 	settle := func() {
 		if ackStop != nil {
@@ -265,9 +260,14 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 		}
 	}()
 	skip := func(reason string, kv ...any) (string, bool) {
-		retry = quotaRetryReasons[reason]
 		h.logger.Info("quota-stop replacement skipped", append([]any{"job", event.JobID, "node", machine, "reason", reason}, kv...)...)
 		return "", false
+	}
+	// retryLater leaves the announcement with its node: the hub could not look or
+	// act yet, nothing is claimed, and a later delivery decides.
+	retryLater := func(reason string, kv ...any) (string, bool) {
+		retry = true
+		return skip(reason, kv...)
 	}
 	budget := h.quotaReplaceBudget
 	if budget <= 0 {
@@ -286,13 +286,17 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// it with pool-action admission so neither can overwrite the other's end.
 	unlock, free := h.lockWithoutPoolAction(ctx, event.JobID)
 	if !free {
-		return skip("pool_action_pending")
+		return retryLater("pool_action_pending")
 	}
 	defer unlock()
 	store := h.inbox.store
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return skip("unknown_job")
+	}
+	if err != nil {
+		// An operational failure says nothing about the job: retry.
+		return retryLater("holder_unavailable", "error", err.Error())
 	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
@@ -308,6 +312,13 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// task (--parent-job), is replaced with the same arguments.
 	if prior.Task == "" && prior.ParentJob == "" || (prior.Profile != "" && prior.Profile != "auto") {
 		return skip("not_replaceable")
+	}
+	// An original spawn still settling (bound, dispatching, reconciling, past its
+	// deadline with a node) can still become the placed holder: keep the stop
+	// retryable and look again on the next delivery. A terminal status or another
+	// host is final.
+	if holder.Status != "succeeded" && spawnMayStillRun(holder) {
+		return retryLater("holder_unsettled", "status", holder.Status)
 	}
 	if holder.Status != "succeeded" || spawnHolderHost(holder) != machine {
 		return skip("holder_state", "status", holder.Status)
@@ -331,7 +342,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
-		return skip("spawn_config_unavailable")
+		return retryLater("spawn_config_unavailable")
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	record, exists, err := app.ExistingJob(readCtx, event.JobID)
@@ -341,7 +352,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	if err != nil {
 		// hk could not be read (a timeout, a 503): the job may be live and carriable,
 		// so nothing is decided and the node keeps the announcement (hk 5690).
-		return skip("job_record_unavailable", "error", err.Error())
+		return retryLater("job_record_unavailable", "error", err.Error())
 	}
 	if !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
 		return skip("job_record", "state", state)
@@ -383,7 +394,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	name := heldAgentName(holder, record)
 	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
-		return skip("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
+		return retryLater("pane_not_idle", "probe", probe.reason, "status", probe.row.AgentStatus)
 	}
 	request, err := quotaReplacementRequest(holder.Request, event.JobID, newJob, pool, exclude, role)
 	if err != nil {
@@ -403,7 +414,7 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			stopSeq = &seq
 		}
 		if closed, _ := h.closeHeldPaneStopped(ctx, holder, name, probe.row, event.JobID, stopSeq); !closed {
-			return skip("pane_not_closed", "pane", holder.Outcome.Pane)
+			return retryLater("pane_not_closed", "pane", holder.Outcome.Pane)
 		}
 	}
 	mark := func() bool {

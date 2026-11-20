@@ -494,12 +494,6 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			latePoll = false
 		}
 		wasWaiting = waiting != nil
-		// A reviewer the manager decided to wait on (a short reset) keeps its
-		// watcher through the reset and the resume, past the ordinary completion
-		// deadline: the watcher is what commits the report that follows (hk 5690).
-		if until, ok := managerWaitUntil(j); ok && until.After(deadline) {
-			deadline = until
-		}
 
 		if j.Report != "" {
 			if info, e := os.Stat(j.Report); e == nil && info.Mode().IsRegular() {

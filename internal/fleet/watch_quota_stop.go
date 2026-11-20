@@ -687,58 +687,6 @@ const QuotaReviewerWaitGrace = 5 * time.Minute
 // a second stop after it ends the job at once (hk 5355).
 const quotaWaitKind = "job.quota_stop_wait"
 
-// managerWaitUntil is when the newest wait the quota-stop manager recorded for
-// the job ends (RecordReviewerQuotaWait), and false when it recorded none.
-func managerWaitUntil(j Job) (time.Time, bool) {
-	var until time.Time
-	found := false
-	for _, ev := range j.Events {
-		if ev.Kind != quotaWaitKind {
-			continue
-		}
-		if at, err := time.Parse(time.RFC3339, str(ev.Payload, "until")); err == nil {
-			until, found = at, true
-		}
-	}
-	return until, found
-}
-
-// CompletionTimeout is how long a job's completion watcher runs: the rule watch
-// reads (PANEWIRE_COMPLETION_TIMEOUT_S, one hour by default). The quota-stop manager
-// uses it to know when a reviewer's watcher is gone.
-func CompletionTimeout() time.Duration {
-	a := &App{}
-	if v := a.envOr("PANEWIRE_COMPLETION_TIMEOUT_S", "WRK_COMPLETION_TIMEOUT_S"); v != "" {
-		if d, ok := timeoutValue(v); ok {
-			return d
-		}
-	}
-	return time.Hour
-}
-
-// RecordReviewerQuotaWait records, for the job's watcher, that the manager decided
-// to wait out reviewer job's limit stop and resume it once at reset: the watcher
-// extends its completion deadline to the reset plus QuotaReviewerWaitGrace, so it
-// is still running to commit the report the resumed reviewer writes (hk 5690).
-func RecordReviewerQuotaWait(ctx context.Context, jobs, job, pane, pool string, reset, now time.Time) error {
-	at := reset
-	if at.IsZero() || at.Before(now) {
-		at = now
-	}
-	// Home resolved as the other manager-side writers do (AnnounceQuotaStop): an App
-	// with no Home opens the ledger under a relative path.
-	home, _ := os.UserHomeDir()
-	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
-	payload := map[string]any{"pane_id": pane, "pool": pool, "reset_at": reset.UTC().Format(time.RFC3339), "until": at.Add(QuotaReviewerWaitGrace).UTC().Format(time.RFC3339)}
-	if !reset.IsZero() {
-		// The stop's remaining duration, so a detached older watcher that survives
-		// a rollout can recognise the same stop and inherit the hold
-		// (reviewerWaitResume).
-		payload["remaining_s"] = int64(reset.Sub(now).Round(time.Second) / time.Second)
-	}
-	return a.event(ctx, job, quotaWaitKind, payload)
-}
-
 // reviewerWaitUntil reports whether the watcher holds reviewer j's quota stop
 // for the manager (hk 5355) and, if so, until when. Only a known reset within
 // QuotaReviewerWait (a passed one included) on a stop that is not a choice dialog
