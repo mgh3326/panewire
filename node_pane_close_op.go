@@ -395,7 +395,7 @@ func (client *HubClient) runPaneCloseOp(ctx context.Context, args nodePaneCloseO
 	if outcome != "" {
 		return nodePaneCloseOpResult{Outcome: outcome}, ""
 	}
-	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, StopSeq: args.StopSeq, target: target}
+	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, StopSeq: args.StopSeq, guardedHandover: args.Handover != nil, target: target}
 	if target.role == "implementer" {
 		// An idle implementer may be waiting on an ESC answer: the hub's
 		// hand-over close keeps the open-question guard pane.close has

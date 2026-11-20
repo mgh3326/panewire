@@ -95,6 +95,9 @@ type poolHandover struct {
 	StopSeq *int64 `json:",omitempty"`
 	// StopEvent is the producer event id of the announcement that opened the row.
 	StopEvent string `json:",omitempty"`
+	// Attempt is the job attempt the stop was admitted in; the action's
+	// TargetAttempt, so a re-prompted job's close is released, not run.
+	Attempt string `json:",omitempty"`
 	// Cwd and Branch bind the close to the worktree the successor continues.
 	Cwd, Branch string `json:",omitempty"`
 	// Snapshot is the verified snapshot of a dirty or unpushed worktree (hk
@@ -261,10 +264,12 @@ func (h *HubServer) queueImplementerHandover(ctx context.Context, exhaustion poo
 		h.logger.Info("pool hand-over past the replacement limit", "job", task.Job, "replacements", n-1)
 		return notice("replacement_limit")
 	}
-	handover, refusal := h.prepareHandover(ctx, exhaustion, task, prior, record, newJob, taskID)
+	handover, refusal, transient := h.prepareHandover(ctx, exhaustion, task, prior, record, newJob, taskID)
 	if refusal != "" {
-		h.logger.Info("pool hand-over not prepared", "job", task.Job, "reason", refusal)
-		if refusal == "already_replaced" || refusal == handoverSuccessorUnavailable {
+		h.logger.Info("pool hand-over not prepared", "job", task.Job, "reason", refusal, "transient", transient)
+		if refusal == "already_replaced" || refusal == handoverSuccessorUnavailable || transient && exhaustion.StopEvent != "" {
+			// Unavailable evidence is not a refusal: an announced stop stays
+			// retryable (the sweep keeps its notice) and no final row is written.
 			return poolJobSkip(role, refusal)
 		}
 		return notice(refusal)
@@ -429,84 +434,91 @@ func (h *HubServer) notifyPoolWait(ctx context.Context, exhaustion poolExhaustio
 
 // prepareHandover reads the old worktree's branch and start point through
 // its node and builds the successor submission without modifying the worktree.
-func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, record map[string]any, newJob, taskID string) (*poolHandover, string) {
+// prepareHandover's third result reports a refusal that is only unavailable
+// evidence (a pane list cut short, a node that did not answer, a lookup that
+// failed): an announced stop keeps it retryable and never stores it as a final
+// refusal (hk 5780 review).
+func (h *HubServer) prepareHandover(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, record map[string]any, newJob, taskID string) (*poolHandover, string, bool) {
 	switch successor, err := h.inbox.store.latestSpawnForJob(ctx, newJob); {
 	case err == nil:
-		if successor.Owner == task.Owner && hubSpawnArg(successor.Request.Args, "--parent-job") == task.Job {
-			// A hand-over (or a quota replacement) already placed this job's successor.
-			return nil, "already_replaced"
+		if successor.ReplacedFrom == task.Job && successor.ReplacedReason == "claim" && successor.Owner == task.Owner && hubSpawnArg(successor.Request.Args, "--parent-job") == task.Job {
+			// This job's own hand-over or quota replacement placed it: the claim
+			// itself wrote the lineage, which a name and a flag cannot forge.
+			return nil, "already_replaced", false
 		}
 		// The next name belongs to something else: nothing is replaced under it.
-		return nil, "successor_name_collision"
+		return nil, "successor_name_collision", false
 	case !errors.Is(err, sql.ErrNoRows):
 		// Only a definite absence lets a hand-over start; an unreadable store
 		// proves neither that a successor exists nor that none does.
-		return nil, handoverSuccessorUnavailable
+		return nil, handoverSuccessorUnavailable, true
 	}
 	old := task.Request
 	if prior.Task == "" && prior.ParentJob == "" {
-		return nil, "not_replaceable"
+		return nil, "not_replaceable", false
 	}
 	if prior.Host != "" && prior.Host != "auto" {
 		// A pinned host cannot move off the old host; the owner decides. A
 		// pinned profile is dropped instead (handoverSuccessorRequest): the
 		// successor is placed automatically, off the spent pool.
-		return nil, "pinned"
+		return nil, "pinned", false
 	}
 	if !validNodeEndReason(handoverEndReason(record, exhaustion, newJob)) {
-		return nil, "end_reason_too_long"
+		return nil, "end_reason_too_long", false
 	}
 	checkout := old.Repository.Checkout
 	if checkout == nil || checkout.Origin == "" || checkout.Branch == "" {
-		return nil, "no_branch"
+		return nil, "no_branch", false
 	}
 	host, label := spawnHolderHost(task), heldAgentName(task, record)
 	probe := h.probeHeldPane(ctx, host, task.Outcome.Pane, label)
 	if probe.state != heldPanePresent || !validNodeCommandPath(probe.row.Cwd) {
-		return nil, "pane_unavailable"
+		// An unknown probe (a cut list, an unreachable node) is no proof the pane
+		// is gone; only a complete inventory without it is.
+		return nil, "pane_unavailable", probe.state == heldPaneUnknown
 	}
 	var read nodeHandoverCheckResult
 	if !h.nodeCall(ctx, host, nodeCommandHandoverCheck, nodeHandoverCheckArgs{Job: task.Job, Cwd: probe.row.Cwd, Origin: checkout.Origin, Branch: checkout.Branch}, hubNodeCommandWait, &read) {
-		return nil, "worktree_unavailable"
+		return nil, "worktree_unavailable", true
 	}
 	var snapshot *poolHandoverSnapshot
 	if read.Outcome == handoverDirty || read.Outcome == handoverUnpushed {
 		var refusal string
 		snapshot, read, refusal = h.handoverSnapshot(ctx, host, task.Job, probe.row.Cwd, checkout, read.Outcome, exhaustion.StopSeq)
 		if refusal != "" {
-			return nil, refusal
+			return nil, refusal, refusal == "snapshot_failed" || refusal == "worktree_unavailable"
 		}
 	}
 	if read.Outcome != handoverCheckOK {
-		return nil, "worktree_" + read.Outcome
+		return nil, "worktree_" + read.Outcome, false
 	}
 	if base := filepath.Base(read.Top); base != checkout.Dir && base != old.Repository.Worktree {
 		// The pane sits in another checkout than the job's own.
-		return nil, "worktree_mismatch"
+		return nil, "worktree_mismatch", false
 	}
 	if !h.otherHostCanTakeSuccessor(host) {
 		// The old worktree keeps the branch on this host until the close
 		// settles, and the successor's checkout is refused branch_in_use there
 		// (node_worktree.go nodePrepareSuccessor). With no other host to place
 		// it on, refuse before any close (review 4611190394).
-		return nil, "branch_in_use"
+		return nil, "branch_in_use", false
 	}
 	request, err := handoverSuccessorRequest(old, task.Job, newJob, handoverExclude(exhaustion), host, exhaustion, read, snapshot)
 	if err != nil {
-		return nil, "invalid_successor"
+		return nil, "invalid_successor", false
 	}
 	if next, err := fleet.ValidateSubmission(request); err != nil || !validLaneReference(next.Owner) {
-		return nil, "invalid_successor"
+		return nil, "invalid_successor", false
 	}
 	if label := hubSpawnArg(request.Args, "-l"); label != "" && !fleet.ValidAgentName(label) {
-		return nil, "invalid_label"
+		return nil, "invalid_label", false
 	}
 	reset := int64(0)
 	if !exhaustion.Reset.IsZero() {
 		reset = exhaustion.Reset.Unix()
 	}
 	return &poolHandover{Successor: request, Job: newJob, Pool: exhaustion.Pool, Cause: exhaustion.Cause, Reset: reset, Account: exhaustion.Account,
-		Task: taskID, Cwd: probe.row.Cwd, Branch: read.Branch, Snapshot: snapshot, StopSeq: exhaustion.StopSeq, StopEvent: exhaustion.StopEvent}, ""
+		Task: taskID, Cwd: probe.row.Cwd, Branch: read.Branch, Snapshot: snapshot, StopSeq: exhaustion.StopSeq, StopEvent: exhaustion.StopEvent, Attempt: exhaustion.StopAttempt}, "", false
 }
 
 // handoverSnapshot runs worktree.handover_snapshot for a worktree the check
@@ -888,7 +900,13 @@ func handoverEndReason(record map[string]any, exhaustion poolExhaustion, newJob 
 	if !spawnargs.ValuePattern.MatchString(pool) {
 		pool = exhaustion.Pool
 	}
-	return fleet.QuotaStopEndReason(pool, time.Time{}, "replaced_by", newJob)
+	key := "replaced_by"
+	if exhaustion.Cause == poolCauseQuotaStop {
+		// An announced implementer stop keeps the implementer's pointer, the one
+		// the requester contract and the legacy replacement write (hk 5780).
+		key = "handed_over_to"
+	}
+	return fleet.QuotaStopEndReason(pool, time.Time{}, key, newJob)
 }
 
 // handoverBeforeClose runs under the job's pool-action lock before the first
@@ -939,7 +957,9 @@ func (h *HubServer) handoverBeforeClose(ctx context.Context, action *poolAction)
 		return withdraw("pane_changed")
 	case probe.state != heldPanePresent:
 		return false, errors.New("pane unavailable")
-	case !nodePaneIdleStatus[probe.row.AgentStatus]:
+	case !quotaPaneStopped(probe.row.AgentStatus, handover.StopSeq != nil):
+		// A pane blocked on the limit dialog is the stop itself, and is closed
+		// only for a stop with its sequence: the node's close is fenced to it.
 		return false, errors.New("hand-over held until the pane is idle")
 	}
 	return true, nil

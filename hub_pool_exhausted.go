@@ -39,6 +39,9 @@ type poolExhaustion struct {
 	// StopEvent is the announcement's producer event id: the row and the owner
 	// decision are keyed by it, so a resend finds its own outcome (hk 5780).
 	StopEvent string
+	// StopAttempt is the job attempt in effect when the hub admitted the stop
+	// (hk 5780): the row's close is released if the job's attempt moved on.
+	StopAttempt string
 }
 
 // poolCauseRetired: every catalog row of the pool is retired (hk 4625).

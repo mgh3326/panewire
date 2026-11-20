@@ -319,6 +319,16 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	}
 	defer unlockJob()
 	store := h.inbox.store
+	if announced != nil {
+		// An announcement with a saved outcome is answered from it, before the
+		// holder, the node or its capabilities are looked at (hk 5780 review).
+		if outcome, found := h.savedStopOutcome(ctx, event); found {
+			if outcome == quotaStopSettled {
+				return skip("outcome_saved")
+			}
+			return retryLater("outcome_unavailable")
+		}
+	}
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// A job the hub did not spawn has no stored submission: not one it carries on.

@@ -67,6 +67,7 @@ func (h *HubServer) createPoolActionLocked(ctx context.Context, exhaustion poolE
 	}}
 	if handover != nil {
 		action.Data.Kind, action.Data.Handover = poolActionKindHandover, handover
+		action.Data.TargetAttempt = handover.Attempt
 		action.Data.Text = poolExhaustionText(exhaustion, task.Job)
 	}
 	// The per-job lock also guards reassignment; mu is needed only to take the
@@ -419,14 +420,25 @@ func (h *HubServer) reconcilePoolActionStep(ctx context.Context, action poolActi
 	if action.Data.Kind == poolActionKindHandover && args.Handover == nil {
 		return errors.New("handover close guard unavailable")
 	}
+	// A close the node journaled as closing is settled by repeating its request:
+	// the node answers it from the journal (closing becomes unknown) and never
+	// starts a close for an entry it holds. A node that came back without
+	// stop-sequence support rejects the fence field, so the repeat omits it, for
+	// that case only: nothing here can start an unfenced close (hk 5780 review).
+	send := *args
+	if send.StopSeq != nil && status.State == fleet.CloseOpClosing {
+		if connected, has := h.nodeCapability(action.Node, hubCapabilityCloseOpStopSeq); connected && !has {
+			send.StopSeq = nil
+		}
+	}
 	// Once the action is stored, I1 prevents its ownership changing. An absent
 	// in-memory job after hub restart does not prevent replay of this binding.
 	allowed := func() bool {
 		job, node := h.jobs[action.Job], h.nodes[action.Node]
-		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps] && (action.Data.Kind != poolActionKindHandover || node.capabilities[hubCapabilityHandoverCheck]) && (args.StopSeq == nil || node.capabilities[hubCapabilityCloseOpStopSeq])
+		return (job == nil || job.Node == action.Node && job.Epoch == action.Epoch) && node != nil && node.agent != nil && node.capabilities[hubCapabilityCloseOps] && (action.Data.Kind != poolActionKindHandover || node.capabilities[hubCapabilityHandoverCheck]) && (send.StopSeq == nil || node.capabilities[hubCapabilityCloseOpStopSeq])
 	}
 	var result nodePaneCloseOpResult
-	if !h.nodeCallWhere(ctx, action.Node, nodeCommandPaneCloseOp, *args, hubNodeCommandWait, &result, allowed) {
+	if !h.nodeCallWhere(ctx, action.Node, nodeCommandPaneCloseOp, send, hubNodeCommandWait, &result, allowed) {
 		return errors.New("close ownership, capability or answer unavailable")
 	}
 	switch result.Outcome {

@@ -65,36 +65,7 @@ func (h *HubServer) handOverAnnouncedImplementer(ctx context.Context, machine st
 		announced.fileLoss(ctx)
 		return quotaStopFiled
 	}
-	// A resend finds its own outcome before anything is probed or prepared: the
-	// worktree may have changed since the first delivery (an owner who read the
-	// refusal committed and pushed), and a second answer would contradict it.
-	// The refusal is a row of its own, so it is found whatever the owner-notice
-	// policy files in the lane inbox.
-	noticeID := poolStopNoticeID(holder.Job, event.EventID)
 	exhaustion := poolExhaustion{Cause: poolCauseQuotaStop, StopSeq: stopSeq, StopEvent: event.EventID}
-	if event.EventID != "" {
-		rows, err := h.inbox.store.poolActionsOf(ctx, holder.Job)
-		if err != nil {
-			return quotaStopRetry
-		}
-		for _, row := range rows {
-			handover := row.Data.Handover
-			if handover == nil || handover.StopEvent != event.EventID {
-				continue
-			}
-			switch row.Data.Kind {
-			case poolActionKindHandover:
-				return quotaStopSettled
-			case poolActionKindRefusal:
-				// The refusal is stored; the notice is repeated until it is owned.
-				exhaustion.Pool = handover.Pool
-				if result := h.notifyPoolExhaustedAs(ctx, exhaustion, holder, role, handover.Reason, noticeID); result.acted() {
-					return quotaStopSettled
-				}
-				return quotaStopRetry
-			}
-		}
-	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
 		return quotaStopRetry
@@ -136,7 +107,16 @@ func (h *HubServer) handOverAnnouncedImplementer(ctx context.Context, machine st
 		// Another job holds the task now; replacing this one would start a second
 		// implementer beside it.
 		result = h.refuseAnnouncedHandover(ctx, exhaustion, holder, role, "task_rebound")
+	} else if requestID, err := fleet.NewRequestID(); err != nil {
+		return quotaStopRetry
 	} else {
+		// The attempt the stop is admitted in binds the row's close: a job
+		// re-prompted since has moved on, and its close is released, not run.
+		var status nodeCloseOpStatusResult
+		if !h.nodeCall(ctx, machine, nodeCommandPaneCloseStatus, nodeCloseOpRefArgs{RequestID: requestID, Job: holder.Job}, hubNodeCommandWait, &status) || status.Attempt == "" {
+			return quotaStopRetry
+		}
+		exhaustion.StopAttempt = status.Attempt
 		result = h.queueImplementerHandover(ctx, exhaustion, holder, prior, app, record, taskID, true)
 	}
 	h.logger.Info("quota-stop implementer hand-over", "job", event.JobID, "node", machine, "action", result.action, "reason", result.why)
@@ -164,4 +144,39 @@ func (h *HubServer) handoverRowOwns(ctx context.Context, job, stopEvent string) 
 		}
 	}
 	return false
+}
+
+// savedStopOutcome resolves the durable outcome of an announcement (its producer
+// event id) before anything about the node or its capabilities is consulted: a
+// stop that has its hand-over row or its stored refusal never takes a fallback
+// chosen from today's capabilities (hk 5780 review). A hand-over row owns the
+// receipt. A stored refusal owns the decision, and its notice is finished (the
+// same idempotent notice) before the receipt. found is false for a stop with no
+// saved outcome. The caller holds the job's lock.
+func (h *HubServer) savedStopOutcome(ctx context.Context, event hubJobEventPayload) (outcome quotaStopOutcome, found bool) {
+	if event.EventID == "" {
+		return quotaStopRetry, false
+	}
+	rows, err := h.inbox.store.poolActionsOf(ctx, event.JobID)
+	if err != nil {
+		return quotaStopRetry, true
+	}
+	for _, row := range rows {
+		handover := row.Data.Handover
+		if handover == nil || handover.StopEvent != event.EventID {
+			continue
+		}
+		switch row.Data.Kind {
+		case poolActionKindHandover:
+			return quotaStopSettled, true
+		case poolActionKindRefusal:
+			task := hubSpawnTask{Job: event.JobID, Owner: row.Data.Owner}
+			exhaustion := poolExhaustion{Pool: handover.Pool, Cause: handover.Cause, StopSeq: handover.StopSeq, StopEvent: handover.StopEvent}
+			if result := h.notifyPoolExhaustedAs(ctx, exhaustion, task, "implementer", handover.Reason, poolStopNoticeID(event.JobID, event.EventID)); result.acted() {
+				return quotaStopSettled, true
+			}
+			return quotaStopRetry, true
+		}
+	}
+	return quotaStopRetry, false
 }

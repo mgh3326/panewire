@@ -118,6 +118,10 @@ type nodePaneCloseArgs struct {
 	// never looked up under the label) and its herdr session is used for
 	// every read and the close. Never on the wire.
 	target *nodeCloseTarget
+	// guardedHandover marks a close operation that carries the hub's hand-over
+	// guard (worktree and checkout re-proved inside the close). With stop_seq it
+	// may close an implementer blocked on its limit dialog (hk 5780). Never on the wire.
+	guardedHandover bool
 }
 
 type nodePaneCaptureArgs struct {
@@ -1262,7 +1266,12 @@ func (client *HubClient) nodePaneCloseWith(ctx context.Context, args nodePaneClo
 		} else {
 			role, err = client.nodeJobRole(args.Name)
 		}
-		if err != nil || role != "reviewer" {
+		// A reviewer, or an implementer the hub hands over from its limit dialog:
+		// only through the guarded close, and only at the announced sequence
+		// (checked below, and again at the close boundary). Anything else blocked
+		// may be waiting on an ESC answer (hk 3315).
+		handoverDialog := role == "implementer" && args.guardedHandover && args.StopSeq != nil
+		if err != nil || role != "reviewer" && !handoverDialog {
 			return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 		}
 	}

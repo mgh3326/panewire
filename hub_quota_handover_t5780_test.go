@@ -18,6 +18,10 @@ import (
 // the legacy close and not nothing. These tests drive the real job.lost frame or
 // the replacement worker with no exhausted-pool reading anywhere.
 
+// announcedCloseStatus is the node's pane.close_status for a job with no close
+// request: the attempt the hub binds an announced stop's close to.
+var announcedCloseStatus = map[string]any{"state": nodeCloseOpNone, "released": false, "settled": false, "attempt": "00002-job.spawned.json"}
+
 // announcedFixture is a hand-over fixture whose node can close a pane at a stop's
 // own sequence (pane_close_op_stop_seq_v1).
 func announcedFixture(t *testing.T, job string) *quotaReplaceFixture {
@@ -98,6 +102,8 @@ func answerHandoverCheck(t *testing.T, f *quotaReplaceFixture, patch map[string]
 		switch string(command["op"]) {
 		case `"agents.list"`:
 			roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+		case `"pane.close_status"`:
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": announcedCloseStatus})
 		case `"worktree.handover_check"`:
 			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": patch})
 			answered = true
@@ -125,7 +131,9 @@ func TestAnnouncedImplementerScreenStopIsHandedOverThroughTheGuardedPath_t5780(t
 	if action.Data.Kind != poolActionKindHandover || handover == nil || handover.Job != next || handover.Branch != "wk/task" || handover.Submitted {
 		t.Fatalf("row=%+v", action)
 	}
-	if action.Data.EndReason != "quota_stop pool=claude replaced_by="+next {
+	// An implementer's pointer, as the requester contract and the legacy
+	// replacement write it (hk 5780 review).
+	if action.Data.EndReason != "quota_stop pool=claude handed_over_to="+next {
 		t.Fatalf("end_reason=%q", action.Data.EndReason)
 	}
 	// The close is fenced to the pane state the stop was observed in (seq=7).
@@ -268,7 +276,7 @@ func TestPrepareHandoverTellsAFailedSuccessorLookupFromAnExistingSuccessor_t5780
 	record, _, _ := (&fleet.App{JobStore: f.jobs}).ExistingJob(t.Context(), job)
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, refusal := f.hub.prepareHandover(canceled, poolExhaustion{Pool: "claude", Cause: poolCauseQuotaStop}, f.holder, prior, record, job+"-q1", "42"); refusal != handoverSuccessorUnavailable {
+	if _, refusal, _ := f.hub.prepareHandover(canceled, poolExhaustion{Pool: "claude", Cause: poolCauseQuotaStop}, f.holder, prior, record, job+"-q1", "42"); refusal != handoverSuccessorUnavailable {
 		t.Fatalf("a failed lookup refused as %q, want %q", refusal, handoverSuccessorUnavailable)
 	}
 	other, otherJob := parkRequest(401)
@@ -276,7 +284,7 @@ func TestPrepareHandoverTellsAFailedSuccessorLookupFromAnExistingSuccessor_t5780
 		t.Fatal(err)
 	}
 	_ = otherJob
-	if _, refusal := f.hub.prepareHandover(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseQuotaStop}, f.holder, prior, record, job+"-q1", "42"); refusal != "successor_name_collision" {
+	if _, refusal, _ := f.hub.prepareHandover(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseQuotaStop}, f.holder, prior, record, job+"-q1", "42"); refusal != "successor_name_collision" {
 		t.Fatalf("an unrelated job on the next name refused as %q, want successor_name_collision", refusal)
 	}
 }
@@ -458,6 +466,8 @@ func answerCheckThenSnapshot(t *testing.T, f *quotaReplaceFixture, snapshot map[
 		switch string(command["op"]) {
 		case `"agents.list"`:
 			roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+		case `"pane.close_status"`:
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": announcedCloseStatus})
 		case `"worktree.handover_check"`:
 			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": handoverDirty}})
 			finished = snapshot == nil
@@ -514,6 +524,235 @@ func TestSnapshotOfAScreenStopIsBoundToTheStopSequence_t5780(t *testing.T) {
 		lines := ownerLines(t, f.hub, "pool-exhausted:")
 		if len(lines) != 1 || !strings.Contains(lines[0], "snapshot_stop_seq_unsupported") {
 			t.Fatalf("owner decisions=%q", lines)
+		}
+	})
+}
+
+// hk 5780 review: the quota manager hands over an implementer sitting on a blocked
+// limit dialog. Its row is not held for an idle pane: a pane blocked on the stop's
+// own dialog is the stop, closed only because the close is fenced to its sequence.
+func TestBlockedImplementerAtTheStopIsClosedNotHeldForIdle_t5780(t *testing.T) {
+	const job = "pw-dialog-5780"
+	f := announcedFixture(t, job)
+	queueAnnouncedRow(t, f, "ev-1")
+	action := readOnlyPoolAction(t, f.hub)
+	if err := runPoolActionStep(t, f.hub, f.node, action,
+		poolStatus(nodeCloseOpNone, false, false),
+		idlePane(job, "/work/project.checkout", "blocked"),
+		idlePane(job, "/work/project.checkout", "blocked"),
+		poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpClosed, "replayed": false}},
+	); err != nil {
+		t.Fatalf("a blocked pane at the stop was held for idle: %v", err)
+	}
+	row := readOnlyPoolAction(t, f.hub)
+	if args := row.Data.Args; args == nil || args.AgentStatus != "blocked" || args.StopSeq == nil || *args.StopSeq != 7 || args.Handover == nil {
+		t.Fatalf("close args=%+v, want the blocked pane, the sequence and the guard", row.Data.Args)
+	}
+}
+
+// hk 5780 review: an announcement with a saved outcome is answered from it before
+// the node's capabilities are consulted. A refusal was stored, its owner notice
+// never went out, and the node came back as an older binary: the replay finishes
+// the notice and settles. It is not filed as a plain loss for a pane that is still
+// open, nor acknowledged by the ordinary relay with the decision unsent.
+func TestSavedRefusalIsReplayedBeforeAnyCapabilityFallback_t5780(t *testing.T) {
+	const job = "pw-saved-5780"
+	f := announcedFixture(t, job)
+	row := poolAction{ID: "refusal-row-1", Job: job, Node: "machine-a", Epoch: 1, Phase: poolActionDone, Data: poolActionData{
+		Owner: "parent", Kind: poolActionKindRefusal,
+		Handover: &poolHandover{Pool: "claude", Cause: poolCauseQuotaStop, StopEvent: "ev-1", Outcome: handoverFailed, Reason: handoverDirty},
+	}}
+	if err := f.hub.inbox.store.insertPoolAction(t.Context(), row, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.mu.Lock()
+	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseOpStopSeq)
+	f.hub.mu.Unlock()
+	settled, filed := deliver(t, f, stopEvent(job, "ev-1"), nil)
+	if settled != 1 || filed != 0 {
+		t.Fatalf("settled=%d filed=%d, want the saved refusal answered and no loss filed", settled, filed)
+	}
+	if lines := ownerLines(t, f.hub, "pool-exhausted:"); len(lines) != 1 || !strings.Contains(lines[0], handoverDirty) {
+		t.Fatalf("the stored refusal's notice was not finished: %q", lines)
+	}
+}
+
+// hk 5780 review: unavailable evidence is not a refusal. A pane list cut short, or a
+// node that does not answer the worktree check (it dropped, or timed out), leaves
+// the announcement retryable with no final row and no notice; the same stop then
+// hands over once the node answers.
+func TestAnnouncedStopTransportFailuresStayRetryable_t5780(t *testing.T) {
+	const job = "pw-transport-5780"
+	f := announcedFixture(t, job)
+	serveUntil := func(stopAt string, reply func(command map[string]json.RawMessage)) func() {
+		return func() {
+			for {
+				command := nodeCommandRead(t, f.node)
+				op := strings.Trim(string(command["op"]), `"`)
+				switch op {
+				case "pane.close_status":
+					nodeCommandReplyTo(t, f.node, command, map[string]any{"result": announcedCloseStatus})
+				case "agents.list":
+					if stopAt == op {
+						reply(command)
+						return
+					}
+					roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+				case "worktree.handover_check":
+					reply(command)
+					return
+				default:
+					t.Fatalf("unexpected node command %s", op)
+				}
+			}
+		}
+	}
+	// A pane list cut short (panes_ok false): the pane is not known gone.
+	settled, filed := deliver(t, f, stopEvent(job, "ev-1"), serveUntil("agents.list", func(command map[string]json.RawMessage) {
+		roleReplyPanes(t, f.node, command, []nodeAgentRow{}, false)
+	}))
+	if settled != 0 || filed != 0 {
+		t.Fatalf("a cut pane list: settled=%d filed=%d, want the stop left with its node", settled, filed)
+	}
+	// The worktree check that gets no answer.
+	settled, filed = deliver(t, f, stopEvent(job, "ev-1"), serveUntil("", func(command map[string]json.RawMessage) {
+		nodeCommandReplyTo(t, f.node, command, map[string]any{"error": "herdr_failed"})
+	}))
+	if settled != 0 || filed != 0 {
+		t.Fatalf("an unanswered worktree check: settled=%d filed=%d", settled, filed)
+	}
+	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
+	if len(rows) != 0 {
+		t.Fatalf("unavailable evidence was stored as an outcome: %+v", rows)
+	}
+	if lines := ownerLines(t, f.hub, "pool-exhausted:"); len(lines) != 0 {
+		t.Fatalf("the owner was told of a refusal that was never proved: %q", lines)
+	}
+	// The same stop, once the node answers, hands over.
+	deliver(t, f, stopEvent(job, "ev-1"), func() { answerHandoverCheck(t, f, handoverReadReply(job)) })
+	if rows := handoverRowsOf(t, f, job); len(rows) != 1 {
+		t.Fatalf("the retried stop was not handed over: %+v", rows)
+	}
+}
+
+// hk 5780 review: the row's close is bound to the attempt the stop was admitted
+// in. A job re-prompted since has another attempt, and its close is released (the
+// owner told), not run.
+func TestHandoverCloseIsBoundToTheAdmittedAttempt_t5780(t *testing.T) {
+	const job = "pw-attempt-5780"
+	f := announcedFixture(t, job)
+	queueAnnouncedRow(t, f, "ev-1")
+	action := readOnlyPoolAction(t, f.hub)
+	if action.Data.TargetAttempt != "00002-job.spawned.json" || action.Data.Handover.Attempt != "00002-job.spawned.json" {
+		t.Fatalf("row not bound to the admitted attempt: target=%q", action.Data.TargetAttempt)
+	}
+	moved := poolActionReply{op: nodeCommandPaneCloseStatus, result: map[string]any{"state": nodeCloseOpNone, "released": false, "settled": false, "attempt": "00009-job.reprompted.json"}}
+	if err := runPoolActionStep(t, f.hub, f.node, action, moved, idlePane(job, "/work/project.checkout", "idle"), releasedReply); err != nil {
+		t.Fatal(err)
+	}
+	if rows := handoverRowsOf(t, f, job); len(rows) != 1 || rows[0].Phase != poolActionRefused {
+		t.Fatalf("the re-prompted job's close was not released: %+v", rows)
+	}
+}
+
+// hk 5780 review: a close the node journaled as closing, on a node that came back
+// without stop-sequence support, is recovered by repeating its request without the
+// fence field: the node answers a request it holds from its journal (closing
+// becomes unknown) and starts no close for it. The row keeps its stored fence and
+// the job stays fenced until that settles.
+func TestClosingJournalIsRecoveredAcrossARollback_t5780(t *testing.T) {
+	const job = "pw-closing-5780"
+	f := announcedFixture(t, job)
+	queueAnnouncedRow(t, f, "ev-1")
+	action := readOnlyPoolAction(t, f.hub)
+	if err := runPoolActionStep(t, f.hub, f.node, action,
+		poolStatus(nodeCloseOpNone, false, false),
+		idlePane(job, "/work/project.checkout", "idle"),
+		idlePane(job, "/work/project.checkout", "idle"),
+		poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpClosed, "replayed": false}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.mu.Lock()
+	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseOpStopSeq)
+	f.hub.mu.Unlock()
+	action = readOnlyPoolAction(t, f.hub)
+	if action.Data.Args == nil || action.Data.Args.StopSeq == nil {
+		t.Fatalf("the stored close lost its fence: %+v", action.Data.Args)
+	}
+	done := make(chan error, 1)
+	go func() { done <- f.hub.reconcilePoolAction(t.Context(), action) }()
+	status := nodeCommandRead(t, f.node)
+	if string(status["op"]) != `"pane.close_status"` {
+		t.Fatalf("first command %s", status["op"])
+	}
+	nodeCommandReplyTo(t, f.node, status, map[string]any{"result": map[string]any{"state": fleet.CloseOpClosing, "released": false, "settled": false, "attempt": "00002-job.spawned.json"}})
+	repeat := nodeCommandRead(t, f.node)
+	if string(repeat["op"]) != `"pane.close_op"` || strings.Contains(string(repeat["args"]), "stop_seq") {
+		t.Fatalf("the repeat for the closing journal is %s %s, want pane.close_op without stop_seq", repeat["op"], repeat["args"])
+	}
+	nodeCommandReplyTo(t, f.node, repeat, map[string]any{"result": map[string]any{"outcome": fleet.CloseOpUnknown, "replayed": false}})
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if after := readOnlyPoolAction(t, f.hub); after.Data.Args == nil || after.Data.Args.StopSeq == nil {
+		t.Fatalf("the saved fence was dropped: %+v", after.Data.Args)
+	}
+}
+
+// hk 5780 review: already_replaced needs the lineage the successor's claim wrote
+// (replaced_from with its reason, the owner and --parent-job), not just a name and
+// a flag, which an unrelated submission can also carry.
+func TestAlreadyReplacedNeedsClaimWrittenLineage_t5780(t *testing.T) {
+	prepare := func(t *testing.T, claim func(f *quotaReplaceFixture, row poolAction)) string {
+		const job = "pw-lineage-5780"
+		f := announcedFixture(t, job)
+		queueAnnouncedRow(t, f, "ev-1")
+		row := readOnlyPoolAction(t, f.hub)
+		prior, err := fleet.ValidateSubmission(f.holder.Request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, _, _ := (&fleet.App{JobStore: f.jobs}).ExistingJob(t.Context(), job)
+		claim(f, row)
+		_, refusal, _ := f.hub.prepareHandover(t.Context(), poolExhaustion{Pool: "claude", Cause: poolCauseQuotaStop}, f.holder, prior, record, row.Data.Handover.Job, "42")
+		return refusal
+	}
+	t.Run("a plain spawn that carries the next name", func(t *testing.T) {
+		refusal := prepare(t, func(f *quotaReplaceFixture, row poolAction) {
+			lookAlike, _ := parkRequest(402)
+			if _, _, err := f.hub.inbox.store.claimSpawn(t.Context(), lookAlike, row.Data.Handover.Job, f.holder.Owner, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if refusal != "successor_name_collision" {
+			t.Fatalf("a look-alike was taken for the hand-over's successor: %q", refusal)
+		}
+	})
+	t.Run("the successor the hand-over claimed", func(t *testing.T) {
+		refusal := prepare(t, func(f *quotaReplaceFixture, row poolAction) {
+			if _, _, err := f.hub.inbox.store.claimHandoverSuccessor(t.Context(), row.Data.Handover.Successor, row.Data.Handover.Job, row.Data.Owner, row.Data.SpawnRequest, row.Job, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if refusal != "already_replaced" {
+			t.Fatalf("the hand-over's own successor refused as %q", refusal)
+		}
+	})
+	t.Run("a successor whose lineage the claim did not write", func(t *testing.T) {
+		// Same name, owner and --parent-job, but the lineage is only derived from the
+		// job's name (the startup backfill), not written by the claim.
+		refusal := prepare(t, func(f *quotaReplaceFixture, row poolAction) {
+			task, _, err := f.hub.inbox.store.claimHandoverSuccessor(t.Context(), row.Data.Handover.Successor, row.Data.Handover.Job, row.Data.Owner, row.Data.SpawnRequest, row.Job, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), f.hub.inbox.store.q(`UPDATE spawn_operations SET replaced_reason='' WHERE request_id=?`), task.Request.RequestID); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if refusal != "successor_name_collision" {
+			t.Fatalf("a name-derived lineage was taken for the claim's: %q", refusal)
 		}
 	})
 }

@@ -213,3 +213,51 @@ func TestSnapshotArgsAcceptTheStopSequence_t5780(t *testing.T) {
 		})
 	}
 }
+
+// hk 5780 review: an implementer blocked on its limit dialog may be waiting on an
+// ESC answer, so the node closes one only through the guarded hand-over close at
+// the exact announced sequence. Without the guard (a plain close), without the
+// sequence, or at another sequence it is left alone.
+func TestCloseOpClosesABlockedImplementerOnlyForAGuardedHandoverAtTheSequence_t5780(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		seq      any
+		guarded  bool
+		closed   bool
+		paneRole string
+	}{
+		{"guarded at the sequence", 5, true, true, "implementer"},
+		{"another sequence", 3, true, false, "implementer"},
+		{"no sequence", nil, true, false, "implementer"},
+		{"no hand-over guard", 5, false, false, "implementer"},
+		{"a reviewer as before", 5, false, true, "reviewer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work, origin, commit := handoverRepo(t)
+			inbox := t.TempDir()
+			row := `{"pane_id":"w1:p1","name":"job-a","agent_status":"blocked","agent":"claude","cwd":"` + work + `","tab_id":"t1","state_change_seq":5}`
+			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(row)}, read: nodeReapScreen("Choose an option\n")}
+			client := closeOpNode(t, inbox, fake)
+			receipt, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "label": "job-a", "role": tc.paneRole, "herdr_session": "fleet", "cwd": work}})
+			if err := os.WriteFile(filepath.Join(inbox, "jobs", closeOpJob, "events", closeOpAttempt), receipt, 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := closeOpArgs("op-dialog")
+			args["cwd"] = work
+			args["agent_status"] = "blocked"
+			if tc.guarded {
+				args["handover"] = map[string]any{"origin": origin, "branch": "wk/task", "commit": commit}
+			}
+			if tc.seq != nil {
+				args["stop_seq"] = tc.seq
+			}
+			result, code := nodeRun(t, client, nodeCommandPaneCloseOp, args)
+			if code != "" {
+				t.Fatalf("code=%q result=%v", code, result)
+			}
+			if closes := fake.called("pane", "close"); tc.closed != (closes == 1) {
+				t.Fatalf("outcome=%v closes=%d, want closed=%v", result["outcome"], closes, tc.closed)
+			}
+		})
+	}
+}
