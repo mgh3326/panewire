@@ -23,9 +23,14 @@ import (
 //     on_kind "operator", on_ref "". hk dedupes an open wait on that triple, so
 //     a repeat answers the same id and can never stack a second wait.
 //   - The anchor is written to the row before the wait write (write-ahead), and
-//     the wait id after it. A 4xx refusal means hk committed nothing, so the
-//     anchor mark goes; a 5xx or transport error may have committed, so the mark
-//     stays and the next pass re-asserts the same deduped wait.
+//     the wait id after it. A 5xx or transport error may have committed, so the
+//     mark stays and the next pass re-asserts the same deduped wait. A 4xx
+//     refusal says this write committed nothing, but an earlier ambiguous write
+//     may have: the open wait is read back (GET /v1/waits, section
+//     needs_operator), kept on the row when found, and the anchor mark goes only
+//     when a complete read shows none open. A read that fails keeps the mark.
+//   - A wait id that was never confirmed is read back the same way at close;
+//     the close never writes a wait to learn it.
 //   - A wait the row holds on a superseded anchor is cleared before the new
 //     anchor's wait opens, so the need never holds two open waits.
 //   - The close runs only after anti-flap clearing confirmed the need gone
@@ -287,10 +292,7 @@ func (h *HubServer) openOneTimeWait(ctx context.Context, key oneTimeActionKey) e
 	waitID, err := h.handoffkeep.addTaskWait(ctx, anchor.ID, oneTimeWaitOperator, "", oneTimeWaitReason(key, action))
 	if err != nil {
 		if handoffkeepRefused(err) {
-			// hk committed nothing on this anchor: the mark goes.
-			if rerr := h.releaseOneTimeWait(key, anchor.ID); rerr != nil {
-				h.logOneTimeWait(key, rerr)
-			}
+			return h.settleRefusedOneTimeOpen(ctx, key, anchor.ID, err)
 		}
 		return err
 	}
@@ -299,6 +301,31 @@ func (h *HubServer) openOneTimeWait(ctx context.Context, key oneTimeActionKey) e
 	_, err = h.mutateOneTime(key, func(s *oneTimeActionState) {
 		s.WaitTaskID = anchor.ID
 		s.WaitID = waitID
+	})
+	return err
+}
+
+// settleRefusedOneTimeOpen settles an open write that hk refused with a 4xx. The
+// refusal means this write committed nothing, but an earlier write on the same
+// anchor may have, so the anchor is read before its mark goes. An open wait that
+// the read finds is recorded on the row and the need stays held. A complete
+// read with none open proves there is nothing to clear, so the mark goes and the
+// refusal is returned for the retry. A failed read keeps the mark.
+func (h *HubServer) settleRefusedOneTimeOpen(ctx context.Context, key oneTimeActionKey, taskID int64, refusal error) error {
+	waitID, found, err := h.handoffkeep.findOperatorWait(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if err := h.releaseOneTimeWait(key, taskID); err != nil {
+			return err
+		}
+		return refusal
+	}
+	_, err = h.mutateOneTime(key, func(s *oneTimeActionState) {
+		if s.WaitTaskID == taskID {
+			s.WaitID = waitID
+		}
 	})
 	return err
 }
@@ -323,20 +350,21 @@ func (h *HubServer) closeOneTimeWait(ctx context.Context, key oneTimeActionKey) 
 }
 
 // clearOneTimeWaitOn ends the wait on taskID. When the wait id was never
-// confirmed, the same deduped write names it first: a 4xx refusal means no wait
-// was ever written there, so the mark just goes; a 5xx or transport error keeps
-// the mark for the next pass. A wait or task already gone counts as done.
+// confirmed, it is read back first: a complete read with no open operator wait on
+// taskID means there is nothing to clear, so the mark just goes; a failed read
+// keeps the mark for the next pass. A wait or task already gone counts as done.
 func (h *HubServer) clearOneTimeWaitOn(ctx context.Context, key oneTimeActionKey, action string, taskID, waitID int64, note string) error {
 	if waitID == 0 {
-		id, err := h.handoffkeep.addTaskWait(ctx, taskID, oneTimeWaitOperator, "", oneTimeWaitReason(key, action))
-		switch {
-		case err == nil:
-			waitID = id
-		case handoffkeepRefused(err):
-			return h.releaseOneTimeWait(key, taskID)
-		default:
+		// Read, never write: a repeat open would create a wait for a need that
+		// holds none.
+		id, found, err := h.handoffkeep.findOperatorWait(ctx, taskID)
+		if err != nil {
 			return err
 		}
+		if !found {
+			return h.releaseOneTimeWait(key, taskID)
+		}
+		waitID = id
 	}
 	err := h.handoffkeep.clearTaskWait(ctx, taskID, waitID, note)
 	if err != nil && !errors.Is(err, errHandoffkeepWaitGone) {

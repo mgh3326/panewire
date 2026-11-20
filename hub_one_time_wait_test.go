@@ -305,8 +305,9 @@ func TestOneTimeWaitCloseResolvesUnconfirmedOpen(t *testing.T) {
 	start := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
 	cycle := oneTimeActionClearCycle
 
+	// The open commits the wait but answers 5xx, so its id stays unconfirmed.
 	fake.mu.Lock()
-	fake.waitStatus = http.StatusInternalServerError
+	fake.waitCommitStatus = http.StatusInternalServerError
 	fake.mu.Unlock()
 	h.noteReadinessActions("oci", oneTimeWaitDialog(start), start)
 	settleOneTimeNotices(t, h)
@@ -318,13 +319,16 @@ func TestOneTimeWaitCloseResolvesUnconfirmedOpen(t *testing.T) {
 		t.Fatalf("wait id recorded despite the failed write: %+v", state)
 	}
 
-	// The need clears for a full cycle while hk still fails the wait write;
-	// once hk recovers the close resolves and ends whatever wait exists.
+	// The need clears for a full cycle while hk still fails the clear; the close
+	// reads the unconfirmed wait back, and once hk recovers it ends that wait.
+	fake.mu.Lock()
+	fake.clearStatus = http.StatusInternalServerError
+	fake.mu.Unlock()
 	h.noteReadinessActions("oci", oneTimeWaitClean(start.Add(time.Minute)), start.Add(time.Minute))
 	h.noteReadinessActions("oci", oneTimeWaitClean(start.Add(time.Minute+cycle)), start.Add(time.Minute+cycle))
 	settleOneTimeNotices(t, h)
 	fake.mu.Lock()
-	fake.waitStatus = 0
+	fake.clearStatus = 0
 	fake.mu.Unlock()
 	// One more gone report re-confirms the pending close and retries it.
 	h.noteReadinessActions("oci", oneTimeWaitClean(start.Add(time.Minute+cycle+time.Minute)), start.Add(time.Minute+cycle+time.Minute))

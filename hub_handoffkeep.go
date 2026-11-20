@@ -245,16 +245,18 @@ func (c *handoffkeepRelayClient) endpoint(path string) string {
 	return target.String()
 }
 
-func (c *handoffkeepRelayClient) do(ctx context.Context, method, endpoint string, body []byte) (int, []byte, error) {
+// send starts one handoffkeep request under the client timeout. The caller reads
+// the body, then calls cancel to end the timeout.
+func (c *handoffkeepRelayClient) send(ctx context.Context, method, endpoint string, body []byte) (*http.Response, context.CancelFunc, error) {
 	requestContext, cancel := context.WithTimeout(ctx, handoffkeepTimeout)
-	defer cancel()
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
 	request, err := http.NewRequestWithContext(requestContext, method, endpoint, reader)
 	if err != nil {
-		return 0, nil, errors.New("handoffkeep request failed")
+		cancel()
+		return nil, nil, errors.New("handoffkeep request failed")
 	}
 	c.env.setAuth(request)
 	request.Header.Set("Accept", "application/json")
@@ -263,8 +265,18 @@ func (c *handoffkeepRelayClient) do(ctx context.Context, method, endpoint string
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
-		return 0, nil, errors.New("handoffkeep request failed")
+		cancel()
+		return nil, nil, errors.New("handoffkeep request failed")
 	}
+	return response, cancel, nil
+}
+
+func (c *handoffkeepRelayClient) do(ctx context.Context, method, endpoint string, body []byte) (int, []byte, error) {
+	response, cancel, err := c.send(ctx, method, endpoint, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer cancel()
 	defer response.Body.Close()
 	payload, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	return response.StatusCode, payload, nil
@@ -477,10 +489,15 @@ func (c *handoffkeepRelayClient) listRelayEvents(ctx context.Context, kind strin
 	return result.Events, nil
 }
 
-// The one-time-action operator wait (hk 5250) drives three handoffkeep
+// The one-time-action operator wait (hk 5250) drives four handoffkeep
 // routes: POST /v1/intake anchors each need to one task, POST
-// /v1/tasks/{id}/waits holds its open operator wait, and POST
-// /v1/tasks/{id}/waits/{wait}/clear ends it. docs/placement.md, "Readiness".
+// /v1/tasks/{id}/waits holds its open operator wait, POST
+// /v1/tasks/{id}/waits/{wait}/clear ends it, and GET /v1/waits reads the open
+// waits back to learn an id without writing one. docs/placement.md, "Readiness".
+
+// handoffkeepWaitsNeedsOperator is the GET /v1/waits section that lists every
+// open hand wait with on_kind "operator" (hk task_waits read, decision 402).
+const handoffkeepWaitsNeedsOperator = "needs_operator"
 
 var (
 	// errHandoffkeepTaskNotFound is a 404 not_found on a task route: the anchor
@@ -603,10 +620,191 @@ func (c *handoffkeepRelayClient) clearTaskWait(ctx context.Context, taskID, wait
 	return nil
 }
 
-// handoffkeepRefusal is a non-2xx answer to a task route. A 4xx means hk did
-// not commit the write, so the caller may retry it or drop what it recorded;
-// a 5xx or a transport error may have committed it, so the caller keeps its
-// record and retries the idempotent write (hub_one_time_wait.go).
+// findOperatorWait reads GET /v1/waits, section needs_operator, and returns the
+// lowest open operator wait id on taskID. The read has no task filter, so it
+// names every open operator wait, and it writes nothing. found is proof of
+// absence only with a nil error: a needs_operator section whose count does not
+// match its rows is an incomplete read, and it is an error.
+func (c *handoffkeepRelayClient) findOperatorWait(ctx context.Context, taskID int64) (int64, bool, error) {
+	response, cancel, err := c.send(ctx, http.MethodGet, c.endpoint("/v1/waits")+"?open=true&section="+handoffkeepWaitsNeedsOperator, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer cancel()
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, false, handoffkeepRefusal{status: response.StatusCode}
+	}
+	return scanOperatorWait(response.Body, taskID)
+}
+
+// errWaitsReadUnusable is a GET /v1/waits body this client cannot read.
+var errWaitsReadUnusable = errors.New("handoffkeep returned an unusable waits read")
+
+// waitsReadRow is one row of a GET /v1/waits section, reduced to the fields that
+// name a hand wait. Each row is decoded alone, so the section may be any size.
+type waitsReadRow struct {
+	Key    string `json:"key"`
+	TaskID int64  `json:"task_id"`
+	OnKind string `json:"on_kind"`
+}
+
+// scanOperatorWait streams a GET /v1/waits body and returns the lowest hand-wait
+// id open on taskID. The body is never buffered whole, so no unrelated section
+// size can block the lookup. Rows that are not hand waits, such as the
+// decision:<ref> rows the desk lists under needs_operator, are skipped.
+func scanOperatorWait(body io.Reader, taskID int64) (int64, bool, error) {
+	dec := json.NewDecoder(body)
+	if err := expectWaitsDelim(dec, '{'); err != nil {
+		return 0, false, err
+	}
+	var lowest int64
+	seen := false
+	for dec.More() {
+		name, err := dec.Token()
+		if err != nil {
+			return 0, false, errWaitsReadUnusable
+		}
+		if name != "sections" {
+			if err := skipWaitsValue(dec); err != nil {
+				return 0, false, err
+			}
+			continue
+		}
+		if err := expectWaitsDelim(dec, '['); err != nil {
+			return 0, false, err
+		}
+		for dec.More() {
+			key, id, err := scanWaitsSection(dec, taskID)
+			if err != nil {
+				return 0, false, err
+			}
+			if key != handoffkeepWaitsNeedsOperator {
+				continue
+			}
+			seen = true
+			if id != 0 && (lowest == 0 || id < lowest) {
+				lowest = id
+			}
+		}
+		if err := expectWaitsDelim(dec, ']'); err != nil {
+			return 0, false, err
+		}
+	}
+	if err := expectWaitsDelim(dec, '}'); err != nil {
+		return 0, false, err
+	}
+	if !seen {
+		return 0, false, errors.New("handoffkeep waits read has no needs_operator section")
+	}
+	return lowest, lowest != 0, nil
+}
+
+// scanWaitsSection reads one section object. It returns the section key and the
+// lowest hand-wait id on taskID among its rows. A needs_operator section whose
+// count does not match its rows is an incomplete read, and it is an error.
+func scanWaitsSection(dec *json.Decoder, taskID int64) (string, int64, error) {
+	if err := expectWaitsDelim(dec, '{'); err != nil {
+		return "", 0, err
+	}
+	var key string
+	count, rows := -1, 0
+	var lowest int64
+	for dec.More() {
+		field, err := dec.Token()
+		if err != nil {
+			return "", 0, errWaitsReadUnusable
+		}
+		switch field {
+		case "key":
+			if err := dec.Decode(&key); err != nil {
+				return "", 0, errWaitsReadUnusable
+			}
+		case "count":
+			if err := dec.Decode(&count); err != nil {
+				return "", 0, errWaitsReadUnusable
+			}
+		case "rows":
+			if err := expectWaitsDelim(dec, '['); err != nil {
+				return "", 0, err
+			}
+			for dec.More() {
+				var row waitsReadRow
+				if err := dec.Decode(&row); err != nil {
+					return "", 0, errWaitsReadUnusable
+				}
+				rows++
+				id, ok, err := operatorWaitRowID(row, taskID)
+				if err != nil {
+					return "", 0, err
+				}
+				if ok && (lowest == 0 || id < lowest) {
+					lowest = id
+				}
+			}
+			if err := expectWaitsDelim(dec, ']'); err != nil {
+				return "", 0, err
+			}
+		default:
+			if err := skipWaitsValue(dec); err != nil {
+				return "", 0, err
+			}
+		}
+	}
+	if err := expectWaitsDelim(dec, '}'); err != nil {
+		return "", 0, err
+	}
+	if key == handoffkeepWaitsNeedsOperator && count != rows {
+		return "", 0, errors.New("handoffkeep waits read is incomplete")
+	}
+	return key, lowest, nil
+}
+
+// operatorWaitRowID reads the wait id of a row that is an open hand wait on
+// taskID. A row is a hand wait only when its key is "wait:<id>"; a decision row
+// on the same task is not one, and it is skipped.
+func operatorWaitRowID(row waitsReadRow, taskID int64) (int64, bool, error) {
+	if row.TaskID != taskID || row.OnKind != oneTimeWaitOperator {
+		return 0, false, nil
+	}
+	digits, ok := strings.CutPrefix(row.Key, "wait:")
+	if !ok {
+		return 0, false, nil
+	}
+	id, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || id < 1 {
+		return 0, false, errWaitsReadUnusable
+	}
+	return id, true, nil
+}
+
+// expectWaitsDelim consumes the next JSON delimiter, which must be want.
+func expectWaitsDelim(dec *json.Decoder, want json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return errWaitsReadUnusable
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != want {
+		return errWaitsReadUnusable
+	}
+	return nil
+}
+
+// skipWaitsValue consumes the next JSON value without keeping it.
+func skipWaitsValue(dec *json.Decoder) error {
+	var skip json.RawMessage
+	if err := dec.Decode(&skip); err != nil {
+		return errWaitsReadUnusable
+	}
+	return nil
+}
+
+// handoffkeepRefusal is a non-2xx answer to a task route. A 4xx says this write
+// committed nothing, but an earlier ambiguous write on the same task may have, so
+// the caller reads the wait back before it drops what it recorded
+// (findOperatorWait). A 5xx or a transport error may have committed this write,
+// so the caller keeps its record and retries the idempotent write
+// (hub_one_time_wait.go).
 type handoffkeepRefusal struct{ status int }
 
 func (e handoffkeepRefusal) Error() string {

@@ -76,18 +76,27 @@ type fakeHandoffkeep struct {
 	// query string, so a test can gate calls that differ only in the query
 	// — an undelivered listing page versus a one-row re-read (#1034).
 	observeQuery func(method, path, rawQuery string)
-	// One-time-action wait model (hk 5250): POST /v1/intake anchors and
-	// POST /v1/tasks/{id}/waits[/{wait}/clear] waits. intakeStatus,
-	// waitStatus and clearStatus, when set to a non-2xx, fail that route;
-	// 0 answers success.
-	intakeStatus int
-	waitStatus   int
-	clearStatus  int
-	intakeTasks  map[string]*fakeHkAnchor
-	hkNextTaskID int64
-	hkDeadTasks  map[int64]bool
-	hkWaits      []*fakeHkWait
-	hkNextWaitID int64
+	// One-time-action wait model (hk 5250): POST /v1/intake anchors,
+	// POST /v1/tasks/{id}/waits[/{wait}/clear] waits and GET /v1/waits reads.
+	// intakeStatus, waitStatus, clearStatus and waitsStatus, when set to a
+	// non-2xx, fail that route; 0 answers success. waitCommitStatus is an
+	// ambiguous open: the wait commits, and the reply is this status.
+	intakeStatus     int
+	waitStatus       int
+	waitCommitStatus int
+	clearStatus      int
+	waitsStatus      int
+	// decisionRowTasks lists tasks that also carry an open decision request, which
+	// handoffkeep lists under needs_operator as a decision:<ref> row with
+	// on_kind operator. waitsPadBytes adds one unrelated decision row of that
+	// size ahead of the rows, so the section outgrows any fixed body cap.
+	decisionRowTasks map[int64]bool
+	waitsPadBytes    int
+	intakeTasks      map[string]*fakeHkAnchor
+	hkNextTaskID     int64
+	hkDeadTasks      map[int64]bool
+	hkWaits          []*fakeHkWait
+	hkNextWaitID     int64
 }
 
 type fakeHandoffkeepCall struct {
@@ -132,6 +141,10 @@ func newFakeHandoffkeep(t *testing.T) (*fakeHandoffkeep, *handoffkeepRelayClient
 }
 
 func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/waits" {
+		f.serveWaitsRead(w, r)
+		return
+	}
 	body := map[string]any{}
 	if raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20)); len(raw) > 0 {
 		_ = json.Unmarshal(raw, &body)
@@ -325,8 +338,12 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			open.Reason = asString(body["reason"])
 			payload := map[string]any{"id": open.ID, "task_id": taskID, "on_kind": open.OnKind, "on_ref": open.OnRef, "reason": open.Reason}
+			commitReply := f.waitCommitStatus
 			f.mu.Unlock()
-			w.WriteHeader(http.StatusOK)
+			if commitReply == 0 {
+				commitReply = http.StatusOK
+			}
+			w.WriteHeader(commitReply)
 			_ = json.NewEncoder(w).Encode(payload)
 			return
 		}
@@ -532,6 +549,41 @@ func (f *fakeHandoffkeep) allWaits() []*fakeHkWait {
 	out := make([]*fakeHkWait, len(f.hkWaits))
 	copy(out, f.hkWaits)
 	return out
+}
+
+// serveWaitsRead answers GET /v1/waits the way handoffkeep does: every section
+// is listed, and each carries its count and rows. Only the needs_operator
+// section holds the fake's open operator waits, since that is the kind a hand
+// wait with on_kind "operator" sorts into. waitsStatus fails the read.
+func (f *fakeHandoffkeep) serveWaitsRead(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	reply := f.waitsStatus
+	rows := []map[string]any{}
+	if f.waitsPadBytes > 0 {
+		rows = append(rows, map[string]any{"key": "decision:dr-pad", "task_id": int64(999999), "on_kind": "operator", "reason": strings.Repeat("x", f.waitsPadBytes), "section": "needs_operator"})
+	}
+	for taskID := range f.decisionRowTasks {
+		rows = append(rows, map[string]any{"key": "decision:dr-" + strconv.FormatInt(taskID, 10), "task_id": taskID, "on_kind": "operator", "section": "needs_operator"})
+	}
+	for _, wait := range f.hkWaits {
+		if wait.OnKind == "operator" && !wait.Cleared {
+			rows = append(rows, map[string]any{"key": "wait:" + strconv.FormatInt(wait.ID, 10), "task_id": wait.TaskID, "on_kind": wait.OnKind, "section": "needs_operator"})
+		}
+	}
+	f.mu.Unlock()
+	if reply != 0 && reply != http.StatusOK {
+		w.WriteHeader(reply)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+		return
+	}
+	sections := []map[string]any{
+		{"key": "needs_operator", "count": len(rows), "rows": rows},
+		{"key": "failed_start", "count": 0, "rows": []any{}},
+		{"key": "waiting_on", "count": 0, "rows": []any{}},
+		{"key": "idle_started", "count": 0, "rows": []any{}},
+	}
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"section": r.URL.Query().Get("section"), "sections": sections})
 }
 
 // settleOneTimeAnchor moves every anchor under ref to a settled state,
