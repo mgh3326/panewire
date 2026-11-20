@@ -36,10 +36,39 @@ var ErrUnreadable = errors.New("herdr pane get answer does not name the pane")
 // cut reply is a nonzero exit with this text on stderr and no stdout.
 var cutDiagnostic = regexp.MustCompile(`EOF while parsing [^\n]*?line \d+, column (\d+)`)
 
-// cutExit reports whether a failed herdr call failed on the CLI's boundary
-// diagnostic (see cutDiagnostic), read from the error text or from the stderr
-// that exec.Cmd.Output captures.
+// SocketCutError reports a socket reply that ended at a byte boundary and does
+// not decode: the socket reader's form of the cut that the CLI reports with
+// cutDiagnostic. Size is the byte count read before the connection ended.
+type SocketCutError struct {
+	Size int
+	Err  error
+}
+
+func (e *SocketCutError) Error() string {
+	return fmt.Sprintf("herdr socket reply cut at %d bytes: %v", e.Size, e.Err)
+}
+
+func (e *SocketCutError) Unwrap() error { return e.Err }
+
+// SocketCut returns the typed cut error for a socket reply of size bytes that
+// failed to decode with decodeErr, when IsCut reports a boundary cut; otherwise
+// nil. A reader of a socket reply calls it on the partial frame it was left with.
+func SocketCut(size int, decodeErr error) error {
+	if !IsCut(size, decodeErr) {
+		return nil
+	}
+	return &SocketCutError{Size: size, Err: decodeErr}
+}
+
+// cutExit reports whether a failed herdr call was cut: a socket reply that the
+// socket reader typed as a SocketCutError, or a CLI call that failed on the
+// boundary diagnostic (see cutDiagnostic), read from the error text or from
+// the stderr that exec.Cmd.Output captures.
 func cutExit(err error) bool {
+	var socketCut *SocketCutError
+	if errors.As(err, &socketCut) {
+		return true
+	}
 	texts := []string{err.Error()}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
