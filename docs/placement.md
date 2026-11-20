@@ -394,7 +394,9 @@ not tell a standing need again. While a need stands, the hub also holds one
 handoffkeep operator wait on an intake anchor task per (host, kind, need)
 (`hub_one_time_wait.go`): it opens once after the notice and closes after the
 anti-flap clear. The wait id is kept in the same row; a failed hk write is
-retried on later reports and never dropped. A need clears only when a
+retried on later reports and on a 30 s timer, and never dropped. A row is kept
+while its notice episode is told or it holds a wait, so a recurrence, a missing
+handoffkeep client or a rejected notice never drops a close still owed. A need clears only when a
 readiness report shows it gone and it stays gone for one full readiness cycle
 (5 minutes): a report that shows it again inside that cycle cancels the clear
 and tells nothing. A report computed before the notice cannot clear it, and a

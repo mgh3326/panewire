@@ -195,8 +195,10 @@ func TestOneTimeWaitHkFailureRetriesAndNeverBlocksSentry(t *testing.T) {
 	h.oneTimeMu.Lock()
 	state := h.oneTimeActions[key]
 	h.oneTimeMu.Unlock()
-	if state.WaitTaskID != 0 || state.WaitID != 0 {
-		t.Fatalf("wait ids recorded without a confirmed write: %+v", state)
+	// The anchor mark is written ahead of the wait write, so only a confirmed wait
+	// id counts as recorded.
+	if state.WaitID != 0 {
+		t.Fatalf("wait id recorded without a confirmed write: %+v", state)
 	}
 
 	// Intake failing is the same story on the other write: the flags land

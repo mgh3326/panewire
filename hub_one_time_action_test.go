@@ -59,6 +59,20 @@ func settleOneTimeNotices(t *testing.T, h *HubServer) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the one-time notice worker did not settle")
 	}
+	settleOneTimeWaits(t, h)
+}
+
+// settleOneTimeWaits waits until the wait worker has reconciled every need it
+// was asked to before this call. The barrier is queued behind them.
+func settleOneTimeWaits(t *testing.T, h *HubServer) {
+	t.Helper()
+	done := make(chan struct{})
+	h.addOneTimeWaitItems(nil, done)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the one-time wait worker did not settle")
+	}
 }
 
 // oneTimeMessages is the message of each Sentry event the hub sent, oldest

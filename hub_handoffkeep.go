@@ -528,7 +528,7 @@ func (c *handoffkeepRelayClient) intakeTask(ctx context.Context, source, sourceR
 		return handoffkeepTaskRef{}, err
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
-		return handoffkeepTaskRef{}, errors.New("handoffkeep rejected the task intake")
+		return handoffkeepTaskRef{}, handoffkeepRefusal{status: status}
 	}
 	var result struct {
 		Task handoffkeepTaskRef `json:"task"`
@@ -563,7 +563,7 @@ func (c *handoffkeepRelayClient) addTaskWait(ctx context.Context, taskID int64, 
 		return 0, errHandoffkeepTaskNotFound
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
-		return 0, errors.New("handoffkeep rejected the task wait")
+		return 0, handoffkeepRefusal{status: status}
 	}
 	var wait struct {
 		ID int64 `json:"id"`
@@ -598,7 +598,27 @@ func (c *handoffkeepRelayClient) clearTaskWait(ctx context.Context, taskID, wait
 		}
 	}
 	if status != http.StatusOK {
-		return errors.New("handoffkeep rejected the task wait clear")
+		return handoffkeepRefusal{status: status}
 	}
 	return nil
+}
+
+// handoffkeepRefusal is a non-2xx answer to a task route. A 4xx means hk did
+// not commit the write, so the caller may retry it or drop what it recorded;
+// a 5xx or a transport error may have committed it, so the caller keeps its
+// record and retries the idempotent write (hub_one_time_wait.go).
+type handoffkeepRefusal struct{ status int }
+
+func (e handoffkeepRefusal) Error() string {
+	return "handoffkeep refused the request: HTTP " + strconv.Itoa(e.status)
+}
+
+// handoffkeepRefused reports that hk answered 4xx, or that the task is gone,
+// so the write did not land.
+func handoffkeepRefused(err error) bool {
+	if errors.Is(err, errHandoffkeepTaskNotFound) {
+		return true
+	}
+	var refusal handoffkeepRefusal
+	return errors.As(err, &refusal) && refusal.status >= 400 && refusal.status < 500
 }
