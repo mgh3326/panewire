@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -27,8 +26,6 @@ func (f *quotaReplaceFixture) serveCommands(t *testing.T, count int) []map[strin
 				rows = []nodeAgentRow{}
 			}
 			roleReplyPanes(t, f.node, command, rows, true)
-		case `"pane.read"`:
-			f.replyPaneRead(t, command)
 		case `"pane.capture"`:
 			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}})
 		case `"pane.close"`:
@@ -41,25 +38,6 @@ func (f *quotaReplaceFixture) serveCommands(t *testing.T, count int) []map[strin
 		}
 	}
 	return commands
-}
-
-// replyPaneRead answers the hub's pane.read of the held pane: the provider's
-// limit screen while the stop stands, a finished review once the reviewer moved
-// on (f.resumed).
-func (f *quotaReplaceFixture) replyPaneRead(t *testing.T, command map[string]json.RawMessage) {
-	t.Helper()
-	if op := strings.Trim(string(command["op"]), `"`); op != "pane.read" {
-		t.Fatalf("node command %s, want the hub's pane.read of the stopped pane", op)
-	}
-	screen := "I resumed and finished the review.\n"
-	if !f.resumed {
-		b, err := os.ReadFile("testdata/quota-stop/claude.txt")
-		if err != nil {
-			t.Fatal(err)
-		}
-		screen = string(b)
-	}
-	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodePaneReadOK, "agent_status": "idle", "composer": nodeComposerEmpty, "screen_tail": screen}})
 }
 
 // quotaGiveUpNotices drains the owner lane's injections and returns the give-up
@@ -118,7 +96,7 @@ func TestFirstPromptDevinFreeLimitReviewerIsCarriedOn(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-6-p1")
 	f.stopPool = "devin-free"
 	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}
-	result, commands := f.run(t, placed, 5)
+	result, commands := f.run(t, placed, 4)
 	if !result.ok || result.job != "mwr-6-p1-q1" {
 		t.Fatalf("replacement=%+v, want mwr-6-p1-q1", result)
 	}
@@ -126,7 +104,7 @@ func TestFirstPromptDevinFreeLimitReviewerIsCarriedOn(t *testing.T) {
 	if i := indexOf(args, "--exclude-pool"); i < 0 || args[i+1] != "devin-free" {
 		t.Fatalf("the successor must not take the pool that stopped: %v", args)
 	}
-	if reason := endReasonOf(t, commands[4]); reason != "quota_stop pool=claude replaced_by=mwr-6-p1-q1" {
+	if reason := endReasonOf(t, commands[3]); reason != "quota_stop pool=claude replaced_by=mwr-6-p1-q1" {
 		t.Fatalf("end_reason=%q, want the record's pool and replaced_by last", reason)
 	}
 	time.Sleep(300 * time.Millisecond) // proves nothing more is sent to the requester
@@ -156,7 +134,7 @@ func TestGiveUpWritesTheStopsOwnPoolAndTheResetOnce(t *testing.T) {
 		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", event)
 		done <- quotaReplaceResult{job, ok}
 	}()
-	commands := f.serveCommands(t, 4) // probe, read, capture, close
+	commands := f.serveCommands(t, 3) // probe, capture, close
 	var successor hubSpawnTask
 	next, _, _ := quotaReplacementJob(f.job)
 	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
@@ -172,7 +150,7 @@ func TestGiveUpWritesTheStopsOwnPoolAndTheResetOnce(t *testing.T) {
 		t.Fatalf("a give-up reported a replacement: %+v", got)
 	}
 	want := fleet.QuotaStopEndReason("devin-free", time.Date(2026, 11, 19, 5, 59, 11, 0, time.UTC), "", "")
-	if reason := endReasonOf(t, commands[5]); reason != want || strings.Contains(reason, "replaced_by") {
+	if reason := endReasonOf(t, commands[4]); reason != want || strings.Contains(reason, "replaced_by") {
 		t.Fatalf("end_reason=%q, want %q", reason, want)
 	}
 	eventually(t, 2*time.Second, "the owner's give-up notice", func() bool { return len(quotaGiveUpNotices(f.destination)) == 1 })
@@ -238,37 +216,108 @@ func TestAnnouncedReviewerQuotaStopStartsTheReplacementAndIsNotRelayedToTheOwner
 	}
 }
 
-// hk 5690 review: a stop announced earlier whose reviewer has since resumed,
-// finished and gone idle again passes the idle probe, but its screen no longer
-// shows the limit. The hub neither closes the pane nor starts a duplicate, and
-// does not give the review up.
-func TestLateAnnouncementForAResumedReviewerClosesNothing(t *testing.T) {
-	f := newQuotaReplaceFixture(t, "reviewer", "mwr-13-p1")
-	f.resumed = true
+// hk 5690 review: the pane state the stop was observed in travels in the relayed
+// reason (seq=<n>) and fences the close on the node. The hub passes it in
+// pane.close's stop_seq and closes nothing without it being fenced.
+func TestReplacementFencesTheCloseToTheAnnouncedPaneState(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-14-p1")
+	f.hub.mu.Lock()
+	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseStopSeq] = true
+	f.hub.mu.Unlock()
+	event := relayedQuotaStop(f.job, "claude")
+	event.Reason += " seq=7"
+	go f.hub.replaceQuotaStopped(t.Context(), "machine-a", event)
+	commands := f.serveCommands(t, 3) // probe, capture, close
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(commands[2]["args"], &args); err != nil {
+		t.Fatal(err)
+	}
+	if string(args["stop_seq"]) != "7" {
+		t.Fatalf("pane.close args %s, want stop_seq 7", commands[2]["args"])
+	}
+	if seq, ok := quotaStopReasonSeq(event.Reason); !ok || seq != 7 {
+		t.Fatalf("seq=%d ok=%v", seq, ok)
+	}
+	if _, ok := quotaStopReasonSeq("quota_stop pool=claude reset_at=2026-11-19T05:59:11Z"); ok {
+		t.Fatal("a reason with no seq reads as fenced")
+	}
+}
+
+// hk 5690 review: a reviewer's job.lost frame is acknowledged to its node only
+// once the replacement is durable. While the hub is still looking at the pane
+// nothing is acknowledged; a resent (replay) announcement after a hub restart
+// starts the replacement again instead of being dropped.
+func TestReviewerAnnouncementIsAcknowledgedOnlyOnceTheReplacementIsDurable(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-15-p1")
+	acked := make(chan struct{}, 4)
+	event := relayedQuotaStop(f.job, "claude")
+	f.hub.startQuotaReplacementAck("machine-a", event, func() { acked <- struct{}{} })
+	probe := nodeCommandRead(t, f.node)
+	roleReplyPanes(t, f.node, probe, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	select {
+	case <-acked:
+		t.Fatal("acknowledged before the successor was claimed")
+	case <-time.After(300 * time.Millisecond): // proves nothing more happens: the hub is still waiting on the close
+	}
+	f.serveCommands(t, 2) // capture, close
+	next, _, _ := quotaReplacementJob(f.job)
+	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
+		_, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), next)
+		return err == nil
+	})
+	successor, _ := f.hub.inbox.store.latestSpawnForJob(t.Context(), next)
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.serveCommands(t, 1) // mark_lost
+	select {
+	case <-acked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("never acknowledged after the replacement completed")
+	}
+}
+
+// A replayed reviewer announcement (the node resent it after a hub restart) is
+// not dropped: it reaches the replacement, which is idempotent.
+func TestReplayedReviewerAnnouncementStartsTheReplacement(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-16-p1")
+	event := relayedQuotaStop(f.job, "claude")
+	raw, err := json.Marshal(map[string]any{"job_id": f.job, "epoch": 1, "owner_lane": "parent", "reason": event.Reason, "pane_id": roleHeldPane, "replay": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(t.Context(), f.node, hubClientWireEvent(hubClientEvent{Kind: "job.lost", Payload: raw})); err != nil {
+		t.Fatal(err)
+	}
+	if op := strings.Trim(string(nodeCommandRead(t, f.node)["op"]), `"`); op != "agents.list" {
+		t.Fatalf("first node command %q, want the pane probe of the replay", op)
+	}
+}
+
+// A node that cannot fence the close (no pane_close_stop_seq_v1) closes nothing
+// for a stop that carries a pane state: the watcher decides after its grace.
+func TestFencedStopOnANodeWithoutTheFenceClosesNothing(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-17-p1")
+	f.hub.mu.Lock()
+	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseStopSeq)
+	f.hub.mu.Unlock()
+	event := relayedQuotaStop(f.job, "claude")
+	event.Reason += " seq=7"
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", relayedQuotaStop(f.job, "claude"))
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", event)
 		done <- quotaReplaceResult{job, ok}
 	}()
-	commands := f.serveCommands(t, 2) // probe, read
+	commands := f.serveCommands(t, 1) // probe only
 	select {
 	case got := <-done:
 		if got.ok {
-			t.Fatalf("a resumed reviewer was replaced: %+v", got)
+			t.Fatalf("a stop that could not be fenced was replaced: %+v", got)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("the hub went on to close a pane that no longer shows the stop")
+		t.Fatal("the hub went on to close an unfenceable pane")
 	}
-	if len(commands) != 2 {
-		t.Fatalf("commands=%d, want only the probe and the read", len(commands))
-	}
-	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-13-p1-q1"); err == nil {
-		t.Fatal("a successor was claimed for a reviewer that moved on")
-	}
-	if relays := quotaGiveUpNotices(f.destination); len(relays) != 0 {
-		t.Fatalf("a recovered reviewer was given up: %+v", relays)
-	}
-	if state := f.jobs.records[f.job]["state"]; state != "spawned" {
-		t.Fatalf("the recovered reviewer's record was changed: %v", state)
+	if len(commands) != 1 {
+		t.Fatalf("commands=%d, want only the probe", len(commands))
 	}
 }

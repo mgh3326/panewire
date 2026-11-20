@@ -956,7 +956,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 // cannot, the job's watcher ends the job after its grace, without a
 // replacement. A write that fails is retried after a backoff.
 func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, reset, attempt string, now time.Time) {
-	stop := quotastop.Stop{Pool: pool}
+	stop := quotastop.Stop{Pool: pool, PaneSeq: q.observedSeq(ctx, id)}
 	if at, err := time.Parse(time.RFC3339, reset); err == nil {
 		stop.Reset = at
 	}
@@ -966,6 +966,22 @@ func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, re
 	}
 	q.update(ctx, id, "action_recorded", 1)
 	q.clearQuotaWait(ctx, pane, now)
+}
+
+// observedSeq is the herdr state_change_seq of the pane when the stop decided
+// under event id was observed, zero when the wake kept none. The announcement
+// carries it so the hub's close is fenced to that pane state (hk 5690).
+func (q *quotaStopManager) observedSeq(ctx context.Context, id string) int64 {
+	var seq int64
+	q.store.mu.Lock()
+	defer q.store.mu.Unlock()
+	if q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM idle_wake_candidates WHERE event_id=?`, id).Scan(&seq) == nil {
+		return seq
+	}
+	if q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM quota_stall_wakes WHERE event_id=?`, id).Scan(&seq) == nil {
+		return seq
+	}
+	return 0
 }
 
 // infoToOwner sends the owner one info lane event about the job notice names

@@ -336,6 +336,11 @@ func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job 
 				reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
 			}
 			reason += " pool=" + event.Payload.Pool + " reset_at=" + reset
+			if event.Payload.StateChangeSeq != 0 {
+				// The pane state the stop was observed in: the hub fences its
+				// close with it (hk 5690).
+				reason += " seq=" + strconv.FormatInt(event.Payload.StateChangeSeq, 10)
+			}
 		}
 		// The event file name is the job event's durable identity: it is
 		// unique per emission, stable across node restarts, and shared by
@@ -467,6 +472,7 @@ type hubInboxEvent struct {
 		Final          bool   `json:"final,omitempty"`
 		Pool           string `json:"pool"`
 		ResetAt        string `json:"reset_at"`
+		StateChangeSeq int64  `json:"state_change_seq"`
 		Question       string `json:"question"`
 		PR             string `json:"pr"`
 		Head           string `json:"head"`

@@ -503,6 +503,19 @@ func TestWatcherReviewerOnQuotaScreenIsAnnouncedForTheHub(t *testing.T) {
 	if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
 		t.Fatalf("quota not released: %s %v", st, pools)
 	}
+	// The end is final in the ledger (hk 5690 review): a watcher started later
+	// does not adopt the old announcement as a live hand-off and revive a job hk
+	// holds lost.
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, announced := announcedQuotaStop(j); announced {
+		t.Fatal("the settled stop is still an announced hand-off a restart would adopt")
+	}
+	if p := lostPayload(t, a); p == nil || str(p, "state_change_seq") == "" && p["state_change_seq"] == nil {
+		t.Fatalf("job.lost payload=%v, want the pane state (state_change_seq) the stop was observed in", p)
+	}
 }
 
 // A reviewer the hub replaced during the grace keeps the record the hub wrote:
@@ -898,5 +911,39 @@ func TestWatcherKeepsTheReviewerFallbackPendingUntilHkTakesTheRecord(t *testing.
 	}
 	if st, _ := ledgerState(t, a, "j"); st != "released" {
 		t.Fatalf("quota %s, want released after the record landed", st)
+	}
+}
+
+// hk 5690 review: an announcement that times out on the job's end lock is
+// retried on the next poll even though the pane's state has not changed: the
+// screen read for that state is not remembered as the stop's observation.
+func TestWatcherRetriesAnAnnouncementThatTimedOutOnTheEndLock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out the 10 s end-lock bound once")
+	}
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
+	a.QuotaHandOffGrace = QuotaStopHandOffGrace
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	unlock, err := LockJobEnd(filepath.Join(a.Jobs, "j"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The announcement waits quotaRecordLockWait for the lock and gives up; the
+	// lock is freed after that, with the pane still in the same state.
+	time.AfterFunc(quotaRecordLockWait+2*time.Second, unlock)
+	done := make(chan error, 1)
+	go func() { done <- a.watch(context.Background(), []string{"j"}) }()
+	select {
+	case e := <-done:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(40 * time.Second): // real time: the lock bound is real
+		t.Fatal("the watcher never finished")
+	}
+	// The announcement, retried after the lock was freed, reached the ledger and
+	// the grace then ended the job.
+	if p := lostPayload(t, a); p == nil || str(p, "reason") != "quota_stop" {
+		t.Fatalf("job.lost payload=%v, want the retried announcement", p)
 	}
 }

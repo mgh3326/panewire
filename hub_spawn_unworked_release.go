@@ -95,11 +95,27 @@ func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name
 	return h.closeHeldPaneAfter(ctx, holder, name, row, questionJob, nil)
 }
 
+// closeHeldPaneStopped is closeHeldPane for a pane stopped on a provider limit:
+// the node closes it only while it is still in the pane state the stop was
+// observed in (stopSeq, hk 5690), so a reviewer that resumed and went idle again
+// is never closed on a late announcement. A node that cannot fence the close
+// closes nothing.
+func (h *HubServer) closeHeldPaneStopped(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string, stopSeq *int64) (bool, string) {
+	if stopSeq != nil && !h.nodeHasCapability(spawnHolderHost(holder), hubCapabilityCloseStopSeq) {
+		return false, "stop_seq_unsupported"
+	}
+	return h.closeHeldPaneFenced(ctx, holder, name, row, questionJob, nil, stopSeq)
+}
+
 // closeHeldPaneAfter is closeHeldPane with beforeClose run once the screen is
 // saved and immediately before the pane.close request goes out: the step that
 // must know a later "pane gone" is its own close writes its intent there, so a
 // stop during the capture leaves none. An error from it closes nothing.
 func (h *HubServer) closeHeldPaneAfter(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string, beforeClose func() error) (bool, string) {
+	return h.closeHeldPaneFenced(ctx, holder, name, row, questionJob, beforeClose, nil)
+}
+
+func (h *HubServer) closeHeldPaneFenced(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string, beforeClose func() error, stopSeq *int64) (bool, string) {
 	machine := spawnHolderHost(holder)
 	// An older node decodes pane.close strictly and would refuse the whole
 	// call, and closing without question_job would drop the open-question
@@ -116,7 +132,7 @@ func (h *HubServer) closeHeldPaneAfter(ctx context.Context, holder hubSpawnTask,
 		return false, "intent_unwritten"
 	}
 	var closed nodePaneCloseResult
-	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd, AllowUnnamed: row.Name == "", QuestionJob: questionJob}
+	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd, AllowUnnamed: row.Name == "", QuestionJob: questionJob, StopSeq: stopSeq}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) {
 		return false, "close_unreadable"
 	}

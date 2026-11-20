@@ -443,6 +443,9 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						// up closing nothing hands it back to this path.
 						continue
 					}
+					if current.StateChangeSeq != nil {
+						credit.PaneSeq = *current.StateChangeSeq
+					}
 					switch err := a.quotaStopAnnounce(ctx, j, credit); {
 					case errors.Is(err, errQuotaStopSuperseded):
 						// The hub ended the job on its posted result: no hand-over
@@ -603,6 +606,9 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						case reviewerHandOffEnded:
 							return nil
 						case reviewerHandOffRetry:
+							// The screen was read and cached for this pane state: look
+							// again next poll, or an unchanged stop is never retried.
+							screenRead = quotaStopWatch{}
 							if err := a.Sleep(ctx, 5*time.Second); err != nil {
 								return err
 							}
@@ -641,6 +647,9 @@ func (a *App) watch(ctx context.Context, args []string) error {
 						case reviewerHandOffEnded:
 							return nil
 						case reviewerHandOffRetry:
+							// The screen was read and cached for this pane state: look
+							// again next poll, or an unchanged stop is never retried.
+							screenRead = quotaStopWatch{}
 							if err := a.Sleep(ctx, 5*time.Second); err != nil {
 								return err
 							}

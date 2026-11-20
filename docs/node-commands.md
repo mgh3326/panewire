@@ -148,6 +148,14 @@ quota-stop closes — takes that hold on an old node, so during a rolling
 upgrade those releases wait for the node rather than close unguarded; callers
 that pass no job are unaffected.
 
+`stop_seq` (hk 5690) is the herdr `state_change_seq` a provider-limit stop was
+observed in, which the announcement carries (docs/quota-stop.md, "Carrying a stop
+on"). The node compares it with the first guarded look, taken after the hub's
+capture, and answers `pane-changed` for a pane in any other state: a reviewer that
+resumed and went idle again is never closed on a late announcement. The hub sends
+it only to a node that advertised `pane_close_stop_seq_v1` and closes nothing on
+a fenced stop for any other node.
+
 With `question_job`, the node makes one more decision at that same point, from
 the node's own files rather than from a copy another process wrote earlier: it
 reads the job's ledger for the pane and the start of its current attempt, then

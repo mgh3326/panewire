@@ -294,6 +294,9 @@ func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
 	if !stop.CreditExhaustedAt.IsZero() {
 		payload["credit_exhausted_at"] = stop.CreditExhaustedAt.UTC().Format(time.RFC3339Nano)
 	}
+	if stop.PaneSeq != 0 {
+		payload["state_change_seq"] = stop.PaneSeq
+	}
 	return payload
 }
 
@@ -599,8 +602,21 @@ func (a *App) quotaStopFinish(ctx context.Context, j Job, stop quotastop.Stop, e
 			return e
 		}
 	}
+	if !emit {
+		// The announced stop ends here, with the lost record held by hk (written
+		// by this watcher or by the hub). Say so in the ledger: without it the
+		// announcement stays the job's newest end, a restarted watcher adopts it
+		// as a live hand-off and a pane that moved on would revive a job hk holds
+		// lost (hk 5690 review). Local only, nothing is relayed.
+		if e := a.event(ctx, j.ID, quotaSettledKind, map[string]any{"pane_id": j.Pane, "pool": stop.Pool}); e != nil {
+			return e
+		}
+	}
 	return a.releaseQuota(ctx, j)
 }
+
+// quotaSettledKind marks an announced quota stop whose end is final.
+const quotaSettledKind = "job.quota_stop_settled"
 
 // A reviewer's quota stop is ended through a durable close intent. The intent
 // is recorded before the first hk write, with the stop and the exact end_reason
@@ -856,6 +872,9 @@ const (
 // the hand-off the watcher then keeps: the announced stop, the grace's end and
 // the pane state the stop was read in. A zero grace expires at the next poll.
 func (a *App) handOffReviewerStop(ctx context.Context, j Job, stop quotastop.Stop, ag Agent) (quotaHandOff, reviewerHandOffOutcome, error) {
+	if ag.StateChangeSeq != nil {
+		stop.PaneSeq = *ag.StateChangeSeq
+	}
 	switch err := a.quotaStopAnnounce(ctx, j, stop); {
 	case errors.Is(err, errQuotaStopSuperseded):
 		// The hub ended the job on its posted result: nothing to hand over.

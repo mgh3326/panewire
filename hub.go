@@ -1683,17 +1683,26 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			// A reviewer's announced quota stop is a control event (hk 5690): the
 			// hub carries the review on, and the requester hears only a give-up.
 			// Filing it as a loss would tell the owner of a carry-over that
-			// succeeds, so it is acknowledged here and never relayed.
+			// succeeds, so it is never relayed. Its node's outbox is acknowledged
+			// only once the replacement is durable (the successor claimed, or the
+			// stop settled with nothing more to do): a hub that exits before that
+			// leaves the row unacknowledged, and the node's resend after the
+			// restart starts the replacement again.
 			control := message.Kind == "job.lost" && !event.Final && h.reviewerQuotaAnnouncement(ctx, event)
-			if cooled && !validLaneReference(event.OwnerLane) || control {
+			persisted := hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID}
+			if cooled && !validLaneReference(event.OwnerLane) {
 				// This acknowledges in-memory cooling, not durable relay persistence.
-				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
+				agent.queuePersisted(persisted)
 			}
 			if !control {
 				h.relayJobEventFromContext(ctx, machineID, message.Kind, event)
 			}
-			if message.Kind == "job.lost" && !event.Replay {
-				h.startQuotaReplacement(machineID, event)
+			if message.Kind == "job.lost" && (!event.Replay || control) {
+				var settled func()
+				if control {
+					settled = func() { agent.queuePersisted(persisted) }
+				}
+				h.startQuotaReplacementAck(machineID, event, settled)
 			}
 		}
 		if message.Kind == "lane.event" {

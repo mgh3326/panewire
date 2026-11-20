@@ -21,6 +21,11 @@ type Stop struct {
 	// but not the rung that drew it (Devin's request rate limit, hk 4644):
 	// the caller names the pool from the running profile instead.
 	PoolFromProfile bool
+	// PaneSeq is the herdr state_change_seq of the pane when the stop was
+	// observed, zero when unknown. The announcement carries it so the node can
+	// refuse to close a pane that left that state (hk 5690). It is not part of
+	// what a screen shows and no classifier sets it.
+	PaneSeq int64
 }
 
 // SamePool reports whether pool names this stop's pool. A stop whose pool the

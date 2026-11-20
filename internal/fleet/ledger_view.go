@@ -109,6 +109,10 @@ func (v *ledgerView) apply(ev Event) {
 		v.Ended, v.closed, v.quota, v.Settled = "", false, nil, false
 	case "job.completed", "job.joined", "job.handed_off":
 		v.Ended, v.closed = ev.Kind, true
+	case quotaSettledKind:
+		// An announced quota stop ended with hk's lost record: nothing is left
+		// to hand over, and the stop is no hand-off to adopt again.
+		v.closed, v.quota = true, nil
 	case "job.completion", eventRecordSettled, "job.escalate":
 		// Ends for quota actions that the watcher still reads as a live run:
 		// report recovery and credit publication follow them.

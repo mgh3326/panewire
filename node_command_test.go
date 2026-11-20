@@ -642,3 +642,34 @@ func TestNodeCommandPaneCloseRechecksComposer(t *testing.T) {
 		})
 	}
 }
+
+// hk 5690 review: a close fenced to the pane state a quota stop was observed in
+// closes only a pane still in that state. A reviewer that resumed and went idle
+// again has a newer sequence, so a late announcement cannot close it; the same
+// pane in the observed state, and a close with no fence, close as before.
+func TestNodeCommandPaneCloseFencedToTheStopsPaneState(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		seq     any
+		outcome string
+	}{
+		{"still in the observed state", 5, nodePaneClosed},
+		{"resumed and idle again", 3, nodePaneChanged},
+		{"no fence", nil, nodePaneClosed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := map[string]any{"pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a"}
+			if test.seq != nil {
+				args["stop_seq"] = test.seq
+			}
+			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5)), nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5))}, read: nodeReapScreen("❯ ")}
+			result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, args)
+			if code != "" || result["outcome"] != test.outcome {
+				t.Fatalf("result=%v code=%q, want %s", result, code, test.outcome)
+			}
+			if closes := fake.called("pane", "close"); (test.outcome == nodePaneClosed) != (closes == 1) {
+				t.Fatalf("outcome=%s but closes=%d", test.outcome, closes)
+			}
+		})
+	}
+}
