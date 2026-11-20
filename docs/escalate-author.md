@@ -99,6 +99,10 @@ event). So the step looks at the pane, not at the record's state:
   activates only while hk's task still names the author and is open; a task
   another job took over, or a closed one, releases the stage without
   dispatching it, and an unreadable task keeps it.
+- A node that advertises `ladder_close_v1` closes the pane through a durable
+  node operation instead of the marker; see
+  [The close operation](#the-close-operation). A node that does not keeps the
+  marker path above, unchanged.
 - Both the first call and every recovery read hk's live task binding
   (`refs.job_id`): a task that no longer names the author is `job_mismatch` and
   a closed one `task_closed`, with the pane left open.
@@ -166,6 +170,39 @@ checkout and its pane. It:
 Quota can change after the plan; a refusal during placement after close
 reports the ended author. An unknown pane or placement result is `pending`;
 it is not reported as a successful escalation.
+
+## The close operation
+
+On a node that advertises `ladder_close_v1` in hello, step 4's pane close is one
+durable node operation (hk 5676), so the hub reads what the node did instead of
+inferring it from a pane that is gone. Contract: [node-commands.md](node-commands.md#ladder-close-paneladder_close).
+
+- The operation is the staged successor's request id, bound to the predecessor
+  job, the node, the hub's ownership epoch for the job, the predecessor's spawn
+  attempt and the pane. The staged row records that it is bound to a node
+  operation before the request is sent (the same row stamp as the marker, with
+  the opposite sign, so a marker-path reader never mistakes one for the other).
+- The node runs `pane.close`'s own guards (idle status, empty composer, open
+  question) and writes one record per request id: `closing` before the close,
+  then `closed`, `gone` (the pane was absent when the node looked) or `refused`
+  (`pane_changed`, `question_open`) before it replies. A repeat of the request
+  answers the stored record and never closes twice, including after a node
+  restart. A record left `closing` is `unknown` on the next repeat: a close may
+  have run.
+- The hub acts on the result: `closed` goes on to the lost mark and
+  activation; `refused` cancels the stage (`pane_not_closed`); `gone` releases
+  the stage of a completed author (`parent_ended`) and lets a live record's
+  author be replaced as before; `unknown` is ambiguous.
+- An ambiguous outcome keeps the stage staged and sends one owner decision
+  (event `ladder-step:<job>:<round>:unresolved:esc`, the same id the expiry pass
+  uses, so the handler, a replay and the expiry pass raise it once between
+  them). A reply the hub never saw is not ambiguous: the replay fences the
+  request and reads the stored result.
+- Before any path releases a stage that was bound to an operation (a refusal,
+  a moved or closed task, the expiry pass, an ended predecessor), the hub
+  fences the request on the node. After the fence a delayed close command
+  answers `fenced` and touches no pane. A fence the node does not answer keeps
+  the stage and the step is retried.
 
 ## Replay
 

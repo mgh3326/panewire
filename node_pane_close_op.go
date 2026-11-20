@@ -59,6 +59,11 @@ func (client *HubClient) spawnHelloCapabilities(ctx context.Context) []string {
 	if client.checkoutSparseReady(ctx) {
 		capabilities = append(capabilities, hubCapabilityCheckoutSparse)
 	}
+	// The ladder close op stores its records under the jobs root; a node
+	// without one cannot keep a result durable, so it does not offer it.
+	if client.jobsInboxRoot != "" {
+		capabilities = append(capabilities, hubCapabilityLadderClose)
+	}
 	return capabilities
 }
 

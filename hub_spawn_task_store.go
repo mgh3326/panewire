@@ -520,9 +520,21 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 // it. It is how a replay tells a pane this step closed from one that went on
 // its own when hk cannot (a completed predecessor stays terminal).
 func (s *laneInboxStore) markStagedClose(parent context.Context, id string, now time.Time) error {
+	return s.markStagedCloseStamp(parent, id, now.UnixMilli())
+}
+
+// markStagedCloseOp is markStagedClose for a close that runs as a durable node
+// operation (hk 5676): the stamp is negative, so the row says the node's stored
+// result, not this marker, tells a close from an independent end, and a stage
+// that is to be released is fenced on the node first.
+func (s *laneInboxStore) markStagedCloseOp(parent context.Context, id string, now time.Time) error {
+	return s.markStagedCloseStamp(parent, id, -now.UnixMilli())
+}
+
+func (s *laneInboxStore) markStagedCloseStamp(parent context.Context, id string, stamp int64) error {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE request_id=? AND status='staged' AND node_id IS NULL`), now.UnixMilli(), id)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE request_id=? AND status='staged' AND node_id IS NULL`), stamp, id)
 	if err != nil {
 		return err
 	}
@@ -532,16 +544,37 @@ func (s *laneInboxStore) markStagedClose(parent context.Context, id string, now 
 	return nil
 }
 
-// stagedCloseMarked reports whether markStagedClose ran for the staged row.
-func (s *laneInboxStore) stagedCloseMarked(parent context.Context, id string) (bool, error) {
+// stagedClose is what a staged row records of its close.
+type stagedClose int
+
+const (
+	stagedCloseNone   stagedClose = iota // nothing was asked for
+	stagedCloseMarker                    // the legacy marker (markStagedClose)
+	stagedCloseNodeOp                    // a durable node operation (markStagedCloseOp)
+)
+
+func (s *laneInboxStore) stagedCloseKind(parent context.Context, id string) (stagedClose, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	var stamp int64
 	err := s.db.QueryRowContext(ctx, s.q(`SELECT claimed_ms FROM spawn_operations WHERE request_id=? AND status='staged'`), id).Scan(&stamp)
-	if err != nil {
-		return false, err
+	switch {
+	case err != nil:
+		return stagedCloseNone, err
+	case stamp > 0:
+		return stagedCloseMarker, nil
+	case stamp < 0:
+		return stagedCloseNodeOp, nil
 	}
-	return stamp > 0, nil
+	return stagedCloseNone, nil
+}
+
+// stagedCloseMarked reports whether the staged row carries the legacy marker
+// of markStagedClose. A row bound to a node operation is not "marked": its
+// stored result decides, never the marker.
+func (s *laneInboxStore) stagedCloseMarked(parent context.Context, id string) (bool, error) {
+	kind, err := s.stagedCloseKind(parent, id)
+	return kind == stagedCloseMarker, err
 }
 
 func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, now time.Time, deadlineSeconds int) error {

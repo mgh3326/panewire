@@ -26,8 +26,9 @@ The one report path an op reads (`job.done`) must be one of two fixed files in
 that job's directory. `job.close` and `job.reap` are issued by the hub after
 its own ownership checks, and the HTTP command endpoint refuses them for every
 caller, as it does `job.mark_lost`. The close operations
-(`pane.close_op`, `pane.close_status`, `pane.close_release`) are hub-issued in
-the same way.
+(`pane.close_op`, `pane.close_status`, `pane.close_release`) and the ladder
+close ops (`pane.ladder_close`, `pane.ladder_close_status`,
+`pane.ladder_close_fence`) are hub-issued in the same way.
 
 ## Task pane sweep
 
@@ -744,6 +745,49 @@ check the hub's action inventory and `pool close action finalized` logs for
 that node, as in the rollback steps above; the drain itself also waits for the
 hub's acknowledgement of a cancelled close. Remove any remaining barrier marker
 before rolling back. Do not advertise on a hub without the guard.
+
+### Ladder close: `pane.ladder_close`
+
+Hub-issued, like the close operations above; the public endpoint refuses all
+three ops. A node advertises `ladder_close_v1` when it has a jobs root to keep
+the records in. The hub never sends these ops to a node that did not, and then
+uses `pane.close` and its marker (docs/escalate-author.md, "The close
+operation"; hk 5676).
+
+`pane.ladder_close` closes the pane of a job the escalate-author step replaces,
+once, and answers one stored result per `request_id` (the staged successor's
+request id). It is not `pane.close_op`: that journal binds an attempt that has
+not ended, and a ladder step also replaces an author whose hk record completed.
+
+Arguments, all required: `request_id`, `job`, `node` (the node's own machine
+id), `epoch` (the hub's ownership epoch for the job), `attempt` (a job-id-shaped
+token, the predecessor's spawn attempt), `pane_id`, `name`, `agent_status`
+(`idle`, `done` or `blocked`, as `pane.close`), `cwd`, `allow_unnamed`.
+
+Result: `{"state": S, "replayed": bool, "reason": R}` where `S` is `closed`
+(this operation closed the pane), `gone` (the pane was absent when the node
+looked), `refused` (`reason` is `pane_changed` or `question_open`; the pane was
+not closed), `unknown` (a close may have run and no result was recorded) or
+`fenced` (the request was ended before it acted). `closing` and `none` appear
+only in a status read.
+
+The node writes `<jobs root>/ladder-close/<request_id>.json` (mode 0600,
+fsynced before it is visible) holding the binding and the state. It writes
+`closing` after the first guarded look and before the last look that precedes
+`herdr pane close`, and the final state before it replies. A repeat with the
+same binding answers the stored state with `replayed: true` and touches no
+pane; a repeat that names another job, epoch, attempt or pane is
+`invalid_args`. A record left `closing` (a node stop, or a result that could
+not be written) is settled `unknown` by the next repeat or fence. A node whose
+job has a higher assigned epoch than the request answers `epoch_mismatch`.
+
+`pane.ladder_close_status` (`request_id`, `job`) reads the record: the stored
+state, or `none` when the node holds nothing. `pane.ladder_close_fence`
+(`request_id`, `job`) ends a request nobody will repeat: with no record it
+writes a `fenced` one, so a close delayed in transit finds it and acts on no
+pane; with a record left `closing` it settles it `unknown`; with a final record
+it answers it as stored. The hub fences before it releases the stage a request
+was bound to.
 
 ### `pane.capture`
 

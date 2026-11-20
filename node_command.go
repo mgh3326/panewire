@@ -81,7 +81,8 @@ func knownNodeCommandOp(op string) bool {
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
 		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
-		nodeCommandCheckoutSweep, nodeCommandHandoverCheck, nodeCommandHandoverSnapshot:
+		nodeCommandCheckoutSweep, nodeCommandHandoverCheck, nodeCommandHandoverSnapshot,
+		nodeCommandLadderClose, nodeCommandLadderCloseStatus, nodeCommandLadderCloseFence:
 		return true
 	}
 	return false
@@ -253,6 +254,10 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
 	nodeCommandHandoverCheck:    {"job", "cwd", "origin", "branch"},
 	nodeCommandHandoverSnapshot: {"job", "epoch", "cwd", "origin", "branch"},
+
+	nodeCommandLadderClose:       {"request_id", "job", "node", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
+	nodeCommandLadderCloseStatus: {"request_id", "job"},
+	nodeCommandLadderCloseFence:  {"request_id", "job"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -420,6 +425,18 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 			return nodeCloseOpReleaseArgs(args), true
 		}
 		return args, true
+	case nodeCommandLadderClose:
+		var args nodeLadderCloseArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeLadderCloseArgs(args)
+	case nodeCommandLadderCloseStatus, nodeCommandLadderCloseFence:
+		var args nodeLadderRefArgs
+		if !decodeNodeCommandStrict(raw, &args) || !validNodeLadderRefArgs(args) {
+			return nil, false
+		}
+		if op == nodeCommandLadderCloseFence {
+			return nodeLadderFenceArgs(args), true
+		}
+		return args, true
 	case nodeCommandPaneCapture:
 		var args nodePaneCaptureArgs
 		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && validNodeCommandPath(args.Cwd) && args.MergedAfter >= 0
@@ -543,6 +560,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease:
 		var result nodeCloseOpStatusResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeCloseOpStatusResult(result)
+		target = result
+	case nodeCommandLadderClose, nodeCommandLadderCloseStatus, nodeCommandLadderCloseFence:
+		var result nodeLadderCloseResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeLadderCloseResult(result)
 		target = result
 	case nodeCommandPaneCapture:
 		var result nodePaneCaptureResult
@@ -986,6 +1007,20 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodePaneCloseRelease(nodeCloseOpRefArgs(args))
+	case nodeLadderCloseArgs:
+		// The record and the close it describes must not interleave with
+		// another acting command or a fence.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeLadderClose(ctx, args)
+	case nodeLadderRefArgs:
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeLadderRef(args, false)
+	case nodeLadderFenceArgs:
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeLadderRef(nodeLadderRefArgs(args), true)
 	case nodePaneCaptureArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()

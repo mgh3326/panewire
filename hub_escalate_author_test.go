@@ -75,6 +75,9 @@ type escalateFixture struct {
 	// markerAtCapture and markerAtClose record whether the staged successor
 	// carried the close marker when the node was asked to capture and to close.
 	markerAtCapture, markerAtClose bool
+	// ladder, when set, plays the node's ladder close operation
+	// (hub_escalate_author_close_t5676_test.go).
+	ladder *ladderNodeFake
 
 	mu       sync.Mutex
 	commands []map[string]json.RawMessage
@@ -254,7 +257,11 @@ func (f *escalateFixture) serveNode(ctx context.Context, t *testing.T) {
 		_ = json.Unmarshal(command["request_id"], &requestID)
 		_ = json.Unmarshal(command["op"], &op)
 		message := map[string]any{"type": "node.command.result", "request_id": requestID, "op": op}
-		for key, value := range f.reply(op) {
+		reply := f.reply(op)
+		if f.ladder != nil && strings.HasPrefix(op, "pane.ladder_close") {
+			reply = f.ladder.reply(f, op, command["args"])
+		}
+		for key, value := range reply {
 			message[key] = value
 		}
 		if err := wsjson.Write(ctx, f.node, message); err != nil {
