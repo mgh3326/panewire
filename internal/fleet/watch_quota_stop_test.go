@@ -698,25 +698,74 @@ func TestWatcherStaysThroughAManagerWaitPastTheCompletionDeadline(t *testing.T) 
 	}
 }
 
-// hk 5690 review: a close intent an older watcher left (decided, hk write not yet
-// committed) is finished on upgrade without a screen read: the watcher no longer
-// detects a reviewer's stop, and the decision was already taken.
-func TestLegacyCloseIntentIsFinishedWithoutAScreenRead(t *testing.T) {
-	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", "The reviewer is quiet.\n")
-	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
-	legacyIntent(t, a, "devin-free", 2*time.Hour)
-	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+// hk 5690 review: a close intent an older watcher left is conditional while hk is
+// live: the pane may have moved on since. The watcher no longer detects a
+// reviewer's stop, but reconciling an existing intent still reads the screen. A
+// reviewer still on the limit screen has its intent finished (the final hk lost
+// write); one that moved on has it cancelled and the job left alone.
+func TestLegacyCloseIntentIsVerifiedOnTheScreenWhileHkIsLive(t *testing.T) {
+	for name, tc := range map[string]struct {
+		screen    string
+		wantState string
+	}{
+		"still on the limit screen": {devinLongStopScreen(t), "lost"},
+		"moved on":                  {"I resumed and finished the review.\n", "spawned"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", tc.screen)
+			t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+			legacyIntent(t, a, "devin-free", 2*time.Hour)
+			if e := a.watch(context.Background(), []string{"j"}); e != nil {
+				t.Fatal(e)
+			}
+			rec := h.record(t, "j")
+			if str(rec, "state") != tc.wantState {
+				t.Fatalf("hk record %v, want state %s", rec, tc.wantState)
+			}
+			if tc.wantState == "lost" && !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free reset_at=") {
+				t.Fatalf("hk record %v, want the intent's frozen end_reason", rec)
+			}
+		})
+	}
+}
+
+// hk 5690 review: the manager's wait record is written with the daemon's resolved
+// home, as the other manager-side writers do. With XDG_DATA_HOME unset an App with
+// no Home opened the ledger under a relative .local/share path in the working
+// directory. It carries the stop's remaining duration for a detached older watcher.
+func TestReviewerQuotaWaitIsWrittenUnderTheResolvedHome(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "reviewer", "idle", "The reviewer is waiting.\n")
+	t.Setenv("XDG_DATA_HOME", "")
+	cwd := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	now := a.Now()
+	if e := RecordReviewerQuotaWait(context.Background(), a.Jobs, "j", "w:p1", "devin-free", now.Add(2*time.Minute), now); e != nil {
 		t.Fatal(e)
 	}
-	if rec := h.record(t, "j"); str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free reset_at=") {
-		t.Fatalf("hk record %v, want the intent's lost write finished", rec)
+	if _, err := os.Stat(filepath.Join(cwd, ".local")); err == nil {
+		t.Fatal("the wait record opened a ledger under a relative .local path in the working directory")
 	}
-	if st, _ := ledgerState(t, a, "j"); st != "released" {
-		t.Fatalf("quota %s, want released", st)
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "herdr" && len(c.Args) > 1 && c.Args[0] == "agent" && c.Args[1] == "read" {
-			t.Fatalf("the intent was re-verified on the screen: %v", c.Args)
+	var wait map[string]any
+	for _, ev := range j.Events {
+		if ev.Kind == quotaWaitKind {
+			wait = ev.Payload
 		}
+	}
+	if wait == nil {
+		t.Fatal("no job.quota_stop_wait in the job's ledger")
+	}
+	if got, ok := wait["remaining_s"].(float64); !ok || got != 120 {
+		t.Fatalf("remaining_s=%v, want 120", wait["remaining_s"])
 	}
 }

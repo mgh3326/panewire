@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -297,5 +298,42 @@ func TestStallExaminationDecisionRecordsHerdrsSequence(t *testing.T) {
 	}
 	if got := rig.q.observedSeq(context.Background(), "stall-ev"); got != 4 {
 		t.Fatalf("recorded herdr sequence %d, want 4 (local %d)", got, local)
+	}
+}
+
+// hk 5690 review: the wait notification for a reviewer's watcher is retried, and
+// the resume does not go out until it is appended. The first append fails: nothing
+// is sent at the reset; once the append succeeds on a later tick, the resume goes.
+func TestReviewerResumeWaitsForTheWatchersWaitRecord(t *testing.T) {
+	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
+	appends, ledgerUp := 0, false
+	rig.q.recordWait = func(context.Context, string, string, string, time.Time, time.Time) error {
+		appends++
+		if !ledgerUp {
+			return errors.New("ledger unavailable")
+		}
+		return nil
+	}
+	rig.observe("working", 1, rig.now)
+	rig.observe("idle", 2, rig.now.Add(time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Second))
+	rig.route(0, "owner")
+	rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second)) // the decision: the append fails
+	// The reset (2 minutes) is due and retried, but the watcher still has no wait.
+	rig.manager.Tick(context.Background(), rig.now.Add(2*time.Minute+10*time.Second))
+	if rig.sends != 0 {
+		t.Fatalf("resumed with the wait unappended: sends=%d", rig.sends)
+	}
+	failedAttempts := appends
+	if failedAttempts < 2 {
+		t.Fatalf("the append was not retried: %d attempts", failedAttempts)
+	}
+	// The ledger comes back: the next tick appends the wait and the resume follows.
+	ledgerUp = true
+	for i := 1; i <= 12 && rig.sends == 0; i++ {
+		rig.manager.Tick(context.Background(), rig.now.Add(3*time.Minute+time.Duration(i)*30*time.Second))
+	}
+	if rig.sends != 1 {
+		t.Fatalf("sends=%d, want one resume once the wait was appended", rig.sends)
 	}
 }

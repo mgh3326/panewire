@@ -1688,16 +1688,22 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			// stop settled with nothing more to do): a hub that exits before that
 			// leaves the row unacknowledged, and the node's resend after the
 			// restart starts the replacement again.
-			control := message.Kind == "job.lost" && !event.Final && h.reviewerQuotaAnnouncement(ctx, event)
+			reviewerStop, stopKnown := false, true
+			if message.Kind == "job.lost" && !event.Final {
+				reviewerStop, stopKnown = h.reviewerQuotaAnnouncement(ctx, event)
+			}
+			control := reviewerStop
 			persisted := hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID}
 			if cooled && !validLaneReference(event.OwnerLane) {
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(persisted)
 			}
-			if !control {
+			// A role the hub could not look up is neither relayed nor acknowledged: it
+			// is decided when the node sends it again, not on a guess.
+			if !control && stopKnown {
 				h.relayJobEventFromContext(ctx, machineID, message.Kind, event)
 			}
-			if message.Kind == "job.lost" && (!event.Replay || control) {
+			if message.Kind == "job.lost" && stopKnown && (!event.Replay || control) {
 				var settled func()
 				if control {
 					settled = func() { agent.queuePersisted(persisted) }

@@ -227,6 +227,13 @@ func (a *App) quotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaS
 	if !slices.Contains(quotaStopRoles, j.QuotaRole()) {
 		return quotastop.Stop{}, quotaNotStopped
 	}
+	return a.readQuotaStopScreen(ctx, j, ag, seen)
+}
+
+// readQuotaStopScreen is quotaStopScreen's read of the idle pane, without the role
+// gate: the legacy close intent's reconcile verifies a stop a watcher already
+// decided on, for a role the watcher no longer detects (hk 5690).
+func (a *App) readQuotaStopScreen(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, quotaSeen) {
 	if seen != nil && ag.StateChangeSeq != nil && seen.read && seen.seq == *ag.StateChangeSeq {
 		return quotastop.Stop{}, quotaNotStopped
 	}
@@ -705,8 +712,18 @@ func RecordReviewerQuotaWait(ctx context.Context, jobs, job, pane, pool string, 
 	if at.IsZero() || at.Before(now) {
 		at = now
 	}
-	a := &App{Jobs: jobs, Now: time.Now, Runner: ExecRunner{}}
-	return a.event(ctx, job, quotaWaitKind, map[string]any{"pane_id": pane, "pool": pool, "reset_at": reset.UTC().Format(time.RFC3339), "until": at.Add(QuotaReviewerWaitGrace).UTC().Format(time.RFC3339)})
+	// Home resolved as the other manager-side writers do (AnnounceQuotaStop): an App
+	// with no Home opens the ledger under a relative path.
+	home, _ := os.UserHomeDir()
+	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
+	payload := map[string]any{"pane_id": pane, "pool": pool, "reset_at": reset.UTC().Format(time.RFC3339), "until": at.Add(QuotaReviewerWaitGrace).UTC().Format(time.RFC3339)}
+	if !reset.IsZero() {
+		// The stop's remaining duration, so a detached older watcher that survives
+		// a rollout can recognise the same stop and inherit the hold
+		// (reviewerWaitResume).
+		payload["remaining_s"] = int64(reset.Sub(now).Round(time.Second) / time.Second)
+	}
+	return a.event(ctx, job, quotaWaitKind, payload)
 }
 
 // reviewerWaitUntil reports whether the watcher holds reviewer j's quota stop
@@ -872,10 +889,20 @@ func (a *App) reconcileQuotaIntent(ctx context.Context, j Job, in quotaIntent, h
 	if !present {
 		return cancel("pane_gone")
 	}
-	// An intent is a decision already taken (by an older watcher, before an upgrade
-	// that left reviewer stops to the manager): it is finished, not re-verified. The
-	// watcher no longer screen-detects a reviewer, so there is no screen read to
-	// make here (hk 5690).
+	// An intent with the hk record still live is conditional: the pane may have
+	// moved on since the older watcher recorded it. The screen is read here for the
+	// reconcile only; reviewer detection in general stays with the manager (hk 5690).
+	if ag.Status == "idle" || ag.Status == "done" {
+		stop, seen := a.readQuotaStopScreen(ctx, j, ag, nil)
+		switch {
+		case seen == quotaScreenUnavailable:
+			return quotaIntentRetry, nil
+		case seen != quotaStopFound || !stop.CreditExhaustedAt.IsZero():
+			return cancel("pane_moved_on")
+		}
+	} else {
+		return cancel("pane_moved_on")
+	}
 	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": in.reason, "at": a.Now().UTC()}); e != nil {
 		if IsJobOwnerMismatch(e) || errors.Is(e, errJobReassigned) {
 			return cancel("job_reassigned")

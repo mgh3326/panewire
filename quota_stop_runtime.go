@@ -94,6 +94,14 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	// herdr_seq is herdr's own state_change_seq of the pane when the stop was
 	// reserved (the wake's local counter is panewire's, not herdr's): the
 	// hand-over announces it so the hub's close is fenced to that state (hk 5690).
+	// wait_pending is 1 from a reviewer's wait decision until its watcher has the
+	// wait (job.quota_stop_wait): the resume never goes out before it does, and each
+	// tick retries the append (hk 5690).
+	if !storeHasColumn(s.db, "quota_stop_decisions", "wait_pending") {
+		if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN wait_pending INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return nil, err
+		}
+	}
 	if !storeHasColumn(s.db, "quota_stop_decisions", "herdr_seq") {
 		if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN herdr_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return nil, err
@@ -797,11 +805,54 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 	// The job's watcher stays through a reviewer's wait: it commits the report the
 	// resumed reviewer writes (hk 5690).
 	if job.Role == "reviewer" && q.recordWait != nil {
-		if err := q.recordWait(ctx, job.JobID, c.PaneID, stop.Pool, stop.Reset, now); err != nil {
-			q.logger.Warn("quota-stop reviewer wait was not recorded for its watcher", "error", err)
-		}
+		q.store.mu.Lock()
+		_, _ = q.store.db.ExecContext(dbCtx, `UPDATE quota_stop_decisions SET wait_pending=1 WHERE event_id=?`, c.EventID)
+		q.store.mu.Unlock()
+		q.appendPendingWait(ctx, c.EventID, job.JobID, c.PaneID, stop.Pool, stop.Reset, now)
 	}
 	return nil
+}
+
+// appendPendingWait appends the wait to the reviewer's ledger and clears the
+// decision's pending flag. A failed append leaves the flag: tick tries again, and
+// the resume waits for it.
+func (q *quotaStopManager) appendPendingWait(ctx context.Context, id, job, pane, pool string, reset, now time.Time) bool {
+	if q.recordWait == nil {
+		return true
+	}
+	if err := q.recordWait(ctx, job, pane, pool, reset, now); err != nil {
+		q.logger.Warn("quota-stop reviewer wait was not recorded for its watcher; retrying", "job", job, "error", err)
+		return false
+	}
+	q.update(ctx, id, "wait_pending", 0)
+	return true
+}
+
+// retryPendingWaits appends every reviewer wait whose first append failed.
+func (q *quotaStopManager) retryPendingWaits(ctx context.Context, now time.Time) {
+	type pend struct {
+		id, job, pane, pool, reset string
+	}
+	var rows []pend
+	q.store.mu.Lock()
+	r, err := q.store.db.QueryContext(ctx, `SELECT event_id,job,pane,pool,reset FROM quota_stop_decisions WHERE wait_pending=1 AND decision='wait'`)
+	if err == nil {
+		for r.Next() {
+			var p pend
+			if r.Scan(&p.id, &p.job, &p.pane, &p.pool, &p.reset) == nil {
+				rows = append(rows, p)
+			}
+		}
+		_ = r.Close()
+	}
+	q.store.mu.Unlock()
+	for _, p := range rows {
+		var reset time.Time
+		if at, e := time.Parse(time.RFC3339, p.reset); e == nil {
+			reset = at
+		}
+		q.appendPendingWait(ctx, p.id, p.job, p.pane, p.pool, reset, now)
+	}
 }
 
 // recordDecision deduplicates known resets exactly; unknown resets are scoped
@@ -836,6 +887,8 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 	if advanceSettle {
 		q.drainBlocked(ctx, now)
 	}
+	// A reviewer's wait that its watcher does not have yet is appended again first.
+	q.retryPendingWaits(ctx, now)
 	// A pending wait keeps its pane token before the outbox can clear it.
 	q.refreshQuotaWaits(ctx, now)
 	// A clear herdr refused earlier is tried again until the token lapses.
@@ -910,6 +963,16 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			continue
 		}
 		if r.due > now.UnixMilli() {
+			continue
+		}
+		// A reviewer is not resumed until its watcher has the wait: the resume is what
+		// lets the reviewer finish, and the watcher must still be there to commit it.
+		var waitPending int
+		q.store.mu.Lock()
+		_ = q.store.db.QueryRowContext(ctx, `SELECT wait_pending FROM quota_stop_decisions WHERE event_id=?`, r.id).Scan(&waitPending)
+		q.store.mu.Unlock()
+		if waitPending != 0 {
+			q.backoffAction(ctx, r.id, now)
 			continue
 		}
 		// Resume support requires a fresh pane identity and screen check at execution.
@@ -1030,7 +1093,7 @@ func (q *quotaStopManager) infoToOwner(owner, eventID, text string, notice *owne
 }
 
 func (q *quotaStopManager) update(ctx context.Context, id, col string, value int) {
-	if col != "hk_recorded" && col != "action_recorded" {
+	if col != "hk_recorded" && col != "action_recorded" && col != "wait_pending" {
 		return
 	}
 	q.store.mu.Lock()

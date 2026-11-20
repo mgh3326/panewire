@@ -2,6 +2,8 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -37,19 +39,25 @@ func isQuotaStopReason(reason string) bool {
 	return reason == "quota_stop" || strings.HasPrefix(reason, "quota_stop ")
 }
 
-// reviewerQuotaAnnouncement reports whether event is a reviewer's announced
-// quota stop: the job the hub spawned as a reviewer, stopped on a provider limit.
-// A job the hub did not spawn has no stored submission and is not one.
-func (h *HubServer) reviewerQuotaAnnouncement(ctx context.Context, event hubJobEventPayload) bool {
+// reviewerQuotaAnnouncement reports whether event is a reviewer's announced quota
+// stop: the job the hub spawned as a reviewer, stopped on a provider limit. known
+// is false when the hub could not tell: its store failed. A job the hub did not
+// spawn has no stored submission and is known not to be one. Only a known answer
+// is acted on, so a transient store failure never relays a loss for a reviewer the
+// hub is about to carry on.
+func (h *HubServer) reviewerQuotaAnnouncement(ctx context.Context, event hubJobEventPayload) (reviewer, known bool) {
 	if h.inbox == nil || !isQuotaStopReason(event.Reason) {
-		return false
+		return false, true
 	}
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, event.JobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, true
+	}
 	if err != nil {
-		return false
+		return false, false
 	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
-	return err == nil && prior.Role == "reviewer"
+	return err == nil && prior.Role == "reviewer", true
 }
 
 // quotaReplaceMax is the replacements one task role (one review pass) gets.
@@ -126,7 +134,9 @@ func (h *HubServer) startQuotaReplacementAck(machine string, event hubJobEventPa
 		// implementer's relayed stop stays as it was (docs/quota-stop.md). The
 		// check runs here, off the node's reader, and a stop that is not a
 		// reviewer's is acknowledged: a resend would change nothing.
-		if !h.reviewerQuotaAnnouncement(h.closeCtx, event) {
+		if reviewer, known := h.reviewerQuotaAnnouncement(h.closeCtx, event); !known {
+			return // unknown: left unacknowledged, the node sends it again
+		} else if !reviewer {
 			if settled != nil {
 				settled()
 			}

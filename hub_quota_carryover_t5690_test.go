@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -374,5 +375,24 @@ func TestReplacementDropsTheStoppedJobsStartConditions(t *testing.T) {
 	}
 	if len(old.StartConditions) != 1 {
 		t.Fatal("the stopped job's own request was changed")
+	}
+}
+
+// hk 5690 review: a role the hub could not look up (its store failed) is unknown,
+// not "not a reviewer": acting on it would relay a loss for a review the hub is
+// about to carry on. A job the hub never spawned is known not to be a reviewer.
+func TestReviewerRoleLookupFailureIsUnknownNotAnImplementer(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-20-p1")
+	event := relayedQuotaStop(f.job, "claude")
+	if reviewer, known := f.hub.reviewerQuotaAnnouncement(t.Context(), event); !reviewer || !known {
+		t.Fatalf("a spawned reviewer: reviewer=%v known=%v", reviewer, known)
+	}
+	if reviewer, known := f.hub.reviewerQuotaAnnouncement(t.Context(), relayedQuotaStop("never-spawned", "claude")); reviewer || !known {
+		t.Fatalf("a job the hub never spawned: reviewer=%v known=%v, want known not-a-reviewer", reviewer, known)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if reviewer, known := f.hub.reviewerQuotaAnnouncement(canceled, event); reviewer || known {
+		t.Fatalf("a failed lookup: reviewer=%v known=%v, want unknown", reviewer, known)
 	}
 }
