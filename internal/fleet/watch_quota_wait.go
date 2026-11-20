@@ -50,9 +50,21 @@ type quotaWait struct {
 	acked bool
 	// ackDeadline is the completion deadline the acks named, the longest of them.
 	ackDeadline time.Time
-	// ackedAt is when the first ack of this wait was written (its durable
-	// timestamp).
+	// ackedAt is when the first ack of this wait was written (see ackWrittenAt).
 	ackedAt time.Time
+}
+
+// ackWrittenAt is when an acknowledgement was written. The watcher records
+// adopted_at to the millisecond: the ledger's created_at is whole seconds
+// (arbiter Store.now), so a deadline inside a second cannot be judged from it.
+// An ack without adopted_at predates that field, and only its whole second is
+// known, so it counts as written at the end of that second: a late ack is never
+// taken for an on-time one.
+func ackWrittenAt(ev Event) time.Time {
+	if at, err := time.Parse(time.RFC3339Nano, str(ev.Payload, "adopted_at")); err == nil {
+		return at
+	}
+	return ev.when.Add(time.Second)
 }
 
 // currentQuotaWait is the newest wait request of attempt in evs, in ledger
@@ -79,8 +91,8 @@ func currentQuotaWait(evs []Event, attempt string) (quotaWait, bool) {
 			found = true
 		case quotaWaitAdoptedKind:
 			if found && until.Equal(w.until) {
-				if !w.acked || ev.when.Before(w.ackedAt) {
-					w.ackedAt = ev.when
+				if at := ackWrittenAt(ev); !w.acked || at.Before(w.ackedAt) {
+					w.ackedAt = at
 				}
 				w.acked = true
 				// The deadline an ack names is the longest any ack of this wait named.
@@ -224,7 +236,7 @@ func (a *App) adoptQuotaWait(ctx context.Context, j Job, view ledgerView, held, 
 	}
 	extended := deadline.Add(w.until.Sub(now))
 	if !w.acked {
-		payload := map[string]any{"pane_id": j.Pane, "attempt": w.attempt, "pool": w.pool, "until": w.until.UTC().Format(time.RFC3339), "deadline": extended.UTC().Format(time.RFC3339Nano)}
+		payload := map[string]any{"pane_id": j.Pane, "attempt": w.attempt, "pool": w.pool, "until": w.until.UTC().Format(time.RFC3339), "deadline": extended.UTC().Format(time.RFC3339Nano), "adopted_at": now.UTC().Format(time.RFC3339Nano)}
 		if w.reset != "" {
 			payload["reset_at"] = w.reset
 		}
