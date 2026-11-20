@@ -690,3 +690,24 @@ func TestLegacyCloseIntentIsVerifiedOnTheScreenWhileHkIsLive(t *testing.T) {
 		})
 	}
 }
+
+// hk 5690 review: a pane blocked at exactly the announced sequence is the stop's own
+// dialog, not movement; blocked at another sequence has moved.
+func TestBlockedPaneAtTheAnnouncedSequenceIsNotMovement(t *testing.T) {
+	seq := func(n int64) *int64 { return &n }
+	h := quotaHandOff{seq: seq(7), active: true}
+	for _, tc := range []struct {
+		name string
+		ag   Agent
+		want bool
+	}{
+		{"blocked at the announced sequence", Agent{Status: "blocked", StateChangeSeq: seq(7)}, true},
+		{"blocked at another sequence", Agent{Status: "blocked", StateChangeSeq: seq(9)}, false},
+		{"idle at the announced sequence", Agent{Status: "idle", StateChangeSeq: seq(7)}, true},
+		{"working", Agent{Status: "working", StateChangeSeq: seq(7)}, false},
+	} {
+		if got := h.unchanged(tc.ag); got != tc.want {
+			t.Fatalf("%s: unchanged=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

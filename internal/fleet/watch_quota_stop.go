@@ -286,10 +286,16 @@ type quotaHandOff struct {
 // unchanged reports whether the pane is still in the state the stop was read
 // in. A pane that went back to work is not stopped any more.
 func (h quotaHandOff) unchanged(ag Agent) bool {
+	sameSeq := h.seq == nil || ag.StateChangeSeq == nil || *h.seq == *ag.StateChangeSeq
+	// A blocked dialog at exactly the announced sequence is the stop's own dialog,
+	// not movement: only a blocked pane at another sequence has moved (hk 5690).
+	if ag.Status == "blocked" && h.seq != nil && ag.StateChangeSeq != nil && sameSeq {
+		return true
+	}
 	if ag.Status != "idle" && ag.Status != "done" {
 		return false
 	}
-	return h.seq == nil || ag.StateChangeSeq == nil || *h.seq == *ag.StateChangeSeq
+	return sameSeq
 }
 
 // expired reports whether the grace has run out with the stop still standing:

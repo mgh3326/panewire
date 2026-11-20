@@ -134,6 +134,10 @@ func newQuotaReplaceFixtureLogged(t *testing.T, role, job string, mutate func(*f
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
 	node := t14Node(t, hub, server, true)
+	// The fixture node can fence a close to a stop's pane state (pane_close_stop_seq_v1).
+	hub.mu.Lock()
+	hub.nodes["machine-a"].capabilities[hubCapabilityCloseStopSeq] = true
+	hub.mu.Unlock()
 	holderRequest := quotaHolderRequest(role, job)
 	if mutate != nil {
 		mutate(&holderRequest)
@@ -156,7 +160,7 @@ func newQuotaReplaceFixtureLogged(t *testing.T, role, job string, mutate func(*f
 // stop's own pool, the only place the stopped band is recorded: the job record
 // pool is the launch pool, the catalog pool for both Devin bands (hk 4582).
 func quotaStopEvent(job, pool string) hubJobEventPayload {
-	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop pool=" + pool, OwnerLane: "parent"}
+	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop pool=" + pool + " seq=7", OwnerLane: "parent"}
 }
 
 type quotaReplaceResult struct {

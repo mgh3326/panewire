@@ -57,7 +57,7 @@ func quotaGiveUpNotices(destination *hubAgent) []hubRelayInjectEvent {
 // relayedQuotaStop is the job.lost the node relays for an announced stop
 // (hub_jobs_client.go): the reason carries the pool and the reset.
 func relayedQuotaStop(job, pool string) hubJobEventPayload {
-	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop pool=" + pool + " reset_at=2026-11-19T05:59:11Z", OwnerLane: "parent"}
+	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop pool=" + pool + " reset_at=2026-11-19T05:59:11Z seq=7", OwnerLane: "parent"}
 }
 
 // hk 5690, the root cause of the 2026-11-19 losses: the hub began a replacement
@@ -234,11 +234,7 @@ func TestAnnouncedReviewerQuotaStopStartsTheReplacementAndIsNotRelayedToTheOwner
 // pane.close's stop_seq and closes nothing without it being fenced.
 func TestReplacementFencesTheCloseToTheAnnouncedPaneState(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-14-p1")
-	f.hub.mu.Lock()
-	f.hub.nodes["machine-a"].capabilities[hubCapabilityCloseStopSeq] = true
-	f.hub.mu.Unlock()
 	event := relayedQuotaStop(f.job, "claude")
-	event.Reason += " seq=7"
 	go f.hub.replaceQuotaStopped(t.Context(), "machine-a", event)
 	commands := f.serveCommands(t, 3) // probe, capture, close
 	var args map[string]json.RawMessage
@@ -505,5 +501,134 @@ func TestUnknownRoleAnnouncementIsNotAcknowledgedByTheCoolingBranch(t *testing.T
 			return
 		}
 		t.Fatalf("the node received %s for an announcement whose role was unknown", payload)
+	}
+}
+
+// hk 5690 review: a reviewer's close needs a verified stop sequence. An
+// announcement with none (a row reserved before the upgrade) never closes a pane:
+// a resumed reviewer is left alone, the announcement stays with its node, and the
+// watcher's grace ends it as before. The give-up close takes the same rule.
+func TestSeqlessAnnouncementNeverClosesAReviewersPane(t *testing.T) {
+	for name, job := range map[string]string{"replacement": "mwr-25-p1", "give-up": "mwr-1-p1-q1-q2"} {
+		t.Run(name, func(t *testing.T) {
+			f := newQuotaReplaceFixture(t, "reviewer", job)
+			event := hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop pool=claude reset_at=2026-11-19T05:59:11Z", OwnerLane: "parent"}
+			acked := 0
+			done := make(chan quotaReplaceResult, 1)
+			go func() {
+				j, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ })
+				done <- quotaReplaceResult{j, ok}
+			}()
+			commands := f.serveCommands(t, 1) // the pane probe
+			select {
+			case got := <-done:
+				if got.ok {
+					t.Fatalf("a seq-less stop was replaced: %+v", got)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("the hub went on to close a pane for a stop with no verified sequence")
+			}
+			if len(commands) != 1 {
+				t.Fatalf("commands=%d, want only the probe", len(commands))
+			}
+			if acked != 0 {
+				t.Fatal("a seq-less announcement was acknowledged: the node would not send it again")
+			}
+			if state := f.jobs.records[job]["state"]; state != "spawned" {
+				t.Fatalf("the job's record was changed: %v", state)
+			}
+		})
+	}
+}
+
+// hk 5690 review: a reviewer's pane in herdr's blocked state at exactly the
+// announced sequence is the stop's own dialog, and a fenced close counts it as
+// stopped: the review is replaced and the close names the blocked status.
+func TestBlockedReviewerAtTheAnnouncedSequenceIsReplaced(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-26-p1")
+	f.paneStatus = "blocked"
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		j, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", relayedQuotaStop(f.job, "claude"))
+		done <- quotaReplaceResult{j, ok}
+	}()
+	commands := f.serveCommands(t, 3) // probe, capture, close
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(commands[2]["args"], &args); err != nil {
+		t.Fatal(err)
+	}
+	if string(args["agent_status"]) != `"blocked"` || string(args["stop_seq"]) != "7" {
+		t.Fatalf("pane.close args %s, want the blocked status fenced to stop_seq 7", commands[2]["args"])
+	}
+	next, _, _ := quotaReplacementJob(f.job)
+	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
+		_, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), next)
+		return err == nil
+	})
+}
+
+// hk 5690 review: a transient hk read inside the give-up is not a final skip. The
+// announcement stays with its node; the next delivery, with hk back, gives up.
+func TestGiveUpRetriesATransientHkRead(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1-q1-q2")
+	f.jobs.failGets = 1
+	event := quotaStopEvent(f.job, "claude")
+	acked := 0
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }); ok || job != "" || acked != 0 {
+		t.Fatalf("a give-up on a failed hk read: job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ })
+	}()
+	f.serveCommands(t, 4) // probe, capture, close, mark_lost: the give-up goes through
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the give-up did not finish")
+	}
+	if acked != 1 {
+		t.Fatalf("acked=%d after the give-up completed, want 1", acked)
+	}
+}
+
+// hk 5690 review: a replay after a hub restart finds the successor already claimed
+// and finishes the replaced_by write, even when the announcement is too old for a
+// fresh replacement (the age gate comes after the claimed-successor check).
+func TestReplayAfterRestartFinishesAClaimedSuccessor(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-27-p1")
+	next, _, _ := quotaReplacementJob(f.job)
+	request, err := quotaReplacementRequest(f.holder.Request, f.job, next, "claude", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, _, err := f.hub.inbox.store.claimSpawnFrom(t.Context(), request, next, "parent", time.Now(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.paneClosed = true // the old pane was closed before the restart
+	event := quotaStopEvent(f.job, "claude")
+	event.Reason += " at=" + strconv.FormatInt(time.Now().Add(-9*time.Minute).Unix(), 10) // far past the age gate
+	acked := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ })
+	}()
+	commands := f.serveCommands(t, 2) // probe (pane gone), mark_lost
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the replay did not finish")
+	}
+	if reason := endReasonOf(t, commands[1]); reason != "quota_stop pool=claude replaced_by="+next {
+		t.Fatalf("end_reason=%q, want the replaced_by pointer to the claimed successor", reason)
+	}
+	if acked != 1 {
+		t.Fatalf("acked=%d, want the replayed announcement acknowledged once", acked)
 	}
 }
