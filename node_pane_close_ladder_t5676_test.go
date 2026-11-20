@@ -12,18 +12,30 @@ import (
 	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
-// The node half of the ladder close operation (hk 5676): the node writes its
-// result before it replies, and a repeat of the request answers that result.
+// The node half of the ladder close operation (hk 5676): one durable record per
+// (job, node, epoch, attempt, pane); a stored result is replayed and never
+// re-run; the close is made under one composite fence; every ambiguity is stored
+// as unknown.
 
-const ladderRequest = "5c1a2b3c-0000-4000-8000-000000000001"
+const (
+	ladderRequest  = "5c1a2b3c-0000-4000-8000-000000000001"
+	ladderRequest2 = "5c1a2b3c-0000-4000-8000-000000000002"
+)
 
+// ladderNode is a node with a seeded job directory (pane w1:p1, label job-a,
+// receipt closeOpAttempt) and a fake herdr.
 func ladderNode(t *testing.T, fake *nodeFakeHerdr, root string) *HubClient {
 	t.Helper()
+	seedCloseOpJob(t, root)
 	return &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond, jobsInboxRoot: root}
 }
 
 func ladderArgs(id string) map[string]any {
-	return map[string]any{"request_id": id, "job": "job-1", "node": "machine-a", "epoch": 1, "attempt": nodeLadderNoAttempt, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false}
+	return map[string]any{"request_id": id, "job": closeOpJob, "node": "machine-a", "epoch": 1, "attempt": closeOpAttempt, "pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "allow_unnamed": false}
+}
+
+func ladderFenceArgs(id string) map[string]any {
+	return map[string]any{"request_id": id, "job": closeOpJob}
 }
 
 func wantLadder(t *testing.T, result map[string]any, code, state string, replayed bool) {
@@ -33,8 +45,32 @@ func wantLadder(t *testing.T, result map[string]any, code, state string, replaye
 	}
 }
 
-// Acceptance 2: a replay of the same operation, even after a node restart,
-// closes the pane once and answers the stored result.
+func wantRefused(t *testing.T, result map[string]any, code, reason string) {
+	t.Helper()
+	wantLadder(t, result, code, nodeLadderRefused, false)
+	if result["reason"] != reason {
+		t.Fatalf("reason=%v, want %q", result["reason"], reason)
+	}
+}
+
+func ladderRecords(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, ladderCloseDir))
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "k-") {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+// Acceptance 2: a replay of the same operation, even after a node restart, and a
+// second request id for the same (job, epoch, attempt, pane), close the pane
+// once and answer the stored result.
 func TestNodeLadderCloseReplayClosesOnceAndAnswersTheStoredResult(t *testing.T) {
 	root := t.TempDir()
 	fake := idlePaneHerdr()
@@ -48,35 +84,45 @@ func TestNodeLadderCloseReplayClosesOnceAndAnswersTheStoredResult(t *testing.T) 
 	restarted := ladderNode(t, fake, root)
 	result, code = nodeRun(t, restarted, nodeCommandLadderClose, ladderArgs(ladderRequest))
 	wantLadder(t, result, code, nodeLadderClosed, true)
-	result, code = nodeRun(t, restarted, nodeCommandLadderCloseStatus, closeOpRef(ladderRequest))
-	wantLadder(t, result, code, nodeLadderClosed, false)
+	result, code = nodeRun(t, restarted, nodeCommandLadderClose, ladderArgs(ladderRequest2))
+	wantLadder(t, result, code, nodeLadderClosed, true)
 	if closes := fake.called("pane", "close"); closes != 1 {
 		t.Fatalf("herdr closed the pane %d times: %v", closes, fake.calls)
 	}
+	if names := ladderRecords(t, root); len(names) != 1 {
+		t.Fatalf("one record per binding, got %v", names)
+	}
 }
 
-// The record is on disk, in its final state, before the node replies: a reply
-// the hub never saw is still readable.
+// The record is on disk, in its final state, before the node replies.
 func TestNodeLadderCloseStoresTheResultBeforeItReplies(t *testing.T) {
 	root := t.TempDir()
 	client := ladderNode(t, idlePaneHerdr(), root)
 	if _, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest)); code != "" {
 		t.Fatal(code)
 	}
-	raw, err := os.ReadFile(filepath.Join(root, ladderCloseDir, ladderRequest+".json"))
+	names := ladderRecords(t, root)
+	if len(names) != 1 {
+		t.Fatalf("records=%v", names)
+	}
+	path := filepath.Join(root, ladderCloseDir, names[0])
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var record nodeLadderRecord
-	if err := json.Unmarshal(raw, &record); err != nil || record.State != nodeLadderClosed || record.Epoch != 1 || record.PaneID != "w1:p1" {
+	if err := json.Unmarshal(raw, &record); err != nil || record.State != nodeLadderClosed || record.Epoch != 1 || record.PaneID != "w1:p1" || record.Attempt != closeOpAttempt {
 		t.Fatalf("record=%s err=%v", raw, err)
 	}
-	if info, err := os.Stat(filepath.Join(root, ladderCloseDir, ladderRequest+".json")); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%v err=%v", info, err)
+	}
+	if info, err := os.Stat(filepath.Join(root, ladderCloseDir)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("dir mode=%v err=%v", info, err)
 	}
 }
 
-// A pane absent when the operation looks was not closed by it.
+// A pane absent when the node looks was not closed by it.
 func TestNodeLadderClosePaneAbsentIsGoneNotClosed(t *testing.T) {
 	fake := goneHerdr()
 	client := ladderNode(t, fake, t.TempDir())
@@ -95,14 +141,15 @@ func TestNodeLadderCloseInterruptedIntentIsUnknownOnRepeat(t *testing.T) {
 	root := t.TempDir()
 	fake := idlePaneHerdr()
 	client := ladderNode(t, fake, root)
-	rootDir, err := client.ladderCloseRoot()
+	store, err := client.openLadderStore()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rootDir.Close()
-	if err := writeNodeLadderRecord(rootDir, nodeLadderRecord{RequestID: ladderRequest, Job: "job-1", Node: "machine-a", Epoch: 1, Attempt: nodeLadderNoAttempt, PaneID: "w1:p1", State: nodeLadderClosing}); err != nil {
+	args := nodeLadderCloseArgs{Job: closeOpJob, Node: "machine-a", Epoch: 1, Attempt: closeOpAttempt, PaneID: "w1:p1"}
+	if err := store.write(ladderKName(ladderKey(args)), nodeLadderRecord{Job: closeOpJob, Node: "machine-a", Epoch: 1, Attempt: closeOpAttempt, PaneID: "w1:p1", State: nodeLadderClosing}); err != nil {
 		t.Fatal(err)
 	}
+	store.close()
 	result, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
 	wantLadder(t, result, code, nodeLadderUnknown, true)
 	if len(fake.calls) != 0 {
@@ -114,13 +161,17 @@ func TestNodeLadderCloseInterruptedIntentIsUnknownOnRepeat(t *testing.T) {
 func TestNodeLadderFenceStopsALateClose(t *testing.T) {
 	fake := idlePaneHerdr()
 	client := ladderNode(t, fake, t.TempDir())
-	result, code := nodeRun(t, client, nodeCommandLadderCloseFence, closeOpRef(ladderRequest))
+	result, code := nodeRun(t, client, nodeCommandLadderCloseFence, ladderFenceArgs(ladderRequest))
 	wantLadder(t, result, code, nodeLadderFenced, false)
 	result, code = nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
 	wantLadder(t, result, code, nodeLadderFenced, true)
 	if len(fake.calls) != 0 {
 		t.Fatalf("a fenced request touched herdr: %v", fake.calls)
 	}
+	// The fence is the request's, not the binding's: another request for the
+	// same binding is judged afresh.
+	result, code = nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest2))
+	wantLadder(t, result, code, nodeLadderClosed, false)
 }
 
 // Fencing a request that already finished answers what it stored.
@@ -129,174 +180,148 @@ func TestNodeLadderFenceAnswersAFinalResultAsStored(t *testing.T) {
 	if _, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest)); code != "" {
 		t.Fatal(code)
 	}
-	result, code := nodeRun(t, client, nodeCommandLadderCloseFence, closeOpRef(ladderRequest))
+	result, code := nodeRun(t, client, nodeCommandLadderCloseFence, ladderFenceArgs(ladderRequest))
 	wantLadder(t, result, code, nodeLadderClosed, false)
-	result, code = nodeRun(t, client, nodeCommandLadderCloseStatus, closeOpRef("5c1a2b3c-0000-4000-8000-0000000000ff"))
-	wantLadder(t, result, code, nodeLadderNone, false)
 }
 
-// A repeat names its binding: another epoch, attempt, pane or job is refused.
-func TestNodeLadderCloseRepeatMustNameTheSameBinding(t *testing.T) {
-	client := ladderNode(t, idlePaneHerdr(), t.TempDir())
+// A request id first bound to one binding does not act under another: some close
+// under the first may have run.
+func TestNodeLadderCloseRepeatNamingAnotherBindingIsUnknown(t *testing.T) {
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, t.TempDir())
 	if _, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest)); code != "" {
 		t.Fatal(code)
-	}
-	for field, value := range map[string]any{"epoch": 2, "attempt": "spawn-2", "pane_id": "w1:p9", "job": "job-2"} {
-		args := ladderArgs(ladderRequest)
-		args[field] = value
-		if _, code := nodeRun(t, client, nodeCommandLadderClose, args); code != "invalid_args" {
-			t.Fatalf("%s: code=%q", field, code)
-		}
-	}
-}
-
-// The three ops are hub-issued: the public endpoint refuses them.
-func TestLadderCloseOpsAreHubOnly(t *testing.T) {
-	hub := &HubServer{}
-	for _, op := range []string{nodeCommandLadderClose, nodeCommandLadderCloseStatus, nodeCommandLadderCloseFence} {
-		if !knownNodeCommandOp(op) {
-			t.Fatalf("%s is not a node op", op)
-		}
-		if access := hub.authorizeNodeCommand(nil, op, "machine-a"); access != hubAccessForbidden {
-			t.Fatalf("%s access=%v", op, access)
-		}
-	}
-}
-
-// A node offers the op only when it has a jobs root to keep results in.
-func TestNodeAdvertisesLadderCloseOnlyWithAJobsRoot(t *testing.T) {
-	with := &HubClient{jobsInboxRoot: t.TempDir()}
-	without := &HubClient{}
-	has := func(c *HubClient) bool {
-		for _, capability := range c.spawnHelloCapabilities(t.Context()) {
-			if capability == hubCapabilityLadderClose {
-				return true
-			}
-		}
-		return false
-	}
-	if !has(with) || has(without) {
-		t.Fatalf("with=%v without=%v", has(with), has(without))
-	}
-}
-
-// A restarted node has not loaded the epoch a job.assigned recorded; the close
-// reads it from disk, so a request from an older owner closes nothing.
-func TestNodeLadderCloseRefusesAStaleEpochReadFromDisk(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "jobs", "job-1", "events"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := jobowner.Assign(filepath.Join(root, "jobs"), "job-1", 3); err != nil {
-		t.Fatal(err)
-	}
-	fake := idlePaneHerdr()
-	client := ladderNode(t, fake, root)
-	if _, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest)); code != "epoch_mismatch" {
-		t.Fatalf("code=%q", code)
-	}
-	if fake.called("pane", "close") != 0 {
-		t.Fatalf("a stale owner closed the pane: %v", fake.calls)
 	}
 	args := ladderArgs(ladderRequest)
-	args["epoch"] = 3
-	if result, code := nodeRun(t, client, nodeCommandLadderClose, args); code != "" || result["state"] == nil {
-		t.Fatalf("the current owner must close: %v %q", result, code)
+	args["epoch"] = 2
+	result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+	wantLadder(t, result, code, nodeLadderUnknown, true)
+	if fake.called("pane", "close") != 1 {
+		t.Fatalf("closes=%d", fake.called("pane", "close"))
 	}
 }
 
-// The close names the attempt the job's own ledger holds, and the spawn
-// receipt of that attempt must name this pane; a completed attempt is allowed,
-// because an author's first READY completes its record and the pane goes on.
-func TestNodeLadderCloseIsBoundToTheJobsCurrentAttempt(t *testing.T) {
+// A refusal closed nothing and stores nothing: the next request for the same
+// binding is judged afresh.
+func TestNodeLadderCloseRefusalStoresNothing(t *testing.T) {
 	root := t.TempDir()
-	dir := seedCloseOpJob(t, root)
-	fake := idlePaneHerdr()
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "working", "/work/a"))}, read: nodeReapScreen("❯ ")}
 	client := ladderNode(t, fake, root)
-	status, code := nodeRun(t, client, nodeCommandLadderCloseStatus, closeOpRef(ladderRequest))
-	if code != "" || status["state"] != nodeLadderNone || status["attempt"] != closeOpAttempt {
-		t.Fatalf("status=%v code=%q", status, code)
-	}
-	// The hub decided on another attempt: nothing is closed, and the refusal is stored.
 	result, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
-	wantLadder(t, result, code, nodeLadderRefused, false)
-	if fake.called("pane", "close") != 0 {
-		t.Fatalf("closed a pane for a stale attempt: %v", fake.calls)
+	wantRefused(t, result, code, nodePaneChanged)
+	if names := ladderRecords(t, root); len(names) != 0 {
+		t.Fatalf("a refusal left a record: %v", names)
 	}
-	// The same attempt, after the author completed: still closed.
-	if err := os.WriteFile(filepath.Join(dir, "events", "00003-job.completed.json"), []byte(`{"kind":"job.completed","created_at":"2026-11-14T00:00:02Z","payload":{}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	args := ladderArgs("5c1a2b3c-0000-4000-8000-000000000002")
-	args["attempt"] = closeOpAttempt
-	result, code = nodeRun(t, client, nodeCommandLadderClose, args)
+	fake.mu.Lock()
+	fake.agents = []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}
+	fake.agentRead = 0
+	fake.mu.Unlock()
+	result, code = nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest2))
 	wantLadder(t, result, code, nodeLadderClosed, false)
-	// A receipt for another pane is not this close's.
-	other := ladderArgs("5c1a2b3c-0000-4000-8000-000000000003")
-	other["attempt"], other["pane_id"] = closeOpAttempt, "w1:p9"
-	result, code = nodeRun(t, client, nodeCommandLadderClose, other)
-	if code != "" && code != "herdr_failed" || result != nil && result["state"] == nodeLadderClosed {
-		t.Fatalf("result=%v code=%q", result, code)
-	}
 }
 
-// The journal directory is created and made durable before it is relied on.
-func TestNodeLadderCloseJournalDirectoryIsPrivate(t *testing.T) {
-	root := t.TempDir()
-	client := ladderNode(t, idlePaneHerdr(), root)
-	if _, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest)); code != "" {
-		t.Fatal(code)
+// The composite fence: the grant equals the request's epoch, no revocation
+// stands, the attempt's receipt names this pane, written after the grant. Each
+// failure closes nothing and stores nothing.
+func TestNodeLadderCloseFenceRefusals(t *testing.T) {
+	revoke := func(t *testing.T, root string) {
+		body := `{"type":"job.revoked","job_id":"` + closeOpJob + `","epoch":3}`
+		if err := os.WriteFile(filepath.Join(root, "jobs", closeOpJob, "events", "00003-job.revoked.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	info, err := os.Stat(filepath.Join(root, ladderCloseDir))
-	if err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("info=%v err=%v", info, err)
-	}
-}
-
-// An attempt started while the final look runs leaves the pane open under the
-// superseded request, and the refusal is stored. (A grant or revocation cannot
-// land during the final look: the ownership lock is held across it, which
-// TestNodeLadderCloseHoldsTheOwnershipLockAcrossTheClose pins.)
-func TestNodeLadderCloseRechecksOwnershipAndAttemptAtTheFinalLook(t *testing.T) {
-	for name, change := range map[string]func(t *testing.T, root string){
-		"reprompt": func(t *testing.T, root string) {
-			body := `{"kind":"job.reprompted","created_at":"2026-11-14T00:00:05Z","payload":{}}`
-			if err := os.WriteFile(filepath.Join(root, "jobs", closeOpJob, "events", "00003-job.reprompted.json"), []byte(body), 0o600); err != nil {
+	for name, tc := range map[string]struct {
+		prepare func(t *testing.T, root string)
+		args    func(map[string]any)
+		reason  string
+	}{
+		"a newer grant": {prepare: func(t *testing.T, root string) {
+			if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
 				t.Fatal(err)
 			}
-		},
+		}, reason: "epoch_changed"},
+		"a request epoch above the grant":    {args: func(a map[string]any) { a["epoch"] = 2 }, reason: "epoch_changed"},
+		"a hub revocation above the grant":   {prepare: revoke, reason: "revoked"},
+		"another attempt":                    {args: func(a map[string]any) { a["attempt"] = "00009-job.spawned.json" }, reason: "attempt_changed"},
+		"a job the node holds no ledger for": {args: func(a map[string]any) { a["job"] = "job-other" }, reason: "no_provenance"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			seedCloseOpJob(t, root)
 			fake := idlePaneHerdr()
 			client := ladderNode(t, fake, root)
-			run := fake.run
-			client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
-				if len(args) >= 2 && args[0] == "pane" && args[1] == "read" && fake.called("pane", "read") == 1 {
-					change(t, root)
-				}
-				return run(ctx, args...)
+			if tc.prepare != nil {
+				tc.prepare(t, root)
 			}
 			args := ladderArgs(ladderRequest)
-			args["attempt"] = closeOpAttempt
-			result, code := nodeRun(t, client, nodeCommandLadderClose, args)
-			wantLadder(t, result, code, nodeLadderRefused, false)
-			if fake.called("pane", "close") != 0 {
-				t.Fatalf("closed under a superseded request: %v", fake.calls)
+			if tc.args != nil {
+				tc.args(args)
 			}
-			again, code := nodeRun(t, client, nodeCommandLadderClose, args)
-			wantLadder(t, again, code, nodeLadderRefused, true)
+			result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+			wantRefused(t, result, code, tc.reason)
+			if fake.called("pane", "close") != 0 {
+				t.Fatalf("closed under a failed fence: %v", fake.calls)
+			}
+			if names := ladderRecords(t, root); len(names) != 0 {
+				t.Fatalf("a refusal left a record: %v", names)
+			}
 		})
 	}
 }
 
-// The ownership check and the close are one step against a revocation: the
-// job's ownership lock is held from the last check until herdr's close returns,
-// so a revocation arriving then waits, and lands after the close.
+// An attempt that ended (the author's first READY) is still the author's pane.
+func TestNodeLadderCloseAllowsAnEndedAttempt(t *testing.T) {
+	root := t.TempDir()
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	body := `{"kind":"job.completed","created_at":"2026-11-14T00:00:02Z","payload":{}}`
+	if err := os.WriteFile(filepath.Join(root, "jobs", closeOpJob, "events", "00003-job.completed.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
+	wantLadder(t, result, code, nodeLadderClosed, false)
+}
+
+// A grant back to this node (A/1 -> B/2 -> A/3), with the reassignment's
+// revocation marker deleted: the grant is 3, no revocation stands, and the
+// epoch-1 receipt is the old attempt's. Only its age shows, so a receipt older
+// than the grant is refused, and one written after it closes.
+func TestNodeLadderCloseAfterARegrantNeedsAReceiptWrittenAfterTheGrant(t *testing.T) {
+	root := t.TempDir()
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	// seedCloseOpJob's receipt is older than this grant.
+	time.Sleep(20 * time.Millisecond) // fixture pacing: a clock tick between receipt and grant
+	if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
+		t.Fatal(err)
+	}
+	args := ladderArgs(ladderRequest)
+	args["epoch"] = 3
+	result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+	wantRefused(t, result, code, "stale_receipt")
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("closed an old attempt's pane under the new grant: %v", fake.calls)
+	}
+	// A spawn under the new grant: its receipt is newer than the grant. The
+	// question scan reads past the old revocation marker.
+	events := filepath.Join(root, "jobs", closeOpJob, "events")
+	for name, body := range map[string]string{
+		"00003-job.revoked.json": `{"type":"job.revoked","job_id":"` + closeOpJob + `","epoch":2}`,
+		"00004-job.spawned.json": `{"kind":"job.spawned","created_at":"2026-11-14T00:00:09Z","payload":{"pane_id":"w1:p1","label":"job-a","role":"implementer","herdr_session":"fleet"}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args = ladderArgs(ladderRequest2)
+	args["epoch"], args["attempt"] = 3, "00004-job.spawned.json"
+	result, code = nodeRun(t, client, nodeCommandLadderClose, args)
+	wantLadder(t, result, code, nodeLadderClosed, false)
+}
+
+// The ownership lock is held from the composite check to the close's return, so
+// a revocation writer lands after the close.
 func TestNodeLadderCloseHoldsTheOwnershipLockAcrossTheClose(t *testing.T) {
 	root := t.TempDir()
-	seedCloseOpJob(t, root)
 	fake := idlePaneHerdr()
 	client := ladderNode(t, fake, root)
 	run := fake.run
@@ -318,12 +343,10 @@ func TestNodeLadderCloseHoldsTheOwnershipLockAcrossTheClose(t *testing.T) {
 		}
 		return run(ctx, args...)
 	}
-	args := ladderArgs(ladderRequest)
-	args["attempt"] = closeOpAttempt
-	result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+	result, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
 	wantLadder(t, result, code, nodeLadderClosed, false)
 	if earlyRevocation {
-		t.Fatal("a revocation landed between the last ownership check and the close")
+		t.Fatal("a revocation landed between the composite check and the close")
 	}
 	select {
 	case <-revoked:
@@ -332,144 +355,11 @@ func TestNodeLadderCloseHoldsTheOwnershipLockAcrossTheClose(t *testing.T) {
 	}
 }
 
-// job.revoked leaves the grant file as it was, so the grant alone cannot say
-// the node lost the job: the ownership check reads the revocation too, at the
-// request, before the intent and at the last check. (A revocation that lands
-// before the question scan stops the close there; the check covers the window
-// after it.)
-func TestNodeLadderOwnershipCheckReadsAHubRevocation(t *testing.T) {
-	root := t.TempDir()
-	seedCloseOpJob(t, root)
-	fake := idlePaneHerdr()
-	client := ladderNode(t, fake, root)
-	args := nodeLadderCloseArgs{Job: closeOpJob, Epoch: 1}
-	if reason, err := client.ladderOwnerStale(args); err != nil || reason != "" {
-		t.Fatalf("a fresh job: %q %v", reason, err)
-	}
-	if err := jobowner.Revoke(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
-		t.Fatal(err)
-	}
-	if reason, err := client.ladderOwnerStale(args); err != nil || reason != "revoked" {
-		t.Fatalf("a revoked job: %q %v", reason, err)
-	}
-	if _, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest)); code != "epoch_mismatch" || fake.called("pane", "close") != 0 {
-		t.Fatalf("a revoked request closed: code=%q %v", code, fake.calls)
-	}
-	// A later grant at the revocation's epoch supersedes it.
-	if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
-		t.Fatal(err)
-	}
-	if reason, err := client.ladderOwnerStale(nodeLadderCloseArgs{Job: closeOpJob, Epoch: 3}); err != nil || reason != "" {
-		t.Fatalf("epoch 3 after its own grant: %q %v", reason, err)
-	}
-}
-
-// A writer holding the job's event lock stalls the close. The pane may go back
-// to work meanwhile: a close that finds the lock busy waits for it and repeats
-// the final pane, composer and question checks, so they see the pane as it is
-// when the wait ends.
-func TestNodeLadderCloseRepeatsThePaneChecksAfterALockWait(t *testing.T) {
-	root := t.TempDir()
-	seedCloseOpJob(t, root)
-	fake := idlePaneHerdr()
-	client := ladderNode(t, fake, root)
-	release, err := jobowner.Lock(filepath.Join(root, "jobs"), closeOpJob)
-	if err != nil {
-		t.Fatal(err)
-	}
-	released := false
-	defer func() {
-		if !released {
-			release()
-		}
-	}()
-	type answer struct {
-		result map[string]any
-		code   string
-	}
-	done := make(chan answer, 1)
-	args := ladderArgs(ladderRequest)
-	args["attempt"] = closeOpAttempt
-	go func() {
-		result, code := nodeRun(t, client, nodeCommandLadderClose, args)
-		done <- answer{result, code}
-	}()
-	eventually(t, 3*time.Second, "the close to read the pane once", func() bool { return fake.called("agent", "list") >= 1 })
-	// Fixture pacing: let the call reach its wait on the lock before the pane changes.
-	time.Sleep(200 * time.Millisecond)
-	fake.mu.Lock()
-	fake.agents = []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "working", "/work/a"))}
-	fake.mu.Unlock()
-	release()
-	released = true
-	got := <-done
-	wantLadder(t, got.result, got.code, nodeLadderRefused, false)
-	if fake.called("pane", "close") != 0 {
-		t.Fatalf("closed a pane that went back to work during the lock wait: %v", fake.calls)
-	}
-}
-
-// The lock wait is bounded by the command's context, so a stalled writer cannot
-// hold the node's acting lock past the deadline: the close gives up without
-// closing, and later commands (status, fence) are served.
-func TestNodeLadderCloseLockWaitEndsWithTheCommandContext(t *testing.T) {
-	root := t.TempDir()
-	seedCloseOpJob(t, root)
-	fake := idlePaneHerdr()
-	client := ladderNode(t, fake, root)
-	release, err := jobowner.Lock(filepath.Join(root, "jobs"), closeOpJob)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	args := ladderArgs(ladderRequest)
-	args["attempt"] = closeOpAttempt
-	raw, err := json.Marshal(args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
-	defer cancel()
-	type answer struct {
-		result any
-		code   string
-	}
-	finished := make(chan answer, 1)
-	go func() {
-		result, code := client.runNodeCommand(ctx, nodeCommandLadderClose, raw)
-		finished <- answer{result, code}
-	}()
-	select {
-	case got := <-finished:
-		// The close never got the lock, so it closed nothing and says so: a
-		// stored refusal, not an unknown close.
-		if result, ok := got.result.(nodeLadderCloseResult); got.code != "" || !ok || result.State != nodeLadderRefused || result.Reason != "lock_busy" {
-			t.Fatalf("result=%+v code=%q", got.result, got.code)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("the close kept waiting on the ownership lock past its context")
-	}
-	if fake.called("pane", "close") != 0 {
-		t.Fatalf("closed without the ownership lock: %v", fake.calls)
-	}
-	statusDone := make(chan struct{})
-	go func() {
-		defer close(statusDone)
-		nodeRun(t, client, nodeCommandLadderCloseFence, closeOpRef(ladderRequest))
-	}()
-	select {
-	case <-statusDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the node's acting lock stayed held after the timed-out close")
-	}
-}
-
 // An author's completion is written under the job's event lock. A slow final
-// pane look must not hold that lock: the close takes it only after the final
+// pane look must not hold that lock: the close tries it only after the final
 // pane, composer and question checks.
 func TestNodeLadderCloseDoesNotHoldTheEventLockDuringTheFinalPaneLook(t *testing.T) {
 	root := t.TempDir()
-	seedCloseOpJob(t, root)
 	fake := idlePaneHerdr()
 	client := ladderNode(t, fake, root)
 	run := fake.run
@@ -485,141 +375,125 @@ func TestNodeLadderCloseDoesNotHoldTheEventLockDuringTheFinalPaneLook(t *testing
 		}
 		return run(ctx, args...)
 	}
-	args := ladderArgs(ladderRequest)
-	args["attempt"] = closeOpAttempt
-	result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+	result, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
 	wantLadder(t, result, code, nodeLadderClosed, false)
 	if heldDuringLook {
 		t.Fatal("the close held the job's event lock during the final pane look")
 	}
 }
 
-// A revocation writer creates the job directory and takes its lock; a request
-// for a job the node holds no ledger for (attempt none) must not close under a
-// revocation that lands after the ownership read.
-func TestNodeLadderCloseWaitsForARevocationWriterOnAMissingJobDirectory(t *testing.T) {
+// A job event writer holding the lock is contention: one try, no wait, no
+// retry. The close is unknown (stored), nothing was closed, and the node's
+// acting lock is free at once.
+func TestNodeLadderCloseContentionIsUnknown(t *testing.T) {
 	root := t.TempDir()
 	fake := idlePaneHerdr()
 	client := ladderNode(t, fake, root)
-	run := fake.run
-	jobs := filepath.Join(root, "jobs")
-	var once bool
-	client.nodeHerdr = func(ctx context.Context, args ...string) ([]byte, error) {
-		if len(args) >= 2 && args[0] == "agent" && args[1] == "list" && fake.called("agent", "list") == 1 && !once {
-			once = true
-			// The writer creates the directory and takes the lock now, and
-			// publishes its marker a little later (fixture pacing).
-			unlock, err := jobowner.Lock(jobs, closeOpJob)
-			if err != nil {
-				t.Fatal(err)
-			}
-			go func() {
-				defer unlock()
-				time.Sleep(250 * time.Millisecond)
-				events := filepath.Join(jobs, closeOpJob, "events")
-				if err := os.MkdirAll(events, 0o700); err != nil {
-					return
-				}
-				_ = os.WriteFile(filepath.Join(events, "00001-job.revoked.json"), []byte(`{"type":"job.revoked","job_id":"`+closeOpJob+`","epoch":3}`), 0o600)
-			}()
-		}
-		return run(ctx, args...)
+	release, err := jobowner.LockContext(context.Background(), filepath.Join(root, "jobs"), closeOpJob)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer release()
 	result, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
-	wantLadder(t, result, code, nodeLadderRefused, false)
-	if fake.called("pane", "close") != 0 {
-		t.Fatalf("closed under a revocation: %v", fake.calls)
+	wantLadder(t, result, code, nodeLadderUnknown, false)
+	if result["reason"] != "lock_busy" || fake.called("pane", "close") != 0 {
+		t.Fatalf("result=%v closes=%d", result, fake.called("pane", "close"))
+	}
+	again, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
+	wantLadder(t, again, code, nodeLadderUnknown, true)
+}
+
+// A herdr failure after the intent is unknown, not a refusal: the node cannot
+// say the close did not run.
+func TestNodeLadderCloseFailureAfterTheIntentIsUnknown(t *testing.T) {
+	fake := idlePaneHerdr()
+	fake.closeErr = os.ErrClosed
+	client := ladderNode(t, fake, t.TempDir())
+	result, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
+	wantLadder(t, result, code, nodeLadderUnknown, false)
+	again, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest))
+	wantLadder(t, again, code, nodeLadderUnknown, true)
+	if fake.called("pane", "close") != 1 {
+		t.Fatalf("a failed close ran again: %v", fake.calls)
 	}
 }
 
-// A job granted back to this node keeps its old hub revocation marker in the
-// ledger (type job.revoked, no kind). A fresh attempt under the new grant must
-// still close: the question scan reads that marker.
-func TestNodeLadderCloseAfterARegrantReadsThePastRevocation(t *testing.T) {
+// Nothing is closed without a durable intent: a journal that cannot be written
+// closes nothing.
+func TestNodeLadderCloseWithoutADurableIntentClosesNothing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a read-only directory does not stop root")
+	}
 	root := t.TempDir()
-	dir := seedCloseOpJob(t, root)
-	events := filepath.Join(dir, "events")
-	for name, body := range map[string]string{
-		"00003-job.revoked.json": `{"type":"job.revoked","job_id":"` + closeOpJob + `","epoch":2}`,
-		"00004-job.spawned.json": `{"kind":"job.spawned","created_at":"2026-11-14T00:00:09Z","payload":{"pane_id":"w1:p1","label":"job-a","role":"implementer","herdr_session":"fleet"}}`,
-	} {
-		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	dir := filepath.Join(root, ladderCloseDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	if _, code := nodeRun(t, client, nodeCommandLadderClose, ladderArgs(ladderRequest)); code != "journal_failed" {
+		t.Fatalf("code=%q", code)
+	}
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("closed without a durable intent: %v", fake.calls)
+	}
+}
+
+// The ops are hub-issued: the public endpoint refuses them.
+func TestLadderCloseOpsAreHubOnly(t *testing.T) {
+	hub := &HubServer{}
+	for _, op := range []string{nodeCommandLadderClose, nodeCommandLadderCloseFence} {
+		if !knownNodeCommandOp(op) {
+			t.Fatalf("%s is not a node op", op)
+		}
+		if access := hub.authorizeNodeCommand(nil, op, "machine-a"); access != hubAccessForbidden {
+			t.Fatalf("%s access=%v", op, access)
 		}
 	}
-	if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
-		t.Fatal(err)
-	}
-	fake := idlePaneHerdr()
-	client := ladderNode(t, fake, root)
-	args := ladderArgs(ladderRequest)
-	args["epoch"], args["attempt"] = 3, "00004-job.spawned.json"
-	result, code := nodeRun(t, client, nodeCommandLadderClose, args)
-	wantLadder(t, result, code, nodeLadderClosed, false)
-	if fake.called("pane", "close") != 1 {
-		t.Fatalf("closes=%d %v", fake.called("pane", "close"), fake.calls)
+	if knownNodeCommandOp("pane.ladder_close_status") {
+		t.Fatal("the status op is gone")
 	}
 }
 
-// A lock that frees with less than the settle interval left must not leave the
-// first pass's intent as an unknown close: neither pass reached `herdr pane
-// close`, so the refusal is stored.
-func TestNodeLadderCloseStoresARefusalWhenTheRetryRunsOutBeforeTheClose(t *testing.T) {
-	root := t.TempDir()
-	seedCloseOpJob(t, root)
-	fake := idlePaneHerdr()
-	client := ladderNode(t, fake, root)
-	client.nodeCloseSettle = 300 * time.Millisecond
-	release, err := jobowner.Lock(filepath.Join(root, "jobs"), closeOpJob)
-	if err != nil {
-		t.Fatal(err)
+// A node offers the op only when it has a jobs root to keep results in.
+func TestNodeAdvertisesLadderCloseOnlyWithAJobsRoot(t *testing.T) {
+	with := &HubClient{jobsInboxRoot: t.TempDir()}
+	without := &HubClient{}
+	has := func(c *HubClient) bool {
+		for _, capability := range c.spawnHelloCapabilities(t.Context()) {
+			if capability == hubCapabilityLadderClose {
+				return true
+			}
+		}
+		return false
 	}
-	// Fixture pacing: the writer lets go after the first pass has reached the
-	// lock (about one settle) and well inside the second settle's window.
-	go func() {
-		time.Sleep(400 * time.Millisecond)
-		release()
-	}()
-	ctx, cancel := context.WithTimeout(t.Context(), 600*time.Millisecond)
-	defer cancel()
-	args := ladderArgs(ladderRequest)
-	args["attempt"] = closeOpAttempt
-	raw, err := json.Marshal(args)
-	if err != nil {
-		t.Fatal(err)
+	if !has(with) || has(without) {
+		t.Fatalf("with=%v without=%v", has(with), has(without))
 	}
-	result, code := client.runNodeCommand(ctx, nodeCommandLadderClose, raw)
-	got, ok := result.(nodeLadderCloseResult)
-	if code != "" || !ok || got.State != nodeLadderRefused {
-		t.Fatalf("result=%+v code=%q", result, code)
-	}
-	if fake.called("pane", "close") != 0 {
-		t.Fatalf("closed: %v", fake.calls)
-	}
-	fenced, code := nodeRun(t, client, nodeCommandLadderCloseFence, closeOpRef(ladderRequest))
-	wantLadder(t, fenced, code, nodeLadderRefused, false)
 }
 
-// A grant back to this node (A/1 -> B/2 -> A/3) does not return the revoked
-// pane: until a fresh claim or spawn receipt, the old receipt does not bind a
-// close.
-func TestNodeLadderCloseAfterARegrantNeedsAFreshReceipt(t *testing.T) {
+// pane.capture carries the attempt token the close names, for a job the node
+// holds a spawn receipt for, and only to a hub that advertised it.
+func TestNodePaneCaptureReportsTheAttemptForALadderClose(t *testing.T) {
 	root := t.TempDir()
-	dir := seedCloseOpJob(t, root)
-	body := `{"type":"job.revoked","job_id":"` + closeOpJob + `","epoch":2}`
-	if err := os.WriteFile(filepath.Join(dir, "events", "00003-job.revoked.json"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
+	client := ladderNode(t, idlePaneHerdr(), root)
+	if got := client.ladderAttempt(closeOpJob); got != closeOpAttempt {
+		t.Fatalf("attempt=%q", got)
 	}
-	if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
-		t.Fatal(err)
+	if got := client.ladderAttempt("job-other"); got != "" {
+		t.Fatalf("a job with no ledger has no provenance: %q", got)
 	}
-	fake := idlePaneHerdr()
-	client := ladderNode(t, fake, root)
-	args := ladderArgs(ladderRequest)
-	args["epoch"], args["attempt"] = 3, closeOpAttempt
-	result, code := nodeRun(t, client, nodeCommandLadderClose, args)
-	wantLadder(t, result, code, nodeLadderRefused, false)
-	if fake.called("pane", "close") != 0 {
-		t.Fatalf("closed a revoked attempt's pane: %v", fake.calls)
+	peer := &hubClientConnection{}
+	capture := nodePaneCaptureResult{Outcome: nodeCaptureScreen, Saved: "/x/pane-screen.txt", Attempt: closeOpAttempt}
+	if got := peer.nodeCommandWire(capture).(nodePaneCaptureResult); got.Attempt != "" {
+		t.Fatalf("an older hub must not see the attempt: %+v", got)
+	}
+	peer.acceptsPaneCaptureAttempt.Store(true)
+	if got := peer.nodeCommandWire(capture).(nodePaneCaptureResult); got.Attempt != closeOpAttempt {
+		t.Fatalf("a hub that advertised it must: %+v", got)
 	}
 }

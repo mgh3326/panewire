@@ -175,45 +175,39 @@ it is not reported as a successful escalation.
 
 On a node that advertises `ladder_close_v1` in hello, step 4's pane close is one
 durable node operation (hk 5676), so the hub reads what the node did instead of
-inferring it from a pane that is gone. Contract: [node-commands.md](node-commands.md#ladder-close-paneladder_close).
+inferring it from a pane that is gone. Contract, and the node's order of steps:
+[node-commands.md](node-commands.md#ladder-close-paneladder_close).
 
-- The operation is the staged successor's request id, bound to the predecessor
-  job, the node, the hub's ownership epoch for the job, the predecessor's spawn
-  attempt and the pane. The staged row records that it is bound to a node
-  operation before the request is sent (the same row stamp as the marker, with
-  the opposite sign, so a marker-path reader never mistakes one for the other).
-- The node runs `pane.close`'s own guards (idle status, empty composer, open
-  question) and writes one record per request id: `closing` before the close,
-  then `closed`, `gone` (the pane was absent when the node looked) or `refused`
-  (`pane_changed`, `question_open`) before it replies. A repeat of the request
-  answers the stored record and never closes twice, including after a node
-  restart. A record left `closing` is `unknown` on the next repeat: a close may
-  have run.
-- The hub acts on the result: `closed` goes on to the lost mark and
-  activation; `refused` cancels the stage (`pane_not_closed`); `gone` releases
-  the stage of a completed author (`parent_ended`) and lets a live record's
-  author be replaced as before; `unknown` is ambiguous.
-- An ambiguous outcome keeps the stage staged and sends one owner decision
-  (event `ladder-step:<job>:<round>:unresolved:esc`, the same id the expiry pass
-  uses, so the handler, a replay and the expiry pass raise it once between
-  them). A reply the hub never saw is not ambiguous: the replay fences the
-  request and reads the stored result.
-- Before any path releases a stage that was bound to an operation (a refusal,
-  a moved or closed task, the expiry pass, an ended predecessor), the hub
-  fences the request on the node and acts on the verdict: a release made
-  because the author remains (a refusal, an expiry) never discards a stage whose
-  fence finds a close that ran (the step goes on to activation) or one that may
-  have run (the stage stays, one owner decision). The protocol is the stage's own
-  once it is marked: an operation-bound stage is never closed with a plain
-  `pane.close`, and stays pending while its node cannot answer the operation.
-  A live record's replay and the expiry pass read the same result, including
-  when the pane is gone or unreadable: a stored close resumes the handoff (lost
-  mark, binding check, activation), and an author whose first READY completed
-  the record meanwhile does not turn a close this step made into `parent_ended`.
-  The node rechecks the ownership epoch and the attempt in the last check before
-  `herdr pane close`, and stores a refusal when either changed. After the fence a delayed close command
-  answers `fenced` and touches no pane. A fence the node does not answer keeps
-  the stage and the step is retried.
+- The node keeps one record per binding (job, node, epoch, attempt, pane),
+  shared by every request id for it. It writes `closing` before it looks at the
+  pane, runs `pane.close`'s guards, closes under one composite ownership check
+  held through the close, and stores the result before it replies. A repeat
+  answers the stored result and never closes twice. Contention, a failure after
+  the intent, or a record left `closing` is `unknown`: a close may have run. A
+  refusal closed nothing and is not stored.
+- The staged row records that it is bound to a node operation before the request
+  is sent (the row stamp the marker uses, with the opposite sign). The protocol
+  is the stage's own once marked: an operation-bound stage is never closed with a
+  plain `pane.close`, and stays pending while its node cannot answer. A node with
+  no provenance for the job (no spawn receipt) keeps the marker path.
+- One reconciler (`reconcileLadderStage`) reads the node's verdict for the
+  handler's close, its replay, the expiry pass and every cancellation, for a
+  live predecessor and a completed one alike:
+
+  | Verdict | Action |
+  |---|---|
+  | no answer | keep the stage, retry |
+  | `unknown` / `closing` | keep the stage, one owner decision |
+  | `closed` | mark the predecessor lost where it is live, read the task binding, activate |
+  | `gone` | release a completed predecessor (`parent_ended`); replace a live one |
+  | `refused` / `fenced` | pane present: cancel (`pane_not_closed`, or `staged_expired`); pane gone: as `gone`; pane unreadable: keep |
+
+- Ambiguity wins over every reason to release. One owner decision (event
+  `ladder-step:<job>:<round>:unresolved:esc`) is shared by every path. Before any
+  release of an operation-bound stage the hub fences the request on the node: a
+  delayed close then answers `fenced` and acts on no pane. A fence the node does
+  not answer keeps the stage; a release made because the author remains never
+  discards a stage whose fence finds a close that ran.
 
 ## Replay
 

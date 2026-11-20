@@ -82,7 +82,7 @@ func knownNodeCommandOp(op string) bool {
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
 		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
 		nodeCommandCheckoutSweep, nodeCommandHandoverCheck, nodeCommandHandoverSnapshot,
-		nodeCommandLadderClose, nodeCommandLadderCloseStatus, nodeCommandLadderCloseFence:
+		nodeCommandLadderClose, nodeCommandLadderCloseFence:
 		return true
 	}
 	return false
@@ -163,7 +163,16 @@ type nodePaneCaptureResult struct {
 	// upload keeps its earlier bytes (hk 3617). It goes on the wire only to a
 	// hub that advertised hubFeaturePaneCaptureDoc (nodeCommandWire).
 	Doc string `json:"doc,omitempty"`
+	// Attempt is the job's current spawn receipt, the attempt token a ladder
+	// close names (hk 5676). Only a screen capture of a job the node holds a
+	// receipt for carries it, and it goes on the wire only to a hub that
+	// advertised hubFeaturePaneCaptureAttempt (nodeCommandWire).
+	Attempt string `json:"attempt,omitempty"`
 }
+
+// hubFeaturePaneCaptureAttempt: an older hub decodes a pane.capture result
+// strictly and would refuse the whole result for an unknown attempt.
+const hubFeaturePaneCaptureAttempt = "pane_capture_attempt"
 
 // hubFeaturePaneCaptureDoc: a hub before hk 3617 decodes a pane.capture
 // result strictly and refuses the whole result for an unknown doc, so a node
@@ -255,9 +264,8 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandHandoverCheck:    {"job", "cwd", "origin", "branch"},
 	nodeCommandHandoverSnapshot: {"job", "epoch", "cwd", "origin", "branch"},
 
-	nodeCommandLadderClose:       {"request_id", "job", "node", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
-	nodeCommandLadderCloseStatus: {"request_id", "job"},
-	nodeCommandLadderCloseFence:  {"request_id", "job"},
+	nodeCommandLadderClose:      {"request_id", "job", "node", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
+	nodeCommandLadderCloseFence: {"request_id", "job"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -428,15 +436,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandLadderClose:
 		var args nodeLadderCloseArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeLadderCloseArgs(args)
-	case nodeCommandLadderCloseStatus, nodeCommandLadderCloseFence:
-		var args nodeLadderRefArgs
-		if !decodeNodeCommandStrict(raw, &args) || !validNodeLadderRefArgs(args) {
-			return nil, false
-		}
-		if op == nodeCommandLadderCloseFence {
-			return nodeLadderFenceArgs(args), true
-		}
-		return args, true
+	case nodeCommandLadderCloseFence:
+		var args nodeLadderFenceArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeLadderFenceArgs(args)
 	case nodeCommandPaneCapture:
 		var args nodePaneCaptureArgs
 		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && validNodeCommandPath(args.Cwd) && args.MergedAfter >= 0
@@ -561,7 +563,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result nodeCloseOpStatusResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeCloseOpStatusResult(result)
 		target = result
-	case nodeCommandLadderClose, nodeCommandLadderCloseStatus, nodeCommandLadderCloseFence:
+	case nodeCommandLadderClose, nodeCommandLadderCloseFence:
 		var result nodeLadderCloseResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeLadderCloseResult(result)
 		target = result
@@ -570,7 +572,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		switch {
 		case !decodeNodeCommandStrict(raw, &result):
 		case result.Outcome == nodeCaptureReport || result.Outcome == nodeCaptureScreen || result.Outcome == nodeCaptureWould:
-			valid = validNodeCommandPath(result.Saved) && (result.Doc == "" || validNodeCaptureDoc(result))
+			valid = validNodeCommandPath(result.Saved) && (result.Doc == "" || validNodeCaptureDoc(result)) && (result.Attempt == "" || result.Outcome == nodeCaptureScreen && fleet.ValidJobID(result.Attempt))
 		case result.Outcome == nodeCaptureNotAJob || result.Outcome == nodePaneChanged || result.Outcome == nodePaneGone:
 			valid = result.Saved == "" && result.Doc == ""
 		}
@@ -972,8 +974,13 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 // which hub it answers: pane.capture's doc reaches only a hub that advertised
 // hubFeaturePaneCaptureDoc.
 func (peer *hubClientConnection) nodeCommandWire(result any) any {
-	if capture, ok := result.(nodePaneCaptureResult); ok && !peer.acceptsPaneCaptureDoc.Load() {
-		capture.Doc = ""
+	if capture, ok := result.(nodePaneCaptureResult); ok {
+		if !peer.acceptsPaneCaptureDoc.Load() {
+			capture.Doc = ""
+		}
+		if !peer.acceptsPaneCaptureAttempt.Load() {
+			capture.Attempt = ""
+		}
 		return capture
 	}
 	return result
@@ -1013,14 +1020,10 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodeLadderClose(ctx, args)
-	case nodeLadderRefArgs:
-		client.nodeCommandMu.Lock()
-		defer client.nodeCommandMu.Unlock()
-		return client.nodeLadderRef(args, false)
 	case nodeLadderFenceArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
-		return client.nodeLadderRef(nodeLadderRefArgs(args), true)
+		return client.nodeLadderFence(args)
 	case nodePaneCaptureArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
@@ -1390,7 +1393,7 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 	if err != nil {
 		slog.Warn("pane screen upload failed; local screen retained", "job", args.Name, "err", err)
 	}
-	return nodePaneCaptureResult{Outcome: nodeCaptureScreen, Saved: screen, Doc: doc}, ""
+	return nodePaneCaptureResult{Outcome: nodeCaptureScreen, Saved: screen, Doc: doc, Attempt: client.ladderAttempt(args.Name)}, ""
 }
 
 // validNodeCaptureDoc reports whether a pane.capture result's doc is the

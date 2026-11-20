@@ -27,8 +27,7 @@ that job's directory. `job.close` and `job.reap` are issued by the hub after
 its own ownership checks, and the HTTP command endpoint refuses them for every
 caller, as it does `job.mark_lost`. The close operations
 (`pane.close_op`, `pane.close_status`, `pane.close_release`) and the ladder
-close ops (`pane.ladder_close`, `pane.ladder_close_status`,
-`pane.ladder_close_fence`) are hub-issued in the same way.
+close ops (`pane.ladder_close`, `pane.ladder_close_fence`) are hub-issued in the same way.
 
 ## Task pane sweep
 
@@ -748,77 +747,67 @@ before rolling back. Do not advertise on a hub without the guard.
 
 ### Ladder close: `pane.ladder_close`
 
-Hub-issued, like the close operations above; the public endpoint refuses all
-three ops. A node advertises `ladder_close_v1` when it has a jobs root to keep
-the records in. The hub never sends these ops to a node that did not, and then
-uses `pane.close` and its marker (docs/escalate-author.md, "The close
-operation"; hk 5676).
+Hub-issued, like the close operations above; the public endpoint refuses both
+ops. A node advertises `ladder_close_v1` when it has a jobs root to keep the
+records in. The hub never sends these ops to a node that did not, and then uses
+`pane.close` and its marker (docs/escalate-author.md, "The close operation";
+hk 5676).
 
 `pane.ladder_close` closes the pane of a job the escalate-author step replaces,
-once, and answers one stored result per `request_id` (the staged successor's
-request id). It is not `pane.close_op`: that journal binds an attempt that has
+at most once per binding K = (job, node, epoch, attempt, pane), and answers one
+stored result. It is not `pane.close_op`: that journal binds an attempt that has
 not ended, and a ladder step also replaces an author whose hk record completed.
 
-Arguments, all required: `request_id`, `job`, `node` (the node's own machine
-id), `epoch` (the hub's ownership epoch for the job), `attempt` (the token
-`pane.ladder_close_status` answered: the job's current attempt in its own ledger,
-or `none` for a job the node holds no ledger for), `pane_id`, `name`, `agent_status`
-(`idle`, `done` or `blocked`, as `pane.close`), `cwd`, `allow_unnamed`.
+Arguments, all required: `request_id` (the staged successor's request id), `job`,
+`node` (the node's own machine id), `epoch` (the hub's ownership epoch for the
+job), `attempt` (the token `pane.capture` reported for the job), `pane_id`,
+`name`, `agent_status` (`idle`, `done` or `blocked`, as `pane.close`), `cwd`,
+`allow_unnamed`.
 
 Result: `{"state": S, "replayed": bool, "reason": R}` where `S` is `closed`
 (this operation closed the pane), `gone` (the pane was absent when the node
-looked), `refused` (`reason` is `pane_changed` or `question_open`; the pane was
-not closed), `unknown` (a close may have run and no result was recorded) or
-`fenced` (the request was ended before it acted). `closing` and `none` appear
-only in a status read.
+looked), `refused` (`reason` is `pane_changed`, `question_open`, `epoch_changed`,
+`revoked`, `attempt_changed`, `stale_receipt` or `no_provenance`; nothing was
+closed and nothing is stored), `unknown` (a close may have run and no result was
+recorded; `reason` says why: `lock_busy`, a failure code, `binding_changed`) or
+`fenced` (the request was ended before it acted).
 
-The node writes `<jobs root>/ladder-close/<request_id>.json` (mode 0600,
-fsynced before it is visible) holding the binding and the state. It writes
-`closing` after the first guarded look and before the last look that precedes
-`herdr pane close`, and the final state before it replies. A repeat with the
-same binding answers the stored state with `replayed: true` and touches no
-pane; a repeat that names another job, epoch, attempt or pane is
-`invalid_args`. A record left `closing` (a node stop, or a result that could
-not be written) is settled `unknown` by the next repeat or fence. The epoch is the larger of the node's in-memory
-assignment and the one `job.assigned` recorded on disk; a higher one than the
-request's answers `epoch_mismatch`, at first sight and again immediately before
-the intent. Immediately before the intent the node also reads the job's ledger
-again: the request's `attempt` must still be the current one, and the attempt's
-spawn receipt, when it has one, must name this pane and label, or the pane is
-left open and `refused` (`pane_changed`) is stored. An ended attempt is allowed:
-an author's first READY completes its record and the pane goes on working. The
-ownership check also reads a hub revocation (`job.revoked`, which leaves the
-grant file as it was) unless a grant at or above its epoch supersedes it. The
-last check runs under the job's ownership lock (the one `job.assigned` and
-`job.revoked` take, taken even for a job with no directory yet, since those
-writers create it; a directory with no events folder is an empty ledger, which
-only the attempt `none` names), held until `herdr pane close` returns, so a grant
-or revocation lands before the check or after the close. The lock is taken
-without waiting and only after the final pane, composer and question checks, so a
-job event writer (an author's completion) is never held off by a slow pane read;
-a busy lock is waited for within the command's deadline, without holding it, and
-the pane checks are repeated before the next try. A wait that runs out closes
-nothing and stores `refused` (`lock_busy`), releasing the node's acting lock; so
-does any failure after the intent and before `herdr pane close` is reached
-(`not_closed`), such as a deadline during a repeated look or settle. A hub
-revocation (a `job.revoked` with an epoch) takes the job from the attempt it
-follows, and a later grant does not return it: until a fresh claim or spawn
-receipt, the old attempt does not bind a close (an attempt that merely ended, by
-the author's first READY, still does). The
-open-question scan reads past a hub revocation marker a regrant left in the
-ledger. The
-journal directory and the jobs root are fsynced on every open, so a created
-directory entry, and a record whose own sync failed, are durable before a result
-or a fence is acknowledged.
+Order, under the node's acting lock:
 
-`pane.ladder_close_status` (`request_id`, `job`) reads the record: the stored
-state, or `none` when the node holds nothing, with `attempt` set to the stored
-record's or else the job's current attempt. `pane.ladder_close_fence`
-(`request_id`, `job`) ends a request nobody will repeat: with no record it
-writes a `fenced` one, so a close delayed in transit finds it and acts on no
-pane; with a record left `closing` it settles it `unknown`; with a final record
-it answers it as stored. The hub fences before it releases the stage a request
-was bound to.
+1. A final record for K is answered as stored, `replayed: true`; one left
+   `closing` becomes `unknown` and never runs again. A request id first bound to
+   another K answers `unknown` (`binding_changed`).
+2. `closing` is written (fsynced) - nothing is closed without a durable intent.
+3. `pane.close`'s guards run: status, composer, open question.
+4. The job's ownership lock (the one `job.assigned` and `job.revoked` take) is
+   tried once, without waiting. A busy lock is contention and ends as `unknown`.
+   Under it, one composite check: the node's grant equals the request's epoch; no
+   hub revocation stands above it; the attempt's spawn receipt names this pane
+   and label, no hub revocation came after it, and it was written after the grant
+   (a regrant A/1 -> B/2 -> A/3 leaves the epoch-1 receipt, which only its age
+   shows). A job with no ledger has no provenance and is refused. An attempt that
+   merely ended (the author's first READY) still binds.
+5. The lock is held through the single `herdr pane close`, so a grant or
+   revocation lands before the check or after the close.
+6. The final result is written (fsynced) before the reply. A failed final write
+   leaves `closing`, which never runs again.
+
+The records are `<jobs root>/ladder-close/k-<hash of K>.json` (one per K, shared by
+every request id for it) and `r-<request id>.json` (the K a request named, or its
+fence), mode 0600 in a 0700 directory; the jobs root and the directory are
+fsynced on every open. A refusal stores no K record, so the next request for the
+same K is judged afresh.
+
+`pane.ladder_close_fence` (`request_id`, `job`) ends a request nobody will repeat:
+one that never reached the intent is fenced for good, so a close delayed in
+transit finds it and acts on no pane; one that did is answered from its K record
+(a record left `closing` becomes `unknown`). A fence is per request id, not per
+binding.
+
+`pane.capture` carries `attempt` (the job's current spawn receipt) on a screen
+capture of a job the node holds a receipt for, only to a hub that advertised
+`pane_capture_attempt`. The open-question scan reads past a hub revocation marker
+a regrant left in the ledger.
 
 ### `pane.capture`
 

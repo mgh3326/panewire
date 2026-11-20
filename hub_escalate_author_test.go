@@ -305,7 +305,12 @@ func (f *escalateFixture) reply(op string) map[string]any {
 		return map[string]any{"result": nodeWorktreeInspectResult{Worktree: &nodeWorktree{Path: paneCwd, Branch: "wk/task", Head: strings.Repeat("b", 40), OriginURL: "https://github.com/example/project.git"}, Check: check}}
 	case "pane.capture":
 		f.markerAtCapture = f.markerSet(context.Background())
-		return map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}}
+		capture := map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}
+		if f.ladder != nil && !f.ladder.noProvenance {
+			// A node with the ladder close op reports the attempt token the close names.
+			capture["attempt"] = "00002-job.spawned.json"
+		}
+		return map[string]any{"result": capture}
 	case "pane.close":
 		f.markerAtClose = f.markerSet(context.Background())
 		if f.closeLost {

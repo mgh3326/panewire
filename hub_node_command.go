@@ -332,7 +332,7 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine string) hubAccess {
 	if op == nodeCommandJobMarkLost || op == nodeCommandJobClose || op == nodeCommandJobReap || op == nodeCommandPaneSweep ||
 		op == nodeCommandPaneCloseOp || op == nodeCommandPaneCloseStatus || op == nodeCommandPaneCloseRelease ||
-		op == nodeCommandLadderClose || op == nodeCommandLadderCloseStatus || op == nodeCommandLadderCloseFence {
+		op == nodeCommandLadderClose || op == nodeCommandLadderCloseFence {
 		// These commands are issued by the hub after its own checks; none is
 		// available through the public node-command endpoint.
 		return hubAccessForbidden

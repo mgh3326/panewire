@@ -107,7 +107,7 @@ func (h *HubServer) closeHeldPaneAfter(ctx context.Context, holder hubSpawnTask,
 	if questionJob != "" && !h.nodeHasCapability(machine, hubCapabilityCloseQuestion) {
 		return false, "question_unsupported"
 	}
-	if !h.captureHeldPane(ctx, machine, name, row) {
+	if _, ok := h.captureHeldPane(ctx, machine, name, row); !ok {
 		return false, "capture_failed"
 	}
 	if beforeClose != nil && beforeClose() != nil {

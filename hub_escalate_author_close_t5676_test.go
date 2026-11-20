@@ -30,6 +30,9 @@ type ladderNodeFake struct {
 	dropReply bool
 	// fenceDown: the node does not answer a fence.
 	fenceDown bool
+	// noProvenance: the node holds no spawn receipt for the job, so capture
+	// reports no attempt.
+	noProvenance bool
 }
 
 func (n *ladderNodeFake) reply(f *escalateFixture, op string, raw json.RawMessage) map[string]any {
@@ -67,11 +70,6 @@ func (n *ladderNodeFake) reply(f *escalateFixture, op string, raw json.RawMessag
 			return map[string]any{"error": "close_failed"}
 		}
 		return answer(result, false)
-	case nodeCommandLadderCloseStatus:
-		if !found {
-			return answer(nodeLadderCloseResult{State: nodeLadderNone}, false)
-		}
-		return answer(stored, false)
 	case nodeCommandLadderCloseFence:
 		if n.fenceDown {
 			return map[string]any{"error": "journal_failed"}
@@ -301,8 +299,9 @@ func TestExpiredLadderStageFencesTheNodeOperationBeforeRelease(t *testing.T) {
 	if _, ok := f.stageStatus(t); ok {
 		t.Fatal("the expired stage remains")
 	}
-	if sent := node.sent(); !slices.Equal(sent, []string{nodeCommandLadderCloseFence}) {
-		t.Fatalf("the stage must be fenced on the node before it is released: %v", sent)
+	sent := node.sent()
+	if len(sent) == 0 || slices.ContainsFunc(sent, func(op string) bool { return op != nodeCommandLadderCloseFence }) {
+		t.Fatalf("the stage must be fenced on the node before it is released, and nothing else sent: %v", sent)
 	}
 	late := node.reply(f, nodeCommandLadderClose, json.RawMessage(`{"request_id":"`+staged.Request.RequestID+`"}`))
 	if result, _ := late["result"].(nodeLadderCloseResult); result.State != nodeLadderFenced || node.closeCount() != 0 {
@@ -376,9 +375,9 @@ func TestEscalateAuthorLiveAuthorWithUnknownCloseStaysStagedOnReplay(t *testing.
 }
 
 // The expiry pass probed the pane present, and the close finished before the
-// fence: the fence's verdict, not the probe, decides. A close that ran keeps
-// the successor; the next pass, which finds the pane gone, activates it.
-func TestExpiredLadderStageKeepsTheSuccessorWhenTheFenceFindsAClose(t *testing.T) {
+// fence: the fence's verdict, not the probe, decides. A close that ran is not an
+// author that remained, so the successor is activated, not discarded.
+func TestExpiredLadderStageActivatesWhenTheFenceFindsAClose(t *testing.T) {
 	f := newEscalateFixture(t, "pw-task-88")
 	f.completeAuthorRecord(t)
 	node := f.withLadderNode(t)
@@ -386,14 +385,11 @@ func TestExpiredLadderStageKeepsTheSuccessorWhenTheFenceFindsAClose(t *testing.T
 	node.preseed(staged.Request.RequestID, nodeLadderClosed)
 	f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
 	f.hub.expireStagedLadderSteps(t.Context())
-	f.stageOpBoundKeepsTheStage(t, "pane still listed")
+	if status, ok := f.stageStatus(t); !ok || status == "staged" {
+		t.Fatalf("the stored close must activate the successor: %q %v", status, ok)
+	}
 	if slices.ContainsFunc(f.infoTexts(), func(text string) bool { return strings.Contains(text, "staged_expired") }) {
 		t.Fatal("a closed author was reported as remaining present")
-	}
-	f.paneAbsent = true
-	f.hub.expireStagedLadderSteps(t.Context())
-	if status, ok := f.stageStatus(t); !ok || status == "staged" {
-		t.Fatalf("the next pass must activate the successor: %q %v", status, ok)
 	}
 }
 
@@ -529,4 +525,24 @@ func TestExpiredLadderStageOfALiveAuthorAsksForAnUnknownCloseWithTheGonePane(t *
 	f.hub.expireStagedLadderSteps(t.Context())
 	f.stageOpBoundKeepsTheStage(t, "live record, pane gone")
 	f.awaitInfo(t, "authorless?")
+}
+
+// A node with the ladder close op but no provenance for the job (no spawn
+// receipt) cannot bind a close: the unmarked stage keeps the marker path.
+func TestEscalateAuthorNodeWithoutProvenanceKeepsTheMarkerPath(t *testing.T) {
+	f := newEscalateFixture(t, "pw-task-96")
+	f.completeAuthorRecord(t)
+	node := f.withLadderNode(t)
+	node.noProvenance = true
+	placed := placedAnywhere
+	result, commands := f.escalate(t, &placed)
+	if result.Code != "" || result.Job != "pw-task-96-l1" {
+		t.Fatalf("result=%+v", result)
+	}
+	if ops := commandOps(commands); !slices.Contains(ops, "pane.close") || slices.Contains(ops, nodeCommandLadderClose) {
+		t.Fatalf("the marker path must close the pane: %v", ops)
+	}
+	if !f.markerAtClose {
+		t.Fatal("the legacy marker must precede the close")
+	}
 }

@@ -2,8 +2,11 @@ package panewire
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,56 +18,62 @@ import (
 
 // The ladder close operation (hk 5676; docs/escalate-author.md, "The close
 // operation"). The escalate-author step closes the author's pane and then
-// activates a staged successor, and the hub's staged row only says the close
-// was asked for. This op makes the node's answer a durable fact: the node
-// writes its result before it replies, so a lost reply or a hub restart reads
-// the same result back instead of guessing from a vanished pane.
+// activates a staged successor. This op makes the node's answer a durable
+// fact: the node writes its result before it replies, so a lost reply or a hub
+// restart reads the same result back instead of guessing from a vanished pane.
 //
-// It is not the close journal of pane.close_op (node_pane_close_op.go): that
-// journal lives in the job's ledger and binds an attempt that has not ended,
-// while a ladder step also replaces an author whose hk record completed. This
-// op is keyed by the staged successor's request id and bound to (predecessor
-// job, node, ownership epoch, attempt, pane); it runs pane.close's own guards
-// (idle status, empty composer, open question) and stores one record per id.
+// One durable record per K = (job, node, epoch, attempt, pane), shared by every
+// request id that targets it. A request id has its own small index file that
+// names its K, so a fence can find the record without the binding. Order, under
+// the node's acting lock:
 //
-// Ops: pane.ladder_close closes once and answers the stored result on every
-// repeat; pane.ladder_close_status reads it; pane.ladder_close_fence ends a
-// request nobody will repeat, so a delayed command can never close the pane
-// after the hub released its stage. All three are hub-issued: the public
-// node-command endpoint refuses them.
+//  1. replay: a final record is answered as stored; one left `closing` becomes
+//     `unknown` and never runs again;
+//  2. publish `closing` (fsynced) - nothing is closed without a durable intent;
+//  3. run pane.close's guards (idle status, empty composer, open question);
+//  4. try the job's ownership lock ONCE and make one composite check under it:
+//     the grant equals the request's epoch, no hub revocation stands, and the
+//     attempt's spawn receipt, written after the grant, names this pane;
+//  5. hold that lock through the single `herdr pane close`;
+//  6. store the final result (fsynced) before replying.
+//
+// A known refusal (a guard, a stale binding) closed nothing and leaves no
+// record, so the next request for the same K is judged afresh. Contention, a
+// read or write failure, or a failure after the intent all end as `unknown`:
+// the node cannot say the pane was not closed, and the hub keeps the stage and
+// asks the owner. The record is final only after the result is durable; a
+// failed final write leaves `closing`, which never runs again.
+//
+// Ops: pane.ladder_close and pane.ladder_close_fence. Both are hub-issued; the
+// public node-command endpoint refuses them. The fence ends a request nobody
+// will repeat, so a delayed close can never act after the hub released its
+// stage.
 const (
-	nodeCommandLadderClose       = "pane.ladder_close"
-	nodeCommandLadderCloseStatus = "pane.ladder_close_status"
-	nodeCommandLadderCloseFence  = "pane.ladder_close_fence"
+	nodeCommandLadderClose      = "pane.ladder_close"
+	nodeCommandLadderCloseFence = "pane.ladder_close_fence"
 
 	// hubCapabilityLadderClose is advertised by a node that runs the ladder
-	// close op. A hub never sends the three ops, and never relies on their
-	// stored results, to a node that did not advertise it.
+	// close op. A hub never sends the ops, and never relies on their stored
+	// results, to a node that did not advertise it.
 	hubCapabilityLadderClose = "ladder_close_v1"
 
-	// States of a ladder close record. closing is the intent written before
-	// the pane close is asked for; every other state is final.
-	nodeLadderNone    = "none"
+	// States of a ladder close record. closing is the intent written before the
+	// pane close is asked for; every other state is final.
 	nodeLadderClosing = "closing"
 	// nodeLadderClosed: this operation closed the pane.
 	nodeLadderClosed = "closed"
-	// nodeLadderGone: the pane was absent when the operation looked, so it
-	// ended before this operation could close it.
+	// nodeLadderGone: the pane was absent when the operation looked, so it ended
+	// before this operation could close it.
 	nodeLadderGone = "gone"
-	// nodeLadderRefused: the guards kept the pane open; reason says which.
+	// nodeLadderRefused: a guard or the composite check kept the pane open;
+	// reason says which. A refusal is never stored.
 	nodeLadderRefused = "refused"
-	// nodeLadderUnknown: a close may have run and no result was recorded (the
-	// node stopped, or the record could not be written, after the intent).
+	// nodeLadderUnknown: a close may have run and no result was recorded.
 	nodeLadderUnknown = "unknown"
 	// nodeLadderFenced: the request was ended before it acted; it never will.
 	nodeLadderFenced = "fenced"
 
 	ladderCloseDir = "ladder-close"
-
-	// nodeLadderNoAttempt is the attempt token of a job the node holds no
-	// ledger for (its directory was removed, or never had a claim): the close
-	// is then bound by its pane guards alone.
-	nodeLadderNoAttempt = "none"
 )
 
 type nodeLadderCloseArgs struct {
@@ -72,7 +81,8 @@ type nodeLadderCloseArgs struct {
 	Job       string `json:"job"`
 	Node      string `json:"node"`
 	Epoch     uint64 `json:"epoch"`
-	// Attempt names the predecessor attempt the hub decided to close.
+	// Attempt is the predecessor's attempt token as pane.capture reported it:
+	// the spawn receipt's event name.
 	Attempt      string `json:"attempt"`
 	PaneID       string `json:"pane_id"`
 	Name         string `json:"name"`
@@ -81,24 +91,16 @@ type nodeLadderCloseArgs struct {
 	AllowUnnamed bool   `json:"allow_unnamed"`
 }
 
-type nodeLadderRefArgs struct {
+type nodeLadderFenceArgs struct {
 	RequestID string `json:"request_id"`
 	Job       string `json:"job"`
 }
-
-// nodeLadderFenceArgs is pane.ladder_close_fence's decoded arguments, a
-// distinct type so the dispatcher can tell it from status.
-type nodeLadderFenceArgs nodeLadderRefArgs
 
 type nodeLadderCloseResult struct {
 	State string `json:"state"`
 	// Replayed is true when a close answers a record an earlier call wrote.
 	Replayed bool   `json:"replayed,omitempty"`
 	Reason   string `json:"reason,omitempty"`
-	// Attempt, on pane.ladder_close_status only, is the attempt token a close
-	// for the job must name: the stored record's, or else the job's current
-	// attempt from its own ledger (nodeLadderNoAttempt when it has none).
-	Attempt string `json:"attempt,omitempty"`
 }
 
 func validNodeLadderCloseArgs(args nodeLadderCloseArgs) bool {
@@ -106,42 +108,52 @@ func validNodeLadderCloseArgs(args nodeLadderCloseArgs) bool {
 		nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
 }
 
-func validNodeLadderRefArgs(args nodeLadderRefArgs) bool {
+func validNodeLadderFenceArgs(args nodeLadderFenceArgs) bool {
 	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job)
 }
 
 func validNodeLadderCloseResult(result nodeLadderCloseResult) bool {
-	if result.Reason != "" && result.State != nodeLadderRefused || result.Attempt != "" && !fleet.ValidJobID(result.Attempt) {
+	if result.Reason != "" && result.State != nodeLadderRefused && result.State != nodeLadderUnknown {
 		return false
 	}
 	switch result.State {
-	case nodeLadderNone, nodeLadderClosing, nodeLadderClosed, nodeLadderGone, nodeLadderRefused, nodeLadderUnknown, nodeLadderFenced:
-		return !result.Replayed || result.State != nodeLadderNone
+	case nodeLadderClosing, nodeLadderClosed, nodeLadderGone, nodeLadderRefused, nodeLadderUnknown, nodeLadderFenced:
+		return true
 	}
 	return false
 }
 
-// nodeLadderRecord is one stored request. The binding fields are written with
-// the first record and compared on every repeat.
+// nodeLadderRecord is the K record. Its binding fields are the K it is stored
+// under.
 type nodeLadderRecord struct {
+	Job     string `json:"job"`
+	Node    string `json:"node"`
+	Epoch   uint64 `json:"epoch"`
+	Attempt string `json:"attempt"`
+	PaneID  string `json:"pane_id"`
+	State   string `json:"state"`
+}
+
+// nodeLadderRequest is a request id's index: the K it named, or a fence.
+type nodeLadderRequest struct {
 	RequestID string `json:"request_id"`
 	Job       string `json:"job"`
-	Node      string `json:"node"`
-	Epoch     uint64 `json:"epoch"`
-	Attempt   string `json:"attempt"`
-	PaneID    string `json:"pane_id"`
-	State     string `json:"state"`
-	Reason    string `json:"reason,omitempty"`
+	K         string `json:"k,omitempty"`
+	Fenced    bool   `json:"fenced,omitempty"`
 }
 
-func (r nodeLadderRecord) binds(args nodeLadderCloseArgs) bool {
-	return r.Job == args.Job && r.Node == args.Node && r.Epoch == args.Epoch && r.Attempt == args.Attempt && r.PaneID == args.PaneID
+func ladderKey(args nodeLadderCloseArgs) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%s", args.Job, args.Node, args.Epoch, args.Attempt, args.PaneID)))
+	return hex.EncodeToString(sum[:])
 }
 
-func (r nodeLadderRecord) final() bool { return r.State != nodeLadderClosing }
+// ladderStore is the journal directory, opened per command.
+type ladderStore struct {
+	root *os.Root
+	dir  string
+}
 
-// ladderCloseRoot opens the directory the records live in, creating it.
-func (client *HubClient) ladderCloseRoot() (*os.Root, error) {
+func (client *HubClient) openLadderStore() (*ladderStore, error) {
 	if client.jobsInboxRoot == "" {
 		return nil, errNodeJobsRootUnset
 	}
@@ -149,17 +161,20 @@ func (client *HubClient) ladderCloseRoot() (*os.Root, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	// The journal directory entry and the directory itself are made durable
-	// before any record in it is read or relied on: a host crash must not lose
-	// an acknowledged result, or a fence, together with a lazily created
-	// directory. Syncing on every open also makes a record whose own write
-	// reported a failed sync durable before a retry acknowledges it.
+	// The journal directory entry and the directory itself are fsynced before
+	// any record in it is read or relied on, so a created entry, and a record
+	// whose own write reported a failed sync, are durable before a result or a
+	// fence is acknowledged.
 	for _, path := range []string{dir, client.jobsInboxRoot} {
 		if err := syncNodeDirectory(path); err != nil {
 			return nil, err
 		}
 	}
-	return os.OpenRoot(dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &ladderStore{root: root, dir: dir}, nil
 }
 
 func syncNodeDirectory(path string) error {
@@ -171,352 +186,301 @@ func syncNodeDirectory(path string) error {
 	return directory.Sync()
 }
 
-// ladderAttempt is the attempt token a close of job must name: the job's
-// current attempt in its own ledger. A job with no directory or no claim has
-// none, and a close of it rests on the pane guards.
-func (client *HubClient) ladderAttempt(job string) (string, error) {
-	root, _, found, err := client.openNodeJobDir(job)
-	if err != nil || !found {
-		return nodeLadderNoAttempt, err
-	}
-	defer root.Close()
-	target, err := readLadderTarget(root)
-	if err != nil || target.attempt == "" {
-		return nodeLadderNoAttempt, err
-	}
-	return target.attempt, nil
-}
+func (s *ladderStore) close() { s.root.Close() }
 
-// readLadderTarget is readNodeCloseTarget for a job directory that may hold
-// nothing but the ownership lock: an ownership writer creates the directory
-// before it writes, so a directory with no events folder is an empty ledger,
-// which only the attempt "none" names.
-func readLadderTarget(job *os.Root) (nodeCloseTarget, error) {
-	target, err := readNodeCloseTarget(job)
+func (s *ladderStore) read(name string, into any) (bool, error) {
+	file, err := s.root.Open(name)
 	if errors.Is(err, os.ErrNotExist) {
-		return nodeCloseTarget{}, nil
-	}
-	return target, err
-}
-
-// ladderOwnerStale reports why the request no longer holds the job: the node
-// durably recorded a higher grant (job.assigned), or a hub revocation at or
-// above the request's epoch (job.revoked, which leaves the grant file as it
-// was). Empty means the request still owns the job.
-func (client *HubClient) ladderOwnerStale(args nodeLadderCloseArgs) (string, error) {
-	jobs := filepath.Join(client.jobsInboxRoot, "jobs")
-	stored, err := jobowner.Epoch(jobs, args.Job)
-	if err != nil {
-		return "", err
-	}
-	if stored > args.Epoch {
-		return "epoch_changed", nil
-	}
-	revoked, err := jobowner.Revoked(jobs, args.Job)
-	if err != nil {
-		return "", err
-	}
-	// A grant at or above the revocation's epoch supersedes it (jobowner.Revoked).
-	if revoked > stored && revoked >= args.Epoch {
-		return "revoked", nil
-	}
-	return "", nil
-}
-
-// ladderBound reports that the job's current ledger still binds the request:
-// the attempt is the one the hub decided on, and a spawn receipt, when the
-// attempt has one, names this pane and label. An ended attempt is allowed: an
-// author's first READY completes its record and the pane goes on working.
-func (client *HubClient) ladderBound(args nodeLadderCloseArgs) (bool, error) {
-	root, _, found, err := client.openNodeJobDir(args.Job)
-	if err != nil {
-		return false, err
-	}
-	if !found {
-		return args.Attempt == nodeLadderNoAttempt, nil
-	}
-	defer root.Close()
-	target, err := readLadderTarget(root)
-	if err != nil {
-		return false, err
-	}
-	// A hub revocation takes the job from the attempt it follows, and a later
-	// grant of the job back to this node does not return it: only a fresh claim
-	// or spawn receipt does. An attempt that merely ended (the author's first
-	// READY) is still the author's pane; a revoked one is not.
-	if target.hubRevoked {
 		return false, nil
 	}
-	attempt := firstNonempty(target.attempt, nodeLadderNoAttempt)
-	if args.Attempt != attempt {
-		return false, nil
-	}
-	return !target.receipt || target.pane == args.PaneID && target.label == args.Name, nil
-}
-
-func readNodeLadderRecord(root *os.Root, id string) (nodeLadderRecord, bool, error) {
-	file, err := root.Open(id + ".json")
-	if errors.Is(err, os.ErrNotExist) {
-		return nodeLadderRecord{}, false, nil
-	}
 	if err != nil {
-		return nodeLadderRecord{}, false, err
+		return false, err
 	}
 	defer file.Close()
 	raw, err := io.ReadAll(io.LimitReader(file, 64<<10))
 	if err != nil {
-		return nodeLadderRecord{}, false, err
+		return false, err
 	}
-	var record nodeLadderRecord
-	if err := json.Unmarshal(raw, &record); err != nil || record.RequestID != id {
-		return nodeLadderRecord{}, false, errors.New("unreadable ladder close record")
+	if err := json.Unmarshal(raw, into); err != nil {
+		return false, errors.New("unreadable ladder close record")
 	}
-	return record, true, nil
+	return true, nil
 }
 
-// writeNodeLadderRecord makes the record durable before it returns: the
-// final state is the node's answer, and the answer is sent only after it.
-func writeNodeLadderRecord(root *os.Root, record nodeLadderRecord) error {
-	raw, err := json.Marshal(record)
+// write makes the record durable before it returns; an error does not mean the
+// record is absent (the rename precedes the directory sync).
+func (s *ladderStore) write(name string, value any) error {
+	raw, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return durable.ReplaceFileAtomicallyInRootSynced(root, record.RequestID+".json", raw, 0o600)
+	return durable.ReplaceFileAtomicallyInRootSynced(s.root, name, raw, 0o600)
 }
 
-func nodeLadderAnswer(record nodeLadderRecord, replayed bool) nodeLadderCloseResult {
-	return nodeLadderCloseResult{State: record.State, Replayed: replayed, Reason: record.Reason}
+func (s *ladderStore) remove(name string) error {
+	if err := s.root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncNodeDirectory(s.dir)
 }
 
-// settleNodeLadderRecord ends an interrupted request: a record left closing
-// means a close may have run and its result was never recorded.
-func settleNodeLadderRecord(root *os.Root, record nodeLadderRecord) (nodeLadderRecord, error) {
+func ladderKName(k string) string        { return "k-" + k + ".json" }
+func ladderRequestName(id string) string { return "r-" + id + ".json" }
+
+func answerLadder(state, reason string, replayed bool) nodeLadderCloseResult {
+	return nodeLadderCloseResult{State: state, Replayed: replayed, Reason: reason}
+}
+
+// settle ends an interrupted record: one left closing means a close may have
+// run and its result was never recorded.
+func (s *ladderStore) settle(name string, record nodeLadderRecord) (nodeLadderRecord, error) {
 	if record.State == nodeLadderClosing {
 		record.State = nodeLadderUnknown
-		if err := writeNodeLadderRecord(root, record); err != nil {
+		if err := s.write(name, record); err != nil {
 			return record, err
 		}
 	}
 	return record, nil
 }
 
-// nodeLadderClose closes the predecessor's pane once. The caller holds
-// nodeCommandMu, so no other acting command interleaves with the guards.
+// nodeLadderClose closes the predecessor's pane at most once per K. The caller
+// holds nodeCommandMu.
 func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderCloseArgs) (any, string) {
 	if client.machineID != "" && args.Node != client.machineID {
 		return nil, "invalid_args"
 	}
-	root, err := client.ladderCloseRoot()
+	store, err := client.openLadderStore()
 	switch {
 	case errors.Is(err, errNodeJobsRootUnset):
 		return nil, "jobs_root_unset"
 	case err != nil:
 		return nil, "journal_failed"
 	}
-	defer root.Close()
-	record, found, err := readNodeLadderRecord(root, args.RequestID)
+	defer store.close()
+	k := ladderKey(args)
+	var request nodeLadderRequest
+	haveRequest, err := store.read(ladderRequestName(args.RequestID), &request)
 	if err != nil {
 		return nil, "journal_failed"
 	}
+	if haveRequest {
+		if request.Fenced {
+			return answerLadder(nodeLadderFenced, "", true), ""
+		}
+		if request.K != k {
+			// The request id was first bound to another K: some close under that
+			// binding may have run, so this one does not act.
+			return answerLadder(nodeLadderUnknown, "binding_changed", true), ""
+		}
+	}
+	var record nodeLadderRecord
+	found, err := store.read(ladderKName(k), &record)
+	if err != nil {
+		return nil, "journal_failed"
+	}
+	index := nodeLadderRequest{RequestID: args.RequestID, Job: args.Job, K: k}
 	if found {
-		// A fenced request never acts, whatever binding the late command names.
-		if record.State == nodeLadderFenced && record.Job == args.Job {
-			return nodeLadderAnswer(record, true), ""
-		}
-		// A repeat names the binding it was registered with; another job,
-		// epoch, attempt or pane never reads this request's result.
-		if !record.binds(args) {
-			return nil, "invalid_args"
-		}
-		record, err = settleNodeLadderRecord(root, record)
-		if err != nil {
+		if record, err = store.settle(ladderKName(k), record); err != nil {
 			return nil, "journal_failed"
 		}
-		return nodeLadderAnswer(record, true), ""
+		if !haveRequest && store.write(ladderRequestName(args.RequestID), index) != nil {
+			return nil, "journal_failed"
+		}
+		return answerLadder(record.State, "", true), ""
 	}
-	// The ownership epoch is the larger of the node's in-memory assignment and
-	// the one a job.assigned durably recorded, which a restarted node has not
-	// loaded yet (as pane.close_op reads it).
-	client.assignmentMu.Lock()
-	owned := client.assignedJobs[args.Job]
-	client.assignmentMu.Unlock()
-	if stored, err := jobowner.Epoch(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job); err != nil {
-		return nil, "epoch_mismatch"
-	} else if stored > owned {
-		owned = stored
+	if !haveRequest {
+		if err := store.write(ladderRequestName(args.RequestID), index); err != nil {
+			return nil, "journal_failed"
+		}
 	}
-	if owned > args.Epoch {
-		return nil, "epoch_mismatch"
+	// The intent is durable before anything is looked at or closed.
+	record = nodeLadderRecord{Job: args.Job, Node: args.Node, Epoch: args.Epoch, Attempt: args.Attempt, PaneID: args.PaneID, State: nodeLadderClosing}
+	if err := store.write(ladderKName(k), record); err != nil {
+		return nil, "journal_failed"
 	}
-	if reason, err := client.ladderOwnerStale(args); err != nil || reason != "" {
-		return nil, "epoch_mismatch"
+	return client.runLadderClose(ctx, store, k, record, args)
+}
+
+// runLadderClose runs steps 3-6 for a record whose intent is durable.
+func (client *HubClient) runLadderClose(ctx context.Context, store *ladderStore, k string, record nodeLadderRecord, args nodeLadderCloseArgs) (any, string) {
+	finish := func(state, reason string) (any, string) {
+		record.State = state
+		if store.write(ladderKName(k), record) != nil {
+			// The record may or may not be on disk; either way this reply is not
+			// its result, and a repeat settles it as unknown.
+			return nil, "journal_failed"
+		}
+		return answerLadder(state, reason, false), ""
 	}
-	record = nodeLadderRecord{RequestID: args.RequestID, Job: args.Job, Node: args.Node, Epoch: args.Epoch, Attempt: args.Attempt, PaneID: args.PaneID, State: nodeLadderClosing}
-	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, QuestionJob: args.Job}
-	// The intent is written after the guarded look and before the last look
-	// that precedes `herdr pane close`: a pane that was never going to be
-	// closed leaves no intent, and one that may have been leaves one.
-	stale := ""
-	// intentWritten: the closing record is on disk. closeReached: the last check
-	// passed, so the next step is the herdr close itself. A failure with the
-	// intent written and the close not reached closed nothing.
-	intentWritten, closeReached := false, false
+	// refuse closes nothing and stores nothing, so the next request for the same
+	// K is judged afresh.
+	refuse := func(reason string) (any, string) {
+		if store.remove(ladderKName(k)) != nil {
+			return nil, "journal_failed"
+		}
+		return answerLadder(nodeLadderRefused, reason, false), ""
+	}
 	jobs := filepath.Join(client.jobsInboxRoot, "jobs")
-	var result nodePaneCloseResult
-	var code string
-	for {
-		busy, releaseOwner := false, func() {}
-		result, code = client.nodePaneCloseWith(ctx, closeArgs, func() error {
-			// Read the ledger again after the first look and the settle,
-			// immediately before the intent: an attempt that moved on, or another
-			// pane, is not closed. The epoch is read again too.
-			if reason, err := client.ladderOwnerStale(args); err != nil {
-				return err
-			} else if reason != "" {
-				stale = reason
-				return nodeCloseHookStop{outcome: nodePaneChanged}
-			}
-			bound, err := client.ladderBound(args)
-			if err != nil {
-				return err
-			}
-			if !bound {
-				stale = "attempt_changed"
-				return nodeCloseHookStop{outcome: nodePaneChanged}
-			}
-			if err := writeNodeLadderRecord(root, record); err != nil {
-				return err
-			}
-			intentWritten = true
-			return nil
-		}, func() error {
-			// The last check before `herdr pane close`, under the job's ownership
-			// lock (the one job.assigned and job.revoked take, taken even for a job
-			// with no directory yet, as those writers create it): a grant, a hub
-			// revocation, or an attempt a re-prompt started while the final look
-			// ran leaves the pane open and the refusal stored. The lock is held
-			// until the close returns, so none lands between the check and the
-			// close. It is taken without waiting, after the final pane, composer
-			// and question checks and not before them, so a job event writer (an
-			// author's completion) is never held off by a slow pane read; a lock
-			// that is busy sends the close back through those checks.
-			unlock, err := jobowner.TryLock(jobs, args.Job)
-			if errors.Is(err, jobowner.ErrLockBusy) {
-				busy = true
-				return nodeCloseHookStop{outcome: nodePaneChanged}
-			} else if err != nil {
-				return err
-			}
-			releaseOwner = unlock
-			if reason, err := client.ladderOwnerStale(args); err != nil {
-				return err
-			} else if reason != "" {
-				stale = reason
-				return nodeCloseHookStop{outcome: nodePaneChanged}
-			}
-			bound, err := client.ladderBound(args)
-			if err != nil {
-				return err
-			}
-			if !bound {
-				stale = "attempt_changed"
-				return nodeCloseHookStop{outcome: nodePaneChanged}
-			}
-			closeReached = true
-			return nil
-		})
-		releaseOwner()
-		if !busy {
-			break
+	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, QuestionJob: args.Job}
+	reason, contended := "", false
+	releaseOwner := func() {}
+	result, code := client.nodePaneCloseWith(ctx, closeArgs, nil, func() error {
+		// The last check before `herdr pane close`. The ownership lock (the one
+		// job.assigned and job.revoked take) is tried once, after the pane
+		// checks, and held until the close returns: a grant or revocation lands
+		// before the check or after the close. A job event writer holding it is
+		// contention, which ends as unknown.
+		unlock, err := jobowner.TryLock(jobs, args.Job)
+		if errors.Is(err, jobowner.ErrLockBusy) {
+			contended = true
+			return nodeCloseHookStop{outcome: nodePaneChanged}
+		} else if err != nil {
+			return err
 		}
-		// A writer holds the lock: wait for it within the command's deadline,
-		// without holding it, and repeat the pane checks before the next try. A
-		// wait that runs out closed nothing, and the refusal is stored.
-		unlock, err := jobowner.LockContext(ctx, jobs, args.Job)
+		releaseOwner = unlock
+		stale, err := client.ladderFence(jobs, args)
 		if err != nil {
-			record.State, record.Reason = nodeLadderRefused, "lock_busy"
-			if writeNodeLadderRecord(root, record) != nil {
-				return nil, "journal_failed"
-			}
-			return nodeLadderAnswer(record, false), ""
+			return err
 		}
-		unlock()
-	}
-	if code != "" {
-		if intentWritten && !closeReached {
-			// The intent is on disk, but the command failed before it reached
-			// `herdr pane close` (a deadline during a repeated look or settle, a
-			// herdr read): nothing was closed, and the refusal is stored so a
-			// repeat does not read the intent as an unknown close.
-			record.State, record.Reason = nodeLadderRefused, "not_closed"
-			if writeNodeLadderRecord(root, record) != nil {
-				return nil, "journal_failed"
-			}
-			return nodeLadderAnswer(record, false), ""
+		if stale != "" {
+			reason = stale
+			return nodeCloseHookStop{outcome: nodePaneChanged}
 		}
-		// A failed command leaves whatever the journal holds: no record, or
-		// the closing intent a repeat settles as unknown (herdr's close ran).
-		return nil, code
+		return nil
+	})
+	releaseOwner()
+	switch {
+	case contended:
+		return finish(nodeLadderUnknown, "lock_busy")
+	case code != "":
+		// A failure after the intent: a close may have run.
+		return finish(nodeLadderUnknown, code)
 	}
 	switch result.Outcome {
 	case nodePaneClosed:
-		record.State = nodeLadderClosed
+		return finish(nodeLadderClosed, "")
 	case nodePaneGone:
-		record.State = nodeLadderGone
+		return finish(nodeLadderGone, "")
 	case nodePaneQuestionOpen:
-		record.State, record.Reason = nodeLadderRefused, nodePaneQuestionOpen
-	default:
-		record.State, record.Reason = nodeLadderRefused, firstNonempty(stale, nodePaneChanged)
+		return refuse(nodePaneQuestionOpen)
 	}
-	if err := writeNodeLadderRecord(root, record); err != nil {
-		return nil, "journal_failed"
-	}
-	return nodeLadderAnswer(record, false), ""
+	return refuse(firstNonempty(reason, nodePaneChanged))
 }
 
-// nodeLadderRef reads a request (fence false) or ends it (fence true). Fencing
-// a request with no record writes a fenced one under its id, so a close
-// delayed in transit finds it and touches no pane; fencing one the node left
-// closing settles it as unknown; a final record is answered as stored. The
-// caller holds nodeCommandMu, so a fence never lands inside a running close.
-func (client *HubClient) nodeLadderRef(args nodeLadderRefArgs, fence bool) (any, string) {
-	root, err := client.ladderCloseRoot()
+// ladderFence is the one composite check, made under the ownership lock: the
+// node's grant equals the request's epoch, no hub revocation stands above it,
+// and the attempt is the one the request names - its spawn receipt names this
+// pane and label, no hub revocation came after it, and it was written after the
+// grant (a revocation marker a reassignment deleted leaves A/1 -> B/2 -> A/3
+// with the epoch-1 receipt, which only its age shows). A job with no ledger has
+// no provenance, and the close fails closed. The empty string means the close
+// may go on.
+func (client *HubClient) ladderFence(jobs string, args nodeLadderCloseArgs) (string, error) {
+	grant, err := jobowner.Epoch(jobs, args.Job)
+	if err != nil {
+		return "", err
+	}
+	if grant != args.Epoch {
+		return "epoch_changed", nil
+	}
+	revoked, err := jobowner.Revoked(jobs, args.Job)
+	if err != nil {
+		return "", err
+	}
+	if revoked > grant {
+		return "revoked", nil
+	}
+	root, _, found, err := client.openNodeJobDir(args.Job)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "no_provenance", nil
+	}
+	defer root.Close()
+	target, err := readNodeCloseTarget(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return "no_provenance", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	// An ended attempt is allowed: an author's first READY completes its record
+	// and the pane goes on working. A hub revocation is not an end.
+	if target.hubRevoked || !target.receipt || target.attempt != args.Attempt || target.pane != args.PaneID || target.label != args.Name {
+		return "attempt_changed", nil
+	}
+	if grantAt, ok, err := jobowner.GrantTime(jobs, args.Job); err != nil {
+		return "", err
+	} else if ok {
+		info, err := root.Stat(filepath.Join("events", target.attempt))
+		if err != nil {
+			return "", err
+		}
+		if info.ModTime().Before(grantAt) {
+			return "stale_receipt", nil
+		}
+	}
+	return "", nil
+}
+
+// ladderAttempt is the attempt token a close of job must name: its current
+// spawn receipt's event name. Empty means the node holds no provenance for the
+// job, and the hub keeps the marker path.
+func (client *HubClient) ladderAttempt(job string) string {
+	root, _, found, err := client.openNodeJobDir(job)
+	if err != nil || !found {
+		return ""
+	}
+	defer root.Close()
+	target, err := readNodeCloseTarget(root)
+	if err != nil || !target.receipt {
+		return ""
+	}
+	return target.attempt
+}
+
+// nodeLadderFence ends a request. A request that never reached the intent is
+// fenced for good: a close delayed in transit finds it and acts on no pane. One
+// that did is answered from its K record (a record left closing becomes
+// unknown). The caller holds nodeCommandMu, so a fence never lands inside a
+// running close.
+func (client *HubClient) nodeLadderFence(args nodeLadderFenceArgs) (any, string) {
+	store, err := client.openLadderStore()
 	switch {
 	case errors.Is(err, errNodeJobsRootUnset):
 		return nil, "jobs_root_unset"
 	case err != nil:
 		return nil, "journal_failed"
 	}
-	defer root.Close()
-	record, found, err := readNodeLadderRecord(root, args.RequestID)
+	defer store.close()
+	var request nodeLadderRequest
+	haveRequest, err := store.read(ladderRequestName(args.RequestID), &request)
 	if err != nil {
 		return nil, "journal_failed"
 	}
-	if found && record.Job != args.Job {
+	if haveRequest && request.Job != args.Job {
 		return nil, "invalid_args"
 	}
-	if !found {
-		if !fence {
-			attempt, err := client.ladderAttempt(args.Job)
-			if err != nil {
+	if haveRequest && request.Fenced {
+		return answerLadder(nodeLadderFenced, "", false), ""
+	}
+	if haveRequest {
+		var record nodeLadderRecord
+		found, err := store.read(ladderKName(request.K), &record)
+		if err != nil {
+			return nil, "journal_failed"
+		}
+		if found {
+			if record, err = store.settle(ladderKName(request.K), record); err != nil {
 				return nil, "journal_failed"
 			}
-			return nodeLadderCloseResult{State: nodeLadderNone, Attempt: attempt}, ""
-		}
-		record = nodeLadderRecord{RequestID: args.RequestID, Job: args.Job, State: nodeLadderFenced}
-		if err := writeNodeLadderRecord(root, record); err != nil {
-			return nil, "journal_failed"
-		}
-		return nodeLadderAnswer(record, false), ""
-	}
-	if fence {
-		if record, err = settleNodeLadderRecord(root, record); err != nil {
-			return nil, "journal_failed"
+			return answerLadder(record.State, "", false), ""
 		}
 	}
-	answer := nodeLadderAnswer(record, false)
-	if !fence {
-		answer.Attempt = record.Attempt
+	// No record: nothing this request did stands, and nothing it does later will.
+	if err := store.write(ladderRequestName(args.RequestID), nodeLadderRequest{RequestID: args.RequestID, Job: args.Job, Fenced: true}); err != nil {
+		return nil, "journal_failed"
 	}
-	return answer, ""
+	return answerLadder(nodeLadderFenced, "", false), ""
 }

@@ -746,6 +746,8 @@ type hubClientConnection struct {
 	// acceptsPaneCaptureDoc is the same for hubFeaturePaneCaptureDoc
 	// (node_command.go).
 	acceptsPaneCaptureDoc atomic.Bool
+	// acceptsPaneCaptureAttempt is the same for hubFeaturePaneCaptureAttempt.
+	acceptsPaneCaptureAttempt atomic.Bool
 	// acceptsHostActivity is the same for hubFeatureHostActivity
 	// (host_activity.go).
 	acceptsHostActivity atomic.Bool
@@ -2304,6 +2306,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsLaneEventPriority.Store(slices.Contains(message.Features, hubFeatureLaneEventPriority))
 				peer.acceptsLaneEventLong.Store(slices.Contains(message.Features, hubFeatureLaneEventLong))
 				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
+				peer.acceptsPaneCaptureAttempt.Store(slices.Contains(message.Features, hubFeaturePaneCaptureAttempt))
 				peer.acceptsHostActivity.Store(slices.Contains(message.Features, hubFeatureHostActivity))
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
 				peer.acceptsEndedPanes.Store(slices.Contains(message.Features, hubFeatureEndedPanes))

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
 	"github.com/mgh3326/panewire/internal/filelock"
@@ -60,6 +61,23 @@ func Assign(jobs, id string, epoch uint64) error {
 		}
 		return durable.ReplaceFileAtomically(filepath.Join(dir, assignmentFile), ".assignment-*", body, 0600)
 	})
+}
+
+// GrantTime is when the job's grant was last written, for a job that has one
+// (a job never reassigned has no grant file and reports false). A spawn receipt
+// written before it belongs to an older grant.
+func GrantTime(jobs, id string) (time.Time, bool, error) {
+	if jobs == "" || !validID.MatchString(id) || id == "." || id == ".." {
+		return time.Time{}, false, errors.New("invalid job assignment")
+	}
+	info, err := os.Stat(filepath.Join(jobs, id, assignmentFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return info.ModTime(), true, nil
 }
 
 // Revoke appends a hub revocation unless a later local grant superseded it.
@@ -147,19 +165,15 @@ func withLockContext(ctx context.Context, jobs, id string, fn func(string) error
 	return fn(dir)
 }
 
-// Lock takes the job's ownership lock, which Assign, Revoke and RevokeIfEpoch
-// also take, and returns its release. A caller that must act on the strength of
-// the job's current grant (a pane close) holds it from its last check until the
-// action returns, so a grant or revocation cannot land in between: it lands
-// before the check or after the action.
-func Lock(jobs, id string) (unlock func(), err error) {
-	return LockContext(context.Background(), jobs, id)
-}
-
+// LockContext takes the job's ownership lock, which Assign, Revoke and
+// RevokeIfEpoch also take, and returns its release. A caller that must act on
+// the strength of the job's current grant (a pane close) holds it from its last
+// check until the action returns, so a grant or revocation cannot land in
+// between. It gives up when ctx ends.
 // ErrLockBusy is TryLock's answer while another writer holds the lock.
 var ErrLockBusy = errors.New("job ownership lock busy")
 
-// TryLock is Lock that does not wait: a lock another writer holds answers
+// TryLock is LockContext that does not wait: a lock another writer holds answers
 // ErrLockBusy at once.
 func TryLock(jobs, id string) (unlock func(), err error) {
 	done, cancel := context.WithCancel(context.Background())
@@ -171,8 +185,6 @@ func TryLock(jobs, id string) (unlock func(), err error) {
 	return unlock, err
 }
 
-// LockContext is Lock that gives up when ctx ends: a stalled writer holding the
-// lock cannot keep a bounded command waiting past its deadline.
 func LockContext(ctx context.Context, jobs, id string) (unlock func(), err error) {
 	if jobs == "" || !validID.MatchString(id) || id == "." || id == ".." {
 		return nil, errors.New("invalid job id")
