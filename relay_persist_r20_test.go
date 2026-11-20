@@ -86,6 +86,12 @@ type fakeHandoffkeep struct {
 	waitCommitStatus int
 	clearStatus      int
 	waitsStatus      int
+	// decisionRowTasks lists tasks that also carry an open decision request, which
+	// handoffkeep lists under needs_operator as a decision:<ref> row with
+	// on_kind operator. waitsPadBytes adds one unrelated decision row of that
+	// size ahead of the rows, so the section outgrows any fixed body cap.
+	decisionRowTasks map[int64]bool
+	waitsPadBytes    int
 	intakeTasks      map[string]*fakeHkAnchor
 	hkNextTaskID     int64
 	hkDeadTasks      map[int64]bool
@@ -553,6 +559,12 @@ func (f *fakeHandoffkeep) serveWaitsRead(w http.ResponseWriter, r *http.Request)
 	f.mu.Lock()
 	reply := f.waitsStatus
 	rows := []map[string]any{}
+	if f.waitsPadBytes > 0 {
+		rows = append(rows, map[string]any{"key": "decision:dr-pad", "task_id": int64(999999), "on_kind": "operator", "reason": strings.Repeat("x", f.waitsPadBytes), "section": "needs_operator"})
+	}
+	for taskID := range f.decisionRowTasks {
+		rows = append(rows, map[string]any{"key": "decision:dr-" + strconv.FormatInt(taskID, 10), "task_id": taskID, "on_kind": "operator", "section": "needs_operator"})
+	}
 	for _, wait := range f.hkWaits {
 		if wait.OnKind == "operator" && !wait.Cleared {
 			rows = append(rows, map[string]any{"key": "wait:" + strconv.FormatInt(wait.ID, 10), "task_id": wait.TaskID, "on_kind": wait.OnKind, "section": "needs_operator"})

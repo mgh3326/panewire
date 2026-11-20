@@ -245,16 +245,18 @@ func (c *handoffkeepRelayClient) endpoint(path string) string {
 	return target.String()
 }
 
-func (c *handoffkeepRelayClient) do(ctx context.Context, method, endpoint string, body []byte) (int, []byte, error) {
+// send starts one handoffkeep request under the client timeout. The caller reads
+// the body, then calls cancel to end the timeout.
+func (c *handoffkeepRelayClient) send(ctx context.Context, method, endpoint string, body []byte) (*http.Response, context.CancelFunc, error) {
 	requestContext, cancel := context.WithTimeout(ctx, handoffkeepTimeout)
-	defer cancel()
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
 	request, err := http.NewRequestWithContext(requestContext, method, endpoint, reader)
 	if err != nil {
-		return 0, nil, errors.New("handoffkeep request failed")
+		cancel()
+		return nil, nil, errors.New("handoffkeep request failed")
 	}
 	c.env.setAuth(request)
 	request.Header.Set("Accept", "application/json")
@@ -263,8 +265,18 @@ func (c *handoffkeepRelayClient) do(ctx context.Context, method, endpoint string
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
-		return 0, nil, errors.New("handoffkeep request failed")
+		cancel()
+		return nil, nil, errors.New("handoffkeep request failed")
 	}
+	return response, cancel, nil
+}
+
+func (c *handoffkeepRelayClient) do(ctx context.Context, method, endpoint string, body []byte) (int, []byte, error) {
+	response, cancel, err := c.send(ctx, method, endpoint, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer cancel()
 	defer response.Body.Close()
 	payload, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	return response.StatusCode, payload, nil
@@ -614,51 +626,177 @@ func (c *handoffkeepRelayClient) clearTaskWait(ctx context.Context, taskID, wait
 // absence only with a nil error: a needs_operator section whose count does not
 // match its rows is an incomplete read, and it is an error.
 func (c *handoffkeepRelayClient) findOperatorWait(ctx context.Context, taskID int64) (int64, bool, error) {
-	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/waits")+"?open=true&section="+handoffkeepWaitsNeedsOperator, nil)
+	response, cancel, err := c.send(ctx, http.MethodGet, c.endpoint("/v1/waits")+"?open=true&section="+handoffkeepWaitsNeedsOperator, nil)
 	if err != nil {
 		return 0, false, err
 	}
-	if status != http.StatusOK {
-		return 0, false, handoffkeepRefusal{status: status}
+	defer cancel()
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, false, handoffkeepRefusal{status: response.StatusCode}
 	}
-	var view struct {
-		Sections []struct {
-			Key   string `json:"key"`
-			Count int    `json:"count"`
-			Rows  []struct {
-				Key    string `json:"key"`
-				TaskID int64  `json:"task_id"`
-				OnKind string `json:"on_kind"`
-			} `json:"rows"`
-		} `json:"sections"`
+	return scanOperatorWait(response.Body, taskID)
+}
+
+// errWaitsReadUnusable is a GET /v1/waits body this client cannot read.
+var errWaitsReadUnusable = errors.New("handoffkeep returned an unusable waits read")
+
+// waitsReadRow is one row of a GET /v1/waits section, reduced to the fields that
+// name a hand wait. Each row is decoded alone, so the section may be any size.
+type waitsReadRow struct {
+	Key    string `json:"key"`
+	TaskID int64  `json:"task_id"`
+	OnKind string `json:"on_kind"`
+}
+
+// scanOperatorWait streams a GET /v1/waits body and returns the lowest hand-wait
+// id open on taskID. The body is never buffered whole, so no unrelated section
+// size can block the lookup. Rows that are not hand waits, such as the
+// decision:<ref> rows the desk lists under needs_operator, are skipped.
+func scanOperatorWait(body io.Reader, taskID int64) (int64, bool, error) {
+	dec := json.NewDecoder(body)
+	if err := expectWaitsDelim(dec, '{'); err != nil {
+		return 0, false, err
 	}
-	if json.Unmarshal(payload, &view) != nil {
-		return 0, false, errors.New("handoffkeep returned an unusable waits read")
-	}
-	for _, section := range view.Sections {
-		if section.Key != handoffkeepWaitsNeedsOperator {
+	var lowest int64
+	seen := false
+	for dec.More() {
+		name, err := dec.Token()
+		if err != nil {
+			return 0, false, errWaitsReadUnusable
+		}
+		if name != "sections" {
+			if err := skipWaitsValue(dec); err != nil {
+				return 0, false, err
+			}
 			continue
 		}
-		if section.Count != len(section.Rows) {
-			return 0, false, errors.New("handoffkeep waits read is incomplete")
+		if err := expectWaitsDelim(dec, '['); err != nil {
+			return 0, false, err
 		}
-		var lowest int64
-		for _, row := range section.Rows {
-			if row.TaskID != taskID || row.OnKind != oneTimeWaitOperator {
+		for dec.More() {
+			key, id, err := scanWaitsSection(dec, taskID)
+			if err != nil {
+				return 0, false, err
+			}
+			if key != handoffkeepWaitsNeedsOperator {
 				continue
 			}
-			digits, ok := strings.CutPrefix(row.Key, "wait:")
-			id, perr := strconv.ParseInt(digits, 10, 64)
-			if !ok || perr != nil || id < 1 {
-				return 0, false, errors.New("handoffkeep returned an unusable waits row")
-			}
-			if lowest == 0 || id < lowest {
+			seen = true
+			if id != 0 && (lowest == 0 || id < lowest) {
 				lowest = id
 			}
 		}
-		return lowest, lowest != 0, nil
+		if err := expectWaitsDelim(dec, ']'); err != nil {
+			return 0, false, err
+		}
 	}
-	return 0, false, errors.New("handoffkeep waits read has no needs_operator section")
+	if err := expectWaitsDelim(dec, '}'); err != nil {
+		return 0, false, err
+	}
+	if !seen {
+		return 0, false, errors.New("handoffkeep waits read has no needs_operator section")
+	}
+	return lowest, lowest != 0, nil
+}
+
+// scanWaitsSection reads one section object. It returns the section key and the
+// lowest hand-wait id on taskID among its rows. A needs_operator section whose
+// count does not match its rows is an incomplete read, and it is an error.
+func scanWaitsSection(dec *json.Decoder, taskID int64) (string, int64, error) {
+	if err := expectWaitsDelim(dec, '{'); err != nil {
+		return "", 0, err
+	}
+	var key string
+	count, rows := -1, 0
+	var lowest int64
+	for dec.More() {
+		field, err := dec.Token()
+		if err != nil {
+			return "", 0, errWaitsReadUnusable
+		}
+		switch field {
+		case "key":
+			if err := dec.Decode(&key); err != nil {
+				return "", 0, errWaitsReadUnusable
+			}
+		case "count":
+			if err := dec.Decode(&count); err != nil {
+				return "", 0, errWaitsReadUnusable
+			}
+		case "rows":
+			if err := expectWaitsDelim(dec, '['); err != nil {
+				return "", 0, err
+			}
+			for dec.More() {
+				var row waitsReadRow
+				if err := dec.Decode(&row); err != nil {
+					return "", 0, errWaitsReadUnusable
+				}
+				rows++
+				id, ok, err := operatorWaitRowID(row, taskID)
+				if err != nil {
+					return "", 0, err
+				}
+				if ok && (lowest == 0 || id < lowest) {
+					lowest = id
+				}
+			}
+			if err := expectWaitsDelim(dec, ']'); err != nil {
+				return "", 0, err
+			}
+		default:
+			if err := skipWaitsValue(dec); err != nil {
+				return "", 0, err
+			}
+		}
+	}
+	if err := expectWaitsDelim(dec, '}'); err != nil {
+		return "", 0, err
+	}
+	if key == handoffkeepWaitsNeedsOperator && count != rows {
+		return "", 0, errors.New("handoffkeep waits read is incomplete")
+	}
+	return key, lowest, nil
+}
+
+// operatorWaitRowID reads the wait id of a row that is an open hand wait on
+// taskID. A row is a hand wait only when its key is "wait:<id>"; a decision row
+// on the same task is not one, and it is skipped.
+func operatorWaitRowID(row waitsReadRow, taskID int64) (int64, bool, error) {
+	if row.TaskID != taskID || row.OnKind != oneTimeWaitOperator {
+		return 0, false, nil
+	}
+	digits, ok := strings.CutPrefix(row.Key, "wait:")
+	if !ok {
+		return 0, false, nil
+	}
+	id, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || id < 1 {
+		return 0, false, errWaitsReadUnusable
+	}
+	return id, true, nil
+}
+
+// expectWaitsDelim consumes the next JSON delimiter, which must be want.
+func expectWaitsDelim(dec *json.Decoder, want json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return errWaitsReadUnusable
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != want {
+		return errWaitsReadUnusable
+	}
+	return nil
+}
+
+// skipWaitsValue consumes the next JSON value without keeping it.
+func skipWaitsValue(dec *json.Decoder) error {
+	var skip json.RawMessage
+	if err := dec.Decode(&skip); err != nil {
+		return errWaitsReadUnusable
+	}
+	return nil
 }
 
 // handoffkeepRefusal is a non-2xx answer to a task route. A 4xx says this write

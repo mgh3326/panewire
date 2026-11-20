@@ -143,3 +143,56 @@ func TestOneTimeWaitRefusedRetryKeepsRowWhileReadFails(t *testing.T) {
 		t.Fatalf("open waits=%d, want the one committed wait", len(got))
 	}
 }
+
+// The desk lists an open decision request on the anchor under needs_operator as
+// a decision:<ref> row with the same task_id and on_kind operator. A close with
+// an unconfirmed id reads past that row to the anchor's hand wait and clears it.
+func TestOneTimeWaitCloseFindsWaitBesideDecisionRow(t *testing.T) {
+	h, fake, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+
+	setFakeHk(fake, func(f *fakeHandoffkeep) { f.waitCommitStatus = http.StatusInternalServerError })
+	h.noteReadinessActions("oci", oneTimeWaitDialog(start), start)
+	settleOneTimeNotices(t, h)
+	anchorID := liveHkAnchor(fake).ID
+	setFakeHk(fake, func(f *fakeHandoffkeep) {
+		f.waitCommitStatus = 0
+		f.decisionRowTasks = map[int64]bool{anchorID: true}
+	})
+
+	gone := start.Add(time.Minute)
+	h.noteReadinessActions("oci", oneTimeWaitClean(gone), gone)
+	h.noteReadinessActions("oci", oneTimeWaitClean(gone.Add(cycle)), gone.Add(cycle))
+	settleOneTimeNotices(t, h)
+	if got := fake.openOperatorWaits(); len(got) != 0 {
+		t.Fatalf("open waits=%v, want the anchor's wait cleared beside its decision row", got)
+	}
+}
+
+// A needs_operator section can outgrow any fixed response cap. The lookup
+// streams the section, so an unrelated row of 2 MiB ahead of the anchor's wait
+// does not stop the close from clearing it.
+func TestOneTimeWaitCloseReadsPastOversizedSection(t *testing.T) {
+	h, fake, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+
+	setFakeHk(fake, func(f *fakeHandoffkeep) { f.waitCommitStatus = http.StatusInternalServerError })
+	h.noteReadinessActions("oci", oneTimeWaitDialog(start), start)
+	settleOneTimeNotices(t, h)
+	setFakeHk(fake, func(f *fakeHandoffkeep) {
+		f.waitCommitStatus = 0
+		f.waitsPadBytes = 2 << 20
+	})
+
+	gone := start.Add(time.Minute)
+	h.noteReadinessActions("oci", oneTimeWaitClean(gone), gone)
+	h.noteReadinessActions("oci", oneTimeWaitClean(gone.Add(cycle)), gone.Add(cycle))
+	settleOneTimeNotices(t, h)
+	if got := fake.openOperatorWaits(); len(got) != 0 {
+		t.Fatalf("open waits=%v, want the anchor's wait cleared past the oversized section", got)
+	}
+}
