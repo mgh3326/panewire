@@ -1165,25 +1165,62 @@ func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hub
 // markSpawnClaimed records that a job's claim reached the hub from the node it
 // was placed on. A restart must not count that job again, even if it finished
 // before the restart and no heartbeat will show it.
-func (s *laneInboxStore) markSpawnClaimed(parent context.Context, job string, now time.Time) error {
+//
+// The stamp is also the claim receipt of a quota successor's pointer (hk 5776),
+// so it is written only to the binding the heartbeat can have been about: the row
+// is bound to machine and was bound at or before observed, the instant the
+// heartbeat was read. The write is a compare-and-set on that row's attempt and
+// node request id, so a refusal that unbinds attempt A and a bind of attempt B
+// that lands before this write is never stamped with A's heartbeat.
+func (s *laneInboxStore) markSpawnClaimed(parent context.Context, job, machine string, observed, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE job=? AND node_id IS NOT NULL AND claimed_ms=0`), now.UnixMilli(), job)
-	return err
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id,attempt,node_id,node_payload FROM spawn_operations WHERE job=? AND node_id IS NOT NULL AND claimed_ms=0 AND placed_ms<=?`), job, observed.UnixMilli())
+	if err != nil {
+		return err
+	}
+	type binding struct {
+		requestID, nodeID string
+		attempt           int
+	}
+	var bound []binding
+	for rows.Next() {
+		var b binding
+		var payload string
+		if err = rows.Scan(&b.requestID, &b.attempt, &b.nodeID, &payload); err != nil {
+			rows.Close()
+			return err
+		}
+		var node hubSpawnRequest
+		if json.Unmarshal([]byte(payload), &node) == nil && node.Machine == machine {
+			bound = append(bound, b)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, b := range bound {
+		if _, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE request_id=? AND attempt=? AND node_id=? AND claimed_ms=0 AND placed_ms<=?`), now.UnixMilli(), b.requestID, b.attempt, b.nodeID, observed.UnixMilli()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// spawnNodeClaimed reports whether the hub saw the node that attempt `attempt`
-// of the request is bound to (nodeID) report the job claimed: the claim receipt
-// (hk 5776). A bind clears the stamp, so it belongs to the current binding.
-func (s *laneInboxStore) spawnNodeClaimed(parent context.Context, requestID string, attempt int, nodeID string) (bool, error) {
+// spawnStartReceipt reports whether attempt `attempt` of the request, bound to
+// nodeID, is a sent attempt that carries the claim receipt (hk 5776): the hub saw
+// the node it is bound to report the job claimed (markSpawnClaimed), and, for a
+// grant-required attempt, the hub granted that node request id. The state and the
+// receipt are read in one statement, so a row a failure settled since a caller's
+// read, which keeps its node and its stamp, is not taken for a start.
+func (s *laneInboxStore) spawnStartReceipt(parent context.Context, requestID string, attempt int, nodeID string) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	var stamp int64
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT claimed_ms FROM spawn_operations WHERE request_id=? AND attempt=? AND node_id=?`), requestID, attempt, nodeID).Scan(&stamp)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return stamp > 0, err
+	var n int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM spawn_operations o WHERE o.request_id=? AND o.attempt=? AND o.node_id=? AND o.claimed_ms>0 AND o.status IN ('dispatching','reconciling','deadline_exceeded','dispatching_grant','reconciling_grant','deadline_exceeded_grant') AND (o.status NOT LIKE '%\_grant'`+s.dialect.escapeClause()+` OR EXISTS (SELECT 1 FROM spawn_attempt_grants g WHERE g.node_id=o.node_id AND g.state='granted'))`), requestID, attempt, nodeID).Scan(&n)
+	return n == 1, err
 }
 
 // boundSpawnsSince lists the operations placed at or after since that are bound

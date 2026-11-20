@@ -916,11 +916,13 @@ func quotaSuccessorSent(successor hubSpawnTask) bool {
 //   - the operation succeeded (placed, its job landed), or
 //   - it is bound to a node, was sent (dispatching, reconciling or past its
 //     deadline with that node), and carries the claim receipt: the hub saw the
-//     node it was bound to report the job claimed (claimed_ms, markSpawnClaimed).
+//     node it was bound to report the job claimed (claimed_ms, markSpawnClaimed),
+//     and, for a grant-required attempt, granted that node request id. The state
+//     and the receipt are read in one statement (spawnStartReceipt).
 //
 // The receipt belongs to this spawn request and its bound node: the stamp is
-// written only from the decided host's report of the job, and a new bind clears
-// it. An hk record found by job id is not evidence, since a node-local launch
+// written by a compare-and-set on the attempt and node request id the heartbeat
+// can have been about, and a new bind clears it. An hk record found by job id is not evidence, since a node-local launch
 // can leave one under the generated name without any operation of the hub's. A
 // fenced attempt can never be granted, so it never reports a claim. From the
 // claim on hk holds the job id for that host, so a later refusal keeps it
@@ -944,7 +946,7 @@ func (h *HubServer) quotaStartProof(ctx context.Context, requestID string) (hubS
 	if !quotaSuccessorSent(task) {
 		return task, false
 	}
-	claimed, err := h.inbox.store.spawnNodeClaimed(ctx, requestID, task.Attempt, task.Node.RequestID)
+	claimed, err := h.inbox.store.spawnStartReceipt(ctx, requestID, task.Attempt, task.Node.RequestID)
 	return task, err == nil && claimed
 }
 

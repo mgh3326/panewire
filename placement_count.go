@@ -118,6 +118,8 @@ func (h *HubServer) restorePlacementCounts() error {
 type claimedPlacement struct {
 	job  string
 	held placementCount
+	// observed is when the heartbeat that showed the claim was read.
+	observed time.Time
 }
 
 // markPlacementClaims persists the claims that just ended placement counts, so
@@ -132,7 +134,7 @@ func (h *HubServer) markPlacementClaims(claimed []claimedPlacement, now time.Tim
 	}
 	var unsaved []claimedPlacement
 	for _, c := range claimed {
-		if err := h.inbox.store.markSpawnClaimed(h.closeCtx, c.job, now); err != nil {
+		if err := h.inbox.store.markSpawnClaimed(h.closeCtx, c.job, c.held.machine, c.observed, now); err != nil {
 			h.logger.Warn("hub could not record a placement claim", "job", c.job, "error", h.inbox.store.loggable("mark placement claim", err))
 			unsaved = append(unsaved, c)
 		}
