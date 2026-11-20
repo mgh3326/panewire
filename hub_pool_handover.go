@@ -217,6 +217,20 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 	if decision == "wait" {
 		return h.waitPoolStop(ctx, exhaustion, task, why)
 	}
+	result := h.queueImplementerHandover(ctx, exhaustion, task, prior, app, record, taskID)
+	if result.action == poolJobQueued {
+		result.why = why
+	}
+	return result
+}
+
+// queueImplementerHandover is the decided half of a hand-over: it builds the
+// successor through the guarded worktree check and stores the hand-over row, or
+// gives the owner today's notice with the reason it could not. The sweep calls
+// it after its §Implementer decision, and so does an announced screen stop
+// (hub_quota_handover.go, hk 5780), whose decision the node's manager made.
+func (h *HubServer) queueImplementerHandover(ctx context.Context, exhaustion poolExhaustion, task hubSpawnTask, prior fleet.Spawn, app *fleet.App, record map[string]any, taskID string) poolJobResult {
+	const role = "implementer"
 	newJob, n, ok := quotaReplacementJob(task.Job)
 	if !ok {
 		h.logger.Info("pool hand-over past the replacement limit", "job", task.Job, "replacements", n-1)
@@ -233,7 +247,7 @@ func (h *HubServer) sweepImplementer(ctx context.Context, exhaustion poolExhaust
 	if err := h.createPoolAction(ctx, exhaustion, task, app, handover); err != nil {
 		return poolJobSkip(role, "handover_not_queued")
 	}
-	return poolJobResult{action: poolJobQueued, role: role, why: why}
+	return poolJobResult{action: poolJobQueued, role: role}
 }
 
 // nodeResumes is how many quota-stop resumes host's node recorded for job,
@@ -458,6 +472,16 @@ func handoverExclude(exhaustion poolExhaustion) string {
 	switch {
 	case exhaustion.accountCredit():
 		return ""
+	case exhaustion.Cause == poolCauseQuotaStop:
+		// A screen stop names the band it spent (hk 5780); an account-scoped one
+		// only the account, which its durable mark keeps the successor off.
+		if exhaustion.Account != "" {
+			return ""
+		}
+		if exhaustion.Band != "" {
+			return exhaustion.Band
+		}
+		return exhaustion.Pool
 	case exhaustion.Cause == poolCauseFreeLimit:
 		return fleet.BandKey(exhaustion.Pool + "-free")
 	case exhaustion.fromQuota():

@@ -1686,35 +1686,31 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				}
 			}
 			cooled := message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received)
-			// A reviewer's announced quota stop is a control event (hk 5690): the
-			// hub carries the review on, and the requester hears only a give-up.
-			// Filing it as a loss would tell the owner of a carry-over that
-			// succeeds, so it is never relayed. Its node's outbox is acknowledged
-			// only once the replacement is durable (the successor claimed, or the
-			// stop settled with nothing more to do): a hub that exits before that
-			// leaves the row unacknowledged, and the node's resend after the
-			// restart starts the replacement again.
-			reviewerStop, stopKnown := false, true
-			if message.Kind == "job.lost" && !event.Final {
-				reviewerStop, stopKnown = h.reviewerQuotaAnnouncement(ctx, event)
-			}
-			control := reviewerStop
 			persisted := hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID}
-			if cooled && !validLaneReference(event.OwnerLane) && !control && stopKnown {
-				// This acknowledges in-memory cooling, not durable relay persistence.
-				agent.queuePersisted(persisted)
-			}
-			// A role the hub could not look up is neither relayed nor acknowledged: it
-			// is decided when the node sends it again, not on a guess.
-			if !control && stopKnown {
+			// relayLoss files the event as a loss for its owner lane: what every
+			// job.lost gets, except an announced quota stop the hub carries on.
+			relayLoss := func(ctx context.Context) {
+				if cooled && !validLaneReference(event.OwnerLane) {
+					// This acknowledges in-memory cooling, not durable relay persistence.
+					agent.queuePersisted(persisted)
+				}
 				h.relayJobEventFromContext(ctx, machineID, message.Kind, event)
 			}
-			if message.Kind == "job.lost" && stopKnown && (!event.Replay || control) {
-				var settled func()
-				if control {
-					settled = func() { agent.queuePersisted(persisted) }
-				}
-				h.startQuotaReplacementAck(machineID, event, settled)
+			if message.Kind == "job.lost" && !event.Final && h.inbox != nil && isQuotaStopReason(event.Reason) {
+				// An announced quota stop is a control event (hk 5690, hk 5780): the
+				// hub carries a reviewer on and hands an implementer over, and the
+				// owner hears only a give-up or a refusal. Filing it as a loss would
+				// tell the owner of a carry-over that succeeds, so the worker files
+				// it only for a job it does not carry on. The role is read from the
+				// stored submission by the worker, never here: this is the node's
+				// websocket reader and must not wait on the store. Its node's outbox
+				// is acknowledged only once the hand-over is durable (the successor
+				// claimed or the row stored, or the stop settled with nothing more to
+				// do): a hub that exits before that leaves the row unacknowledged,
+				// and the node's resend after the restart starts it again.
+				h.startQuotaStop(machineID, event, func() { agent.queuePersisted(persisted) }, relayLoss)
+			} else {
+				relayLoss(ctx)
 			}
 		}
 		if message.Kind == "lane.event" {

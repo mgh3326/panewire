@@ -29,6 +29,10 @@ type poolExhaustion struct {
 	// "credit_exhausted" for a pane showing the provider's credit rejection.
 	Cause string
 	Reset time.Time
+	// Band is the pool band a screen stop spent (poolCauseQuotaStop only, hk
+	// 5780): the successor excludes it. It is read once, when the hand-over is
+	// prepared, and is not stored with the row.
+	Band string
 }
 
 // poolCauseRetired: every catalog row of the pool is retired (hk 4625).
@@ -37,6 +41,11 @@ const poolCauseRetired = "retired"
 // poolCauseCreditExhausted: a pane of a job on the pool shows the provider's
 // credit-exhausted rejection (hk 4625).
 const poolCauseCreditExhausted = "credit_exhausted"
+
+// poolCauseQuotaStop: the node announced a stop its quota-stop manager decided
+// to hand over (a limit screen in the pane, hk 5780). No pool reading drives
+// it, so it has no reset the hub re-checks and no pool-wide hold.
+const poolCauseQuotaStop = "quota_stop"
 
 // fromQuota reports a cause read from a node's published quota value, which a
 // newer reading of the same bucket can supersede. The pool triggers are read
