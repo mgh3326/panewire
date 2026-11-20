@@ -789,9 +789,12 @@ left open and `refused` (`pane_changed`) is stored. An ended attempt is allowed:
 an author's first READY completes its record and the pane goes on working. The
 ownership check also reads a hub revocation (`job.revoked`, which leaves the
 grant file as it was) unless a grant at or above its epoch supersedes it. The
-last check takes the job's ownership lock (the one `job.assigned` and
-`job.revoked` take) and holds it until `herdr pane close` returns, so a grant or
-revocation lands before the check or after the close. The
+ownership lock (the one `job.assigned` and `job.revoked` take) is taken before the
+final pane, composer and question checks and held until `herdr pane close`
+returns, so a grant or revocation lands before the checks or after the close, and
+what the checks saw is what the close acts on. The wait is bounded by the
+command's deadline; a timed-out wait closes nothing and releases the node's
+acting lock. The
 journal directory and the jobs root are fsynced on every open, so a created
 directory entry, and a record whose own sync failed, are durable before a result
 or a fence is acknowledged.

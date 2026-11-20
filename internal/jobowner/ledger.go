@@ -153,6 +153,12 @@ func withLockContext(ctx context.Context, jobs, id string, fn func(string) error
 // action returns, so a grant or revocation cannot land in between: it lands
 // before the check or after the action.
 func Lock(jobs, id string) (unlock func(), err error) {
+	return LockContext(context.Background(), jobs, id)
+}
+
+// LockContext is Lock that gives up when ctx ends: a stalled writer holding the
+// lock cannot keep a bounded command waiting past its deadline.
+func LockContext(ctx context.Context, jobs, id string) (unlock func(), err error) {
 	if jobs == "" || !validID.MatchString(id) || id == "." || id == ".." {
 		return nil, errors.New("invalid job id")
 	}
@@ -160,7 +166,7 @@ func Lock(jobs, id string) (unlock func(), err error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	return filelock.Acquire(context.Background(), filepath.Join(dir, ".wrk-events.lock"))
+	return filelock.Acquire(ctx, filepath.Join(dir, ".wrk-events.lock"))
 }
 
 // JobEnv and EpochEnv name the launch environment that binds a worker process

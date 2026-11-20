@@ -253,15 +253,12 @@ func TestNodeLadderCloseJournalDirectoryIsPrivate(t *testing.T) {
 	}
 }
 
-// A grant recorded, or an attempt started, while the final look runs leaves the
-// pane open under the superseded request, and the refusal is stored.
+// An attempt started while the final look runs leaves the pane open under the
+// superseded request, and the refusal is stored. (A grant or revocation cannot
+// land during the final look: the ownership lock is held across it, which
+// TestNodeLadderCloseHoldsTheOwnershipLockAcrossTheClose pins.)
 func TestNodeLadderCloseRechecksOwnershipAndAttemptAtTheFinalLook(t *testing.T) {
 	for name, change := range map[string]func(t *testing.T, root string){
-		"grant": func(t *testing.T, root string) {
-			if err := jobowner.Assign(filepath.Join(root, "jobs"), closeOpJob, 3); err != nil {
-				t.Fatal(err)
-			}
-		},
 		"reprompt": func(t *testing.T, root string) {
 			body := `{"kind":"job.reprompted","created_at":"2026-11-14T00:00:05Z","payload":{}}`
 			if err := os.WriteFile(filepath.Join(root, "jobs", closeOpJob, "events", "00003-job.reprompted.json"), []byte(body), 0o600); err != nil {
@@ -364,5 +361,98 @@ func TestNodeLadderOwnershipCheckReadsAHubRevocation(t *testing.T) {
 	}
 	if reason, err := client.ladderOwnerStale(nodeLadderCloseArgs{Job: closeOpJob, Epoch: 3}); err != nil || reason != "" {
 		t.Fatalf("epoch 3 after its own grant: %q %v", reason, err)
+	}
+}
+
+// A writer holding the job's event lock stalls the close. The pane may go back
+// to work meanwhile: the lock is taken before the final pane, composer and
+// question checks, so those checks see the pane as it is when the wait ends.
+func TestNodeLadderCloseTakesTheOwnershipLockBeforeTheFinalPaneChecks(t *testing.T) {
+	root := t.TempDir()
+	seedCloseOpJob(t, root)
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	release, err := jobowner.Lock(filepath.Join(root, "jobs"), closeOpJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+	type answer struct {
+		result map[string]any
+		code   string
+	}
+	done := make(chan answer, 1)
+	args := ladderArgs(ladderRequest)
+	args["attempt"] = closeOpAttempt
+	go func() {
+		result, code := nodeRun(t, client, nodeCommandLadderClose, args)
+		done <- answer{result, code}
+	}()
+	eventually(t, 3*time.Second, "the close to read the pane once", func() bool { return fake.called("agent", "list") >= 1 })
+	// Fixture pacing: let the call reach its wait on the lock before the pane changes.
+	time.Sleep(200 * time.Millisecond)
+	fake.mu.Lock()
+	fake.agents = []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "working", "/work/a"))}
+	fake.mu.Unlock()
+	release()
+	released = true
+	got := <-done
+	wantLadder(t, got.result, got.code, nodeLadderRefused, false)
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("closed a pane that went back to work during the lock wait: %v", fake.calls)
+	}
+}
+
+// The lock wait is bounded by the command's context, so a stalled writer cannot
+// hold the node's acting lock past the deadline: the close gives up without
+// closing, and later commands (status, fence) are served.
+func TestNodeLadderCloseLockWaitEndsWithTheCommandContext(t *testing.T) {
+	root := t.TempDir()
+	seedCloseOpJob(t, root)
+	fake := idlePaneHerdr()
+	client := ladderNode(t, fake, root)
+	release, err := jobowner.Lock(filepath.Join(root, "jobs"), closeOpJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	args := ladderArgs(ladderRequest)
+	args["attempt"] = closeOpAttempt
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	finished := make(chan string, 1)
+	go func() {
+		_, code := client.runNodeCommand(ctx, nodeCommandLadderClose, raw)
+		finished <- code
+	}()
+	select {
+	case code := <-finished:
+		if code == "" {
+			t.Fatal("a close that never got the ownership lock reported a result")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the close kept waiting on the ownership lock past its context")
+	}
+	if fake.called("pane", "close") != 0 {
+		t.Fatalf("closed without the ownership lock: %v", fake.calls)
+	}
+	statusDone := make(chan struct{})
+	go func() {
+		defer close(statusDone)
+		nodeRun(t, client, nodeCommandLadderCloseFence, closeOpRef(ladderRequest))
+	}()
+	select {
+	case <-statusDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the node's acting lock stayed held after the timed-out close")
 	}
 }

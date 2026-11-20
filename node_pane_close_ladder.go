@@ -340,6 +340,22 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 	stale := ""
 	releaseOwner := func() {}
 	result, code := client.nodePaneCloseWith(ctx, closeArgs, func() error {
+		// The job's ownership lock is taken here, before the final pane, composer
+		// and question checks, and held until `herdr pane close` returns: a grant
+		// or revocation lands before the checks or after the close, never between
+		// them, and what the checks saw is what the close acts on. The wait is
+		// bounded by the command's own context, so a stalled event writer cannot
+		// keep the node's acting lock past its deadline; a timed-out wait closes
+		// nothing. A job with no directory has no ownership ledger to race.
+		if _, _, found, err := client.openNodeJobDir(args.Job); err != nil {
+			return err
+		} else if found {
+			unlock, err := jobowner.LockContext(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
+			if err != nil {
+				return err
+			}
+			releaseOwner = unlock
+		}
 		// Read the ledger again after the first look and the settle, immediately
 		// before the intent: an attempt that moved on, or another pane, is not
 		// closed. The epoch is read again too.
@@ -355,21 +371,10 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 		}
 		return writeNodeLadderRecord(root, record)
 	}, func() error {
-		// The last check before `herdr pane close`: a grant a job.assigned
-		// recorded, a hub revocation, or an attempt a re-prompt started while the
-		// final look ran leaves the pane open and the refusal stored. The job's
-		// ownership lock is taken first and held until the close returns, so a
-		// grant or revocation lands before this check or after the close, never
-		// between them. A job with no directory has no ownership ledger to race.
-		if _, _, found, err := client.openNodeJobDir(args.Job); err != nil {
-			return err
-		} else if found {
-			unlock, err := jobowner.Lock(filepath.Join(client.jobsInboxRoot, "jobs"), args.Job)
-			if err != nil {
-				return err
-			}
-			releaseOwner = unlock
-		}
+		// The last check before `herdr pane close`, under the ownership lock the
+		// pre-intent hook took: a grant a job.assigned recorded, a hub revocation,
+		// or an attempt a re-prompt started while the final look ran leaves the
+		// pane open and the refusal stored.
 		if reason, err := client.ladderOwnerStale(args); err != nil {
 			return err
 		} else if reason != "" {
