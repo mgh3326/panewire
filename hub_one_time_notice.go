@@ -139,27 +139,30 @@ func releaseOneTimeBarriers(batch []oneTimeObservation) {
 func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender *oneTimeSender) {
 	var untold []oneTimeSighting
 	queued := map[oneTimeActionKey]bool{}
+	touched := map[oneTimeActionKey]bool{}
 	var barriers []chan struct{}
 	for _, obs := range batch {
 		switch {
 		case obs.done != nil:
 			barriers = append(barriers, obs.done)
 		case obs.report != nil:
-			h.clearOneTimeActions(obs.machine, obs.report)
+			for _, key := range h.clearOneTimeActions(obs.machine, obs.report) {
+				touched[key] = true
+			}
 			for _, kind := range fleet.ReadinessKinds {
 				harness, ok := obs.report.Harnesses[kind]
 				if !ok {
 					continue
 				}
 				if harness.Dialog != "" {
-					h.considerOneTimeSighting(obs.machine, kind, harness.Dialog, obs.at, queued, &untold)
+					h.considerOneTimeSighting(obs.machine, kind, harness.Dialog, obs.at, queued, &untold, touched)
 				}
 				if kind != "cmd" && harness.Login == fleet.ReadinessLoginMissing {
-					h.considerOneTimeSighting(obs.machine, kind, oneTimeLoginMissing, obs.at, queued, &untold)
+					h.considerOneTimeSighting(obs.machine, kind, oneTimeLoginMissing, obs.at, queued, &untold, touched)
 				}
 			}
 		default:
-			h.considerOneTimeSighting(obs.machine, obs.kind, obs.need, obs.at, queued, &untold)
+			h.considerOneTimeSighting(obs.machine, obs.kind, obs.need, obs.at, queued, &untold, touched)
 		}
 	}
 	for _, s := range untold {
@@ -172,16 +175,23 @@ func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender 
 		}
 		// Only this attempt's own 2xx reaches here: the state and its row are
 		// written for this need and no other.
+		// The episode is told now. A row that holds a wait keeps it: the new
+		// episode re-asserts that wait, and the reset below cancels a close
+		// still owed.
 		h.oneTimeMu.Lock()
-		if h.oneTimeActions == nil {
-			h.oneTimeActions = map[oneTimeActionKey]oneTimeActionState{}
+		state := h.oneTimeActions[s.key]
+		state.ToldAt = s.at
+		state.GoneSince = time.Time{}
+		state.ConfirmedAt = time.Time{}
+		if err := h.saveOneTimeLocked(s.key, state); err != nil {
+			h.logger.Warn("one-time action notice could not be stored", "host", s.key.machine, "kind", s.key.kind, "error", err)
 		}
-		state := oneTimeActionState{ToldAt: s.at}
-		h.oneTimeActions[s.key] = state
-		h.putOneTimeActionLocked(s.key, state)
 		h.oneTimeMu.Unlock()
 		h.logger.Warn("host needs a one-time action", "host", s.key.machine, "kind", s.key.kind, "need", s.key.need)
 	}
+	// The wait worker does every handoffkeep write, so a slow or failing hk
+	// never delays the notices above. It reconciles each touched need.
+	h.enqueueOneTimeWaits(touchedKeys(touched)...)
 	for _, done := range barriers {
 		close(done)
 	}
@@ -189,18 +199,21 @@ func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender 
 
 // considerOneTimeSighting applies one sighting. A told need is only restarted
 // in its clear countdown when it shows again. An untold need joins this batch's
-// delivery once, at the first sighting.
-func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.Time, queued map[oneTimeActionKey]bool, untold *[]oneTimeSighting) {
+// delivery once, at the first sighting. touched records every need the batch
+// saw so the handoffkeep wait sync can re-assert the standing ones.
+func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.Time, queued map[oneTimeActionKey]bool, untold *[]oneTimeSighting, touched map[oneTimeActionKey]bool) {
 	s, ok := oneTimeSightingFor(machine, kind, need, at)
 	if !ok {
 		return
 	}
+	touched[s.key] = true
 	h.oneTimeMu.Lock()
-	if state, told := h.oneTimeActions[s.key]; told {
+	if state, ok := h.oneTimeActions[s.key]; ok && !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() {
 		if !state.GoneSince.IsZero() {
 			state.GoneSince = time.Time{}
-			h.oneTimeActions[s.key] = state
-			h.putOneTimeActionLocked(s.key, state)
+			if err := h.saveOneTimeLocked(s.key, state); err != nil {
+				h.logger.Warn("one-time action notice could not be stored", "host", s.key.machine, "kind", s.key.kind, "error", err)
+			}
 		}
 		h.oneTimeMu.Unlock()
 		return
@@ -342,4 +355,13 @@ func (r oneTimeRecorder) RoundTrip(request *http.Request) (*http.Response, error
 		attempt.mu.Unlock()
 	}
 	return response, err
+}
+
+// touchedKeys lists the needs in set.
+func touchedKeys(set map[oneTimeActionKey]bool) []oneTimeActionKey {
+	keys := make([]oneTimeActionKey, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	return keys
 }

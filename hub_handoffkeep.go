@@ -476,3 +476,149 @@ func (c *handoffkeepRelayClient) listRelayEvents(ctx context.Context, kind strin
 	}
 	return result.Events, nil
 }
+
+// The one-time-action operator wait (hk 5250) drives three handoffkeep
+// routes: POST /v1/intake anchors each need to one task, POST
+// /v1/tasks/{id}/waits holds its open operator wait, and POST
+// /v1/tasks/{id}/waits/{wait}/clear ends it. docs/placement.md, "Readiness".
+
+var (
+	// errHandoffkeepTaskNotFound is a 404 not_found on a task route: the anchor
+	// task is gone, so intake must resolve a fresh one.
+	errHandoffkeepTaskNotFound = errors.New("handoffkeep task not found")
+	// errHandoffkeepWaitGone is a clear whose wait or anchor is already gone:
+	// the desired end state holds, so the caller treats it as done.
+	errHandoffkeepWaitGone = errors.New("handoffkeep wait is gone")
+)
+
+// handoffkeepErrorCode reads the {"error": "..."} code of an hk error body.
+func handoffkeepErrorCode(payload []byte) string {
+	var body struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(payload, &body) != nil {
+		return ""
+	}
+	return body.Error
+}
+
+// handoffkeepTaskRef is the intake answer's task fields the wait sync needs:
+// its id, and its state so a settled anchor is recognized and replaced.
+type handoffkeepTaskRef struct {
+	ID    int64  `json:"id"`
+	State string `json:"state"`
+}
+
+// intakeTask resolves the (source, source_ref) anchor. hk answers 201 for a
+// new triage task and 200 with the recorded task for a repeat, so a retry or
+// a hub restart reuses the same anchor.
+func (c *handoffkeepRelayClient) intakeTask(ctx context.Context, source, sourceRef, title, body, lane string) (handoffkeepTaskRef, error) {
+	request, err := json.Marshal(struct {
+		Source    string `json:"source"`
+		SourceRef string `json:"source_ref"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		Lane      string `json:"lane,omitempty"`
+	}{Source: source, SourceRef: sourceRef, Title: title, Body: body, Lane: lane})
+	if err != nil {
+		return handoffkeepTaskRef{}, errors.New("handoffkeep request encoding failed")
+	}
+	status, payload, err := c.do(ctx, http.MethodPost, c.endpoint("/v1/intake"), request)
+	if err != nil {
+		return handoffkeepTaskRef{}, err
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return handoffkeepTaskRef{}, handoffkeepRefusal{status: status}
+	}
+	var result struct {
+		Task handoffkeepTaskRef `json:"task"`
+	}
+	if json.Unmarshal(payload, &result) != nil || result.Task.ID < 1 {
+		return handoffkeepTaskRef{}, errors.New("handoffkeep returned an unusable task")
+	}
+	return result.Task, nil
+}
+
+// addTaskWait opens or re-asserts the task's open wait on (onKind, onRef) and
+// returns its id. hk dedupes an open wait on that triple — a repeat updates
+// its reason and answers the same id — so a retry or restart cannot stack a
+// second open wait.
+func (c *handoffkeepRelayClient) addTaskWait(ctx context.Context, taskID int64, onKind, onRef, reason string) (int64, error) {
+	if taskID < 1 {
+		return 0, errors.New("handoffkeep task id is invalid")
+	}
+	request, err := json.Marshal(struct {
+		OnKind string `json:"on_kind"`
+		OnRef  string `json:"on_ref"`
+		Reason string `json:"reason"`
+	}{OnKind: onKind, OnRef: onRef, Reason: reason})
+	if err != nil {
+		return 0, errors.New("handoffkeep request encoding failed")
+	}
+	status, payload, err := c.do(ctx, http.MethodPost, c.endpoint("/v1/tasks/"+strconv.FormatInt(taskID, 10)+"/waits"), request)
+	if err != nil {
+		return 0, err
+	}
+	if status == http.StatusNotFound && handoffkeepErrorCode(payload) == "not_found" {
+		return 0, errHandoffkeepTaskNotFound
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return 0, handoffkeepRefusal{status: status}
+	}
+	var wait struct {
+		ID int64 `json:"id"`
+	}
+	if json.Unmarshal(payload, &wait) != nil || wait.ID < 1 {
+		return 0, errors.New("handoffkeep returned an unusable task wait")
+	}
+	return wait.ID, nil
+}
+
+// clearTaskWait ends the task's wait. Clearing an already-cleared wait
+// answers 200 with changed=false; a wait or task that no longer exists is
+// errHandoffkeepWaitGone, which the caller treats as the end state it wanted.
+func (c *handoffkeepRelayClient) clearTaskWait(ctx context.Context, taskID, waitID int64, note string) error {
+	if taskID < 1 || waitID < 1 {
+		return errors.New("handoffkeep task wait id is invalid")
+	}
+	request, err := json.Marshal(struct {
+		Note string `json:"note,omitempty"`
+	}{Note: note})
+	if err != nil {
+		return errors.New("handoffkeep request encoding failed")
+	}
+	status, payload, err := c.do(ctx, http.MethodPost, c.endpoint("/v1/tasks/"+strconv.FormatInt(taskID, 10)+"/waits/"+strconv.FormatInt(waitID, 10)+"/clear"), request)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusNotFound {
+		switch handoffkeepErrorCode(payload) {
+		case "not_found", "task_wait_not_found":
+			return errHandoffkeepWaitGone
+		}
+	}
+	if status != http.StatusOK {
+		return handoffkeepRefusal{status: status}
+	}
+	return nil
+}
+
+// handoffkeepRefusal is a non-2xx answer to a task route. A 4xx means hk did
+// not commit the write, so the caller may retry it or drop what it recorded;
+// a 5xx or a transport error may have committed it, so the caller keeps its
+// record and retries the idempotent write (hub_one_time_wait.go).
+type handoffkeepRefusal struct{ status int }
+
+func (e handoffkeepRefusal) Error() string {
+	return "handoffkeep refused the request: HTTP " + strconv.Itoa(e.status)
+}
+
+// handoffkeepRefused reports that hk answered 4xx, or that the task is gone,
+// so the write did not land.
+func handoffkeepRefused(err error) bool {
+	if errors.Is(err, errHandoffkeepTaskNotFound) {
+		return true
+	}
+	var refusal handoffkeepRefusal
+	return errors.As(err, &refusal) && refusal.status >= 400 && refusal.status < 500
+}

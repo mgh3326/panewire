@@ -230,6 +230,20 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		db.Close()
 		return nil, err
 	}
+	// Stores from before hk 5250 lack the wait columns on
+	// one_time_action_notices; fresh stores already have them in
+	// oneTimeActionSchema.
+	for _, column := range []struct{ name, definition string }{
+		{"wait_task_id", "BIGINT NOT NULL DEFAULT 0"},
+		{"wait_id", "BIGINT NOT NULL DEFAULT 0"},
+		{"confirmed_ms", "BIGINT NOT NULL DEFAULT 0"},
+		{"anchor_ref", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if _, err := addTableColumn(ctx, db, "one_time_action_notices", column.name, column.definition); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_hold ON lane_inbox(lane,hold_until) WHERE hold_until>0 AND digest_batch='' AND acked_at=0`); err != nil {
 		db.Close()
 		return nil, err
@@ -343,7 +357,12 @@ func (s *laneInboxStore) batchesVersion() uint64 { return s.batchesGen.Load() }
 // addLaneInboxColumn adds a state column to pre-feature SQLite stores. added
 // is true only when this call created it, so a caller can backfill once.
 func addLaneInboxColumn(ctx context.Context, db *sql.DB, column, definition string) (added bool, err error) {
-	rows, err := db.QueryContext(ctx, `PRAGMA table_info(lane_inbox)`)
+	return addTableColumn(ctx, db, "lane_inbox", column, definition)
+}
+
+// addTableColumn is addLaneInboxColumn for any hub-store table.
+func addTableColumn(ctx context.Context, db *sql.DB, table, column, definition string) (added bool, err error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return false, err
 	}
@@ -364,7 +383,7 @@ func addLaneInboxColumn(ctx context.Context, db *sql.DB, column, definition stri
 		return false, err
 	}
 	// A second hub opening the same store may add the column first.
-	if _, err := db.ExecContext(ctx, `ALTER TABLE lane_inbox ADD COLUMN `+column+` `+definition); err != nil {
+	if _, err := db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+definition); err != nil {
 		return false, ignoreDuplicateColumn(err)
 	}
 	return true, nil

@@ -15,7 +15,8 @@ import (
 // full report cycle, so a host whose report flaps is not told on every flap.
 // The refusal and readiness handlers only hand observations to the notice
 // worker (hub_one_time_notice.go), which owns the told state and every send.
-// docs/placement.md, "Readiness".
+// The operator wait that goes with a standing need is a separate obligation
+// with its own worker (hub_one_time_wait.go). docs/placement.md, "Readiness".
 
 const (
 	// oneTimeLoginMissing is the need of a harness whose login is missing.
@@ -27,12 +28,35 @@ const (
 
 type oneTimeActionKey struct{ machine, kind, need string }
 
-// oneTimeActionState is one told need. ToldAt is when the notice was sent.
-// GoneSince is when a report first showed the need gone, and zero while the
-// need shows; it clears once it has stayed gone for oneTimeActionClearCycle.
+// oneTimeActionState is one need's row. The notice episode is ToldAt (when
+// the Sentry notice was sent; zero once a recurrence resets the episode),
+// GoneSince (when a report first showed the need gone; zero while it shows)
+// and ConfirmedAt (set once anti-flap clearing confirmed the need gone for a
+// full cycle). The wait is a separate obligation: AnchorRef is where the anchor
+// walk last reached, WaitTaskID is the anchor the wait is on (written before
+// the wait write, so an ambiguous write can be resolved), and WaitID is the
+// confirmed operator wait. A row lives while its episode is told or it holds a
+// wait; see oneTimeRowKept.
 type oneTimeActionState struct {
-	ToldAt    time.Time
-	GoneSince time.Time
+	ToldAt      time.Time
+	GoneSince   time.Time
+	ConfirmedAt time.Time
+	AnchorRef   string
+	WaitTaskID  int64
+	WaitID      int64
+}
+
+// oneTimeRowKept reports whether a row still has something to remember. A told
+// episode the clear has not yet confirmed needs its row; so does a wait that
+// is not known to be closed, even after its episode ended.
+func oneTimeRowKept(state oneTimeActionState) bool {
+	return (!state.ToldAt.IsZero() && state.ConfirmedAt.IsZero()) || state.holdsWait()
+}
+
+// holdsWait reports whether the row names any handoffkeep wait or anchor
+// write, confirmed or not.
+func (s oneTimeActionState) holdsWait() bool {
+	return s.WaitTaskID != 0 || s.WaitID != 0
 }
 
 // oneTimeSighting is one need seen on a host at a time, with the action the
@@ -108,10 +132,15 @@ func (h *HubServer) noteReadinessActions(machine string, report *fleet.Readiness
 // clearOneTimeActions advances the clear of every told need of machine that
 // report reads. A report that shows the need cancels a pending clear. A report
 // that shows it gone starts the clear countdown, and a later gone report at
-// least one cycle after that forgets the need.
-func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness) {
+// least one cycle after that confirms the clear. A confirmed clear with no wait
+// to close drops the row here; one with a wait stays until the wait worker has
+// closed it (hub_one_time_wait.go). A recurrence after a confirmed clear starts
+// a new untold episode and keeps any wait it holds. It returns the needs whose
+// clear was just confirmed, so the wait worker can close their waits.
+func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness) []oneTimeActionKey {
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
+	var confirmed []oneTimeActionKey
 	for key, state := range h.oneTimeActions {
 		// A kind the report does not cover (kiro, opencode) says nothing about the
 		// need, so it can neither show it gone nor clear it.
@@ -124,22 +153,40 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 		if key.need == oneTimeLoginMissing && harness.Login == fleet.ReadinessLoginUnknown {
 			continue
 		}
+		next := state
 		shows := readinessShowsNeed(harness, key.need)
 		switch {
+		case shows && !state.ConfirmedAt.IsZero():
+			// The need returned after its clear was confirmed: a new untold episode.
+			// A wait still held stays; the new episode re-asserts it on the same
+			// anchor, which cancels the pending close.
+			next.ToldAt = time.Time{}
+			next.GoneSince = time.Time{}
+			next.ConfirmedAt = time.Time{}
 		case shows && !state.GoneSince.IsZero():
-			state.GoneSince = time.Time{}
-			h.oneTimeActions[key] = state
-			h.putOneTimeActionLocked(key, state)
+			next.GoneSince = time.Time{}
 		case shows:
+			continue
+		case !state.ConfirmedAt.IsZero():
+			// A confirmed clear whose wait close has not landed yet: every report that
+			// shows the need gone asks the wait worker again.
+			if state.holdsWait() {
+				confirmed = append(confirmed, key)
+			}
+			continue
 		case state.GoneSince.IsZero():
-			state.GoneSince = report.CheckedAt
-			h.oneTimeActions[key] = state
-			h.putOneTimeActionLocked(key, state)
-		case report.CheckedAt.Sub(state.GoneSince) >= oneTimeActionClearCycle:
-			delete(h.oneTimeActions, key)
-			h.deleteOneTimeActionLocked(key)
+			next.GoneSince = report.CheckedAt
+		case report.CheckedAt.Sub(state.GoneSince) >= oneTimeActionClearCycle && state.ConfirmedAt.IsZero():
+			next.ConfirmedAt = report.CheckedAt
+			confirmed = append(confirmed, key)
+		default:
+			continue
+		}
+		if err := h.saveOneTimeLocked(key, next); err != nil {
+			h.logger.Warn("one-time action state could not be stored", "host", key.machine, "kind", key.kind, "error", err)
 		}
 	}
+	return confirmed
 }
 
 func readinessShowsNeed(harness fleet.HarnessReadiness, need string) bool {

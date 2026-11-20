@@ -821,8 +821,11 @@ type HubServer struct {
 	oneTimeDSN    string
 	oneTimeNotify oneTimeNotifier
 	oneTimeQueue  oneTimeNotices
-	fleetLoadMu   sync.Mutex
-	fleetLoadAt   time.Time // guarded by fleetLoadMu
+	// oneTimeWaitQueue feeds the wait worker that owns every handoffkeep write for
+	// a told need (hub_one_time_wait.go); it stops after the notice worker.
+	oneTimeWaitQueue oneTimeWaitQueue
+	fleetLoadMu      sync.Mutex
+	fleetLoadAt      time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
 	// handoff; closed makes every call after the first return nil at once.
 	closeMu    sync.Mutex
@@ -1103,6 +1106,7 @@ func (h *HubServer) Close() error {
 	// The notice worker stops accepting observations, cancels its request and
 	// is joined here, so it releases its Sentry client before the store closes.
 	h.closeOneTimeNotices()
+	h.closeOneTimeWaits()
 	h.closeQuotaRefreshes()
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from

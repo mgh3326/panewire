@@ -76,6 +76,18 @@ type fakeHandoffkeep struct {
 	// query string, so a test can gate calls that differ only in the query
 	// — an undelivered listing page versus a one-row re-read (#1034).
 	observeQuery func(method, path, rawQuery string)
+	// One-time-action wait model (hk 5250): POST /v1/intake anchors and
+	// POST /v1/tasks/{id}/waits[/{wait}/clear] waits. intakeStatus,
+	// waitStatus and clearStatus, when set to a non-2xx, fail that route;
+	// 0 answers success.
+	intakeStatus int
+	waitStatus   int
+	clearStatus  int
+	intakeTasks  map[string]*fakeHkAnchor
+	hkNextTaskID int64
+	hkDeadTasks  map[int64]bool
+	hkWaits      []*fakeHkWait
+	hkNextWaitID int64
 }
 
 type fakeHandoffkeepCall struct {
@@ -88,6 +100,23 @@ type fakeHandoffkeepCall struct {
 type fakeHandoffkeepComment struct {
 	TaskPath string
 	Body     string
+}
+
+// fakeHkAnchor is one intake task the fake holds, keyed by (source, source_ref).
+type fakeHkAnchor struct {
+	ID    int64
+	Ref   string
+	State string
+}
+
+// fakeHkWait is one task_waits row; Cleared models cleared_at being set.
+type fakeHkWait struct {
+	ID      int64
+	TaskID  int64
+	OnKind  string
+	OnRef   string
+	Reason  string
+	Cleared bool
 }
 
 func newFakeHandoffkeep(t *testing.T) (*fakeHandoffkeep, *handoffkeepRelayClient, func()) {
@@ -237,6 +266,115 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(reply)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": count, "task_id": 0, "body": asString(body["body"]), "author": "svc-panewire"})
 
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/intake":
+		f.mu.Lock()
+		reply := f.intakeStatus
+		if reply == 0 || reply == http.StatusOK || reply == http.StatusCreated {
+			if f.intakeTasks == nil {
+				f.intakeTasks = map[string]*fakeHkAnchor{}
+			}
+			ref := asString(body["source_ref"])
+			key := asString(body["source"]) + "\x00" + ref
+			anchor, exists := f.intakeTasks[key]
+			created := false
+			if !exists {
+				f.hkNextTaskID++
+				anchor = &fakeHkAnchor{ID: f.hkNextTaskID, Ref: ref, State: "triage"}
+				f.intakeTasks[key] = anchor
+				created = true
+			}
+			status := http.StatusOK
+			if created {
+				status = http.StatusCreated
+			}
+			payload := map[string]any{"created": created, "task": map[string]any{
+				"id": anchor.ID, "state": anchor.State, "lane": asString(body["lane"]),
+				"title": asString(body["title"]), "body_doc": asString(body["body"]),
+			}}
+			f.mu.Unlock()
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(payload)
+			return
+		}
+		f.mu.Unlock()
+		w.WriteHeader(reply)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+		return
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/waits"):
+		taskID, _ := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/tasks/"), "/waits"), 10, 64)
+		f.mu.Lock()
+		reply := f.waitStatus
+		if reply == 0 || reply == http.StatusOK || reply == http.StatusCreated {
+			if f.hkDeadTasks[taskID] {
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"error":"not_found"}`)
+				return
+			}
+			var open *fakeHkWait
+			for _, wait := range f.hkWaits {
+				if wait.TaskID == taskID && wait.OnKind == asString(body["on_kind"]) && wait.OnRef == asString(body["on_ref"]) && !wait.Cleared {
+					open = wait
+					break
+				}
+			}
+			if open == nil {
+				f.hkNextWaitID++
+				open = &fakeHkWait{ID: f.hkNextWaitID, TaskID: taskID, OnKind: asString(body["on_kind"]), OnRef: asString(body["on_ref"])}
+				f.hkWaits = append(f.hkWaits, open)
+			}
+			open.Reason = asString(body["reason"])
+			payload := map[string]any{"id": open.ID, "task_id": taskID, "on_kind": open.OnKind, "on_ref": open.OnRef, "reason": open.Reason}
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(payload)
+			return
+		}
+		f.mu.Unlock()
+		w.WriteHeader(reply)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+		return
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/clear"):
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		var taskID, waitID int64
+		if len(parts) == 6 {
+			taskID, _ = strconv.ParseInt(parts[2], 10, 64)
+			waitID, _ = strconv.ParseInt(parts[4], 10, 64)
+		}
+		f.mu.Lock()
+		reply := f.clearStatus
+		if reply == 0 {
+			if f.hkDeadTasks[taskID] {
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"error":"not_found"}`)
+				return
+			}
+			var found *fakeHkWait
+			for _, wait := range f.hkWaits {
+				if wait.ID == waitID && wait.TaskID == taskID {
+					found = wait
+					break
+				}
+			}
+			if found == nil {
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"error":"task_wait_not_found"}`)
+				return
+			}
+			changed := !found.Cleared
+			found.Cleared = true
+			payload := map[string]any{"changed": changed, "wait": map[string]any{"id": found.ID, "task_id": taskID}}
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(payload)
+			return
+		}
+		f.mu.Unlock()
+		w.WriteHeader(reply)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+		return
 	default:
 		if status != http.StatusCreated && status != http.StatusOK {
 			w.WriteHeader(status)
@@ -357,6 +495,89 @@ func (f *fakeHandoffkeep) rowCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.rows)
+}
+
+// oneTimeAnchors lists the intake anchors whose source_ref is ref or a
+// dead-anchor descendant of it (ref+"/d<id>" chains).
+func (f *fakeHandoffkeep) oneTimeAnchors(ref string) []*fakeHkAnchor {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*fakeHkAnchor
+	for _, anchor := range f.intakeTasks {
+		if anchor.Ref == ref || strings.HasPrefix(anchor.Ref, ref+"/d") {
+			out = append(out, anchor)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// openOperatorWaits lists the uncleaned operator waits.
+func (f *fakeHandoffkeep) openOperatorWaits() []*fakeHkWait {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*fakeHkWait
+	for _, wait := range f.hkWaits {
+		if wait.OnKind == "operator" && !wait.Cleared {
+			out = append(out, wait)
+		}
+	}
+	return out
+}
+
+// allWaits lists every wait row, cleared or not.
+func (f *fakeHandoffkeep) allWaits() []*fakeHkWait {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*fakeHkWait, len(f.hkWaits))
+	copy(out, f.hkWaits)
+	return out
+}
+
+// settleOneTimeAnchor moves every anchor under ref to a settled state,
+// modelling the desk declining or closing it.
+func (f *fakeHandoffkeep) settleOneTimeAnchor(ref, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, anchor := range f.intakeTasks {
+		if anchor.Ref == ref || strings.HasPrefix(anchor.Ref, ref+"/d") {
+			anchor.State = state
+		}
+	}
+}
+
+// dropOneTimeAnchor removes the anchor's intake row and marks its task dead,
+// modelling handoffkeep losing the task: re-intake then creates a fresh one.
+func (f *fakeHandoffkeep) dropOneTimeAnchor(ref string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.hkDeadTasks == nil {
+		f.hkDeadTasks = map[int64]bool{}
+	}
+	for key, anchor := range f.intakeTasks {
+		if anchor.Ref == ref || strings.HasPrefix(anchor.Ref, ref+"/d") {
+			f.hkDeadTasks[anchor.ID] = true
+			delete(f.intakeTasks, key)
+			for _, wait := range f.hkWaits {
+				if wait.TaskID == anchor.ID {
+					wait.Cleared = true
+				}
+			}
+		}
+	}
+}
+
+// oneTimeCallCount counts requests whose path ends with suffix.
+func (f *fakeHandoffkeep) oneTimeCallCount(method, suffix string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	total := 0
+	for _, call := range f.calls {
+		if call.Method == method && strings.HasSuffix(call.Path, suffix) {
+			total++
+		}
+	}
+	return total
 }
 
 func asString(value any) string {
