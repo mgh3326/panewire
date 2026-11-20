@@ -25,6 +25,12 @@ import (
 const (
 	nodeCommandHandoverSnapshot   = "worktree.handover_snapshot"
 	hubCapabilityHandoverSnapshot = "handover_snapshot_v1"
+	// hubCapabilitySnapshotStopSeq: the node decodes stop_seq on the snapshot
+	// command and checks the pane's sequence before pushing (hk 5780).
+	hubCapabilitySnapshotStopSeq = "handover_snapshot_stop_seq_v1"
+	// handoverPaneChanged is the outcome of a snapshot refused because the
+	// pane left the stopped state; nothing was pushed.
+	handoverPaneChanged = "pane_changed"
 
 	handoverSnapshotOK       = "ok"
 	handoverSnapshotRefused  = "snapshot_refused"
@@ -65,6 +71,11 @@ type nodeHandoverSnapshotArgs struct {
 	Cwd    string `json:"cwd"`
 	Origin string `json:"origin"`
 	Branch string `json:"branch"`
+	// StopSeq is the herdr state_change_seq a quota stop was observed in (hk
+	// 5780): the node reads the job's pane again immediately before it pushes
+	// the snapshot ref and publishes nothing for a pane that left that state.
+	// Sent only to a node advertising hubCapabilitySnapshotStopSeq.
+	StopSeq *int64 `json:"stop_seq,omitempty"`
 }
 
 type nodeHandoverSnapshotResult struct {
@@ -84,7 +95,7 @@ type nodeHandoverSnapshotResult struct {
 }
 
 func validNodeHandoverSnapshotArgs(args nodeHandoverSnapshotArgs) bool {
-	return validNodeHandoverCheckArgs(nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: args.Origin, Branch: args.Branch}) && args.Epoch > 0
+	return (args.StopSeq == nil || *args.StopSeq >= 0) && validNodeHandoverCheckArgs(nodeHandoverCheckArgs{Job: args.Job, Cwd: args.Cwd, Origin: args.Origin, Branch: args.Branch}) && args.Epoch > 0
 }
 
 func handoverSnapshotRef(job, commit string) string {
@@ -138,7 +149,7 @@ func validNodeHandoverSnapshotResult(result nodeHandoverSnapshotResult) bool {
 			return reflect.DeepEqual(result, nodeHandoverSnapshotResult{Outcome: result.Outcome, Reason: result.Reason})
 		}
 		return false
-	case handoverSnapshotPushFail, handoverSnapshotUnproven, handoverEpochMismatch, handoverBranchMismatch, handoverGitFailed, nodeCaptureNotAJob:
+	case handoverSnapshotPushFail, handoverSnapshotUnproven, handoverPaneChanged, handoverEpochMismatch, handoverBranchMismatch, handoverGitFailed, nodeCaptureNotAJob:
 		return reflect.DeepEqual(result, nodeHandoverSnapshotResult{Outcome: result.Outcome})
 	}
 	return false
@@ -192,9 +203,29 @@ func (client *HubClient) nodeHandoverSnapshot(ctx context.Context, args nodeHand
 		return outcome(handoverGitFailed)
 	}
 	defer os.RemoveAll(scratch)
-	snapshot, err := handoverSnapshotPush(ctx, prepared.top, scratch, args.Job)
+	var paneErr error
+	beforePush := func() error {
+		if args.StopSeq == nil {
+			return nil
+		}
+		// The receipt's own pane and session, not anything the hub names.
+		outcome, row, err := client.nodePaneMatchInSession(ctx, target.session, target.pane, target.label, "", args.Cwd, false, false)
+		switch {
+		case err != nil:
+			paneErr = err
+			return err
+		case outcome != "" || row.StateChangeSeq == nil || *row.StateChangeSeq != *args.StopSeq:
+			return errHandoverSnapshotPaneChanged
+		}
+		return nil
+	}
+	snapshot, err := handoverSnapshotPush(ctx, prepared.top, scratch, args.Job, beforePush)
 	var refused handoverRefusal
 	switch {
+	case errors.Is(err, errHandoverSnapshotPaneChanged):
+		return outcome(handoverPaneChanged)
+	case paneErr != nil:
+		return nil, "herdr_failed"
 	case ctx.Err() != nil:
 		return nil, "snapshot_failed"
 	case errors.As(err, &refused):
@@ -234,6 +265,8 @@ func listedBytes(paths []string) int {
 var (
 	errHandoverSnapshotPush   = errors.New("snapshot push failed")
 	errHandoverSnapshotOrigin = errors.New("snapshot origin verification failed")
+	// errHandoverSnapshotPaneChanged: the pane left the stopped state before the push.
+	errHandoverSnapshotPaneChanged = errors.New("pane left the stopped state")
 )
 
 // handoverSnapshotGit runs one git command in top. Literal pathspecs keep a
@@ -497,7 +530,8 @@ type handoverSnapshotCommit struct{ Commit, Ref, Tree, Parent string }
 
 // handoverSnapshotPush publishes a content-addressed ref and accepts it only
 // after a read from origin confirms the exact commit.
-func handoverSnapshotPush(ctx context.Context, top, scratch, job string) (handoverSnapshotCommit, error) {
+// beforePush, when set, runs immediately before the ref is pushed; its error stops the push.
+func handoverSnapshotPush(ctx context.Context, top, scratch, job string, beforePush func() error) (handoverSnapshotCommit, error) {
 	if !validNodeJobName(job) {
 		return handoverSnapshotCommit{}, fmt.Errorf("invalid job")
 	}
@@ -519,6 +553,11 @@ func handoverSnapshotPush(ctx context.Context, top, scratch, job string) (handov
 		return handoverSnapshotCommit{}, fmt.Errorf("snapshot commit failed")
 	}
 	ref := handoverSnapshotRef(job, commit)
+	if beforePush != nil {
+		if err := beforePush(); err != nil {
+			return handoverSnapshotCommit{}, err
+		}
+	}
 	if _, err := handoverSnapshotGit(ctx, top, nil, "", "-c", "push.recurseSubmodules=no", "push", "--no-verify", "--no-follow-tags", "--recurse-submodules=no", "origin", commit+":"+ref); err != nil {
 		return handoverSnapshotCommit{}, fmt.Errorf("%w: %v", errHandoverSnapshotPush, err)
 	}

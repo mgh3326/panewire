@@ -185,9 +185,11 @@ func TestGiveUpLeavesABusyPaneAlone(t *testing.T) {
 // hk 5690 review: a reviewer's announced quota stop reaches the hub as a
 // job.lost frame from its node. The frame starts the replacement (the real relay
 // path, the relayed reason) and is a control event: the owner lane is not handed
-// a loss for a review the hub is carrying on. An implementer's announcement is
-// relayed to its owner as before and starts no replacement: the legacy close has
-// none of the hand-over checks its worktree needs (dirty or unpushed work).
+// a loss for a review the hub is carrying on. An implementer's announcement on a
+// node without close ops and the hand-over check (this fixture) is relayed to its
+// owner as before and starts no replacement: the legacy close has none of the
+// hand-over checks its worktree needs (dirty or unpushed work). A capable node's
+// implementer goes through the guarded hand-over (hub_quota_handover_t5780_test.go).
 func TestAnnouncedReviewerQuotaStopStartsTheReplacementAndIsNotRelayedToTheOwner(t *testing.T) {
 	for role, isReviewer := range map[string]bool{"reviewer": true, "implementer": false} {
 		t.Run(role, func(t *testing.T) {
@@ -261,7 +263,7 @@ func TestReviewerAnnouncementIsAcknowledgedOnlyOnceTheReplacementIsDurable(t *te
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-15-p1")
 	acked := make(chan struct{}, 4)
 	event := relayedQuotaStop(f.job, "claude")
-	f.hub.startQuotaReplacementAck("machine-a", event, func() { acked <- struct{}{} })
+	f.hub.startQuotaStop("machine-a", event, func() { acked <- struct{}{} }, nil)
 	probe := nodeCommandRead(t, f.node)
 	roleReplyPanes(t, f.node, probe, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
 	select {
@@ -341,7 +343,7 @@ func TestStaleResentAnnouncementIsLeftToTheWatcher(t *testing.T) {
 	event := relayedQuotaStop(f.job, "claude")
 	event.Reason += " at=" + strconv.FormatInt(time.Now().Add(-9*time.Minute).Unix(), 10)
 	acked := false
-	job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked = true })
+	job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked = true }, nil)
 	if ok || job != "" {
 		t.Fatalf("a stale announcement was replaced: %q", job)
 	}
@@ -375,22 +377,26 @@ func TestReplacementDropsTheStoppedJobsStartConditions(t *testing.T) {
 	}
 }
 
-// hk 5690 review: a role the hub could not look up (its store failed) is unknown,
-// not "not a reviewer": acting on it would relay a loss for a review the hub is
-// about to carry on. A job the hub never spawned is known not to be a reviewer.
-func TestReviewerRoleLookupFailureIsUnknownNotAnImplementer(t *testing.T) {
-	f := newQuotaReplaceFixture(t, "reviewer", "mwr-20-p1")
-	event := relayedQuotaStop(f.job, "claude")
-	if reviewer, known := f.hub.reviewerQuotaAnnouncement(t.Context(), event); !reviewer || !known {
-		t.Fatalf("a spawned reviewer: reviewer=%v known=%v", reviewer, known)
+// hk 5690 review, hk 5780: the role of an announced stop is read from the
+// holder the replacement loads, not by a preflight. A job the hub never spawned,
+// and a role it does not carry on, is filed as the loss it always was (and the
+// stop is settled); a lookup that cannot be made is neither filed nor settled:
+// acting on it would relay a loss for a job the hub is about to carry on.
+func TestAnnouncedStopRoleIsReadFromTheHolderTheReplacementLoads(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "consult", "mwr-20-p1")
+	var filed, settled int
+	announced := &quotaAnnouncement{relay: func(context.Context) { filed++ }}
+	ack := func() { settled++ }
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", relayedQuotaStop("never-spawned", "claude"), ack, announced); ok || job != "" || filed != 1 || settled != 0 {
+		t.Fatalf("a job the hub never spawned: filed=%d settled=%d, want a loss filed once and not acknowledged", filed, settled)
 	}
-	if reviewer, known := f.hub.reviewerQuotaAnnouncement(t.Context(), relayedQuotaStop("never-spawned", "claude")); reviewer || !known {
-		t.Fatalf("a job the hub never spawned: reviewer=%v known=%v, want known not-a-reviewer", reviewer, known)
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", relayedQuotaStop(f.job, "claude"), ack, announced); ok || job != "" || filed != 2 || settled != 0 {
+		t.Fatalf("a consult: filed=%d settled=%d, want a loss filed and not acknowledged", filed, settled)
 	}
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if reviewer, known := f.hub.reviewerQuotaAnnouncement(canceled, event); reviewer || known {
-		t.Fatalf("a failed lookup: reviewer=%v known=%v, want unknown", reviewer, known)
+	if job, ok := f.hub.replaceQuotaStoppedAck(canceled, "machine-a", relayedQuotaStop(f.job, "claude"), ack, announced); ok || job != "" || filed != 2 || settled != 0 {
+		t.Fatalf("a failed lookup: filed=%d settled=%d, want neither", filed, settled)
 	}
 }
 
@@ -403,14 +409,14 @@ func TestHkReadFailureLeavesTheAnnouncementUnacknowledged(t *testing.T) {
 	f.jobs.failGets = 1
 	acked := 0
 	event := relayedQuotaStop(f.job, "claude")
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }); ok || job != "" {
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }, nil); ok || job != "" {
 		t.Fatalf("a replacement was made with hk unreadable: %q", job)
 	}
 	if acked != 0 {
 		t.Fatalf("the announcement was acknowledged %d times on a transient hk failure", acked)
 	}
 	// hk is back: the same announcement, delivered again, reaches the pane probe.
-	go f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ })
+	go f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }, nil)
 	if op := strings.Trim(string(nodeCommandRead(t, f.node)["op"]), `"`); op != "agents.list" {
 		t.Fatalf("first node command %q after hk recovered, want the pane probe", op)
 	}
@@ -458,7 +464,7 @@ func TestAcknowledgementFollowsAnExplicitOutcome(t *testing.T) {
 	ack := func() { acked++ }
 
 	// A job the hub never spawned: no row, a final answer.
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event("never-spawned"), ack); ok || job != "" || acked != 1 {
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event("never-spawned"), ack, nil); ok || job != "" || acked != 1 {
 		t.Fatalf("unknown job: job=%q ok=%v acked=%d, want a final acknowledged skip", job, ok, acked)
 	}
 	// The original spawn is still settling: retry, no acknowledgement.
@@ -466,14 +472,14 @@ func TestAcknowledgementFollowsAnExplicitOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	acked = 0
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event(f.job), ack); ok || job != "" || acked != 0 {
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event(f.job), ack, nil); ok || job != "" || acked != 0 {
 		t.Fatalf("unsettled holder: job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
 	}
 	// The original spawn ended for good: final.
 	if _, err := f.hub.inbox.store.db.Exec(`UPDATE spawn_operations SET status='failed' WHERE job=?`, f.job); err != nil {
 		t.Fatal(err)
 	}
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event(f.job), ack); ok || job != "" || acked != 1 {
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event(f.job), ack, nil); ok || job != "" || acked != 1 {
 		t.Fatalf("terminal holder: job=%q ok=%v acked=%d, want a final acknowledged skip", job, ok, acked)
 	}
 }
@@ -517,7 +523,7 @@ func TestSeqlessAnnouncementNeverClosesAReviewersPane(t *testing.T) {
 			acked := 0
 			done := make(chan quotaReplaceResult, 1)
 			go func() {
-				j, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ })
+				j, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }, nil)
 				done <- quotaReplaceResult{j, ok}
 			}()
 			commands := f.serveCommands(t, 1) // the pane probe
@@ -575,13 +581,13 @@ func TestGiveUpRetriesATransientHkRead(t *testing.T) {
 	f.jobs.failGets = 1
 	event := quotaStopEvent(f.job, "claude")
 	acked := 0
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }); ok || job != "" || acked != 0 {
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }, nil); ok || job != "" || acked != 0 {
 		t.Fatalf("a give-up on a failed hk read: job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ })
+		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }, nil)
 	}()
 	f.serveCommands(t, 4) // probe, capture, close, mark_lost: the give-up goes through
 	select {
@@ -618,7 +624,7 @@ func TestReplayAfterRestartFinishesAClaimedSuccessor(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ })
+		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }, nil)
 	}()
 	commands := f.serveCommands(t, 2) // probe (pane gone), mark_lost
 	select {
@@ -641,7 +647,7 @@ func (f *quotaReplaceFixture) replaceSendingNothing(t *testing.T, event hubJobEv
 	t.Helper()
 	done := make(chan quotaReplaceResult, 1)
 	go func() {
-		job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, ack)
+		job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, ack, nil)
 		done <- quotaReplaceResult{job, ok}
 	}()
 	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
@@ -715,13 +721,13 @@ func TestClaimedSuccessorIsAcknowledgedOnlyOnceItsPointerIsWritten(t *testing.T)
 	f.paneClosed = true
 	f.jobs.failGets = 1 // the pointer write cannot read the old record
 	acked := 0
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked++ }); ok || job != "" || acked != 0 {
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked++ }, nil); ok || job != "" || acked != 0 {
 		t.Fatalf("finish failed: job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked++ })
+		f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", quotaStopEvent(f.job, "claude"), func() { acked++ }, nil)
 	}()
 	f.serveCommands(t, 2) // probe (pane gone), mark_lost
 	select {
@@ -802,7 +808,7 @@ func TestAQueuedSuccessorClaimIsNeverAcknowledgedAsReplaced(t *testing.T) {
 	acked := 0
 	event := quotaStopEvent(f.job, "claude")
 	event.Reason += " at=" + strconv.FormatInt(time.Now().Add(-9*time.Minute).Unix(), 10) // an old resend: would be stale
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }); ok || job != "" || acked != 0 {
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }, nil); ok || job != "" || acked != 0 {
 		t.Fatalf("a queued claim: job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
 	}
 }
@@ -1154,7 +1160,7 @@ func TestSuccessorLookupErrorKeepsTheStopForARetry(t *testing.T) {
 	event := quotaStopEvent(f.job, "claude")
 	event.Reason += " at=" + strconv.FormatInt(time.Now().Add(-9*time.Minute).Unix(), 10) // an old resend: stale if the read is skipped
 	acked := 0
-	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }); ok || job != "" || acked != 0 {
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }, nil); ok || job != "" || acked != 0 {
 		t.Fatalf("job=%q ok=%v acked=%d, want a retry with no acknowledgement", job, ok, acked)
 	}
 }

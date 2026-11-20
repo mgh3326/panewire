@@ -147,6 +147,18 @@ func (h *HubServer) closeHeldPaneFenced(ctx context.Context, holder hubSpawnTask
 
 // nodeHasCapability reports that machine's connected node advertised capability
 // at its hello. A node that is absent, reconnecting, or older has not.
+// nodeCapability tells a node that is not connected from one that is connected
+// without the capability: a disconnect says nothing about what the node can do.
+func (h *HubServer) nodeCapability(machine, capability string) (connected, has bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	record := h.nodes[machine]
+	if record == nil || record.agent == nil {
+		return false, false
+	}
+	return true, record.capabilities[capability]
+}
+
 func (h *HubServer) nodeHasCapability(machine, capability string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

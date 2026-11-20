@@ -2086,6 +2086,12 @@ const hubCapabilityCloseQuestion = "pane_close_question_v1"
 // fence.
 const hubCapabilityCloseStopSeq = "pane_close_stop_seq_v1"
 
+// hubCapabilityCloseOpStopSeq is advertised by a node whose pane.close_op decodes
+// stop_seq and refuses a pane no longer in that state (hk 5780). The hub fences
+// an implementer's screen-stop hand-over close with it, and hands over nothing
+// for a stop it cannot fence.
+const hubCapabilityCloseOpStopSeq = "pane_close_op_stop_seq_v1"
+
 // hubCapabilitySpawnExpires is advertised by a node whose job.spawn decoder
 // reads expires_ms. The hub sends the request's absolute expiry only to such a
 // node, which writes it into the job.spawned receipt as expires_at so the
@@ -2103,7 +2109,7 @@ const hubCapabilityConsultStamp = "consult_stamp_v1"
 // hubSpawnCapabilities is what an upgraded node always advertises in hello;
 // close_ops_v1 is added while the node is ready for it
 // (spawnHelloCapabilities).
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilityCloseStopSeq, hubCapabilitySpawnExpires, hubCapabilityConsultStamp, hubCapabilityOwnerNotify, hubCapabilityApplied}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant, hubCapabilityCloseQuestion, hubCapabilityCloseStopSeq, hubCapabilityCloseOpStopSeq, hubCapabilitySpawnExpires, hubCapabilityConsultStamp, hubCapabilityOwnerNotify, hubCapabilityApplied}
 
 // hubCapabilityOwnerNotify is advertised by a node whose spawn argument rule
 // accepts --owner-notify (hk 5360). The hub strips the flag for any other node;

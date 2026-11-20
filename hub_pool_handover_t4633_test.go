@@ -518,7 +518,9 @@ func TestPoolHandoverAndQuotaReplacementFenceEachOther(t *testing.T) {
 		// A successor under --parent-job holds no task role slot.
 		i := slices.Index(successor.Args, "--task")
 		successor.Args[i], successor.Args[i+1] = "--parent-job", job
-		if _, _, err := f.hub.inbox.store.claimSpawn(t.Context(), successor, job+"-q1", "parent", time.Now()); err != nil {
+		// A quota replacement's claim writes the lineage (replaced_from, reason "claim"),
+		// which already_replaced requires (hk 5780).
+		if _, _, err := f.hub.inbox.store.claimSpawnFrom(t.Context(), successor, job+"-q1", "parent", time.Now(), job); err != nil {
 			t.Fatal(err)
 		}
 		done := make(chan poolJobResult, 1)

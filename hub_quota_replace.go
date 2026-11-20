@@ -17,9 +17,11 @@ import (
 
 // A quota-stopped job is handled by role (hk 3334, docs/quota-stop.md): a
 // reviewer whose stop is announced on a live job (its watcher saw a limit screen
-// or a credit rejection, hk 5690) is replaced on another pool at once; an
-// implementer the quota-stop manager has handed over is replaced the same way.
-// The node announces the stop with job.lost reason "quota_stop" and leaves the hk
+// or a credit rejection, hk 5690) is replaced on another pool at once. An
+// implementer the quota-stop manager has handed over goes through the guarded
+// worktree hand-over (hub_quota_handover.go, hk 5780), never the close below:
+// that close has none of the checks an implementer's worktree needs. The node
+// announces the stop with job.lost reason "quota_stop" and leaves the hk
 // record alone, because hk never rewrites a lost record and the pointer to the
 // successor can only be written with it. The hub places the successor, then
 // closes the old pane with a screen capture and writes the old hk record lost
@@ -27,8 +29,8 @@ import (
 // handed_over_to=<job>); a reviewer's requester is told nothing. When no other
 // pool can take a reviewer the hub gives it up at once (giveUpQuotaStop): the
 // record ends with the plain reason and the owner gets one notice. An implementer
-// that cannot be placed is left to the watcher's grace and the spawn failure
-// notice.
+// the guarded hand-over refuses (dirty or unpushed work it cannot snapshot, a
+// pinned host, no other host) is left in its pane with one owner decision.
 
 // isQuotaStopReason reports whether reason is a relayed quota stop: the bare
 // "quota_stop" an older node sends, or the form the node's relay builds from the
@@ -38,27 +40,6 @@ import (
 // replaced: the relayed reason always carries the pool.
 func isQuotaStopReason(reason string) bool {
 	return reason == "quota_stop" || strings.HasPrefix(reason, "quota_stop ")
-}
-
-// reviewerQuotaAnnouncement reports whether event is a reviewer's announced quota
-// stop: the job the hub spawned as a reviewer, stopped on a provider limit. known
-// is false when the hub could not tell: its store failed. A job the hub did not
-// spawn has no stored submission and is known not to be one. Only a known answer
-// is acted on, so a transient store failure never relays a loss for a reviewer the
-// hub is about to carry on.
-func (h *HubServer) reviewerQuotaAnnouncement(ctx context.Context, event hubJobEventPayload) (reviewer, known bool) {
-	if h.inbox == nil || !isQuotaStopReason(event.Reason) {
-		return false, true
-	}
-	holder, err := h.inbox.store.latestSpawnForJob(ctx, event.JobID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, true
-	}
-	if err != nil {
-		return false, false
-	}
-	prior, err := fleet.ValidateSubmission(holder.Request)
-	return err == nil && prior.Role == "reviewer", true
 }
 
 // quotaLineageHolds reports whether successor is a replacement of predecessor (the
@@ -139,19 +120,25 @@ const (
 const quotaReplacePoll = 500 * time.Millisecond
 
 func (h *HubServer) startQuotaReplacement(machine string, event hubJobEventPayload) {
-	h.startQuotaReplacementAck(machine, event, nil)
+	h.startQuotaStop(machine, event, nil, nil)
 }
 
-// startQuotaReplacementAck is startQuotaReplacement for a stop whose node still
-// owes the hub an acknowledgement: settled runs once the replacement no longer
-// depends on the node resending it (replaceQuotaStoppedAck).
-func (h *HubServer) startQuotaReplacementAck(machine string, event hubJobEventPayload, settled func()) {
+// startQuotaStop answers a stop announced by machine's node with a job.lost whose
+// reason isQuotaStopReason, off the node's websocket reader. The reader never
+// reads the store: the role comes from the stored submission the replacement
+// itself loads (replaceQuotaStoppedAck), after the drain check. settled runs once
+// the stop is durably owned (the node may then drop it from its outbox); relay
+// files the event as the plain loss for a job the hub does not carry on (a
+// consult, a job it never spawned): until hk 5780 the reader did that after its
+// own store read. Both may be nil.
+func (h *HubServer) startQuotaStop(machine string, event hubJobEventPayload, settled func(), relay func(context.Context)) {
 	if h.inbox == nil || !isQuotaStopReason(event.Reason) {
 		return
 	}
 	if h.spawnGrantDrain || h.spawnRollbackDrain {
 		// A rollback drain creates no successor: an older hub could misread
-		// its *_grant row (docs/hub-spawn-operations.md).
+		// its *_grant row (docs/hub-spawn-operations.md). Nothing is read, filed
+		// or acknowledged: the node sends the stop again after the drain.
 		h.logger.Warn("hub quota hand-off skipped while draining grant rows", "host", machine, "job", event.JobID)
 		return
 	}
@@ -164,22 +151,23 @@ func (h *HubServer) startQuotaReplacementAck(machine string, event hubJobEventPa
 	h.closeMu.Unlock()
 	go func() {
 		defer h.spawnWorkers.Done()
-		// Only a reviewer is carried on from a relayed stop: its pane holds no work.
-		// The legacy close this path takes has none of the hand-over checks an
-		// implementer's worktree needs (dirty or unpushed work, hk 4633), so an
-		// implementer's relayed stop stays as it was (docs/quota-stop.md). The
-		// check runs here, off the node's reader, and a stop that is not a
-		// reviewer's is acknowledged: a resend would change nothing.
-		if reviewer, known := h.reviewerQuotaAnnouncement(h.closeCtx, event); !known {
-			return // unknown: left unacknowledged, the node sends it again
-		} else if !reviewer {
-			if settled != nil {
-				settled()
-			}
-			return
-		}
-		h.replaceQuotaStoppedAck(h.closeCtx, machine, event, settled)
+		h.replaceQuotaStoppedAck(h.closeCtx, machine, event, settled, &quotaAnnouncement{relay: relay})
 	}()
+}
+
+// quotaAnnouncement marks a replacement the node announced (a relayed job.lost),
+// as opposed to one the hub started itself (an account's credit, hk 5138). Only
+// an announced stop splits by role: a reviewer takes the close below, an
+// implementer the guarded worktree hand-over, anything else is filed as a loss.
+type quotaAnnouncement struct {
+	relay func(context.Context)
+}
+
+// fileLoss files the stop as a plain loss, for a job the hub does not carry on.
+func (a *quotaAnnouncement) fileLoss(ctx context.Context) {
+	if a != nil && a.relay != nil {
+		a.relay(ctx)
+	}
 }
 
 // quotaReplacementRequest is the holder's submission for the successor: same
@@ -274,7 +262,7 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude
 // replaceQuotaStopped answers one job.lost reason "quota_stop" from machine.
 // It reports the successor's job id when one was placed and the old job closed.
 func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, event hubJobEventPayload) (string, bool) {
-	return h.replaceQuotaStoppedAck(ctx, machine, event, nil)
+	return h.replaceQuotaStoppedAck(ctx, machine, event, nil, nil)
 }
 
 // replaceQuotaStoppedAck is replaceQuotaStopped that calls ackStop, once, when
@@ -282,7 +270,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 // repairs the rest) or the replacement reached a decision that a resend cannot
 // change. Every exit is an explicit outcome: a final one (skip, giveUp) settles
 // the stop, a retry (retryLater) does not, and a claim settles it too (hk 5690).
-func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, event hubJobEventPayload, ackStop func()) (string, bool) {
+func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, event hubJobEventPayload, ackStop func(), announced *quotaAnnouncement) (string, bool) {
 	settle := func() {
 		if ackStop != nil {
 			ackStop()
@@ -295,6 +283,14 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			settle()
 		}
 	}()
+	// fileLoss hands the stop to the ordinary loss relay, which owns its receipt:
+	// the node's outbox row is not acknowledged here (hk 5780 review).
+	fileLoss := func() {
+		if announced != nil {
+			announced.fileLoss(ctx)
+			retry = true
+		}
+	}
 	skip := func(reason string, kv ...any) (string, bool) {
 		h.logger.Info("quota-stop replacement skipped", append([]any{"job", event.JobID, "node", machine, "reason", reason}, kv...)...)
 		return "", false
@@ -313,17 +309,58 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	defer cancel()
 	// The existing quota replacement also closes and writes this job. Order
 	// it with pool-action admission so neither can overwrite the other's end.
-	unlock, free := h.lockWithoutPoolAction(ctx, event.JobID)
+	unlockJob, free := h.lockWithoutPoolAction(ctx, event.JobID)
 	if !free {
+		if announced != nil && h.handoverRowOwns(ctx, event.JobID, event.EventID) {
+			// This announcement's own hand-over row owns the job: it has its outcome.
+			return skip("handover_owned")
+		}
 		return retryLater("pool_action_pending")
 	}
-	defer unlock()
+	defer unlockJob()
 	store := h.inbox.store
+	if announced != nil {
+		// An announcement with a saved outcome is answered from it, before the
+		// holder, the node or its capabilities are looked at (hk 5780 review).
+		if outcome, found := h.savedStopOutcome(ctx, event); found {
+			if outcome == quotaStopSettled {
+				return skip("outcome_saved")
+			}
+			return retryLater("outcome_unavailable")
+		}
+	}
+	holder, err := store.latestSpawnForJob(ctx, event.JobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A job the hub did not spawn has no stored submission: not one it carries on.
+		fileLoss()
+		return skip("unknown_job")
+	}
+	if err != nil {
+		// An operational failure says nothing about the job: retry. Nothing is
+		// filed either: a role the hub could not look up is decided when the
+		// node sends the stop again, not on a guess.
+		return retryLater("holder_unavailable", "error", err.Error())
+	}
+	prior, err := fleet.ValidateSubmission(holder.Request)
+	if err != nil {
+		fileLoss()
+		return skip("unreadable_request")
+	}
+	role := prior.Role
+	// An announced reviewer stop is replaced at once. An implementer only
+	// announces job.lost when the quota-stop manager handed it over.
+	if role != "reviewer" && role != "implementer" {
+		fileLoss()
+		return skip("role", "role", role)
+	}
+	// An announced implementer is handed over by the guarded worktree hand-over
+	// (hk 4633, hk 5780), not by the close below, which has none of its checks.
+	guarded := announced != nil && role == "implementer"
 	// A successor already claimed for this job (a replay after a hub restart, or a
 	// second delivery) is finished before anything else, and before the age gate: a
 	// claimed successor that may still run needs its replaced_by write, which the
 	// periodic pass would otherwise leave until its own age (hk 5690 review).
-	if claimed, _, ok := quotaReplacementJob(event.JobID); ok {
+	if claimed, _, ok := quotaReplacementJob(event.JobID); ok && !guarded {
 		successor, err := store.latestSpawnForJob(ctx, claimed)
 		switch {
 		case err != nil && !errors.Is(err, sql.ErrNoRows):
@@ -336,11 +373,8 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			// for the same owner and task. A name collision is refused and the
 			// record kept; the predecessor is never closed without the lineage and a
 			// verified stop sequence (hk 5690).
-			predecessor, perr := store.latestSpawnForJob(ctx, event.JobID)
-			if perr != nil && !errors.Is(perr, sql.ErrNoRows) {
-				return retryLater("holder_unavailable", "error", perr.Error())
-			}
-			if perr != nil || !quotaLineageHolds(successor, predecessor, event.JobID) {
+			predecessor := holder
+			if !quotaLineageHolds(successor, predecessor, event.JobID) {
 				return skip("successor_name_collision", "job", claimed)
 			}
 			if quotaSuccessorPlaceable(successor) {
@@ -364,11 +398,9 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 			}
 			// The claimed successor ended without being placed: no other pool could
 			// take the review, and this delivery finishes the give-up.
-			if predecessor.Status == "succeeded" {
-				if prior, verr := fleet.ValidateSubmission(predecessor.Request); verr == nil && prior.Role == "reviewer" {
-					if h.giveUpQuotaStop(ctx, predecessor, prior.Owner, event, "not_placed") {
-						return retryLater("successor_give_up_pending", "replacement", claimed)
-					}
+			if predecessor.Status == "succeeded" && role == "reviewer" {
+				if h.giveUpQuotaStop(ctx, predecessor, prior.Owner, event, "not_placed") {
+					return retryLater("successor_give_up_pending", "replacement", claimed)
 				}
 			}
 			return skip("already_replaced", "replacement", claimed)
@@ -377,31 +409,16 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	// The watcher ends an unchanged stopped job itself when its grace runs out,
 	// and hk never rewrites a lost record: a replacement that cannot finish inside
 	// what is left of the grace could place a successor after that plain loss
-	// (hk 5690 review). A stop announced too long ago is left to the watcher.
-	if announced, ok := quotaStopReasonAt(event.Reason); ok && h.now().Sub(announced) > fleet.QuotaStopHandOffGrace-budget {
-		return skip("announcement_stale", "age", h.now().Sub(announced).Round(time.Second))
-	}
-	holder, err := store.latestSpawnForJob(ctx, event.JobID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return skip("unknown_job")
-	}
-	if err != nil {
-		// An operational failure says nothing about the job: retry.
-		return retryLater("holder_unavailable", "error", err.Error())
-	}
-	prior, err := fleet.ValidateSubmission(holder.Request)
-	if err != nil {
-		return skip("unreadable_request")
-	}
-	role := prior.Role
-	// An announced reviewer stop is replaced at once. An implementer only
-	// announces job.lost when the quota-stop manager handed it over.
-	if role != "reviewer" && role != "implementer" {
-		return skip("role", "role", role)
+	// (hk 5690 review). A stop announced too long ago is left to the watcher. A
+	// hand-over row owns its own close and survives that loss (it fails safe).
+	if announcedAt, ok := quotaStopReasonAt(event.Reason); ok && !guarded && h.now().Sub(announcedAt) > fleet.QuotaStopHandOffGrace-budget {
+		return skip("announcement_stale", "age", h.now().Sub(announcedAt).Round(time.Second))
 	}
 	// A task-bound job, or a reviewer that inherited its builder's
-	// task (--parent-job), is replaced with the same arguments.
-	if prior.Task == "" && prior.ParentJob == "" || (prior.Profile != "" && prior.Profile != "auto") {
+	// task (--parent-job), is replaced with the same arguments. The guarded
+	// hand-over refuses a task-less job itself, with an owner decision, and drops
+	// a pinned profile.
+	if !guarded && (prior.Task == "" && prior.ParentJob == "" || (prior.Profile != "" && prior.Profile != "auto")) {
 		return skip("not_replaceable")
 	}
 	// An original spawn still settling (bound, dispatching, reconciling, past its
@@ -413,6 +430,18 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	}
 	if holder.Status != "succeeded" || spawnHolderHost(holder) != machine {
 		return skip("holder_state", "status", holder.Status)
+	}
+	if guarded {
+		// The job's lock is held through the hand-over: it serializes overlapping
+		// deliveries of one announcement.
+		switch h.handOverAnnouncedImplementer(ctx, machine, event, holder, prior, announced) {
+		case quotaStopSettled:
+			return "", false
+		case quotaStopFiled:
+			retry = true // the ordinary relay owns the receipt
+			return "", false
+		}
+		return retryLater("handover_pending")
 	}
 	// A reviewer the hub cannot carry on is given up: its record ends lost now
 	// (not after the watcher's grace) and the owner is told once (hk 5690).
