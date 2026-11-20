@@ -396,3 +396,56 @@ func TestReviewerRoleLookupFailureIsUnknownNotAnImplementer(t *testing.T) {
 		t.Fatalf("a failed lookup: reviewer=%v known=%v, want unknown", reviewer, known)
 	}
 }
+
+// hk 5690 review: an hk read that fails (a brief outage) says nothing about the
+// job: it may be live and carriable. The replacement decides nothing and the
+// announcement is not acknowledged, so the node keeps it; the next delivery, with
+// hk back, proceeds.
+func TestHkReadFailureLeavesTheAnnouncementUnacknowledged(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-21-p1")
+	f.jobs.failGets = 1
+	acked := 0
+	event := relayedQuotaStop(f.job, "claude")
+	if job, ok := f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ }); ok || job != "" {
+		t.Fatalf("a replacement was made with hk unreadable: %q", job)
+	}
+	if acked != 0 {
+		t.Fatalf("the announcement was acknowledged %d times on a transient hk failure", acked)
+	}
+	// hk is back: the same announcement, delivered again, reaches the pane probe.
+	go f.hub.replaceQuotaStoppedAck(t.Context(), "machine-a", event, func() { acked++ })
+	if op := strings.Trim(string(nodeCommandRead(t, f.node)["op"]), `"`); op != "agents.list" {
+		t.Fatalf("first node command %q after hk recovered, want the pane probe", op)
+	}
+}
+
+// hk 5690 review: a reviewer's announcement has no owner lane, which is the
+// generic pool-cooling case the hub acknowledges at once. It is acknowledged only
+// from the replacement's settled callback: while the hub is still replacing, the
+// node receives no acknowledgement.
+func TestReviewerAnnouncementWithNoOwnerLaneIsNotAcknowledgedAtOnce(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-22-p1")
+	event := relayedQuotaStop(f.job, "devin-free")
+	raw, err := json.Marshal(map[string]any{"job_id": f.job, "epoch": 1, "reason": event.Reason, "pane_id": roleHeldPane})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(t.Context(), f.node, hubClientWireEvent(hubClientEvent{Kind: "job.lost", Payload: raw})); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond) // proves no acknowledgement follows: the hub waits on its pane probe
+	defer cancel()
+	for {
+		_, payload, err := f.node.Read(ctx)
+		if err != nil {
+			return
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(payload, &fields) != nil {
+			continue
+		}
+		if typ := string(fields["type"]); typ != `"node.command"` {
+			t.Fatalf("the node received %s while the replacement was still running: %s", typ, payload)
+		}
+	}
+}

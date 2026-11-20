@@ -24,6 +24,8 @@ import (
 type quotaJobs struct {
 	mu      sync.Mutex
 	records map[string]map[string]any
+	// failGets is how many reads fail first, as a brief hk outage does.
+	failGets int
 }
 
 func (q *quotaJobs) Claim(context.Context, string, string, string) error { return nil }
@@ -41,6 +43,10 @@ func (q *quotaJobs) Put(_ context.Context, id string, fields map[string]any) err
 func (q *quotaJobs) Get(_ context.Context, id string) (map[string]any, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.failGets > 0 {
+		q.failGets--
+		return nil, errors.New("hk unavailable")
+	}
 	record, ok := q.records[id]
 	if !ok {
 		return nil, fleet.ErrJobNotFound

@@ -305,7 +305,7 @@ func TestStallExaminationDecisionRecordsHerdrsSequence(t *testing.T) {
 // the resume does not go out until it is appended. The first append fails: nothing
 // is sent at the reset; once the append succeeds on a later tick, the resume goes.
 func TestReviewerResumeWaitsForTheWatchersWaitRecord(t *testing.T) {
-	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
+	rig := newReviewerStopRig(t, 5*time.Minute, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
 	appends, ledgerUp := 0, false
 	rig.q.recordWait = func(context.Context, string, string, string, time.Time, time.Time) error {
 		appends++
@@ -335,5 +335,31 @@ func TestReviewerResumeWaitsForTheWatchersWaitRecord(t *testing.T) {
 	}
 	if rig.sends != 1 {
 		t.Fatalf("sends=%d, want one resume once the wait was appended", rig.sends)
+	}
+}
+
+// hk 5690 review: a reviewer resumed with no watcher loses its completion. When the
+// wait still has not reached the watcher after the watcher's own completion
+// deadline, the reviewer is handed over (announced) instead of resumed. With a 60 s
+// completion timeout and the ledger down until after it, the reset brings a
+// hand-over, not a resume.
+func TestReviewerWithNoWatcherLeftIsHandedOverNotResumed(t *testing.T) {
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
+	rig := newReviewerStopRig(t, 10*time.Second, reviewerStopTask, "testdata/quota-stop/devin-reset-2min.txt")
+	rig.q.recordWait = func(context.Context, string, string, string, time.Time, time.Time) error {
+		return errors.New("ledger unavailable")
+	}
+	rig.observe("working", 1, rig.now)
+	rig.observe("idle", 2, rig.now.Add(time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Second))
+	rig.route(0, "owner")
+	rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second)) // the wait decision: the append fails
+	rig.manager.Tick(context.Background(), rig.now.Add(2*time.Minute+10*time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(3*time.Minute))
+	if rig.sends != 0 {
+		t.Fatalf("a reviewer with no watcher left was resumed: sends=%d", rig.sends)
+	}
+	if len(rig.announce) != 1 {
+		t.Fatalf("announcements=%d, want one hand-over", len(rig.announce))
 	}
 }

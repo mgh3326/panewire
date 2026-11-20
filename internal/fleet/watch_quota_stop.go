@@ -703,6 +703,19 @@ func managerWaitUntil(j Job) (time.Time, bool) {
 	return until, found
 }
 
+// CompletionTimeout is how long a job's completion watcher runs: the rule watch
+// reads (PANEWIRE_COMPLETION_TIMEOUT_S, one hour by default). The quota-stop manager
+// uses it to know when a reviewer's watcher is gone.
+func CompletionTimeout() time.Duration {
+	a := &App{}
+	if v := a.envOr("PANEWIRE_COMPLETION_TIMEOUT_S", "WRK_COMPLETION_TIMEOUT_S"); v != "" {
+		if d, ok := timeoutValue(v); ok {
+			return d
+		}
+	}
+	return time.Hour
+}
+
 // RecordReviewerQuotaWait records, for the job's watcher, that the manager decided
 // to wait out reviewer job's limit stop and resume it once at reset: the watcher
 // extends its completion deadline to the reset plus QuotaReviewerWaitGrace, so it

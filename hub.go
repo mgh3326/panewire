@@ -1694,7 +1694,7 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			}
 			control := reviewerStop
 			persisted := hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID}
-			if cooled && !validLaneReference(event.OwnerLane) {
+			if cooled && !validLaneReference(event.OwnerLane) && !control {
 				// This acknowledges in-memory cooling, not durable relay persistence.
 				agent.queuePersisted(persisted)
 			}

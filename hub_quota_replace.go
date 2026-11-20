@@ -245,7 +245,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 // to send again: the hub could not look or act yet, and nothing was claimed.
 // Every other exit is a decision (replaced, given up, nothing to replace), after
 // which a resend would change nothing.
-var quotaRetryReasons = map[string]bool{"pool_action_pending": true, "spawn_config_unavailable": true, "pane_not_idle": true, "pane_not_closed": true}
+var quotaRetryReasons = map[string]bool{"pool_action_pending": true, "spawn_config_unavailable": true, "pane_not_idle": true, "pane_not_closed": true, "job_record_unavailable": true}
 
 // replaceQuotaStoppedAck is replaceQuotaStopped that calls ackStop, once, when
 // the stop is durably owned: the successor is claimed (the reconcile pass
@@ -338,7 +338,12 @@ func (h *HubServer) replaceQuotaStoppedAck(ctx context.Context, machine string, 
 	cancel()
 	state, _ := record["state"].(string)
 	pool, _ := record["pool"].(string)
-	if err != nil || !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
+	if err != nil {
+		// hk could not be read (a timeout, a 503): the job may be live and carriable,
+		// so nothing is decided and the node keeps the announcement (hk 5690).
+		return skip("job_record_unavailable", "error", err.Error())
+	}
+	if !exists || (state != "claimed" && state != "spawned") || !spawnargs.ValuePattern.MatchString(pool) {
 		return skip("job_record", "state", state)
 	}
 	// The band that stopped comes from the stop's own pool, not the record:

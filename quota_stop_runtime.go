@@ -805,9 +805,6 @@ func (q *quotaStopManager) actOnQuotaStop(ctx context.Context, c idleWakeCandida
 	// The job's watcher stays through a reviewer's wait: it commits the report the
 	// resumed reviewer writes (hk 5690).
 	if job.Role == "reviewer" && q.recordWait != nil {
-		q.store.mu.Lock()
-		_, _ = q.store.db.ExecContext(dbCtx, `UPDATE quota_stop_decisions SET wait_pending=1 WHERE event_id=?`, c.EventID)
-		q.store.mu.Unlock()
 		q.appendPendingWait(ctx, c.EventID, job.JobID, c.PaneID, stop.Pool, stop.Reset, now)
 	}
 	return nil
@@ -826,6 +823,21 @@ func (q *quotaStopManager) appendPendingWait(ctx context.Context, id, job, pane,
 	}
 	q.update(ctx, id, "wait_pending", 0)
 	return true
+}
+
+// watcherGone reports whether the completion watcher of the job on pane has run
+// out of its deadline (the job's start plus the completion timeout the watcher
+// itself reads), so it cannot be handed a wait or commit a resumed report.
+func (q *quotaStopManager) watcherGone(ctx context.Context, pane string, now time.Time) bool {
+	job, ok := q.jobForPane(ctx, pane)
+	if !ok {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, job.StartedAt)
+	if err != nil {
+		return false
+	}
+	return now.After(started.Add(fleet.CompletionTimeout()))
 }
 
 // retryPendingWaits appends every reviewer wait whose first append failed.
@@ -847,6 +859,9 @@ func (q *quotaStopManager) retryPendingWaits(ctx context.Context, now time.Time)
 	}
 	q.store.mu.Unlock()
 	for _, p := range rows {
+		if q.watcherGone(ctx, p.pane, now) {
+			continue // the resume gate hands it over
+		}
 		var reset time.Time
 		if at, e := time.Parse(time.RFC3339, p.reset); e == nil {
 			reset = at
@@ -868,8 +883,12 @@ func (q *quotaStopManager) recordDecision(ctx context.Context, c idleWakeCandida
 // was, so a caller can tell that this call decided nothing.
 func (q *quotaStopManager) recordDecisionFor(ctx context.Context, c idleWakeCandidate, role string, now time.Time, pool, reset, decision, reason, resume string, due int64) (recorded bool, err error) {
 	shadow := !q.act && !quotaActsOn(role, pool)
+	// A reviewer's wait is pending for its watcher from the very statement that
+	// decides it (hk 5690): the resume never goes out unless the wait has been
+	// appended, and a crash after this commit leaves the flag for the next tick.
+	waitPending := boolInt(decision == "wait" && role == "reviewer" && q.recordWait != nil)
 	q.store.mu.Lock()
-	result, err := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=? WHERE event_id=? AND decision='' AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>? AND (? <> 'unknown' OR d.created / 3600000 = ?))`, pool, reset, decision, reason, resume, due, boolInt(shadow), c.EventID, c.PaneID, reset, c.EventID, reset, now.UnixMilli()/3600000)
+	result, err := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=?,wait_pending=? WHERE event_id=? AND decision='' AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>? AND (? <> 'unknown' OR d.created / 3600000 = ?))`, pool, reset, decision, reason, resume, due, boolInt(shadow), waitPending, c.EventID, c.PaneID, reset, c.EventID, reset, now.UnixMilli()/3600000)
 	q.store.mu.Unlock()
 	if err != nil {
 		q.logger.Warn("quota-stop decision was not recorded", "error", err)
@@ -972,6 +991,16 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		_ = q.store.db.QueryRowContext(ctx, `SELECT wait_pending FROM quota_stop_decisions WHERE event_id=?`, r.id).Scan(&waitPending)
 		q.store.mu.Unlock()
 		if waitPending != 0 {
+			// The wait still has not reached the watcher. If the watcher's own
+			// completion deadline has passed it is gone, and a reviewer resumed with
+			// no watcher loses its completion: hand it over instead (hk 5690).
+			if q.watcherGone(ctx, r.pane, now) {
+				q.store.mu.Lock()
+				_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET decision='handover',reason='watcher_gone',wait_pending=0 WHERE event_id=?`, r.id)
+				q.store.mu.Unlock()
+				q.handOver(ctx, r.id, r.job, r.pane, r.pool, r.reset, r.attempt, now)
+				continue
+			}
 			q.backoffAction(ctx, r.id, now)
 			continue
 		}
