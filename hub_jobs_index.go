@@ -353,7 +353,14 @@ func reduceHubJobEvents(jobID string, events []hubIndexedEvent) hubJobReduction 
 			// A revive of a completed job whose pane is busy again (hk 5799) is
 			// the same run continuing: restore the run its end cleared.
 			if ev.event.reason() == fleet.CompletedPaneReviveReason && !validHubActiveJob(r.active) && validHubActiveJob(r.ended.active) {
-				r.active, r.claimTime, r.paneID, r.profile = r.ended.active, r.ended.claimTime, r.ended.paneID, r.ended.profile
+				// The active window judges the revive, not the original claim: a
+				// pane kept on an open PR can outlive the window (hk 5799 review).
+				// The claim metadata is kept as it was.
+				claimed := ev.eventTime
+				if claimed.IsZero() {
+					claimed = r.ended.claimTime
+				}
+				r.active, r.claimTime, r.paneID, r.profile = r.ended.active, claimed, r.ended.paneID, r.ended.profile
 				r.ended = hubEndedRun{}
 			}
 		default:

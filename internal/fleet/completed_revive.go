@@ -3,6 +3,8 @@ package fleet
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -168,4 +170,45 @@ func withoutRevivedJobs(jobs []Job, revived map[string]bool) []Job {
 		}
 	}
 	return kept
+}
+
+// submissionOnlyDir reports whether job's directory holds only a submitter's
+// submission.json and no events/ ledger. Such a directory belongs to a job
+// placed on another host, so it is not this node's unreadable ledger.
+func submissionOnlyDir(a *App, job string) bool {
+	if !a.hasSubmissionReceipt(job) {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(a.Jobs, job, "events"))
+	return os.IsNotExist(err)
+}
+
+// revivedRunAttempt reports whether j's current attempt is a completed-pane
+// revive: the newest attempt-starting event is the job.reprompted that
+// CompletedPaneReviveReason wrote.
+func revivedRunAttempt(j Job) bool {
+	attempt := viewLedger(j.Events).Attempt
+	for _, ev := range j.Events {
+		if ev.name == attempt {
+			return ev.Kind == "job.reprompted" && str(ev.Payload, "reason") == CompletedPaneReviveReason
+		}
+	}
+	return false
+}
+
+// restartRevivedWatchers starts the watcher of a live job whose current attempt
+// is a completed-pane revive and that has none. A start that failed in the pass
+// that revived it is retried here, on a later pass, without another
+// job.reprompted. jobs skipped in revived are left to that pass.
+func (s *TaskPaneSweeper) restartRevivedWatchers(a *App, jobs []Job, revived map[string]bool) {
+	for _, j := range jobs {
+		if j.Ended != "" || j.Pane == "" || revived[j.ID] || !revivedRunAttempt(j) || a.watchActive(j.ID) {
+			continue
+		}
+		if err := reviveStartWatch(a, j.ID); err != nil {
+			a.warn("revived job %s watcher did not start, retried next pass: %v", j.ID, err)
+			continue
+		}
+		s.info("revived job watcher started", "job", j.ID, "pane", j.Pane)
+	}
 }

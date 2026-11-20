@@ -52,3 +52,19 @@ func writeRigEvent(t *testing.T, dir, name, body string) {
 		t.Fatal(err)
 	}
 }
+
+// hk 5799 review: a pane kept on an open PR can outlive the hub's 72-hour active
+// window, so the claim is outside it. The revive is inside it, and the manager
+// reads the revived job's stop as for any live job.
+func TestCompletedJobRevivedOutsideTheClaimWindowIsObserved_hk5799(t *testing.T) {
+	rig := newRoleStopRig(t, "implementer", 100*time.Hour, roleStopTask)
+	events := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events")
+	completed := rig.now.Add(-30 * time.Minute).UTC().Format(time.RFC3339)
+	writeRigEvent(t, events, "00003-job.completed.json", `{"kind":"job.completed","type":"job.completed","created_at":"`+completed+`"}`)
+	at := rig.now.Add(-10 * time.Minute).UTC().Format(time.RFC3339)
+	writeRigEvent(t, events, "00004-job.reprompted.json", `{"kind":"job.reprompted","type":"job.reprompted","created_at":"`+at+`","reason":"completed_pane_busy","pane_id":"workspace:pane-1"}`)
+	rig.run()
+	if d, reason := rig.decision(t); d != "handover" || reason != "reset_too_late" {
+		t.Fatalf("revived job outside the claim window: decision=%s reason=%s, want handover reset_too_late; manager log:\n%s", d, reason, rig.logs.String())
+	}
+}

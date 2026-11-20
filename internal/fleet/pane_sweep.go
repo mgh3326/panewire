@@ -553,7 +553,11 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 		}
 		j, err := a.job(entry.Name())
 		if err != nil {
-			unreadable = true
+			// A submitter's own record (submission.json, no events/) is not this
+			// node's ledger: it does not make the node's jobs unreadable.
+			if !submissionOnlyDir(a, entry.Name()) {
+				unreadable = true
+			}
 			continue
 		}
 		all = append(all, j)
@@ -567,7 +571,9 @@ func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Durati
 	// A completed job whose pane is busy again is revived before any close
 	// decision (completed_revive.go, hk 5799): the pass neither closes that
 	// pane nor judges the job as ended.
-	if revived := s.reviveCompletedPanes(ctx, a, all, unreadable); len(revived) > 0 {
+	revived := s.reviveCompletedPanes(ctx, a, all, unreadable)
+	s.restartRevivedWatchers(a, all, revived)
+	if len(revived) > 0 {
 		candidates = withoutRevivedJobs(candidates, revived)
 		abandoned = withoutRevivedJobs(abandoned, revived)
 	}
