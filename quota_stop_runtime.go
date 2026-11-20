@@ -603,7 +603,13 @@ func (q *quotaStopManager) reserveDecision(ctx context.Context, c idleWakeCandid
 	if n, _ := result.RowsAffected(); n == 1 {
 		// herdr's sequence for the state this wake observed; zero when the pane
 		// has moved on locally or herdr reported none.
-		_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET herdr_seq=COALESCE((SELECT upstream_state_change_seq FROM idle_wake_panes WHERE pane_id=? AND state_change_seq=?),0) WHERE event_id=?`, c.PaneID, c.StateChangeSeq, c.EventID)
+		// A stall examination's candidate keeps its local sequence in the stall
+		// wake row, not in the candidate (job_inactivity.go).
+		local := int64(c.StateChangeSeq)
+		if local == 0 {
+			_ = q.store.db.QueryRowContext(ctx, `SELECT state_change_seq FROM quota_stall_wakes WHERE event_id=?`, c.EventID).Scan(&local)
+		}
+		_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET herdr_seq=COALESCE((SELECT upstream_state_change_seq FROM idle_wake_panes WHERE pane_id=? AND state_change_seq=?),0) WHERE event_id=?`, c.PaneID, local, c.EventID)
 		return true, false, nil
 	}
 	if err := q.store.db.QueryRowContext(ctx, `SELECT decision FROM quota_stop_decisions WHERE event_id=?`, c.EventID).Scan(&decision); err != nil {

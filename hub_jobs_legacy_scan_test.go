@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -166,7 +167,10 @@ func legacyScanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hu
 				if reset == "" {
 					reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
 				}
-				reason += " pool=" + event.Payload.Pool + " reset_at=" + reset
+				reason += " pool=" + event.Payload.Pool + " reset_at=" + reset + " at=" + strconv.FormatInt(eventTime.Unix(), 10)
+				if event.Payload.StateChangeSeq != 0 {
+					reason += " seq=" + strconv.FormatInt(event.Payload.StateChangeSeq, 10)
+				}
 			}
 			// The event file name is the job event's durable identity: it is
 			// unique per emission, stable across node restarts, and shared by

@@ -1020,3 +1020,38 @@ func TestWatcherKeepsAnAnnouncedHandOffThroughAHerdrOutage(t *testing.T) {
 		t.Fatalf("quota %s, want released at the end of the grace", st)
 	}
 }
+
+// hk 5690 review: a failed agent list is not a pane that is gone. A reviewer that
+// resumed while herdr could not be asked, with the outage spanning the grace's
+// end, is not written lost: the deadline waits for an answer.
+func TestWatcherDoesNotWriteLossForAPaneHerdrCouldNotBeAskedAbout(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinLongStopScreen(t))
+	a.QuotaHandOffGrace = QuotaStopHandOffGrace
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			switch {
+			case lists >= 3 && lists < 200: // past the 120 polls of the grace
+				if lists == 150 {
+					if rec := h.record(t, "j"); str(rec, "state") == "lost" {
+						t.Errorf("written lost during a herdr outage past the grace: %v", rec)
+					}
+				}
+				return Result{Code: 1, Err: "herdr down"}
+			case lists >= 200:
+				// herdr is back and the reviewer has resumed.
+				return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working","state_change_seq":9}]}}`}
+			}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if rec := h.record(t, "j"); str(rec, "state") == "lost" {
+		t.Fatalf("a reviewer that resumed during the outage was written lost: %v", rec)
+	}
+}

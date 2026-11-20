@@ -262,3 +262,35 @@ func TestManagerHandOverAnnouncesHerdrsSequenceNotTheLocalCounter(t *testing.T) 
 		t.Fatalf("announced PaneSeq=%d, want herdr's 4 (the local counter is not it)", got)
 	}
 }
+
+// hk 5690 review: a stall examination's candidate carries no local sequence (it
+// keeps it in quota_stall_wakes), so resolving the sequence from the candidate
+// alone stored zero and the announcement went out unfenced. The reservation reads
+// the stall wake's sequence and stores herdr's.
+func TestStallExaminationDecisionRecordsHerdrsSequence(t *testing.T) {
+	rig := newReviewerStopRig(t, time.Hour, reviewerStopTask, "testdata/quota-stop/devin-reset-2h.txt")
+	for _, st := range []struct {
+		status string
+		rev    int64
+		seq    int64
+	}{{"working", 1, 3}, {"idle", 2, 4}} {
+		if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", WorkspaceID: "workspace", Label: "worker-synthetic", Status: st.status, Revision: st.rev, SourceStateChangeSeq: st.seq}}, rig.now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var local int64
+	if err := rig.store.db.QueryRow(`SELECT state_change_seq FROM idle_wake_panes WHERE pane_id='workspace:pane-1'`).Scan(&local); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.store.db.Exec(`INSERT INTO quota_stall_wakes(event_id,pane_id,state_change_seq) VALUES('stall-ev','workspace:pane-1',?)`, local); err != nil {
+		t.Fatal(err)
+	}
+	job := HubActiveJob{JobID: "job-active", AgentLabel: "worker-synthetic", Role: "reviewer", OwnerLane: "owner"}
+	// A stall candidate has no StateChangeSeq of its own.
+	if _, _, err := rig.q.reserveDecision(context.Background(), idleWakeCandidate{PaneID: "workspace:pane-1", EventID: "stall-ev"}, job, rig.now); err != nil {
+		t.Fatal(err)
+	}
+	if got := rig.q.observedSeq(context.Background(), "stall-ev"); got != 4 {
+		t.Fatalf("recorded herdr sequence %d, want 4 (local %d)", got, local)
+	}
+}

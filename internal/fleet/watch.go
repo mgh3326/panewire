@@ -371,13 +371,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 			continue
 		}
+		herdrUnseen := false
 		if e != nil && !creditPending && handOff.active && !view.Reaped && !workerEscalated(j) {
 			// An announced hand-off outlives a herdr outage: the job's hk record and
 			// lease stay with this watcher until the grace ends, which the old close
 			// intent also guaranteed. The pane reads as unseen meanwhile, so nothing
 			// is revived or ended early (hk 5690 review).
 			a.warn("quota hand-off continues without a herdr answer: %v", e)
-			agents, e = nil, nil
+			agents, e, herdrUnseen = nil, nil, true
 		}
 		if e != nil && !creditPending {
 			if workerEscalated(j) {
@@ -674,7 +675,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		}
 
 		if handOff.active {
-			if handOff.expired(a.Now(), paneAgent, present) {
+			// A pane that herdr could not be asked about is unseen, not gone: the
+			// reviewer may have resumed meanwhile, and a plain loss cannot be
+			// taken back. The deadline waits for an answer, except when hk already
+			// holds a terminal record, which only needs settling here.
+			if handOff.expired(a.Now(), paneAgent, present) && (!herdrUnseen || a.hkJobEnded(ctx, id)) {
 				deferred, err := a.endUnlessHubClose(id, j, func(j Job) error { return a.quotaStopLost(ctx, j, handOff.stop, false) })
 				if errors.Is(err, errQuotaLostPending) {
 					// hk did not take the record: the job stays live and leased
