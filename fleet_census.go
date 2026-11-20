@@ -16,6 +16,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/mgh3326/panewire/internal/herdrpanes"
 )
 
 // fleet-census answers "what panes are up, who spawned them, and are they
@@ -260,23 +262,32 @@ func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensus
 			Status: pane.Status, HasAgent: true, AgentName: pane.Name, Harness: pane.Harness,
 		}
 	}
-	if rawPanes, err := client.Call(ctx, "pane.list", map[string]any{}); err == nil {
+	// The socket's pane.list goes through the same cut rules as the CLI list
+	// (herdrpanes); an unreadable one leaves paneListOK false, never "no panes".
+	var listedPanes []map[string]any
+	if _, err := herdrpanes.Read(ctx, func(ctx context.Context) ([]byte, error) {
+		return client.Call(ctx, "pane.list", map[string]any{})
+	}, func(raw []byte) error {
 		var paneList struct {
 			Panes []map[string]any `json:"panes"`
 		}
-		if json.Unmarshal(rawPanes, &paneList) == nil {
-			view.paneListOK = true
-			for _, entry := range paneList.Panes {
-				pane := identityFromMap(entry)
-				if pane.PaneID == "" {
-					continue
-				}
-				obs := fleetCensusPaneObs{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, TabID: pane.TabID, Status: pane.Status}
-				if agent, live := view.agents[pane.PaneID]; live {
-					obs = agent
-				}
-				view.panes = append(view.panes, obs)
+		if err := json.Unmarshal(raw, &paneList); err != nil {
+			return err
+		}
+		listedPanes = paneList.Panes
+		return nil
+	}); err == nil {
+		view.paneListOK = true
+		for _, entry := range listedPanes {
+			pane := identityFromMap(entry)
+			if pane.PaneID == "" {
+				continue
 			}
+			obs := fleetCensusPaneObs{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, TabID: pane.TabID, Status: pane.Status}
+			if agent, live := view.agents[pane.PaneID]; live {
+				obs = agent
+			}
+			view.panes = append(view.panes, obs)
 		}
 	}
 	if !view.paneListOK {

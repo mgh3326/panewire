@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/herdrpanes"
 	"github.com/mgh3326/panewire/internal/jobowner"
 )
 
@@ -780,20 +781,21 @@ func (l nodeFleetHubClose) Settle(ctx context.Context, job string) (fleet.HubClo
 	if err != nil {
 		return fleet.HubClosePending, err
 	}
-	listed := func(ctx context.Context, session, pane string) (bool, error) {
-		out, err := l.client.nodeHerdrRunnerForSession(session)(ctx, "pane", "list")
-		if err != nil {
-			return false, err
-		}
-		return fleet.PaneListedIn(out, pane)
-	}
 	// The hk store is resolved only by a step that reads or writes hk: a
 	// close that closed nothing is cancelled locally even when the node has
 	// no handoffkeep_env.
-	settlement := fleet.NewHubCloseSettlement(l.jobs, home, l.client.nodeJobStoreForCommand, l.client.nowUTC, listed, slogWarnWriter{})
+	settlement := fleet.NewHubCloseSettlement(l.jobs, home, l.client.nodeJobStoreForCommand, l.client.nowUTC, l.client.hubClosePaneListed, slogWarnWriter{})
 	settlement.App.JobOwnerNode = l.client.machineID
 	settlement.App.JobFenceCapability = l.client.noteJobFenceSupport
 	return settlement.Settle(ctx, job)
+}
+
+// hubClosePaneListed reports whether herdr still has pane in session. The
+// close knows the one pane it needs, so it asks herdr for that pane (`pane
+// get`) rather than reading the whole pane list: pane_not_found is absent, and
+// any other failure is unknown, never absent (see herdrpanes).
+func (client *HubClient) hubClosePaneListed(ctx context.Context, session, pane string) (bool, error) {
+	return herdrpanes.PaneGet(ctx, client.nodeHerdrRunnerForSession(session), pane)
 }
 
 func (client *HubClient) hubCloseLedger() nodeHubCloseLedger {

@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/mgh3326/panewire/internal/herdrpanes"
 )
 
 const consultWorkerRefusal = "consult request refused: ask your design lane by ESC with an hk packet"
@@ -47,35 +49,42 @@ func processParent(pid int) (int, error) {
 }
 
 func consultPane(ctx context.Context, run relayCommandRunner, pid int, parent func(int) (int, error)) (string, error) {
-	raw, err := run(ctx, "pane", "list")
-	if err != nil {
-		return "", err
-	}
-	var top map[string]json.RawMessage
-	if err = json.Unmarshal(raw, &top); err != nil {
-		return "", err
-	}
-	if v := top["result"]; v != nil {
-		if err = json.Unmarshal(v, &top); err != nil {
-			return "", err
-		}
-	}
 	var panes []struct {
 		ID string `json:"pane_id"`
 	}
-	if err = json.Unmarshal(top["panes"], &panes); err != nil || panes == nil {
-		return "", errors.New("cannot read herdr pane list")
+	// A cut pane list is read again once (herdrpanes); still cut, it is an
+	// error, never an empty list that would leave the consult pane unresolved.
+	if _, err := herdrpanes.List(ctx, run, func(raw []byte) error {
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &top); err != nil {
+			return err
+		}
+		if v := top["result"]; v != nil {
+			if err := json.Unmarshal(v, &top); err != nil {
+				return err
+			}
+		}
+		var rows []struct {
+			ID string `json:"pane_id"`
+		}
+		if err := json.Unmarshal(top["panes"], &rows); err != nil || rows == nil {
+			return errors.New("cannot read herdr pane list")
+		}
+		panes = rows
+		return nil
+	}); err != nil {
+		return "", err
 	}
 	shells := make(map[string]int)
 	for _, p := range panes {
 		if p.ID == "" {
 			return "", errors.New("invalid herdr pane list")
 		}
-		raw, err = run(ctx, "pane", "process-info", "--pane", p.ID)
+		raw, err := run(ctx, "pane", "process-info", "--pane", p.ID)
 		if err != nil {
 			return "", err
 		}
-		top = nil
+		var top map[string]json.RawMessage
 		if err = json.Unmarshal(raw, &top); err != nil {
 			return "", err
 		}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/agybusy"
+	"github.com/mgh3326/panewire/internal/herdrpanes"
 )
 
 func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
@@ -176,14 +177,22 @@ type Pane struct {
 	Name  string `json:"name"`
 }
 
-// panes reads `herdr pane list`, the full pane inventory. As the node's
-// pane list reader does, an answer with no rows array is an error.
+// panes reads `herdr pane list`, the full pane inventory, through the shared
+// cut-answer rules (herdrpanes). As the node's pane list reader does, an answer
+// with no rows array is an error, and a cut answer is read again once.
 func (a *App) panes(ctx context.Context) ([]Pane, error) {
-	r := a.call(ctx, "herdr", "pane", "list")
-	if e := check(r, "herdr pane list"); e != nil {
-		return nil, e
-	}
-	return parsePaneList([]byte(r.Out))
+	var panes []Pane
+	_, err := herdrpanes.Read(ctx, func(ctx context.Context) ([]byte, error) {
+		r := a.call(ctx, "herdr", "pane", "list")
+		if e := check(r, "herdr pane list"); e != nil {
+			return nil, e
+		}
+		return []byte(r.Out), nil
+	}, func(out []byte) (err error) {
+		panes, err = parsePaneList(out)
+		return err
+	})
+	return panes, err
 }
 
 // parseHerdrList decodes the rows under key of a herdr list answer, bare or

@@ -439,8 +439,9 @@ func (a *App) readJobCloseOp(job, id string) (CloseOp, bool, error) {
 // of a hub close's terminal hk record, lease release and final job.lost. App
 // carries the jobs root, the clock, the local quota ledger and the node's own
 // hk JobStore (never the watcher's credential resolution). PaneListed, when
-// set, reads the full pane inventory in a herdr session; nil reads it through
-// App's runner.
+// set, reports whether herdr still has the job's pane in a herdr session (the
+// node asks `pane get` for that one pane); nil reads the full pane inventory
+// through App's runner.
 type HubCloseSettlement struct {
 	App        *App
 	PaneListed func(ctx context.Context, session, pane string) (bool, error)
@@ -626,8 +627,9 @@ func PendingHubCloseJobs(jobs string) ([]string, error) {
 	return out, nil
 }
 
-// hubClosePanePresent reads the full pane inventory in the receipt's herdr
-// session. The agent list alone cannot prove a pane is gone.
+// hubClosePanePresent asks whether the job's pane is still in the receipt's
+// herdr session: through listed when given, else by reading the full pane
+// inventory. The agent list alone cannot prove a pane is gone.
 func (a *App) hubClosePanePresent(ctx context.Context, j Job, listed func(ctx context.Context, session, pane string) (bool, error)) (bool, error) {
 	route := a.laneRoute(j)
 	if listed != nil {
@@ -639,21 +641,6 @@ func (a *App) hubClosePanePresent(ctx context.Context, j Job, listed func(ctx co
 	}
 	for _, p := range panes {
 		if p.Pane == j.Pane {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// PaneListedIn reports whether a herdr pane list answer names pane; the
-// answer is decoded strictly, so an unreadable one is an error.
-func PaneListedIn(out []byte, pane string) (bool, error) {
-	panes, err := parsePaneList(out)
-	if err != nil {
-		return false, err
-	}
-	for _, p := range panes {
-		if p.Pane == pane {
 			return true, nil
 		}
 	}
