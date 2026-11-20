@@ -409,6 +409,13 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 	if !ready {
 		return fail(exitConfig, "shell not ready")
 	}
+	// The pane's shell runs its lines in order, so the readiness echo below also
+	// proves this removal ran before the agent starts (docs/config.md#agy-ssh-variables).
+	if unset := paneUnsetCommand(seat.Kind); unset != nil {
+		if e := a.must(ctx, "herdr", append([]string{"pane", "run", pane}, unset...)...); e != nil {
+			return e
+		}
+	}
 	// Exact output-line proof avoids typing launch argv into an rc-file read.
 	var nonce [12]byte
 	if _, e := rand.Read(nonce[:]); e != nil {

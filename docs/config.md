@@ -117,6 +117,29 @@ against absolute source paths, set `go_trimpath = false`. The go command trims
 cache entries unused for five days itself (`GOCACHE/trim.txt`); this key sets
 no bound of its own.
 
+### agy SSH variables
+
+A herdr server started from an SSH session carries `SSH_CONNECTION`, and every
+pane inherits it. agy 1.5.5 keeps its login in a file token store when
+`SSH_CONNECTION` is set and in the OS keyring otherwise. A pane that inherits the
+variable finds no file token and opens on agy's login screen, and the spawn
+refuses with exit 88 (`AUTH_UNAVAILABLE`), although the keyring login is valid.
+
+For an agy pane, spawn removes `SSH_CONNECTION`, `SSH_CLIENT` and `SSH_TTY` from
+the pane's shell: it sends `unset SSH_CONNECTION SSH_CLIENT SSH_TTY` to the
+pane before it starts the agent, so the agent inherits an environment without
+them. The shell runs its lines in order, and the readiness echo that follows
+proves the `unset` ran before `agent start`. The removal cannot go through
+`herdr tab create --env`, which only sets variables, or through an argv prefix,
+because `herdr agent start` runs agy's own executable and passes the argv after
+`--` to it as arguments. A pane shell without an `unset` builtin (fish) keeps the
+variables; the spawn does not detect that case.
+
+Only agy is scoped in, and there is no configuration key. Claude reads the same
+variables to detect an SSH session (browser open, multiplexer and login choices),
+so its panes keep them. codex, omp and devin do not reference them. Code:
+`internal/fleet/agy_ssh_env.go`.
+
 ### Capability flags
 
 A seat policy row may require a host capability (`capability` in the policy).
