@@ -595,6 +595,15 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.Retryable = true
 		return result
 	}
+	// herdr refuses an agent name it does not accept only after the pane is
+	// open, which leaves a pane with no agent (hk 5961). Refuse a present but
+	// invalid name before any checkout, brief or pane, and say why in the answer.
+	// An absent -l is left to the spawn itself, which requires one.
+	if label := hubSpawnFlagArg(message.Args, "-l"); label != "" && !fleet.ValidAgentName(label) {
+		result.RC, result.Error, result.Retryable = 2, "label_invalid", false
+		result.StdoutTail = "label_invalid: -l must be a herdr agent name: a lowercase letter, then lowercase letters, digits, - or _, at most 32 characters"
+		return result
+	}
 	config, defaults, err := client.resolveHubSpawnConfig()
 	if err != nil {
 		result.RC, result.Error = 2, "spawn_disabled"

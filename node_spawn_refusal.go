@@ -19,6 +19,8 @@ func nodeSpawnRefusalFix(code, rule string) string {
 		default:
 			return "Create or repair the configured regular spawn.json file with enabled, workspace, herdr_session and cwd_map."
 		}
+	case "label_invalid":
+		return "Pass a -l label that is a herdr agent name (a lowercase letter, then lowercase letters, digits, - or _, at most 32 characters), or replay the saved request with a shorter label."
 	case "cwd_unmapped":
 		return "Add the requested repository key to spawn.json.cwd_map with its absolute node-local path, or choose a mapped node."
 	case "brief_doc_unavailable":

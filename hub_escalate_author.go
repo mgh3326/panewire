@@ -882,9 +882,10 @@ func (h *HubServer) escalateAuthorKept(ctx context.Context, request hubEscalateA
 // ladder step is one `-l<n>` followed by any quota-stop replacements `-q<n>`.
 var escalateAuthorChain = regexp.MustCompile(`-l[0-9]+(-q[0-9]+)*$`)
 
-// escalateAuthorJob names the successor of old: "<old>-l1". One ladder step per
-// job chain is the policy's limit, so a job whose id already carries a ladder
-// step (with or without later quota-stop replacements) has none left.
+// escalateAuthorJob names the successor of old: "<old>-l1" (shortened to
+// herdr's agent name limit by successorName). One ladder step per job chain is
+// the policy's limit, so a job whose id already carries a ladder step (with or
+// without later quota-stop replacements) has none left.
 func escalateAuthorJob(old string) (job string, step int, ok bool) {
 	step = 1
 	if escalateAuthorChain.MatchString(old) {
@@ -893,8 +894,8 @@ func escalateAuthorJob(old string) (job string, step int, ok bool) {
 	if step > escalateAuthorMaxStep {
 		return "", step, false
 	}
-	job = fmt.Sprintf("%s-l%d", old, step)
-	return job, step, len(job) <= 128 && hubJobIDPattern.MatchString(job)
+	job, ok = successorName(old, "l", step)
+	return job, step, ok
 }
 
 // escalateAuthorRung reports whether profile@effort is a live catalog rung
@@ -980,7 +981,11 @@ func escalateAuthorSubmission(old fleet.Submission, request hubEscalateAuthorReq
 	if next.DeadlineSeconds < 1 || next.DeadlineSeconds > int(escalateAuthorWait/time.Second) {
 		next.DeadlineSeconds = int(escalateAuthorWait / time.Second)
 	}
-	next.Args = escalateAuthorArgs(old.Args, request, newJob)
+	args, err := escalateAuthorArgs(old.Args, request, newJob)
+	if err != nil {
+		return fleet.Submission{}, err
+	}
+	next.Args = args
 	next.Brief = escalateAuthorBrief(old.Brief, request)
 	if old.Repository.Checkout != nil && (old.Repository.Checkout.Mode == "branch" || old.Repository.Checkout.Mode == fleet.HubCheckoutSuccessor) {
 		checkout := *old.Repository.Checkout
@@ -1004,7 +1009,7 @@ func escalateAuthorSubmission(old fleet.Submission, request hubEscalateAuthorReq
 
 // escalateAuthorArgs rewrites the replaced job's spawn arguments for its
 // successor.
-func escalateAuthorArgs(old []string, request hubEscalateAuthorRequest, newJob string) []string {
+func escalateAuthorArgs(old []string, request hubEscalateAuthorRequest, newJob string) ([]string, error) {
 	args := slices.Clone(old)
 	set := func(flag, value string) {
 		for i := 0; i+1 < len(args); i++ {
@@ -1026,7 +1031,12 @@ func escalateAuthorArgs(old []string, request hubEscalateAuthorRequest, newJob s
 	has := func(flag string) bool { return slices.Contains(args, flag) }
 	set("--job", newJob)
 	if label := hubSpawnArg(old, "-l"); label != "" {
-		set("-l", label+strings.TrimPrefix(newJob, request.Job))
+		_, step, _ := escalateAuthorJob(request.Job)
+		successorLabel, _ := successorName(label, "l", step)
+		if !fleet.ValidAgentName(successorLabel) {
+			return nil, fmt.Errorf("the successor label of %q is not a valid agent name", label)
+		}
+		set("-l", successorLabel)
 	}
 	set("-m", request.Profile)
 	if request.Effort != "" {
@@ -1048,7 +1058,7 @@ func escalateAuthorArgs(old []string, request hubEscalateAuthorRequest, newJob s
 		set("--containment", "hk:"+request.Task)
 	}
 	// An experiment arm is not an arg; escalateAuthorSubmission settles it.
-	return args
+	return args, nil
 }
 
 // escalateAuthorBrief is the successor's brief: the original brief, the

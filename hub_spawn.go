@@ -294,7 +294,7 @@ func validSpawnCheckoutMode(value string) bool {
 
 func validHubSpawnResultError(value string) bool {
 	switch value {
-	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "launch_proof_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request":
+	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "launch_proof_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "unknown", "deadline_not_started", "invalid_args", "invalid_request", "label_invalid":
 		return true
 	default:
 		if !strings.HasPrefix(value, "checkout_refused:") || len(value) > hubCheckoutRefusalMaxBytes {
