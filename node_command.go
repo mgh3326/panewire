@@ -82,7 +82,7 @@ func knownNodeCommandOp(op string) bool {
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
 		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
-		nodeCommandCheckoutSweep, nodeCommandHandoverCheck, nodeCommandHandoverSnapshot:
+		nodeCommandCheckoutSweep, nodeCommandHandoverCheck, nodeCommandHandoverSnapshot, nodeCommandLadderClose:
 		return true
 	}
 	return false
@@ -264,6 +264,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneCloseRelease: {"request_id", "job"},
 	nodeCommandHandoverCheck:    {"job", "cwd", "origin", "branch"},
 	nodeCommandHandoverSnapshot: {"job", "epoch", "cwd", "origin", "branch"},
+	nodeCommandLadderClose:      {"request_id", "job", "node", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -466,6 +467,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandPaneCloseOp:
 		var args nodePaneCloseOpArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodePaneCloseOpArgs(args)
+	case nodeCommandLadderClose:
+		var args nodeLadderCloseArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeLadderCloseArgs(args)
 	case nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease:
 		var args nodeCloseOpRefArgs
 		if !decodeNodeCommandStrict(raw, &args) || !validNodeCloseOpRefArgs(args) {
@@ -598,6 +602,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease:
 		var result nodeCloseOpStatusResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeCloseOpStatusResult(result)
+		target = result
+	case nodeCommandLadderClose:
+		var result nodeLadderCloseResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeLadderCloseResult(result)
 		target = result
 	case nodeCommandPaneCapture:
 		var result nodePaneCaptureResult
@@ -1041,6 +1049,12 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodePaneCloseRelease(nodeCloseOpRefArgs(args))
+	case nodeLadderCloseArgs:
+		// The same one-at-a-time lock as pane.close: the K record and the
+		// close it records must not interleave with another acting command.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeLadderClose(ctx, args)
 	case nodePaneCaptureArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
