@@ -189,8 +189,9 @@ staged successor before anything is sent (the stage's `ladder_step.close`):
 A stage whose close was sent is withdrawn only after `pane.ladder_close_fence`
 for its request id answers `fenced` (or an already final `closed`/`gone`), so a
 close delayed past the release never runs; a fence with no answer keeps the
-stage. A replay or the expiry pass of a completed author whose pane is gone
-asks the node for the K instead of reading the marker. Step 4 (hk 5866)
+stage. A replay or the expiry pass of a completed author reads the K from the node
+through the fence (never `pane.ladder_close`, which would run a close the node
+has no record of) instead of reading the marker. Step 4 (hk 5866)
 replaces this mapping with one reconciler.
 
 ## Replay

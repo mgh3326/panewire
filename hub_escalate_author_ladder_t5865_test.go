@@ -174,3 +174,69 @@ func TestEscalateAuthorWithdrawingASentStageFencesFirst(t *testing.T) {
 		t.Fatal("the fenced stage was kept")
 	}
 }
+
+// stageBoundCompletedSuccessor stages a completed author's successor whose
+// close binding is already frozen, as a step that sent its close and stopped.
+func (f *ladderCloseFixture) stageBoundCompletedSuccessor(t *testing.T) {
+	t.Helper()
+	f.completeAuthorRecord(t)
+	f.stageCompletedSuccessor(t, false)
+	requestID, err := fleet.NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.bindStagedClose(t.Context(), stage.Request.RequestID, fleet.LadderCloseBinding{Protocol: fleet.LadderCloseProtocolV1,
+		RequestID: requestID, Node: "machine-a", Epoch: 3, Attempt: "attempt-1", Pane: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/" + f.job + "-checkout"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Reading what a stage's close did never sends a close: a node that has no
+// record of the K would run it. The expiry pass of a completed author whose
+// pane is present must leave the pane, and release the stage through the fence.
+func TestExpiredLadderStageReadsTheNodeRecordWithoutSendingAClose(t *testing.T) {
+	f := newLadderCloseFixture(t, "pw-task-5865-expiry", true)
+	f.answer = nodeLadderClosed
+	f.stageBoundCompletedSuccessor(t)
+	f.take()
+	f.hub.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	f.hub.expireStagedLadderSteps(t.Context())
+	ops := commandOps(f.take())
+	if slices.Contains(ops, nodeCommandLadderClose) || slices.Contains(ops, nodeCommandPaneClose) || !slices.Contains(ops, nodeCommandLadderFence) {
+		t.Fatalf("ops=%v", ops)
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err == nil {
+		t.Fatal("the expired stage remains")
+	}
+	f.awaitInfo(t, "staged_expired")
+}
+
+// A replay whose pane is gone reads the K through the fence: a fenced K (the
+// node closed nothing) is an author that ended independently, an unknown one
+// keeps the stage with the decision, and no close is sent either way.
+func TestEscalateAuthorReplayReadsTheKWithoutSendingAClose(t *testing.T) {
+	for _, tc := range []struct{ fence, want, wantStage string }{
+		{nodeLadderFenced, "parent_ended", ""},
+		{nodeLadderUnknown, "pending", "staged"},
+	} {
+		t.Run(tc.fence, func(t *testing.T) {
+			f := newLadderCloseFixture(t, "pw-task-5865-replay", true)
+			f.fenceAnswer = tc.fence
+			f.stageBoundCompletedSuccessor(t)
+			f.paneAbsent = true
+			result, commands := f.escalate(t, nil)
+			ops := commandOps(commands)
+			if result.Code != tc.want || slices.Contains(ops, nodeCommandLadderClose) || !slices.Contains(ops, nodeCommandLadderFence) {
+				t.Fatalf("result=%+v ops=%v", result, ops)
+			}
+			stage, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+			if (tc.wantStage == "") != (err != nil) || err == nil && stage.Status != tc.wantStage {
+				t.Fatalf("stage=%+v err=%v", stage, err)
+			}
+		})
+	}
+}

@@ -107,32 +107,45 @@ func (h *HubServer) escalateAuthorUnresolved(ctx context.Context, id *fleet.Ladd
 	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: fmt.Sprintf("ladder-step:%s:%d:unresolved:esc", id.Parent, id.Round), JobID: id.Parent, OwnerLane: owner, NotifyType: "decision", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
 }
 
+// fenceLadderClose asks the node to fence the stage's K: it answers the record
+// that exists (closed, gone, unknown) and otherwise writes a tombstone, so a
+// close for this K never runs afterwards. It is the one read of a K that sends
+// no close.
+func (h *HubServer) fenceLadderClose(ctx context.Context, stage hubSpawnTask, bound fleet.LadderCloseBinding) ladderVerdict {
+	fence := nodeLadderFenceArgs{RequestID: bound.RequestID, Job: stage.Request.LadderStep.Parent, Node: bound.Node, Epoch: bound.Epoch, Attempt: bound.Attempt, PaneID: bound.Pane}
+	var result nodeLadderCloseResult
+	if !h.nodeCall(ctx, bound.Node, nodeCommandLadderFence, fence, spawnHeldPaneActWait, &result) || !validNodeLadderCloseResult(result) {
+		return ladderVerdict{}
+	}
+	return ladderVerdict{state: result.State, reason: result.Reason, answered: true}
+}
+
 // stagedCloseOutcome says whether the step's close took the predecessor's pane,
-// for a stage whose pane is gone. A ladder stage asks the node (its record is
-// the proof); any other reads the close marker. unresolved keeps the stage.
+// for a stage whose pane is gone. A marker stage reads the close marker. A
+// ladder stage reads the node's record through the fence, never through
+// pane.ladder_close, which would run a close the node has no record of: a
+// fenced K means nothing was or will be closed. unresolved keeps the stage.
 func (h *HubServer) stagedCloseOutcome(ctx context.Context, stage hubSpawnTask) (marked, unresolved bool, err error) {
 	bound := stagedLadderClose(stage)
 	if bound == nil || bound.Protocol != fleet.LadderCloseProtocolV1 {
 		marked, err = h.inbox.store.stagedCloseMarked(ctx, stage.Request.RequestID)
 		return marked, false, err
 	}
-	verdict := h.askLadderClose(ctx, stage.Request.LadderStep.Parent, *bound)
+	verdict := h.fenceLadderClose(ctx, stage, *bound)
 	return verdict.state == nodeLadderClosed || verdict.state == nodeLadderGone, verdict.unresolved(), nil
 }
 
 // withdrawStage releases a stage. A stage whose close was sent to a capable
 // node is fenced first, so a close delayed past the release never runs; only a
-// fenced or already settled K may be released: an unknown one stays. previousID is the holder whose role is restored,
-// or "" for a discard.
+// fenced or already settled K may be released: an unknown one stays. previousID
+// is the holder whose role is restored, or "" for a discard.
 func (h *HubServer) withdrawStage(ctx context.Context, id, previousID, roleKey string) error {
 	stage, err := h.inbox.store.spawnTask(ctx, id)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if bound := stagedLadderClose(stage); err == nil && bound != nil && bound.Protocol == fleet.LadderCloseProtocolV1 {
-		fence := nodeLadderFenceArgs{RequestID: bound.RequestID, Job: stage.Request.LadderStep.Parent, Node: bound.Node, Epoch: bound.Epoch, Attempt: bound.Attempt, PaneID: bound.Pane}
-		var result nodeLadderCloseResult
-		if !h.nodeCall(ctx, bound.Node, nodeCommandLadderFence, fence, spawnHeldPaneActWait, &result) || result.State != nodeLadderFenced && result.State != nodeLadderClosed && result.State != nodeLadderGone {
+		if state := h.fenceLadderClose(ctx, stage, *bound).state; state != nodeLadderFenced && state != nodeLadderClosed && state != nodeLadderGone {
 			return errLadderFenceHeld
 		}
 	}
