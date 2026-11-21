@@ -541,6 +541,38 @@ func (s *laneInboxStore) markStagedClose(parent context.Context, id string, now 
 	return nil
 }
 
+// bindStagedClose freezes the close binding on a staged ladder successor before
+// any close is sent (hk 5865). The first binding wins: a stage that has one
+// returns it unchanged, so a second step for the same K reuses it.
+func (s *laneInboxStore) bindStagedClose(parent context.Context, id string, binding fleet.LadderCloseBinding) (fleet.LadderCloseBinding, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var raw string
+	if err := s.db.QueryRowContext(ctx, s.q(`SELECT payload FROM spawn_operations WHERE request_id=? AND status='staged' AND node_id IS NULL`), id).Scan(&raw); err != nil {
+		return fleet.LadderCloseBinding{}, err
+	}
+	var request fleet.Submission
+	if err := json.Unmarshal([]byte(raw), &request); err != nil || request.LadderStep == nil {
+		return fleet.LadderCloseBinding{}, errSpawnClaimed
+	}
+	if stored := request.LadderStep.Close; stored != nil {
+		return *stored, nil
+	}
+	request.LadderStep.Close = &binding
+	next, err := json.Marshal(request)
+	if err != nil {
+		return fleet.LadderCloseBinding{}, err
+	}
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET payload=? WHERE request_id=? AND status='staged' AND node_id IS NULL AND payload=?`), string(next), id, raw)
+	if err != nil {
+		return fleet.LadderCloseBinding{}, err
+	}
+	if n, _ := s.dialect.rowsMatched(result); n != 1 {
+		return fleet.LadderCloseBinding{}, errSpawnClaimed
+	}
+	return binding, nil
+}
+
 // stagedCloseMarked reports whether markStagedClose ran for the staged row.
 func (s *laneInboxStore) stagedCloseMarked(parent context.Context, id string) (bool, error) {
 	ctx, done := s.op(parent)

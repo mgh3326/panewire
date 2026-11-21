@@ -78,6 +78,35 @@ type LadderStepIdentity struct {
 	PR      string `json:"pr"`
 	Profile string `json:"profile"`
 	Effort  string `json:"effort"`
+	// Close is the close binding frozen on the stage before any close is sent
+	// (hk 5865). The first write wins; a later step for the same stage reuses it.
+	Close *LadderCloseBinding `json:"close,omitempty"`
+}
+
+// The protocols a stage's close runs under.
+const (
+	// LadderCloseProtocolV1 is pane.ladder_close on a node advertising
+	// ladder_close_v1; the node's durable record per K answers every replay.
+	LadderCloseProtocolV1 = "ladder_close_v1"
+	// LadderCloseProtocolMarker is pane.close plus the staged row's close marker,
+	// for a node without the capability.
+	LadderCloseProtocolMarker = "marker"
+)
+
+// LadderCloseBinding is K = (job, node, epoch, attempt, pane) with the pane row
+// the node's guards compare and the protocol. A marker binding carries only
+// the protocol.
+type LadderCloseBinding struct {
+	Protocol     string `json:"protocol"`
+	RequestID    string `json:"request_id,omitempty"`
+	Node         string `json:"node,omitempty"`
+	Epoch        uint64 `json:"epoch,omitempty"`
+	Attempt      string `json:"attempt,omitempty"`
+	Pane         string `json:"pane,omitempty"`
+	Name         string `json:"name,omitempty"`
+	AgentStatus  string `json:"agent_status,omitempty"`
+	Cwd          string `json:"cwd,omitempty"`
+	AllowUnnamed bool   `json:"allow_unnamed,omitempty"`
 }
 
 type Accepted struct{ Job, Request string }
