@@ -1759,7 +1759,7 @@ Within the floor:
 
 - A rung graded `unrated` is never chosen and never asks its quota gate (`grade_unrated`).
 - A row is dropped (`grade_insufficient`) when the rung it launches at is below the floor. That rung is the row's own effort; a rung-less row launches at its profile's default effort.
-- `--author-family F` on `plan` or `resolve` drops consult rungs of family `F` (`family_excluded`). With no `--author-family`, `resolve` and `spawn` (without `--parent-job`) take the family of the job the caller runs in (`ARBITER_JOB`), the same family `--parent-job` would give. A job that cannot be read refuses rather than selecting with no family. With no family at all, nothing is excluded and the stamp records `unknown`.
+- `--author-family F` on `plan` or `resolve` names the asker's family. Under `roles.consult.family_rule` `prefer_other` (or unset; operator decision 467, hk 5917) a rung of family `F` stays a candidate and family is only a tie-break after band and quota room, as for a reviewer (see the v1 table); `not_author` drops it (`family_excluded`). An explicit `--exclude-family` always drops (`family_excluded`). With no `--author-family`, `resolve` and `spawn` (without `--parent-job`) take the family of the job the caller runs in (`ARBITER_JOB`), the same family `--parent-job` would give. A job that cannot be read refuses rather than selecting with no family. With no family at all, nothing is excluded and the stamp records `unknown`.
 - If no rung passes at the floor but a below-floor rung passes every other rule, consult retries once at the asker's own grade and stamps `fallback: no_rung_at_floor`. A below-floor rung on a cooling pool counts as such a rung. Unrated, absent-rung, and family-excluded rungs never trigger the retry. A session without a task grade never retries.
 
 The selection record carries a `consult` object with `asker_grade`, `asker_family`, `grade_source` (`flag`, `task`, or `without_task`), `floor`, `used_floor`, and `fallback`. `resolve --role consult` prints `floor=<G>` on its text line.
@@ -1866,7 +1866,13 @@ one of `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
 This PR does not parse the proposed v2 schema.
 
 `roles.reviewer.family_rule` sets how a reviewer relates to the author's
-family (operator decision 462, hk 5897). Unset and `"prefer_other"` mean the
+family (operator decision 462, hk 5897). `roles.consult.family_rule` takes
+the same values with the same semantics for a consult and the asker's family
+(decision 467, hk 5917): unset means `prefer_other`, so a consult seat of the
+asker's own family is chosen when it has the most room, `not_author` is the
+rollback drop, and one helper (`routing.sameFamilyOK`) serves both roles. An
+explicit `--exclude-family` stays a hard drop under either rule, and judge
+keeps its hard drop. Unset and `"prefer_other"` mean the
 same: a seat of the author's family stays a candidate, and family is only a
 tie-break key in the selection comparator (`compareCands`), after band and
 quota room, so an equal-room pair picks the other family and a same-family
@@ -1876,9 +1882,9 @@ preference": the seat is not dropped and the record's `degraded` list names
 rollback: a same-family seat drops as `family_excluded`, and an unreadable
 author family drops every seat as `author_family_unreadable`. Any other
 value on the reviewer role is refused as a config error naming
-`family_rule`; other roles' values (`judge`: `not_parent`) are not read.
-A spawn applies the same rule when it checks the seat. The consult rule (a
-family other than the asker's) is separate and unchanged. The launch receipt
+`family_rule`; other roles' values (`judge`: `not_parent`) are not read. The
+same refusal applies to an unknown `roles.consult.family_rule`.
+A spawn applies the same rule when it checks the seat. The launch receipt
 still records the seat's `family` on every pass, so a same-family review stays
 visible to whatever compares it with the author's family.
 

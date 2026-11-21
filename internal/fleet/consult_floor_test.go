@@ -19,6 +19,10 @@ type consultFloorOpts struct {
 	block           string
 	allowEscalation bool
 	cooling         []string
+	// pools replaces the default claude/codex pool views when set.
+	pools map[string]PoolView
+	// excludeFamilies is the caller's explicit --exclude-family.
+	excludeFamilies []string
 }
 
 // consultFloorSelect runs the selection core the way resolve builds its
@@ -36,6 +40,9 @@ func consultFloorSelectWith(t *testing.T, o consultFloorOpts, rows []CatalogRow,
 		block = routingBlockV1
 	}
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
+	if o.pools != nil {
+		pools = o.pools
+	}
 	a, s, q := selFixture(t, "S", rows, pools, present)
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex", "codex-astra": "codex"})
 	if len(o.cooling) > 0 {
@@ -52,7 +59,7 @@ func consultFloorSelectWith(t *testing.T, o consultFloorOpts, rows []CatalogRow,
 		t.Fatalf("route: %v", e)
 	}
 	s.Role, s.RoutingRole, s.Task, s.AllowEscalation = "implementer", "consult", "", o.allowEscalation
-	req := selReq{grade: grade, t: "T1", role: "implementer", authorFamily: family, allowEscalation: o.allowEscalation, urgency: urgencyNormal, urgencySource: "default", route: route}
+	req := selReq{grade: grade, t: "T1", role: "implementer", authorFamily: family, excludeFamilies: o.excludeFamilies, allowEscalation: o.allowEscalation, urgency: urgencyNormal, urgencySource: "default", route: route}
 	return a.selectFor(context.Background(), s, req)
 }
 

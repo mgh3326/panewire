@@ -298,8 +298,8 @@ type selCand struct {
 	// other pool.
 	wasteGroup string
 	accountKey string
-	// sameFamily marks a reviewer seat of the author's own family. It is a
-	// tie-break key only (compareCands), after band and quota room.
+	// sameFamily marks a reviewer or consult seat of the author's (asker's)
+	// own family. It is a tie-break key only (compareCands), after band and quota room.
 	sameFamily bool
 	host       string
 	hosts      []selHost
@@ -555,14 +555,16 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 				reason = "profile_excluded"
 			case slices.Contains(req.excludeFamilies, seat.Family):
 				reason = "family_excluded"
-			case req.route.top() && req.authorFamily != "" && seat.Family == req.authorFamily:
-				// A consult rung runs on a family other than its asker's.
+			case req.route.top() && !req.route.sameFamilyOK() && req.authorFamily != "" && seat.Family == req.authorFamily:
+				// Consult family_rule not_author: the hard drop of the asker's
+				// family. Under prefer_other (or unset) the family is only a
+				// tie-break (compareCands), as for a reviewer (hk 5917).
 				reason = "family_excluded"
 			case !slices.Contains(roles, req.role):
 				reason = "seat_role"
-			case req.role == "reviewer" && !req.route.reviewerSameFamilyOK() && req.authorFamily == "":
+			case req.role == "reviewer" && !req.route.sameFamilyOK() && req.authorFamily == "":
 				reason = "author_family_unreadable"
-			case req.role == "reviewer" && !req.route.reviewerSameFamilyOK() && seat.Family == req.authorFamily:
+			case req.role == "reviewer" && !req.route.sameFamilyOK() && seat.Family == req.authorFamily:
 				// not_author: the hard drop. Under prefer_other the family is
 				// only a tie-break (compareCands), and an unreadable author
 				// family is recorded as degraded, not dropped.
@@ -991,6 +993,10 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 // selectFor ranks and admits the catalog rungs for a resolved request. It is
 // the selection core shared by spawn and `panewire plan`: it reads the catalog,
 // account observations, presence and quota gates, and writes no job state.
+// ranksFamily reports that the request ranks an other-family seat ahead of a
+// same-family one on a tie: the reviewer and consult roles (family_rule).
+func (req selReq) ranksFamily() bool { return req.role == "reviewer" || req.route.top() }
+
 func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, error) {
 	policy, e := a.poolPolicy()
 	if e != nil {
@@ -1006,7 +1012,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	if req.expectedUnreadable {
 		p.degraded = append(p.degraded, "expected_unreadable")
 	}
-	if req.role == "reviewer" && req.authorFamily == "" && req.route.reviewerSameFamilyOK() {
+	if req.role == "reviewer" && req.authorFamily == "" && req.route.sameFamilyOK() {
 		// No preference rather than a drop (family_rule prefer_other).
 		p.degraded = append(p.degraded, "author_family_unreadable")
 	}
@@ -1101,7 +1107,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			}
 		}
 		c.reason, c.seatName, c.seat = reason, seatName, seat
-		c.sameFamily = seat != nil && req.role == "reviewer" && req.authorFamily != "" && seat.Family == req.authorFamily
+		c.sameFamily = seat != nil && req.ranksFamily() && req.authorFamily != "" && seat.Family == req.authorFamily
 		if reason == "" {
 			// Checked after the seat rules so a candidate those rules
 			// drop keeps its own reason.

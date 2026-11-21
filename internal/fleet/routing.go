@@ -46,10 +46,10 @@ type RoutingRule struct {
 	MinEffort    string   `json:"min_effort,omitempty"`
 	OnExhaustion string   `json:"on_exhaustion"`
 	DowngradeTo  []string `json:"downgrade_to,omitempty"`
-	// FamilyRule is the reviewer role's author-family rule: familyRulePreferOther
-	// (or unset) keeps a same-family seat a candidate and ranks family only as a
-	// tie-break; familyRuleNotAuthor drops it. Other roles carry their own
-	// values (judge: "not_parent"), which nothing reads.
+	// FamilyRule is the reviewer and consult roles' author-family rule:
+	// familyRulePreferOther (or unset) keeps a same-family seat a candidate and
+	// ranks family only as a tie-break; familyRuleNotAuthor drops it. Other
+	// roles carry their own values (judge: "not_parent"), which nothing reads.
 	FamilyRule string `json:"family_rule,omitempty"`
 	Fixed      bool   `json:"fixed,omitempty"`
 	// FamilyEffort maps a profile, or a top family, to the role-effort rung
@@ -59,20 +59,21 @@ type RoutingRule struct {
 	FamilyEffort map[string]string `json:"family_effort,omitempty"`
 }
 
-// Reviewer family rules (operator decision 462, hk 5897). An unset rule is
-// familyRulePreferOther. See docs/placement.md.
+// Family rules of the reviewer (operator decision 462, hk 5897) and consult
+// (decision 467, hk 5917) roles. An unset rule is familyRulePreferOther. See
+// docs/config.md.
 const (
 	familyRulePreferOther = "prefer_other"
 	familyRuleNotAuthor   = "not_author"
 )
 
-// reviewerSameFamilyOK reports that a reviewer seat of the author's own family
+// sameFamilyOK reports that a seat of the author's (or asker's) own family
 // stays a candidate; the family then only breaks a tie after band and quota
 // room (compareCands). false is the hard drop kept for rollback. A nil route
-// or an unset rule reads as prefer_other. Only the reviewer routing role reads
-// family_rule: judge (resolve-only, seat role reviewer) keeps its hard drop of
-// the parent's family whatever its own rule value says.
-func (r *routing) reviewerSameFamilyOK() bool {
+// or an unset rule reads as prefer_other. The reviewer and consult routing
+// roles read family_rule; judge (resolve-only, seat role reviewer) keeps its
+// hard drop of the parent's family whatever its own rule value says.
+func (r *routing) sameFamilyOK() bool {
 	if r != nil && r.role == "judge" {
 		return false
 	}
@@ -164,7 +165,7 @@ func (p RoutingPolicy) validate() error {
 				return fmt.Errorf("routing role %s has unknown min_effort %q", name, r.MinEffort)
 			}
 		}
-		if name == "reviewer" {
+		if name == "reviewer" || topRoutingRole(name) {
 			switch r.FamilyRule {
 			case "", familyRulePreferOther, familyRuleNotAuthor:
 			default:
