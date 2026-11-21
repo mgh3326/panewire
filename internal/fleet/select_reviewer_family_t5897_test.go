@@ -168,3 +168,31 @@ func TestReviewerSameFamilyOKT5897(t *testing.T) {
 		}
 	}
 }
+
+// The judge routing role maps to the reviewer seat role but does not read
+// reviewer.family_rule: it keeps the hard drop of the parent's family, and an
+// unreadable parent family still drops every seat, under any reviewer rule.
+func TestJudgeKeepsFamilyDropUnderPreferOtherT5897(t *testing.T) {
+	judgeSelect := func(family string) (*selPlan, error) {
+		a, s, q := selFixture(t, "S", reviewerRows(), map[string]PoolView{"claude": spendPool(5), "codex": spendPool(90)}, []string{"claude", "codex"})
+		serveRouting(t, routingDoc(reviewerBlock("prefer_other")))
+		q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-terra61": "codex"})
+		route, e := a.routeFor(context.Background(), "reviewer", "judge")
+		if e != nil {
+			t.Fatal(e)
+		}
+		s.Role, s.RoutingRole = "reviewer", "judge"
+		req := selReq{grade: "S", t: "T1", role: "reviewer", authorFamily: family, urgency: urgencyNormal, urgencySource: "default", route: route}
+		return a.selectFor(context.Background(), s, req)
+	}
+	sel, e := judgeSelect("anthropic")
+	if e != nil || sel.chosen.seatName != "codex-terra61" {
+		t.Fatalf("chosen=%v err=%v, want codex-terra61", sel.chosen, e)
+	}
+	if got := candOutcome(sel.record(), "opus", "high")["outcome"]; got != "dropped:family_excluded" {
+		t.Fatalf("judge must drop the parent's family: %v", got)
+	}
+	if _, e := judgeSelect(""); e == nil {
+		t.Fatal("judge with an unreadable parent family must drop every seat")
+	}
+}

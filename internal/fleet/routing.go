@@ -69,8 +69,13 @@ const (
 // reviewerSameFamilyOK reports that a reviewer seat of the author's own family
 // stays a candidate; the family then only breaks a tie after band and quota
 // room (compareCands). false is the hard drop kept for rollback. A nil route
-// or an unset rule reads as prefer_other.
+// or an unset rule reads as prefer_other. Only the reviewer routing role reads
+// family_rule: judge (resolve-only, seat role reviewer) keeps its hard drop of
+// the parent's family whatever its own rule value says.
 func (r *routing) reviewerSameFamilyOK() bool {
+	if r != nil && r.role == "judge" {
+		return false
+	}
 	return r == nil || r.rule == nil || r.rule.FamilyRule != familyRuleNotAuthor
 }
 
