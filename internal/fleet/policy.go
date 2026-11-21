@@ -141,8 +141,17 @@ func taskMarkerPattern() string {
 var taskMarker = regexp.MustCompile(taskMarkerPattern())
 
 // Check admits one launch row for a seat role. capabilityOn is the host's
-// answer for the seat's capability flag, from capability.
+// answer for the seat's capability flag, from capability. A reviewer must be
+// of another family than the author (the not_author rule); the spawn path
+// uses check with the routing table's family_rule.
 func (s Seat) Check(l Launch, role, grade, authorFamily, arm string, capabilityOn bool) error {
+	return s.check(l, role, grade, authorFamily, arm, capabilityOn, false)
+}
+
+// check is Check with the reviewer family rule: sameFamilyOK admits a reviewer
+// of the author's family, and an unreadable author family (prefer_other:
+// "no preference").
+func (s Seat) check(l Launch, role, grade, authorFamily, arm string, capabilityOn, sameFamilyOK bool) error {
 	if !validCatalogGrade(l.Grade) || l.ModelID == "" || (l.Effort == "" && s.needsEffort()) || l.Gate == "" {
 		return fail(exitConfig, "canon launch data incomplete")
 	}
@@ -182,7 +191,7 @@ func (s Seat) Check(l Launch, role, grade, authorFamily, arm string, capabilityO
 			return fail(exitSeatRefused, "canon grade %s does not cover task grade %s", l.Grade, grade)
 		}
 	}
-	if role == "reviewer" {
+	if role == "reviewer" && !sameFamilyOK {
 		if authorFamily == "" {
 			return fail(exitSeatRefused, "reviewer requires readable author family")
 		}

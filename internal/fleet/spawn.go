@@ -1670,7 +1670,7 @@ func (a *App) checkLaunchRow(ctx context.Context, s Spawn, seat Seat, qr QuotaRe
 			return Launch{}, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, authorFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), capability(a.readinessStates(ctx), hostName, hostCfg, seat.Capability)); e != nil {
+	if e = seat.check(launch, s.Role, grade, authorFamily, a.e6Arm(s.E6Arm, s.e6ArmLocked), capability(a.readinessStates(ctx), hostName, hostCfg, seat.Capability), s.route.reviewerSameFamilyOK()); e != nil {
 		return Launch{}, e
 	}
 	return launch, nil

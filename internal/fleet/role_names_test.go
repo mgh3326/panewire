@@ -57,11 +57,12 @@ func TestRetiredRoleFlagsAreUsageErrors(t *testing.T) {
 	}
 }
 
-// A reviewer whose only admissible seat shares the author's family is refused
-// with exit 77 (seat refusal). Nothing retries it as another role: no pane is
+// Under reviewer.family_rule not_author, a reviewer whose only admissible seat
+// shares the author's family is refused with exit 77 (seat refusal). Nothing retries it as another role: no pane is
 // created and no task is claimed.
 func TestReviewerSeatRefusalIsNotRetriedAsAnotherRole(t *testing.T) {
 	a, s, f, _ := cmdFixture(t)
+	serveRouting(t, routingDocV1)                   // family_rule "not_author"
 	s.Role, s.ParentFamily = "reviewer", "deepseek" // cmd-dsflash41 is a deepseek seat
 	err := a.Spawn(context.Background(), s)
 	if exitCode(err) != exitSeatRefused {

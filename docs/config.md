@@ -1862,6 +1862,23 @@ allows (any profile ID when the role allows `"*"`), or its effort is not
 one of `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
 This PR does not parse the proposed v2 schema.
 
+`roles.reviewer.family_rule` sets how a reviewer relates to the author's
+family (operator decision 462, hk 5897). Unset and `"prefer_other"` mean the
+same: a seat of the author's family stays a candidate, and family is only a
+tie-break key in the selection comparator (`compareCands`), after band and
+quota room, so an equal-room pair picks the other family and a same-family
+seat with more room still wins. An author family that cannot be read is "no
+preference": the seat is not dropped and the record's `degraded` list names
+`author_family_unreadable`. `"not_author"` is the hard drop kept for
+rollback: a same-family seat drops as `family_excluded`, and an unreadable
+author family drops every seat as `author_family_unreadable`. Any other
+value on the reviewer role is refused as a config error naming
+`family_rule`; other roles' values (`judge`: `not_parent`) are not read.
+A spawn applies the same rule when it checks the seat. The consult rule (a
+family other than the asker's) is separate and unchanged. The launch receipt
+still records the seat's `family` on every pass, so a same-family review stays
+visible to whatever compares it with the author's family.
+
 A spawn role is its routing role: `--role implementer`, `reviewer` and
 `consult` route as `implementer`, `reviewer` and `consult`. The table's
 `panewire_role_map` (and its pre-#155 name `runtug_role_map`) is not read, so
@@ -2022,7 +2039,7 @@ unchanged.
 `panewire resolve --role consult|implementer|verifier|reviewer|judge
 [--grade G] [--t T0..T3] [--author-family F] [--harness KIND] [--allow-escalation] [--json]` runs the same
 selection core without a launch or job write. `--t` defaults to `T0`.
-Reviewer and judge require `--author-family` to exclude that family.
+Reviewer and judge require `--author-family`; a reviewer excludes that family only under `family_rule` `not_author`, and otherwise ranks it last on a tie (see the v1 table above).
 Reviewer and judge also require `--grade`: resolve is called by the session
 that makes the subagent call, so that caller supplies the work's grade instead
 of silently selecting a reviewer at the generic `C` default. Text output names

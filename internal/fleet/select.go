@@ -298,6 +298,9 @@ type selCand struct {
 	// other pool.
 	wasteGroup string
 	accountKey string
+	// sameFamily marks a reviewer seat of the author's own family. It is a
+	// tie-break key only (compareCands), after band and quota room.
+	sameFamily bool
 	host       string
 	hosts      []selHost
 	holders    []selHost
@@ -557,9 +560,12 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 				reason = "family_excluded"
 			case !slices.Contains(roles, req.role):
 				reason = "seat_role"
-			case req.role == "reviewer" && req.authorFamily == "":
+			case req.role == "reviewer" && !req.route.reviewerSameFamilyOK() && req.authorFamily == "":
 				reason = "author_family_unreadable"
-			case req.role == "reviewer" && seat.Family == req.authorFamily:
+			case req.role == "reviewer" && !req.route.reviewerSameFamilyOK() && seat.Family == req.authorFamily:
+				// not_author: the hard drop. Under prefer_other the family is
+				// only a tie-break (compareCands), and an unreadable author
+				// family is recorded as degraded, not dropped.
 				reason = "family_excluded"
 			case seat.seatE6(row.Effort) && a.e6Arm(req.e6Arm, req.e6ArmLocked) != seat.Canon+"@"+row.Effort:
 				reason = "e6_marker"
@@ -1000,6 +1006,10 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	if req.expectedUnreadable {
 		p.degraded = append(p.degraded, "expected_unreadable")
 	}
+	if req.role == "reviewer" && req.authorFamily == "" && req.route.reviewerSameFamilyOK() {
+		// No preference rather than a drop (family_rule prefer_other).
+		p.degraded = append(p.degraded, "author_family_unreadable")
+	}
 	// Hub-only cooling fails open when the snapshot is unavailable; record the gap.
 	snapshot, coolingState := a.fleetSnapshot(ctx)
 	if snapshot == nil {
@@ -1091,6 +1101,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			}
 		}
 		c.reason, c.seatName, c.seat = reason, seatName, seat
+		c.sameFamily = seat != nil && req.role == "reviewer" && req.authorFamily != "" && seat.Family == req.authorFamily
 		if reason == "" {
 			// Checked after the seat rules so a candidate those rules
 			// drop keeps its own reason.
@@ -1481,6 +1492,15 @@ func compareCands(x, y *selCand, compareGrade, roomFirst bool) int {
 	}
 	if c := cmp.Compare(rankBlocking(firstPct(x.longProj, x.blocking)), rankBlocking(firstPct(y.longProj, y.blocking))); c != 0 {
 		return c
+	}
+	// Family is a tie-break after band and room: an other-family seat ranks
+	// ahead of a same-family one. A row-level key, so the order stays
+	// transitive.
+	if x.sameFamily != y.sameFamily {
+		if y.sameFamily {
+			return -1
+		}
+		return 1
 	}
 	if x.ignoreGrade {
 		if c := cmp.Compare(topProfileRank(x.row), topProfileRank(y.row)); c != 0 {

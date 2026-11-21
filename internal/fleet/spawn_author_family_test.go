@@ -32,13 +32,28 @@ func TestReviewerAuthorFamilyWithoutBuilderJob(t *testing.T) {
 		t.Fatalf("an unlinked reviewer claimed the task %d times", n)
 	}
 
+	// Under family_rule not_author a seat of the author's family is refused.
 	a, s, _, _ = cmdFixture(t)
+	serveRouting(t, routingDocV1)
 	s.Role, s.AuthorFamily = "reviewer", "deepseek"
 	if e := a.Spawn(context.Background(), s); code(e) != exitSeatRefused {
 		t.Fatalf("a seat of the author's family must still be refused: %v", e)
 	}
 	if n := claimCalls(t); n != 0 {
 		t.Fatalf("claims after refusal: %d", n)
+	}
+}
+
+// Under family_rule prefer_other (or unset) the same seat is admitted: the
+// family is only a selection tie-break (hk 5897).
+func TestReviewerSameFamilySpawnsUnderPreferOtherT5897(t *testing.T) {
+	for _, rule := range []string{"prefer_other", ""} {
+		a, s, _, _ := cmdFixture(t)
+		serveRouting(t, routingDoc(reviewerBlock(rule)))
+		s.Role, s.AuthorFamily = "reviewer", "deepseek"
+		if e := a.Spawn(context.Background(), s); e != nil {
+			t.Fatalf("rule %q: a same-family reviewer must spawn: %v", rule, e)
+		}
 	}
 }
 

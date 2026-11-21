@@ -46,13 +46,37 @@ type RoutingRule struct {
 	MinEffort    string   `json:"min_effort,omitempty"`
 	OnExhaustion string   `json:"on_exhaustion"`
 	DowngradeTo  []string `json:"downgrade_to,omitempty"`
-	FamilyRule   string   `json:"family_rule,omitempty"`
-	Fixed        bool     `json:"fixed,omitempty"`
+	// FamilyRule is the reviewer role's author-family rule: familyRulePreferOther
+	// (or unset) keeps a same-family seat a candidate and ranks family only as a
+	// tie-break; familyRuleNotAuthor drops it. Other roles carry their own
+	// values (judge: "not_parent"), which nothing reads.
+	FamilyRule string `json:"family_rule,omitempty"`
+	Fixed      bool   `json:"fixed,omitempty"`
 	// FamilyEffort maps a profile, or a top family, to the role-effort rung
 	// it leads at instead of Effort (consult only). That exact rung
 	// is admitted even when its catalog gate is escalation: the entry is the
 	// operator's opt-in. See routing.familyEffortKey for the family rule.
 	FamilyEffort map[string]string `json:"family_effort,omitempty"`
+}
+
+// Reviewer family rules (operator decision 462, hk 5897). An unset rule is
+// familyRulePreferOther. See docs/placement.md.
+const (
+	familyRulePreferOther = "prefer_other"
+	familyRuleNotAuthor   = "not_author"
+)
+
+// reviewerSameFamilyOK reports that a reviewer seat of the author's own family
+// stays a candidate; the family then only breaks a tie after band and quota
+// room (compareCands). false is the hard drop kept for rollback. A nil route
+// or an unset rule reads as prefer_other. Only the reviewer routing role reads
+// family_rule: judge (resolve-only, seat role reviewer) keeps its hard drop of
+// the parent's family whatever its own rule value says.
+func (r *routing) reviewerSameFamilyOK() bool {
+	if r != nil && r.role == "judge" {
+		return false
+	}
+	return r == nil || r.rule == nil || r.rule.FamilyRule != familyRuleNotAuthor
 }
 
 // routingRoles are the roles the table routes and `panewire resolve --role`
@@ -138,6 +162,13 @@ func (p RoutingPolicy) validate() error {
 		if r.MinEffort != "" {
 			if _, ok := effortRank[r.MinEffort]; !ok {
 				return fmt.Errorf("routing role %s has unknown min_effort %q", name, r.MinEffort)
+			}
+		}
+		if name == "reviewer" {
+			switch r.FamilyRule {
+			case "", familyRulePreferOther, familyRuleNotAuthor:
+			default:
+				return fmt.Errorf("routing role %s has unknown family_rule %q (want %s or %s)", name, r.FamilyRule, familyRulePreferOther, familyRuleNotAuthor)
 			}
 		}
 		switch r.OnExhaustion {
