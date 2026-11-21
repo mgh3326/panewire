@@ -1860,6 +1860,14 @@ func noSymlinks(path string) error {
 // a `done` that adopts it (adoptBriefSent) leaves the job as a spawn would.
 func (a *App) spawnReceipt(ctx context.Context, s Spawn, seat Seat, launch Launch, pane, tab, pool, owner, machine string) map[string]any {
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
+	// The grant epoch this attempt runs under, so a close can tell a receipt
+	// from an earlier grant of the job to this node from the current one
+	// (node_pane_close_ladder_fence.go). Absent when the grant is unreadable.
+	if jobowner.ValidID(s.Job) {
+		if epoch, e := jobowner.Epoch(a.Jobs, s.Job); e == nil {
+			receipt["epoch"] = strconv.FormatUint(epoch, 10)
+		}
+	}
 	// The request's time limit, so the node's pane sweep can end a reviewer or
 	// consult by its real limit (hk 4747).
 	receipt["expires_at"] = a.spawnExpiresAt(s).UTC().Format(time.RFC3339)

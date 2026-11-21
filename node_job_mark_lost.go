@@ -123,6 +123,8 @@ type nodeJobLedgerEvent struct {
 	request, attempt string
 	hubRevokedEpoch  uint64
 	closeIntentEpoch uint64
+	// receiptEpoch is a job.spawned receipt's grant epoch; 0 when it names none.
+	receiptEpoch uint64
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -267,18 +269,23 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				return nil, errors.New("unreadable job event")
 			}
 		}
-		var intentEpoch uint64
-		if event.Kind == "job.hub_close_intent" && len(event.Payload.Epoch) != 0 {
+		var payloadEpoch uint64
+		if (event.Kind == "job.hub_close_intent" || event.Kind == "job.spawned") && len(event.Payload.Epoch) != 0 {
 			var epoch string
 			if json.Unmarshal(event.Payload.Epoch, &epoch) != nil {
 				return nil, errors.New("unreadable job event")
 			}
-			if intentEpoch, err = strconv.ParseUint(epoch, 10, 64); err != nil {
+			if payloadEpoch, err = strconv.ParseUint(epoch, 10, 64); err != nil {
 				return nil, errors.New("unreadable job event")
 			}
 		}
 		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task, owner: event.Payload.OwnerLane, keep: event.Payload.Keep, session: event.Payload.HerdrSession, cwd: event.Payload.Cwd,
-			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID, attempt: event.Payload.Attempt, hubRevokedEpoch: revokedEpoch, closeIntentEpoch: intentEpoch})
+			name: entry.Name(), reason: event.Payload.Reason, final: event.Payload.Final, request: event.Payload.RequestID, attempt: event.Payload.Attempt, hubRevokedEpoch: revokedEpoch})
+		if event.Kind == "job.spawned" {
+			events[len(events)-1].receiptEpoch = payloadEpoch
+		} else {
+			events[len(events)-1].closeIntentEpoch = payloadEpoch
+		}
 	}
 	return events, nil
 }

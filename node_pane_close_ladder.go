@@ -33,10 +33,13 @@ import (
 //  4. one `herdr pane close`;
 //  5. store the final result (fsynced) before replying.
 //
-// The ownership lock, the composite epoch/attempt fence and the request-id
-// index a fence looks a record up by are step 2 (hk 5864). The hub does not
-// call this op yet (step 3, hk 5865): it is admitted only as a hub-issued
-// command and no capability is advertised.
+// Step 2 (hk 5864) adds, between the guards and the close, the job's ownership
+// lock (tried once; contention is `unknown`) and one composite fence check made
+// under it (ladderFenceCheck), held through the close; and the
+// pane.ladder_close_fence op (node_pane_close_ladder_fence.go) with the
+// request-id index it finds a K by. The hub does not call these ops yet
+// (step 3, hk 5865): they are admitted only as hub-issued commands and no
+// capability is advertised.
 //
 // A known refusal (a guard) closed nothing and leaves no record, so the next
 // request for the same K is judged afresh. A failure after the intent — a
@@ -59,6 +62,9 @@ const (
 	nodeLadderRefused = "refused"
 	// nodeLadderUnknown: a close may have run and no result was recorded.
 	nodeLadderUnknown = "unknown"
+	// nodeLadderFenced: a fence was recorded before any close ran, so a close
+	// for this K never runs.
+	nodeLadderFenced = "fenced"
 
 	ladderCloseDir = "ladder-close"
 )
@@ -88,8 +94,11 @@ type nodeLadderCloseResult struct {
 }
 
 func validNodeLadderCloseArgs(args nodeLadderCloseArgs) bool {
-	return fleet.ValidCloseOpID(args.RequestID) && fleet.ValidJobID(args.Job) && machineIDPattern.MatchString(args.Node) && args.Epoch > 0 && fleet.ValidJobID(args.Attempt) &&
-		nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
+	return fleet.ValidCloseOpID(args.RequestID) && validLadderKey(args.Job, args.Node, args.Epoch, args.Attempt, args.PaneID) && validNodePaneName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
+}
+
+func validLadderKey(job, node string, epoch uint64, attempt, pane string) bool {
+	return fleet.ValidJobID(job) && machineIDPattern.MatchString(node) && epoch > 0 && fleet.ValidJobID(attempt) && nodeCommandPaneIDPattern.MatchString(pane)
 }
 
 func validNodeLadderCloseResult(result nodeLadderCloseResult) bool {
@@ -97,7 +106,7 @@ func validNodeLadderCloseResult(result nodeLadderCloseResult) bool {
 		return false
 	}
 	switch result.State {
-	case nodeLadderClosing, nodeLadderClosed, nodeLadderGone, nodeLadderRefused, nodeLadderUnknown:
+	case nodeLadderClosing, nodeLadderClosed, nodeLadderGone, nodeLadderRefused, nodeLadderUnknown, nodeLadderFenced:
 		return true
 	}
 	return false
@@ -198,6 +207,25 @@ func (s *ladderStore) remove(name string) error {
 
 func ladderKName(k string) string { return "k-" + k + ".json" }
 
+// ladderRequestName is the request-id index entry: it holds the K binding the
+// request id was first used for, so one request id never names two Ks and a
+// fence by request id finds its K.
+func ladderRequestName(id string) string { return "r-" + id + ".json" }
+
+// bindRequest records which K a request id names, or reports that it already
+// names another one.
+func (s *ladderStore) bindRequest(id string, binding nodeLadderRecord) (ok bool, err error) {
+	var stored nodeLadderRecord
+	found, err := s.read(ladderRequestName(id), &stored)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		return stored == binding, nil
+	}
+	return true, s.write(ladderRequestName(id), binding)
+}
+
 func answerLadder(state, reason string, replayed bool) nodeLadderCloseResult {
 	return nodeLadderCloseResult{State: state, Replayed: replayed, Reason: reason}
 }
@@ -230,6 +258,12 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 	}
 	defer store.close()
 	k := ladderKey(args)
+	binding := nodeLadderRecord{Job: args.Job, Node: args.Node, Epoch: args.Epoch, Attempt: args.Attempt, PaneID: args.PaneID}
+	if same, err := store.bindRequest(args.RequestID, binding); err != nil {
+		return nil, "journal_failed"
+	} else if !same {
+		return nil, "invalid_args"
+	}
 	var record nodeLadderRecord
 	found, err := store.read(ladderKName(k), &record)
 	if err != nil {
@@ -243,7 +277,8 @@ func (client *HubClient) nodeLadderClose(ctx context.Context, args nodeLadderClo
 	}
 	// The intent is durable before anything is looked at or closed; a failed
 	// write closes nothing.
-	record = nodeLadderRecord{Job: args.Job, Node: args.Node, Epoch: args.Epoch, Attempt: args.Attempt, PaneID: args.PaneID, State: nodeLadderClosing}
+	record = binding
+	record.State = nodeLadderClosing
 	if err := store.write(ladderKName(k), record); err != nil {
 		return nil, "journal_failed"
 	}
@@ -270,7 +305,14 @@ func (client *HubClient) runLadderClose(ctx context.Context, store *ladderStore,
 		return answerLadder(nodeLadderRefused, reason, false), ""
 	}
 	closeArgs := nodePaneCloseArgs{PaneID: args.PaneID, Name: args.Name, AgentStatus: args.AgentStatus, Cwd: args.Cwd, AllowUnnamed: args.AllowUnnamed, QuestionJob: args.Job}
-	result, code := client.nodePaneCloseWith(ctx, closeArgs, nil, nil)
+	// The lock the fence check takes is held until the close call has returned.
+	var release func()
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
+	result, code := client.nodePaneCloseWith(ctx, closeArgs, nil, client.ladderFenceCheck(args, &release))
 	if code != "" {
 		// A failure after the intent: a close may have run.
 		return finish(nodeLadderUnknown, code)

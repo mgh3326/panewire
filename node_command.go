@@ -82,7 +82,7 @@ func knownNodeCommandOp(op string) bool {
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose, nodeCommandJobReap,
 		nodeCommandCheckoutPull, nodeCommandPaneSweep, nodeCommandPaneCloseOp, nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease,
-		nodeCommandCheckoutSweep, nodeCommandHandoverCheck, nodeCommandHandoverSnapshot, nodeCommandLadderClose:
+		nodeCommandCheckoutSweep, nodeCommandHandoverCheck, nodeCommandHandoverSnapshot, nodeCommandLadderClose, nodeCommandLadderFence:
 		return true
 	}
 	return false
@@ -265,6 +265,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandHandoverCheck:    {"job", "cwd", "origin", "branch"},
 	nodeCommandHandoverSnapshot: {"job", "epoch", "cwd", "origin", "branch"},
 	nodeCommandLadderClose:      {"request_id", "job", "node", "epoch", "attempt", "pane_id", "name", "agent_status", "cwd", "allow_unnamed"},
+	nodeCommandLadderFence:      {"request_id"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -452,8 +453,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalQuestion := op == nodeCommandPaneClose && nodeCommandPaneCloseFields(raw)
 	optionalExpect := op == nodeCommandJobReap && nodeCommandHasFields(raw, append(append([]string(nil), names...), "expect"))
 	optionalAck := op == nodeCommandPaneCloseStatus && nodeCloseStatusFields(raw)
+	optionalFence := op == nodeCommandLadderFence && nodeCommandHasFields(raw, append(append([]string(nil), names...), "job", "node", "epoch", "attempt", "pane_id"))
 	optionalHandover := op == nodeCommandPaneCloseOp && nodePaneCloseOpFields(raw) || op == nodeCommandHandoverSnapshot && nodeHandoverSnapshotFields(raw)
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover) {
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalRemove && !optionalUnnamed && !optionalList && !optionalInspect && !optionalEndReason && !optionalQuestion && !optionalSparse && !optionalExpect && !optionalAck && !optionalHandover && !optionalFence) {
 		return nil, false
 	}
 	switch op {
@@ -470,6 +472,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandLadderClose:
 		var args nodeLadderCloseArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeLadderCloseArgs(args)
+	case nodeCommandLadderFence:
+		var args nodeLadderFenceArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeLadderFenceArgs(args)
 	case nodeCommandPaneCloseStatus, nodeCommandPaneCloseRelease:
 		var args nodeCloseOpRefArgs
 		if !decodeNodeCommandStrict(raw, &args) || !validNodeCloseOpRefArgs(args) {
@@ -603,7 +608,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result nodeCloseOpStatusResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeCloseOpStatusResult(result)
 		target = result
-	case nodeCommandLadderClose:
+	case nodeCommandLadderClose, nodeCommandLadderFence:
 		var result nodeLadderCloseResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeLadderCloseResult(result)
 		target = result
@@ -1055,6 +1060,11 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodeLadderClose(ctx, args)
+	case nodeLadderFenceArgs:
+		// Under the same lock as the close it fences.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeLadderFence(ctx, args)
 	case nodePaneCaptureArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()

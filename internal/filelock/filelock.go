@@ -23,6 +23,27 @@ func Acquire(ctx context.Context, path string) (func(), error) {
 	return acquire(ctx, path, nil)
 }
 
+// TryAcquire takes the lock at path once, without waiting. ok is false when
+// another holder has it; there is no retry. The returned release drops the lock
+// and closes the file.
+func TryAcquire(path string) (release func(), ok bool, err error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o666)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return func() {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}, true, nil
+}
+
 // acquire is Acquire with a test seam: beforeFlock, when non-nil, runs after
 // the pre-flock context check and before each flock attempt.
 func acquire(ctx context.Context, path string, beforeFlock func()) (func(), error) {

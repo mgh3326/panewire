@@ -127,6 +127,16 @@ func appendRevocation(dir, id string, epoch uint64) error {
 	return durable.ReplaceFileAtomically(path, ".revocation-*", body, 0600)
 }
 
+// TryLock takes the job's ownership lock (the one Assign, Revoke and every
+// producer write take) once, without waiting. held is false when another
+// holder has it. The job directory must already exist.
+func TryLock(jobs, id string) (release func(), held bool, err error) {
+	if jobs == "" || !ValidID(id) {
+		return nil, false, errors.New("invalid job id")
+	}
+	return filelock.TryAcquire(filepath.Join(jobs, id, ".wrk-events.lock"))
+}
+
 func withLock(jobs, id string, fn func(string) error) error {
 	return withLockContext(context.Background(), jobs, id, fn)
 }

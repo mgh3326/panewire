@@ -511,6 +511,7 @@ func (stop nodeCloseHookStop) Error() string { return "close stopped: " + stop.o
 type nodeCloseTarget struct {
 	attempt                         string
 	receipt                         bool
+	receiptEpoch                    uint64
 	pane, label, role, session, cwd string
 	ended                           bool
 	// announced: the attempt's newest end-like event is a quota stop
@@ -535,6 +536,7 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 		case event.kind == "job.spawned":
 			target.attempt, target.receipt, target.ended, target.announced, target.intent, target.hubClose = event.name, true, false, false, false, false
 			target.pane, target.label, target.session, target.cwd = event.pane, event.label, event.session, event.cwd
+			target.receiptEpoch = event.receiptEpoch
 			if event.role != "" {
 				target.role = event.role
 			}
