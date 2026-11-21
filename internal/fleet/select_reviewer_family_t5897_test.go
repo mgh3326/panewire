@@ -112,19 +112,6 @@ func TestReviewerFamilyRuleUnknownIsConfigErrorT5897(t *testing.T) {
 	}
 }
 
-// The consult rule (a family other than the asker's) is not part of
-// decision 462: it still drops the asker's family under prefer_other.
-func TestConsultFamilyRuleUnchangedByPreferOtherT5897(t *testing.T) {
-	rows := []CatalogRow{consultFloorRung("opus", "high", "S+", "claude"), consultFloorRung("codex-sol", "high", "S+", "codex")}
-	sel, e := consultFloorSelectWith(t, consultFloorOpts{block: reviewerBlock("prefer_other")}, rows, consultFloorBothPools, "S", "anthropic")
-	if e != nil || sel.chosen.seat.Canon != "codex-sol" {
-		t.Fatalf("chosen=%v err=%v, want codex-sol", sel.chosen, e)
-	}
-	if got := candOutcome(sel.record(), "opus", "high")["reason"]; got != "family_excluded" {
-		t.Fatalf("consult must still drop the asker's family: %v", got)
-	}
-}
-
 // The spawn admission applies the same rule: Check keeps the strict refusal;
 // check with sameFamilyOK admits a same-family or unreadable-family reviewer.
 func TestSeatCheckReviewerFamilyRuleT5897(t *testing.T) {
@@ -163,7 +150,7 @@ func TestReviewerSameFamilyOKT5897(t *testing.T) {
 		{&routing{rule: &RoutingRule{FamilyRule: "prefer_other"}}, true},
 		{&routing{rule: &RoutingRule{FamilyRule: "not_author"}}, false},
 	} {
-		if got := tc.r.reviewerSameFamilyOK(); got != tc.want {
+		if got := tc.r.sameFamilyOK(); got != tc.want {
 			t.Errorf("%+v: %v, want %v", tc.r, got, tc.want)
 		}
 	}

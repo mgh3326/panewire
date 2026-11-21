@@ -81,7 +81,9 @@ The hub uses the consult floor (`hk:doc policy/model-families` §Consult):
 
 - the task's title grade + one rung, capped at SS; a task without a grade asks
   at S+; a design-session lane asks at SS;
-- a family other than the author's;
+- a family other than the author's, preferred rather than required: a
+  same-family seat is chosen only when it has more quota room, unless the
+  consult role sets `family_rule` `not_author` (decision 467, hk 5917);
 - a consult-eligible catalog row through the ordinary quota gate.
 
 No seat is state `refused` with the reason (quota, no row, unknown author
@@ -113,7 +115,7 @@ task/role reservation (hk 4568).
 | `cancelled` | reserved for an operator cancel; no route in phase 1 |
 
 A lost or failed job gets one respawn on the next eligible seat (the failed
-seat profile is excluded, the family and floor rules still apply), then
+seat profile is excluded, the family preference and floor rules still apply), then
 `failed`. A report that completes but lacks a section fails without a respawn.
 A queued row whose spawn operation is missing (a crash between the row and the
 claim) is started by the coordinator once its pre-claim lease expires; the

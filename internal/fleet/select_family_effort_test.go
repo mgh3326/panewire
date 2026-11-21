@@ -10,11 +10,11 @@ import (
 // hk 2595: roles.<role>.family_effort sets a lead/consult family's
 // role-effort rung and opts that exact escalation rung in.
 
-const consultRuleV1 = `"consult":     {"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait"}`
+const consultRuleV1 = `"consult":     {"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait", "family_rule": "not_author"}`
 
 func consultFamilyEffortBlock(t *testing.T, familyEffort string) string {
 	t.Helper()
-	lead := strings.Replace(consultRuleV1, `"on_exhaustion": "wait"}`, `"on_exhaustion": "wait", "family_effort": `+familyEffort+`}`, 1)
+	lead := strings.Replace(consultRuleV1, `"family_rule": "not_author"}`, `"family_rule": "not_author", "family_effort": `+familyEffort+`}`, 1)
 	block := strings.Replace(routingBlockV1, consultRuleV1, lead, 1)
 	if block == routingBlockV1 {
 		t.Fatal("routingBlockV1 lead rule moved; update consultRuleV1")

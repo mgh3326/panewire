@@ -664,8 +664,8 @@ func (h *HubServer) consultJobFailed(ctx context.Context, c hubConsult, reason s
 }
 
 // respawnConsult runs the single allowed second attempt on the next eligible
-// seat: still at the consult floor and in another family, never the seat that
-// failed.
+// seat: still at the consult floor, preferring another family, never the seat
+// that failed.
 // consultLease bounds the save-then-claim window: long enough for a request
 // to finish, half the remaining time so recovery still fits before the
 // deadline, and never longer than consultRecoverGrace.

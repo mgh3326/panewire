@@ -16,7 +16,7 @@ import (
 const routingBlockV1 = `{
   "version": 1,
   "roles": {
-    "consult":     {"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait"},
+    "consult":     {"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait", "family_rule": "not_author"},
     "implementer": {"allowed": ["sonnet", "opus", "codex-terra61", "codex-sol", "devin-swe2", "devin-swe2-medium", "devin-swe2-max", "cmd-dsflash41"], "effort": "high", "on_exhaustion": "wait"},
     "explorer":    {"allowed": ["sonnet", "haiku", "codex-luna", "devin-swe2-medium", "agy-flash38-high"], "effort": "medium", "on_exhaustion": "downgrade_to", "downgrade_to": ["haiku", "devin-swe2-medium"]},
     "reviewer":    {"allowed": ["*"], "effort": "high", "on_exhaustion": "escalate", "family_rule": "not_author"},
