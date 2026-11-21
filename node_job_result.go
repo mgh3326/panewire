@@ -56,7 +56,14 @@ type nodeJobResult struct {
 
 // nodeJobTerminalKinds are the ledger kinds that end a job. The newest one in
 // sequence order is the job's terminal event.
-var nodeJobTerminalKinds = map[string]bool{"job.completed": true, "job.lost": true, "job.reaped": true, "job.revoked": true}
+//
+// The set adds the end kinds readNodeCloseTarget treats as ended
+// (node_pane_close_op.go): a job that ends with a handoff or a settled record
+// has no later terminal event, and reading it as "" would hide that it ended.
+var nodeJobTerminalKinds = map[string]bool{
+	"job.completed": true, "job.completion": true, "job.handed_off": true,
+	"job.lost": true, "job.reaped": true, "job.record_settled": true, "job.revoked": true,
+}
 
 // nodeJobTerminal reads the job's terminal event through the shared ledger
 // reader. A missing events/ holds no terminal event.

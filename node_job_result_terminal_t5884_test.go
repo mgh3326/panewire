@@ -121,3 +121,36 @@ func TestNodeJobResultTerminalEventValidation(t *testing.T) {
 		t.Fatal("a missing job without terminal_event is valid")
 	}
 }
+
+// A job whose newest end record is a handoff or a settled record reports that
+// kind, not an earlier completion or "" (hk 5884 review).
+func TestNodeJobResultTerminalEventEndKinds(t *testing.T) {
+	client, report := nodeReapJobDir(t, "job-a", "report.md")
+	events := filepath.Join(filepath.Dir(report), "events")
+	if err := os.MkdirAll(events, 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, kind string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(events, name), []byte(`{"kind":"`+kind+`"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("00001-job.completed.json", "job.completed")
+	write("00002-job.handed_off.json", "job.handed_off")
+	got, _ := client.nodeJobResult(nodeJobResultArgs{Job: "job-a"})
+	if result := got.(nodeJobResult); result.TerminalEvent == nil || *result.TerminalEvent != "job.handed_off" {
+		t.Fatalf("completed then handed_off: %+v", result)
+	}
+	write("00003-job.record_settled.json", "job.record_settled")
+	got, _ = client.nodeJobResult(nodeJobResultArgs{Job: "job-a"})
+	if result := got.(nodeJobResult); result.TerminalEvent == nil || *result.TerminalEvent != "job.record_settled" {
+		t.Fatalf("record_settled: %+v", result)
+	}
+	for _, kind := range []string{"job.handed_off", "job.completion", "job.record_settled"} {
+		kind := kind
+		if !validNodeJobResult(nodeJobResult{Found: true, FindingsError: "missing", TerminalEvent: &kind}) {
+			t.Fatalf("%q should be valid", kind)
+		}
+	}
+}

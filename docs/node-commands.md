@@ -1579,7 +1579,8 @@ still reads `present: true`, with `sha256` taken from the job's newest
 having been facts of the deleted file. `completed`
 is true when the local event ledger contains a `job.completed` event.
 `terminal_event` is the kind of the job's newest terminal ledger event: the last
-of `job.revoked`, `job.reaped`, `job.completed` and `job.lost` in `events/`
+of `job.revoked`, `job.reaped`, `job.completed`, `job.completion`, `job.lost`,
+`job.handed_off` and `job.record_settled` in `events/`
 in sequence order (the ledger's own order, read by the shared ledger reader),
 or `""` when the ledger holds none. A job with no `events/` directory is `""`.
 The field is omitted when the ledger cannot be read or the node predates it; a
