@@ -1393,8 +1393,11 @@ lower-grade task. The pool's other rows follow its seat.
 row); `profile@effort` is the catalog row's profile and effort, the grade is
 the task's. It is read only in the ranked band. A named row that is not a
 candidate (dropped, wrong pool, grade below the task's) leaves the pool on its
-lowest-fit seat. The embedded default sends Command Code's B and C tasks to
-`omp-dsflash41@high`:
+lowest-fit seat. The embedded default has no `seats` entry: Command Code's B and
+C tasks take the catalog's own seat, `omp-musespark13c`, on every host. A host
+that wants a different row for a pool and grade names it in its own
+`pool-order.json`, as in this example, which sends Command Code's B and C tasks
+to `omp-dsflash41@high`:
 
 ```json
 "seats": {"commandcode": {"B": "omp-dsflash41@high", "C": "omp-dsflash41@high"}}
