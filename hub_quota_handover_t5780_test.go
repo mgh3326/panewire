@@ -655,40 +655,22 @@ func TestHandoverCloseIsBoundToTheAdmittedAttempt_t5780(t *testing.T) {
 	}
 }
 
-// hk 5780 round 4: a close the node journaled as closing, on a node that came back
-// without the close fence, with the pane still present. Nothing is sent that could
-// close unfenced and no retry row is made: the original row is given up (released
-// through the existing path), the owner gets exactly one notice, and no successor
-// is started.
+// hk 5780 round 4, hk 5798: a close the node journaled as closing, on a node that
+// came back without the close fence, with the pane still present. Nothing is sent
+// that could close unfenced and no retry row is made: the original row is withdrawn
+// (it keeps the job's fence), the owner gets exactly one notice, and no successor
+// is started. The withdrawal's recovery is in hub_pool_action_withdrawn_t5798_test.go.
 func TestClosingFencedHandoverOnADowngradedNodeIsGivenUpNotReplayed_t5780(t *testing.T) {
 	const job = "pw-closing-5780"
-	f := announcedFixture(t, job)
-	queueAnnouncedRow(t, f, "ev-1")
-	action := readOnlyPoolAction(t, f.hub)
-	if err := runPoolActionStep(t, f.hub, f.node, action,
-		poolStatus(nodeCloseOpNone, false, false),
-		idlePane(job, "/work/project.checkout", "idle"),
-		idlePane(job, "/work/project.checkout", "idle"),
-		poolActionReply{op: nodeCommandPaneCloseOp, result: map[string]any{"outcome": fleet.CloseOpClosed, "replayed": false}},
-	); err != nil {
-		t.Fatal(err)
-	}
-	f.hub.mu.Lock()
-	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseOpStopSeq)
-	f.hub.mu.Unlock()
-	action = readOnlyPoolAction(t, f.hub)
-	closing := poolActionReply{op: nodeCommandPaneCloseStatus, result: map[string]any{"state": fleet.CloseOpClosing, "released": false, "settled": false, "attempt": "00002-job.spawned.json"}}
-	// The only commands: the status read and the release of the original request.
-	// A close (pane.close_op) or a probe for a retry would fail the script.
-	if err := runPoolActionStep(t, f.hub, f.node, action, closing, poolActionReply{op: nodeCommandPaneCloseRelease, result: map[string]any{"state": fleet.CloseOpClosing, "released": false, "settled": false, "attempt": "00002-job.spawned.json"}}); err != nil {
+	f, action := closingOnDowngradedNode(t, job)
+	// The only command: the status read. A close (pane.close_op), a release or a
+	// probe for a retry would fail the script.
+	if err := runPoolActionStep(t, f.hub, f.node, action, closingStatus); err != nil {
 		t.Fatal(err)
 	}
 	rows, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job)
-	if len(rows) != 1 || rows[0].ID != action.ID || rows[0].Phase != poolActionRefused || rows[0].Data.Handover.Reason != "stop_seq_unsupported" || rows[0].Data.Handover.StopSeq == nil {
-		t.Fatalf("rows=%+v, want the original row given up with its fence recorded and no retry row", rows)
-	}
-	if owner, _ := f.hub.inbox.store.poolActionsOf(t.Context(), job); len(owner) != 1 {
-		t.Fatalf("a new request id was made: %+v", owner)
+	if len(rows) != 1 || rows[0].ID != action.ID || rows[0].Phase != poolActionPending || !rows[0].Data.Withdrawn || rows[0].Data.Handover.Outcome != handoverFailed || rows[0].Data.Handover.Reason != "stop_seq_unsupported" || rows[0].Data.Handover.StopSeq == nil {
+		t.Fatalf("rows=%+v, want the original row withdrawn with its fence recorded and no retry row", rows)
 	}
 	lines := ownerLines(t, f.hub, "pool-handover:")
 	if len(lines) != 1 || !strings.Contains(lines[0], "unsettled after a node downgrade") || !strings.Contains(lines[0], roleHeldPane) {
@@ -697,8 +679,8 @@ func TestClosingFencedHandoverOnADowngradedNodeIsGivenUpNotReplayed_t5780(t *tes
 	if ids := spawnOperations(t, f.hub, job+"-q1"); len(ids) != 0 {
 		t.Fatalf("a successor was started: %v", ids)
 	}
-	if owns, _ := f.hub.inbox.store.poolActionOwns(t.Context(), job); owns != "" {
-		t.Fatalf("the job is still fenced by %s", owns)
+	if owns, _ := f.hub.inbox.store.poolActionOwns(t.Context(), job); owns != action.ID {
+		t.Fatalf("the withdrawn row does not hold the job's fence: %q", owns)
 	}
 }
 
