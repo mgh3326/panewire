@@ -674,7 +674,15 @@ cancelled and released, settled, or superseded answers are final. Superseded
 ends the old action without a notice and permits a later sweep of the new
 attempt. `intent_cancelled` stops the close action without a notice or role
 release but keeps its reassignment fence until hk is terminal or the node
-reports synced settlement. A mismatch or `not-a-job` stays pending until release
+reports synced settlement. A fenced hand-over (`stop_seq`) whose close the node holds as `closing`, after a
+downgrade below `pane_close_op_stop_seq_v1`, is *withdrawn* (hk 5798): one row
+update records `handover_failed` and the withdrawal, the owner gets one notice,
+and the row keeps the job's fence. A withdrawn row is never offered a close or a
+retry. Each pass it asks the node for status and, for a `closing` journal, repeats
+its request id without `stop_seq`, which the node settles as `unknown` before any
+herdr call. It ends only on the node's proof: settled, a cancelled or refused
+request, a missing-job answer (retired), or `intent_cancelled` (guarded).
+A mismatch or `not-a-job` stays pending until release
 provides a durable tombstone, or, for a job whose directory is gone, until the
 node's missing-job answer (above) fences the request. `reassignJob` refuses while any action for the
 job remains pending or guarded; a configured store error fails closed. An

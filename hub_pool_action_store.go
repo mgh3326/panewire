@@ -57,6 +57,12 @@ type poolActionData struct {
 	// Acked is set once the node confirmed the hub's ack of its
 	// intent_cancelled answer (hk 5073); a guarded action then asks no more.
 	Acked bool
+	// Withdrawn marks a hand-over the hub gave up (hk 5798): handover_failed is
+	// recorded and the row stays non-final, so it keeps the job's fence until
+	// the node proves the close intent settled or cancelled. It is written in
+	// the same row update as the outcome, never after it, and a withdrawn row is
+	// never offered a close or a retry (reconcileWithdrawnPoolAction).
+	Withdrawn bool `json:",omitempty"`
 }
 
 // retryPoolAction atomically keeps the uncertain request fenced and records
@@ -77,7 +83,7 @@ func (s *laneInboxStore) retryPoolAction(parent context.Context, action, retry p
 	if err := json.Unmarshal([]byte(currentData), &current); err != nil {
 		return false, err
 	}
-	if now.UnixMilli() < current.RetryAfter {
+	if current.Withdrawn || now.UnixMilli() < current.RetryAfter {
 		return false, nil
 	}
 	if current.RetryID != "" {
