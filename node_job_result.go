@@ -48,21 +48,10 @@ type nodeJobResult struct {
 	// (hub_pool_handover.go nodeResumes), so it hands over rather than waits.
 	QuotaResumes *int `json:"quota_resumes,omitempty"`
 	// TerminalEvent is the kind of the job's newest terminal ledger event
-	// (nodeJobTerminalKinds), or "" when the ledger holds none. Nil is a
+	// (nodeJobTerminalEvent), or "" when the ledger holds none. Nil is a
 	// ledger that could not be read, or a node that predates the field: the
 	// caller falls back to completed, never reads it as "".
 	TerminalEvent *string `json:"terminal_event,omitempty"`
-}
-
-// nodeJobTerminalKinds are the ledger kinds that end a job. The newest one in
-// sequence order is the job's terminal event.
-//
-// The set adds the end kinds readNodeCloseTarget treats as ended
-// (node_pane_close_op.go): a job that ends with a handoff or a settled record
-// has no later terminal event, and reading it as "" would hide that it ended.
-var nodeJobTerminalKinds = map[string]bool{
-	"job.completed": true, "job.completion": true, "job.handed_off": true,
-	"job.lost": true, "job.reaped": true, "job.record_settled": true, "job.revoked": true,
 }
 
 // nodeJobTerminal reads the job's terminal event through the shared ledger
@@ -77,7 +66,7 @@ func nodeJobTerminal(job *os.Root) (string, error) {
 	}
 	terminal := ""
 	for _, event := range events {
-		if nodeJobTerminalKinds[event.kind] {
+		if nodeJobTerminalEvent(event.kind) {
 			terminal = event.kind
 		}
 	}
@@ -306,7 +295,7 @@ func validNodeJobResult(r nodeJobResult) bool {
 	if r.QuotaResumes != nil && *r.QuotaResumes < 0 {
 		return false
 	}
-	if r.TerminalEvent != nil && *r.TerminalEvent != "" && !nodeJobTerminalKinds[*r.TerminalEvent] {
+	if r.TerminalEvent != nil && *r.TerminalEvent != "" && !nodeJobTerminalEvent(*r.TerminalEvent) {
 		return false
 	}
 	if !r.Found {

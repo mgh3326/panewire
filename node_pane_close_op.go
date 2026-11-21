@@ -564,9 +564,7 @@ func readNodeCloseTarget(job *os.Root) (nodeCloseTarget, error) {
 			} else {
 				target.ended = true
 			}
-		case event.kind == "job.completed", event.kind == "job.completion", event.kind == "job.record_settled",
-			event.kind == "job.joined", event.kind == "job.revoked",
-			event.kind == "job.handed_off", event.kind == "job.escalate", event.kind == "job.reaped":
+		case nodeJobEndKinds[event.kind]:
 			target.ended = true
 		}
 	}

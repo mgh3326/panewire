@@ -154,3 +154,52 @@ func TestNodeJobResultTerminalEventEndKinds(t *testing.T) {
 		}
 	}
 }
+
+// terminal_event and the close target read one end-kind set. For every kind
+// the two callers agree on whether the job ended, and job.joined is among
+// the ended kinds (hk 5884 decision).
+func TestNodeJobResultTerminalEventAgreesWithCloseTarget(t *testing.T) {
+	client, report := nodeReapJobDir(t, "job-a", "report.md")
+	events := filepath.Join(filepath.Dir(report), "events")
+	jobRoot, err := os.OpenRoot(filepath.Dir(report))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jobRoot.Close()
+	ledgerWith := func(t *testing.T, kind string) {
+		t.Helper()
+		if err := os.RemoveAll(events); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(events, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(events, "00001-"+kind+".json"), []byte(`{"kind":"`+kind+`"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, kind := range []string{"job.completed", "job.completion", "job.record_settled", "job.joined", "job.revoked", "job.handed_off", "job.escalate", "job.reaped", "job.lost"} {
+		ledgerWith(t, kind)
+		target, err := readNodeCloseTarget(jobRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := client.nodeJobResult(nodeJobResultArgs{Job: "job-a"})
+		terminal := *got.(nodeJobResult).TerminalEvent
+		if !target.ended || terminal != kind {
+			t.Fatalf("%s: ended=%v terminal_event=%q, want ended and terminal_event=%s", kind, target.ended, terminal, kind)
+		}
+	}
+	// Kinds outside the set are not an end on either side.
+	for _, kind := range []string{"job.aborted", "worker.complete", "job.claim", "job.spawned"} {
+		ledgerWith(t, kind)
+		target, err := readNodeCloseTarget(jobRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := client.nodeJobResult(nodeJobResultArgs{Job: "job-a"})
+		if target.ended || *got.(nodeJobResult).TerminalEvent != "" {
+			t.Fatalf("%s: ended=%v, want neither end", kind, target.ended)
+		}
+	}
+}

@@ -178,6 +178,23 @@ func readNodeJobLedger(job *os.Root, pane, label string) (nodeJobLedger, error) 
 	return ledger, nil
 }
 
+// nodeJobEndKinds are the ledger kinds that end an attempt on this node. The
+// close target (readNodeCloseTarget) and terminal_event (job.result) both read
+// this one set, so they cannot disagree. job.lost is not here: it ends an
+// attempt unless it announces a quota-stop hand-over, which only the close
+// target decides (nodeJobTerminalEvent counts it as terminal).
+var nodeJobEndKinds = map[string]bool{
+	"job.completed": true, "job.completion": true, "job.record_settled": true,
+	"job.joined": true, "job.revoked": true, "job.handed_off": true,
+	"job.escalate": true, "job.reaped": true,
+}
+
+// nodeJobTerminalEvent reports whether a ledger kind is a job's terminal event
+// for job.result's terminal_event.
+func nodeJobTerminalEvent(kind string) bool {
+	return kind == "job.lost" || nodeJobEndKinds[kind]
+}
+
 // readNodeJobLedgerEvents parses the job's events in file order, which is
 // sequence order.
 func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
