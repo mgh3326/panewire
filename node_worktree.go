@@ -1284,7 +1284,7 @@ func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *node
 		// Another worktree of this clone holds the branch. The node never
 		// forces or steals it; only a finished predecessor's clean, pushed
 		// checkout is released (hk 5870).
-		if !nodeReleaseHeldBranch(ctx, git, clone, *held, originTip) {
+		if !client.nodeReleaseHeldBranch(ctx, git, clone, *held, originTip) {
 			result.Reason = "worktree=" + held.Path
 			return nodePrepareBranchInUse
 		}
@@ -1413,9 +1413,11 @@ func nodeBranchHolder(entries []nodeWorktreeEntry, dir, branch string) *nodeWork
 // branch out on this node (hk 5870). It goes only when nothing in the worktree
 // would be lost: unlocked, on the branch, no tracked, untracked or ignored
 // change, and HEAD at the tip origin holds, so every commit it has is pushed.
-// The removal is `git worktree remove` without --force; the branch itself lives
-// in the clone, so it survives the worktree.
-func nodeReleaseHeldBranch(ctx context.Context, git relayCommandRunner, clone string, held nodeWorktreeEntry, originTip string) bool {
+// It also goes only when no live pane sits inside it (a fresh `herdr pane
+// list`): a job still working there would lose its cwd. A pane read that fails
+// keeps the holder. The removal is `git worktree remove` without --force; the
+// branch itself lives in the clone, so it survives the worktree.
+func (client *HubClient) nodeReleaseHeldBranch(ctx context.Context, git relayCommandRunner, clone string, held nodeWorktreeEntry, originTip string) bool {
 	if held.Locked || held.Detached || originTip == "" {
 		return false
 	}
@@ -1426,6 +1428,9 @@ func nodeReleaseHeldBranch(ctx context.Context, git relayCommandRunner, clone st
 	// --ignored: `git worktree remove` deletes ignored files without --force.
 	status, err := git(ctx, "-C", held.Path, "status", "--porcelain", "--ignored")
 	if err != nil || strings.TrimSpace(string(status)) != "" {
+		return false
+	}
+	if inUse, err := client.nodePaneInUse(ctx, held.Path); err != nil || inUse {
 		return false
 	}
 	_, err = git(ctx, "-C", clone, "worktree", "remove", held.Path)

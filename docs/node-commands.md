@@ -1288,9 +1288,10 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   `branch_in_use` with `reason` `worktree=<dir>`; the branch is never forced or
   stolen. The one exception (hk 5870) is a finished predecessor's checkout that
   is unlocked, on that branch, clean with no ignored file either (`git status
-  --porcelain --ignored` empty), and whose HEAD is the tip origin holds: the node
-  removes it with `git worktree remove` (never `--force`) and prepares the
-  successor there. Any other holder still refuses. A worktree at `dir` is reused only on that branch, clean, at the
+  --porcelain --ignored` empty), whose HEAD is the tip origin holds, and inside
+  which no live pane sits (a fresh `herdr pane list`; an unreadable list counts
+  as in use): the node removes it with `git worktree remove` (never `--force`)
+  and prepares the successor there. Any other holder still refuses. A worktree at `dir` is reused only on that branch, clean, at the
   commit; a local branch behind the commit is fast-forwarded and one ahead or
   diverged refuses. The prepared worktree sits on the local branch, which
   tracks `origin/<branch>` so a plain `git push` pushes it, and the result

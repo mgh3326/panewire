@@ -1,6 +1,8 @@
 package panewire
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +85,56 @@ func TestNodePrepareSuccessorReleasesHolderAtSnapshot5870(t *testing.T) {
 	}
 	if _, err := os.Stat(held); !os.IsNotExist(err) {
 		t.Fatalf("the clean predecessor worktree %s survived (err=%v)", held, err)
+	}
+}
+
+// A clean pushed holder that a live pane still works in is refused: the pane's
+// cwd would vanish mid-job. A pane read that fails keeps the holder too, since
+// the node cannot prove the holder is idle.
+func TestNodePrepareSuccessorKeepsHolderWithLivePane5870(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(fixture *nodeWorktreeFixture, held string)
+	}{
+		{
+			name: "a live pane inside the holder",
+			setup: func(fixture *nodeWorktreeFixture, held string) {
+				panes, err := json.Marshal(map[string]any{"result": map[string]any{"panes": []map[string]any{
+					{"pane_id": "p-live", "agent_status": "working", "cwd": filepath.Join(held, "sub")},
+				}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixture.herdr.panes = string(panes)
+			},
+		},
+		{
+			name: "an unreadable pane list",
+			setup: func(fixture *nodeWorktreeFixture, held string) {
+				fixture.herdr.panesErr = errors.New("herdr unavailable")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newNodeWorktreeFixture(t)
+			client := fixture.client()
+			held := fixture.holdBranch(t, "repo.parent", "feat")
+			tc.setup(fixture, held)
+			dir := filepath.Join(fixture.workRoot, "repo.job")
+			args := fixture.prepareArgs(fleet.HubCheckoutSuccessor, "feat", fixture.feat, "", "repo.job")
+
+			result, code := nodeRun(t, client, nodeCommandWorktreePrepare, args)
+			if code != "" || result["outcome"] != nodePrepareBranchInUse {
+				t.Fatalf("prepare outcome=%v code=%q, want %q", result["outcome"], code, nodePrepareBranchInUse)
+			}
+			if _, err := os.Stat(held); err != nil {
+				t.Fatalf("the holder %s with a live pane was removed: %v", held, err)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("a refused prepare created %s (err=%v)", dir, err)
+			}
+		})
 	}
 }
 
