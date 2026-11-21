@@ -113,7 +113,14 @@ func (client *HubClient) settleExecutingSpawn(ctx context.Context, journal *node
 	if row.Job == "" {
 		result = lostSpawnResult(result, spawnLostNoJobRecorded, false)
 	} else {
-		spawned := client.readLocalSpawnRecord(row.Job)
+		spawned, recorded := client.readLocalSpawnRecord(row.Job)
+		if recorded && spawned.NodeRequestID != row.RequestID {
+			// The newest job.spawned is another attempt's, or predates the
+			// request binding: it never proves this row's landing, and no
+			// other answer is provable from it, so the row stays executing
+			// and the replay answers unknown (hk 5829).
+			return nil, false
+		}
 		session := firstNonempty(spawned.HerdrSession, client.nodeSpawnSession())
 		evidence, ok := client.readSpawnEvidence(ctx, session)
 		if !ok {
@@ -278,22 +285,27 @@ func lostSpawnResult(result hubSpawnResult, reason string, retryable bool) hubSp
 }
 
 // localSpawnRecord is the part of a job's newest job.spawned event the settle
-// reads: where the pane is and what the hub's pane check compares.
+// reads: where the pane is, what the hub's pane check compares, and the node
+// request the record belongs to (hk 5829).
 type localSpawnRecord struct {
 	PaneID, HerdrSession, Host, Profile, Model, Role, CWD string
 	Pool, AccountKey                                      string
 	LaneUnregistered                                      bool
 	CheckoutMode                                          string
+	NodeRequestID                                         string
 }
 
-func (client *HubClient) readLocalSpawnRecord(job string) localSpawnRecord {
+// readLocalSpawnRecord returns the job's newest job.spawned record and
+// whether one was found at all; the second value tells a missing record from
+// a record that carries no request binding.
+func (client *HubClient) readLocalSpawnRecord(job string) (localSpawnRecord, bool) {
 	if client.jobsInboxRoot == "" || !hubJobIDPattern.MatchString(job) {
-		return localSpawnRecord{}
+		return localSpawnRecord{}, false
 	}
 	dir := filepath.Join(client.jobsInboxRoot, "jobs", job, "events")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return localSpawnRecord{}
+		return localSpawnRecord{}, false
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -302,7 +314,8 @@ func (client *HubClient) readLocalSpawnRecord(job string) localSpawnRecord {
 		}
 	}
 	sort.Strings(names)
-	var found localSpawnRecord
+	var record localSpawnRecord
+	found := false
 	for _, name := range names {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil || len(data) > 16<<10 {
@@ -322,15 +335,17 @@ func (client *HubClient) readLocalSpawnRecord(job string) localSpawnRecord {
 				Pool             string `json:"pool"`
 				AccountKey       string `json:"account_key"`
 				CheckoutMode     string `json:"checkout_mode"`
+				NodeRequestID    string `json:"node_request_id"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || firstNonempty(event.Type, event.Kind, event.Event) != "job.spawned" {
 			continue
 		}
 		p := event.Payload
-		found = localSpawnRecord{PaneID: p.PaneID, HerdrSession: p.HerdrSession, Host: p.Host, Profile: p.Profile, Model: p.Model, Pool: p.Pool, AccountKey: p.AccountKey, Role: p.Role, CWD: p.CWD, LaneUnregistered: p.LaneUnregistered, CheckoutMode: p.CheckoutMode}
+		record = localSpawnRecord{PaneID: p.PaneID, HerdrSession: p.HerdrSession, Host: p.Host, Profile: p.Profile, Model: p.Model, Pool: p.Pool, AccountKey: p.AccountKey, Role: p.Role, CWD: p.CWD, LaneUnregistered: p.LaneUnregistered, CheckoutMode: p.CheckoutMode, NodeRequestID: p.NodeRequestID}
+		found = true
 	}
-	return found
+	return record, found
 }
 
 // runSpawnSettle settles at start and retries while a pass leaves rows

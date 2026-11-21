@@ -55,14 +55,25 @@ func newSettleFixture(t *testing.T, herdr relayCommandRunner) *settleFixture {
 	return &settleFixture{client: client, journal: journal, orphan: orphan, started: started, jobs: root}
 }
 
-// recordSpawn writes the job.spawned event the dead process left behind.
+// recordSpawn writes the job.spawned event the dead process left behind,
+// bound to this fixture's request the way a node writes it (hk 5829).
 func (f *settleFixture) recordSpawn(t *testing.T, pane string) {
+	f.recordSpawnID(t, pane, f.orphan.RequestID)
+}
+
+// recordSpawnID writes the record with an explicit node_request_id; "" writes
+// the pre-binding record an older node left.
+func (f *settleFixture) recordSpawnID(t *testing.T, pane, requestID string) {
 	t.Helper()
 	dir := filepath.Join(f.jobs, "jobs", "job-a", "events")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": pane, "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "model_id": "m", "role": "implementer", "cwd": "/work/a", "pool": "codex", "account_key": "codex:0123456789abcdef"}})
+	payload := map[string]any{"pane_id": pane, "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "model_id": "m", "role": "implementer", "cwd": "/work/a", "pool": "codex", "account_key": "codex:0123456789abcdef"}
+	if requestID != "" {
+		payload["node_request_id"] = requestID
+	}
+	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": payload})
 	if err := os.WriteFile(filepath.Join(dir, "01.json"), event, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +119,34 @@ func TestSpawnSettleAnswersReplayFromPane(t *testing.T) {
 	f.client.handleHubSpawn(t.Context(), peer, f.orphan)
 	if got := next(); got.RC != 0 || got.Pane != "w1:p1" || got.Error != "" {
 		t.Fatalf("replay answered %+v", got)
+	}
+}
+
+// hk 5829: the job.spawned record must name this attempt's request. A record
+// another attempt wrote under the same job name — or one an older node wrote
+// without the binding — never proves this row's landing: the row stays
+// executing and the replay answers unknown, not the foreign pane's rc=0.
+func TestSpawnSettleForeignSpawnedRecordStaysExecuting(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		requestID string // "" writes a pre-binding record
+	}{
+		{"another attempt's record", "00000000-0000-4000-8000-000000000999"},
+		{"a record without the binding", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			herdr := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "label-a", "working", "/work/a"))}, panes: settlePanes("w1:p1", "label-a")}
+			f := newSettleFixture(t, herdr.run)
+			f.recordSpawnID(t, "w1:p1", tc.requestID)
+			if settled, left := f.client.settleExecutingSpawns(t.Context(), f.journal); settled != 0 || left != 1 || f.stored(t) != nil {
+				t.Fatalf("settled=%d left=%d stored=%+v", settled, left, f.stored(t))
+			}
+			peer, next := settlePeer(t)
+			f.client.handleHubSpawn(t.Context(), peer, f.orphan)
+			if got := next(); got.RC != 75 || got.Error != "unknown" {
+				t.Fatalf("replay answered %+v", got)
+			}
+		})
 	}
 }
 
@@ -329,7 +368,7 @@ func TestSpawnSettleKeepsLaneUnregistered(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "cwd": "/work/a", "lane_unregistered": true}})
+	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "cwd": "/work/a", "lane_unregistered": true, "node_request_id": f.orphan.RequestID}})
 	if err := os.WriteFile(filepath.Join(dir, "01.json"), event, 0600); err != nil {
 		t.Fatal(err)
 	}

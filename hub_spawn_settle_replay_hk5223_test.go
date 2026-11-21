@@ -38,7 +38,7 @@ func settledSparseRestart(t *testing.T) (*settleFixture, hubOutboundMessage, hub
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "model_id": "m", "role": "implementer", "cwd": "/work/a", "pool": "codex", "account_key": "codex:0123456789abcdef", "checkout_mode": nodeCheckoutSparse}})
+	event, _ := json.Marshal(map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w1:p1", "herdr_session": "worker", "host": "machine-a", "profile": "codex-terra", "model_id": "m", "role": "implementer", "cwd": "/work/a", "pool": "codex", "account_key": "codex:0123456789abcdef", "checkout_mode": nodeCheckoutSparse, "node_request_id": withLists.RequestID}})
 	if err := os.WriteFile(filepath.Join(dir, "01.json"), event, 0600); err != nil {
 		t.Fatal(err)
 	}

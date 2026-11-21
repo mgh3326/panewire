@@ -314,16 +314,17 @@ func TestSpawnSettleRestartPreservesSparseCheckoutMode(t *testing.T) {
 	event, _ := json.Marshal(map[string]any{
 		"kind": "job.spawned",
 		"payload": map[string]any{
-			"pane_id":       "w1:p1",
-			"herdr_session": "worker",
-			"host":          "machine-a",
-			"profile":       "codex-terra",
-			"model_id":      "m",
-			"role":          "implementer",
-			"cwd":           "/work/a",
-			"pool":          "codex",
-			"account_key":   "codex:0123456789abcdef",
-			"checkout_mode": nodeCheckoutSparse,
+			"pane_id":         "w1:p1",
+			"herdr_session":   "worker",
+			"host":            "machine-a",
+			"profile":         "codex-terra",
+			"model_id":        "m",
+			"role":            "implementer",
+			"cwd":             "/work/a",
+			"pool":            "codex",
+			"account_key":     "codex:0123456789abcdef",
+			"checkout_mode":   nodeCheckoutSparse,
+			"node_request_id": f.orphan.RequestID,
 		},
 	})
 	if err := os.WriteFile(filepath.Join(dir, "01.json"), event, 0600); err != nil {

@@ -250,7 +250,9 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	// successor refusal names in its error; an older hub's strict parser
 	// would drop the whole answer for it (hk 5118).
 	message.checkoutBranchReply = peer.acceptsCheckoutBranch.Load()
-	result := client.runClaimedHubSpawn(fleet.WithSpawnLanded(admissionCtx, func() { client.sendSpawnStarted(ctx, peer, message.RequestID) }), message)
+	// WithSpawnNodeRequestID binds the job.spawned record to this request, so
+	// a restart settle accepts only this attempt's landing (hk 5829).
+	result := client.runClaimedHubSpawn(fleet.WithSpawnNodeRequestID(fleet.WithSpawnLanded(admissionCtx, func() { client.sendSpawnStarted(ctx, peer, message.RequestID) }), message.RequestID), message)
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
 	if ctx.Err() != nil && result.RC != 0 {
