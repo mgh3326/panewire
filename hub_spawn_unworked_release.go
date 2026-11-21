@@ -115,6 +115,13 @@ func (h *HubServer) closeHeldPaneAfter(ctx context.Context, holder hubSpawnTask,
 	return h.closeHeldPaneFenced(ctx, holder, name, row, questionJob, beforeClose, nil)
 }
 
+// captureHeldPane saves the pane's screen through its node.
+func (h *HubServer) captureHeldPane(ctx context.Context, machine, name string, row nodeAgentRow) bool {
+	var captured nodePaneCaptureResult
+	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, AllowUnnamed: row.Name == "", MergedAfter: 0, Write: true}
+	return h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) && captured.Outcome == nodeCaptureScreen
+}
+
 func (h *HubServer) closeHeldPaneFenced(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string, beforeClose func() error, stopSeq *int64) (bool, string) {
 	machine := spawnHolderHost(holder)
 	// An older node decodes pane.close strictly and would refuse the whole
@@ -123,9 +130,7 @@ func (h *HubServer) closeHeldPaneFenced(ctx context.Context, holder hubSpawnTask
 	if questionJob != "" && !h.nodeHasCapability(machine, hubCapabilityCloseQuestion) {
 		return false, "question_unsupported"
 	}
-	var captured nodePaneCaptureResult
-	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, AllowUnnamed: row.Name == "", MergedAfter: 0, Write: true}
-	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
+	if !h.captureHeldPane(ctx, machine, name, row) {
 		return false, "capture_failed"
 	}
 	if beforeClose != nil && beforeClose() != nil {

@@ -76,6 +76,10 @@ type escalateFixture struct {
 	// carried the close marker when the node was asked to capture and to close.
 	markerAtCapture, markerAtClose bool
 
+	// extraReply answers an op before the defaults, for a test that needs a
+	// node answer the common fixture does not model; nil/absent falls through.
+	extraReply func(op string, command map[string]json.RawMessage) map[string]any
+
 	mu       sync.Mutex
 	commands []map[string]json.RawMessage
 }
@@ -254,7 +258,13 @@ func (f *escalateFixture) serveNode(ctx context.Context, t *testing.T) {
 		_ = json.Unmarshal(command["request_id"], &requestID)
 		_ = json.Unmarshal(command["op"], &op)
 		message := map[string]any{"type": "node.command.result", "request_id": requestID, "op": op}
-		for key, value := range f.reply(op) {
+		reply := f.reply(op)
+		if f.extraReply != nil {
+			if extra := f.extraReply(op, command); extra != nil {
+				reply = extra
+			}
+		}
+		for key, value := range reply {
 			message[key] = value
 		}
 		if err := wsjson.Write(ctx, f.node, message); err != nil {

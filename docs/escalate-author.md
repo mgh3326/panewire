@@ -167,6 +167,32 @@ Quota can change after the plan; a refusal during placement after close
 reports the ended author. An unknown pane or placement result is `pending`;
 it is not reported as a successful escalation.
 
+## The close protocol (hk 5865)
+
+The close of the author's pane runs under one of two protocols, frozen on the
+staged successor before anything is sent (the stage's `ladder_step.close`):
+
+- `ladder_close_v1`: the author's node advertises `ladder_close_v1`. The stage
+  stores K (job, node, epoch, attempt, pane), the request id and the pane row
+  the node's guards compare; the hub sends `pane.ladder_close` with exactly
+  that. The first binding written wins, so a second step for the same stage
+  reuses it. The node's record answers every replay.
+- `marker`: any other node keeps `pane.close` plus the staged row's close
+  marker, unchanged.
+
+| verdict | action |
+| --- | --- |
+| `closed`, `gone` | the closed path: the predecessor is marked lost, the stage is activated |
+| `refused`, `fenced` | the node closed nothing: the stage is released, the holder's role restored, today's `pane_not_closed` refusal |
+| `unknown`, no readable answer | the stage is kept and never activated; one decision event `ladder-step:<job>:<round>:unresolved:esc`, shared with the expiry pass |
+
+A stage whose close was sent is withdrawn only after `pane.ladder_close_fence`
+for its request id answers `fenced` (or an already final `closed`/`gone`), so a
+close delayed past the release never runs; a fence with no answer keeps the
+stage. A replay or the expiry pass of a completed author whose pane is gone
+asks the node for the K instead of reading the marker. Step 4 (hk 5866)
+replaces this mapping with one reconciler.
+
 ## Replay
 
 The successor job id is `<old>-l1`. Replay finds its operation before testing

@@ -37,9 +37,9 @@ import (
 // lock (tried once; contention is `unknown`) and one composite fence check made
 // under it (ladderFenceCheck), held through the close; and the
 // pane.ladder_close_fence op (node_pane_close_ladder_fence.go) with the
-// request-id index it finds a K by. The hub does not call these ops yet
-// (step 3, hk 5865): they are admitted only as hub-issued commands and no
-// capability is advertised.
+// request-id index it finds a K by. The hub calls them only on a node that
+// advertises ladder_close_v1 (step 3, hk 5865, hub_escalate_author_ladder.go);
+// they are admitted only as hub-issued commands.
 //
 // A known refusal (a guard) closed nothing and leaves no record, so the next
 // request for the same K is judged afresh. A failure after the intent — a
@@ -48,6 +48,11 @@ import (
 // failed final write leaves `closing`, which never runs again.
 const (
 	nodeCommandLadderClose = "pane.ladder_close"
+
+	// hubCapabilityLadderClose: the node answers pane.ladder_close and
+	// pane.ladder_close_fence (hk 5865). The hub calls them only on a node that
+	// advertises it; any other node keeps pane.close plus the close marker.
+	hubCapabilityLadderClose = fleet.LadderCloseProtocolV1
 
 	// States of a ladder close record. closing is the intent written before
 	// the pane close is asked for; every other state is final.
