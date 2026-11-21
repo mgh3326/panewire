@@ -1580,6 +1580,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			receipt["lane_error"] = s.laneError
 		}
 	}
+	// The hub request this execution answers, so a restart settle can tell
+	// this attempt's record from another launch's under the same job name
+	// (hk 5829).
+	if id := spawnNodeRequestID(ctx); id != "" {
+		receipt["node_request_id"] = id
+	}
 	if e = a.event(ctx, s.Job, "job.spawned", receipt); e != nil {
 		return e
 	}
