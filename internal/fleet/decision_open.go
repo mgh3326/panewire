@@ -114,7 +114,9 @@ func readJobDecisionLedger(dir string) (since time.Time, resumed map[string]bool
 			return time.Time{}, nil, "", err
 		}
 		var event struct {
-			Kind      string `json:"kind"`
+			Kind string `json:"kind"`
+			// Type is the kind of a hub revocation marker, which has no kind.
+			Type      string `json:"type"`
 			CreatedAt string `json:"created_at"`
 			TS        string `json:"ts"`
 			Payload   struct {
@@ -122,7 +124,7 @@ func readJobDecisionLedger(dir string) (since time.Time, resumed map[string]bool
 				EventID string `json:"event_id"`
 			} `json:"payload"`
 		}
-		if err := json.Unmarshal(body, &event); err != nil || event.Kind == "" {
+		if err := json.Unmarshal(body, &event); err != nil || event.Kind == "" && event.Type != "job.revoked" {
 			return time.Time{}, nil, "", errors.New("unreadable job event")
 		}
 		at := eventTime(event.CreatedAt, event.TS)
