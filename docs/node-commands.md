@@ -1286,7 +1286,12 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   prepared. A never-pushed snapshot branch gets no upstream; the first
   `git push` of it names origin and the branch. A worktree of the clone that already holds the branch refuses
   `branch_in_use` with `reason` `worktree=<dir>`; the branch is never forced or
-  stolen. A worktree at `dir` is reused only on that branch, clean, at the
+  stolen. The one exception (hk 5870) is a finished predecessor's checkout that
+  is unlocked, on that branch, clean with no ignored file either (`git status
+  --porcelain --ignored` empty), whose HEAD is the tip origin holds, and inside
+  which no live pane sits (a fresh `herdr pane list`; an unreadable list counts
+  as in use): the node removes it with `git worktree remove` (never `--force`)
+  and prepares the successor there. Any other holder still refuses. A worktree at `dir` is reused only on that branch, clean, at the
   commit; a local branch behind the commit is fast-forwarded and one ahead or
   diverged refuses. The prepared worktree sits on the local branch, which
   tracks `origin/<branch>` so a plain `git push` pushes it, and the result
@@ -1314,7 +1319,7 @@ refused. A missing clone is created with `git clone <origin>`.
 | `cancelled` | The caller's context was cancelled while waiting for the per-clone lock; the lock was never taken, nothing ran, and there is no `retry_after_s`. |
 | `branch-elsewhere` | The branch is checked out elsewhere, `dir` sits on another branch/commit, or the branch is not on origin where required. |
 | `successor_stale` | A successor checkout's freshly fetched `origin/<branch>` is not the commit the request names — or, for a snapshot fetch, not an ancestor of it; `reason` carries `want=<sha> origin=<sha>`. |
-| `branch_in_use` | A successor checkout's branch is held by another worktree of the clone; `reason` carries `worktree=<dir>`. |
+| `branch_in_use` | A successor checkout's branch is held by another worktree of the clone that the node does not release (only a clean, pushed finished predecessor's worktree is released, hk 5870); `reason` carries `worktree=<dir>`. |
 | `sha-missing` | The fetched ref does not resolve to `sha`, or the commit is not in the clone after fetching. |
 | `origin-mismatch` | The existing clone tracks a different owner/repo. |
 | `dirty` | The existing worktree at `dir` has uncommitted or untracked files. |
