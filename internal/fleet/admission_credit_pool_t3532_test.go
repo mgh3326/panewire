@@ -83,17 +83,18 @@ func TestOmpDsflash41RankedAsCreditAlternative(t *testing.T) {
 	}
 }
 
-// The credit role rule applies to omp-dsflash41 as to any credit rung: the
-// reviewer role it gained in hk 3532 is refused at admission (docs/quota.md).
+// The commandcode-pool seat rule (hk 5898, operator decision 464): omp-dsflash41
+// seats an implementer, a builder on a placed default rung, a reviewer and a
+// verifier; consult stays refused (docs/quota.md §Command Code seats).
 func TestOmpDsflash41CreditRoleRule(t *testing.T) {
 	row := admissionRow{Profile: "omp-dsflash41", Effort: "high", Pool: "commandcode", Grade: "A+", Gate: defaultGate, Placed: true}
-	for _, role := range []string{"implementer"} {
+	for _, role := range []string{"implementer", "builder", "reviewer", "verifier"} {
 		if d := admissionRoleCheck(admissionRequest{Profile: "omp-dsflash41", Role: role}, row); d != nil {
-			t.Fatalf("credit rung must seat %s: %s", role, d.msg)
+			t.Fatalf("commandcode rung must seat %s: %s", role, d.msg)
 		}
 	}
-	if d := admissionRoleCheck(admissionRequest{Profile: "omp-dsflash41", Role: "reviewer"}, row); d == nil {
-		t.Fatal("credit rung must not seat a reviewer")
+	if d := admissionRoleCheck(admissionRequest{Profile: "omp-dsflash41", Role: "consult"}, row); d == nil {
+		t.Fatal("commandcode rung must still refuse consult")
 	}
 }
 

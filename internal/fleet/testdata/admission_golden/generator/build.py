@@ -117,7 +117,9 @@ sc("commandcode-30d-missing", {"pool": "commandcode", "profile": "cmd-dsflash41"
    note="New rule (decision/2026-11-06/commandcode-30d-required-in-panewire-gate): a commandcode reading without its 30d window is unmeasurable in panewire's gate. pacelever admits it.",
    native={"ok": False, "exit_code": 4, "provider_id": "commandcode", "reason": "commandcode_required_window_missing:30d", "missing_windows": ["30d"]})
 sc("commandcode-30d-exhausted", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high"}, {"observation": auto([b("5h", 10, t(h=2)), b("7d", 20, t(d=5)), b("30d", 100, t(d=20))])})
-sc("cmd-dsflash41-reviewer-denied", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "reviewer"}, {"observation": auto(CC_OK)})
+sc("cmd-dsflash41-reviewer-denied", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "reviewer"}, {"observation": auto(CC_OK)},
+   note="hk 5898, operator decision 464: the commandcode pool seats a reviewer and a verifier, so pacelever's credit refusal of a commandcode reviewer no longer holds. cmd-dsflash41 keeps its own implementer-only rule (hk 3248), which panewire names here; pacelever names the credit rule it judged first.",
+   native={"ok": False, "exit_code": 5, "provider_id": "commandcode", "reason": "role_restricted: cmd-dsflash41 seats only an implementer"})
 sc("cmd-dsflash41-builder-denied", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "builder"}, {"observation": auto(CC_OK)},
    note="Operator decision 2026-11-07 (hk 3248 comment 11914): cmd-dsflash41 seats only an implementer. pacelever v0.3.28 also seats a builder on a placed default rung.",
    native={"ok": False, "exit_code": 5, "provider_id": "commandcode", "reason": "role_restricted: cmd-dsflash41 seats only an implementer"})

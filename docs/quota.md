@@ -453,7 +453,7 @@ refuses first. The rules, each with its test in
 | An unrated or unplaced rung needs the exact `<canon>@<effort>` marker, except for the consult and builder roles on an unrated rung | `e6_arm_required: exact measurement marker required`, `e6_arm_required: unplaced profile requires exact measurement marker`, `e6_arm_required` |
 | A requested rung that is retired | `rung is retired in the catalog` |
 | A credit or `codex-terra61` request for a rung that is not placed | `e6_arm_required: rung is not placed` |
-| Seat roles: a credit rung seats an implementer, or a builder on a placed default rung; `fable` and `codex-astra` have no role restriction of their own (their rung's gate decides, as for any profile); any other `astra` profile is removed | `role_restricted: …` |
+| Seat roles: a `pi-` credit rung seats an implementer, or a builder on a placed default rung; a commandcode-pool rung also seats a reviewer and a verifier (hk 5898, [Command Code seats](#command-code-seats)); `fable` and `codex-astra` have no role restriction of their own (their rung's gate decides, as for any profile); any other `astra` profile is removed | `role_restricted: …` |
 | An `--operator-request` must be `hk:task/N` or `hk:doc/…` | `operator_request_ref_invalid` |
 | An unsubscribed profile or pool | `profile is unsubscribed` |
 | A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
@@ -576,22 +576,26 @@ Rules beyond pacelever's: a commandcode reading needs its `5h` and `7d` windows 
 nothing monthly (decision 289, hk 4707; this replaces
 decision/2026-11-06/commandcode-30d-required-in-panewire-gate and its
 `commandcode_required_window_missing:30d` refusal). And
-a credit rung seats only an implementer (operator, 2026-11-07 for
-cmd-dsflash41; hk 3532 extends it to every commandcode-pool rung); pacelever
-also seats a builder on a placed default rung.
+a `pi-` credit rung seats only an implementer, or a builder on a placed default
+rung, as pacelever does. The commandcode pool diverges from pacelever on
+purpose (operator decision 464, hk 5898): a commandcode rung also seats a
+reviewer and a verifier, still under the pool's cutoff. Consult stays refused on
+it. `cmd-dsflash41` keeps its own implementer-only rule (operator, 2026-11-07,
+hk 3248).
 
 ### Command Code seats
 
 A rung is a credit rung when its catalog row's pool is `commandcode`
 (`admissionCredit` in `internal/fleet/admission_verdict.go`). The pool decides,
 not the profile name: a credit rung needs an explicit effort, ranks as credit
-among alternatives, and seats only an implementer. The profiles that draw on
+among alternatives, and seats the roles its pool rule admits (see
+[Admission](#admission), hk 5898). The profiles that draw on
 the pool:
 
 | Profile | Harness | How it reaches Command Code | Seat roles | Notes |
 |---|---|---|---|---|
-| `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | implementer | Operator 2026-11-07 (hk 3248): no builder. |
-| `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | implementer, reviewer | The policy seat lists reviewer, but admission refuses it on a credit rung (see below). |
+| `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | implementer | Operator 2026-11-07 (hk 3248): implementer only; no builder, reviewer or verifier. |
+| `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | implementer, reviewer | Admitted as a reviewer or verifier under the pool's cutoff (hk 5898, operator decision 464). |
 | `omp-musespark13` | omp | `commandcode/meta/muse-spark-1.3`, gated by `omp_commandcode` | implementer, reviewer | low, high, max; unrated until routing-policy grades it. |
 | `omp-argon4` | omp | `commandcode/google/gemini-4-argon`, gated by `omp_commandcode` | implementer, reviewer | off only; no thinking levels. |
 | `omp-mimo26pro` | omp | `commandcode/xiaomi/mimo-v2.6-pro`, gated by `omp_commandcode` | implementer, reviewer | off only; no thinking levels. |

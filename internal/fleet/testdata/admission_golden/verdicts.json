@@ -1834,7 +1834,14 @@
      ]
     }
    },
+   "disagreement": "hk 5898, operator decision 464: the commandcode pool seats a reviewer and a verifier, so pacelever's credit refusal of a commandcode reviewer no longer holds. cmd-dsflash41 keeps its own implementer-only rule (hk 3248), which panewire names here; pacelever names the credit rule it judged first.",
    "name": "cmd-dsflash41-reviewer-denied",
+   "native": {
+    "ok": false,
+    "exit_code": 5,
+    "provider_id": "commandcode",
+    "reason": "role_restricted: cmd-dsflash41 seats only an implementer"
+   },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": false,
