@@ -82,9 +82,10 @@ const quotaReplaceMax = 2
 
 var quotaReplaceChain = regexp.MustCompile(`(-q[0-9]+)+$`)
 
-// quotaReplacementJob names the successor of old: "<old>-q<n>", where n counts
-// the replacements already in old's id. It refuses past quotaReplaceMax and
-// an id outside what a job id may be.
+// quotaReplacementJob names the successor of old: "<old>-q<n>" (shortened to
+// herdr's agent name limit by successorName), where n counts the replacements
+// already in old's id. It refuses past quotaReplaceMax and a name that is not
+// a valid agent name and job id.
 func quotaReplacementJob(old string) (job string, n int, ok bool) {
 	n = 1
 	if chain := quotaReplaceChain.FindString(old); chain != "" {
@@ -93,8 +94,8 @@ func quotaReplacementJob(old string) (job string, n int, ok bool) {
 	if n > quotaReplaceMax {
 		return "", n, false
 	}
-	job = fmt.Sprintf("%s-q%d", old, n)
-	return job, n, len(job) <= 128 && hubJobIDPattern.MatchString(job)
+	job, ok = successorName(old, "q", n)
+	return job, n, ok
 }
 
 // quotaReplaceDeadline is the deadline the hub gives the successor's spawn, so
@@ -178,6 +179,15 @@ func (a *quotaAnnouncement) fileLoss(ctx context.Context) {
 // implementer also gets one line naming the earlier job's report and branch to
 // continue from.
 func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude string, role string) (fleet.Submission, error) {
+	wantJob, n, ok := quotaReplacementJob(oldJob)
+	if !ok || wantJob != newJob {
+		return fleet.Submission{}, fmt.Errorf("%q is not the quota replacement of %q", newJob, oldJob)
+	}
+	label := hubSpawnArg(old.Args, "-l")
+	successorLabel, _ := successorName(label, "q", n)
+	if label != "" && !fleet.ValidAgentName(successorLabel) {
+		return fleet.Submission{}, fmt.Errorf("the successor label of %q is not a valid agent name", label)
+	}
 	id, err := fleet.NewRequestID()
 	if err != nil {
 		return fleet.Submission{}, err
@@ -196,7 +206,6 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude
 	}
 	next.Args = slices.Clone(old.Args)
 	next.RetryHost = ""
-	suffix := strings.TrimPrefix(newJob, oldJob)
 	setArg := func(flag, value string) {
 		for i := 0; i+1 < len(next.Args); i++ {
 			if next.Args[i] == flag {
@@ -207,8 +216,8 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool, exclude
 		next.Args = append(next.Args, flag, value)
 	}
 	setArg("--job", newJob)
-	if label := hubSpawnArg(old.Args, "-l"); label != "" {
-		setArg("-l", label+suffix)
+	if label != "" {
+		setArg("-l", successorLabel)
 	}
 	// A report path under the stopped job's directory moves to the successor's;
 	// the node resolves it inside the job that owns it. A path elsewhere (an

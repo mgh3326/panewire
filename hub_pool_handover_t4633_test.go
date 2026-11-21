@@ -581,7 +581,6 @@ func TestPoolHandoverFallsBackBeforeTheClose(t *testing.T) {
 			s.Args[slices.Index(s.Args, "--host")+1] = "machine-a"
 			s.Args = append(s.Args, "--override-reason", "pinned by the owner", "--containment", "hk:42")
 		}, false, "pinned"},
-		{"end_reason over hk's limit", strings.Repeat("e", 100), nil, false, "end_reason_too_long"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newQuotaReplaceFixtureWith(t, "implementer", tc.job, tc.mutate)

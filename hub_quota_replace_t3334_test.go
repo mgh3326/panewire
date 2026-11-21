@@ -342,8 +342,10 @@ func TestQuotaReplacementJobNames(t *testing.T) {
 	if _, _, ok := quotaReplacementJob("mwr-1-p1-q1-q2"); ok {
 		t.Fatal("a third replacement is allowed")
 	}
-	if _, _, ok := quotaReplacementJob(strings.Repeat("a", 126)); ok {
-		t.Fatal("a successor id past 128 characters is allowed")
+	// A long old id is shortened to herdr's agent name limit (hk 5961), so the
+	// successor fits it whatever the old id's length.
+	if job, _, ok := quotaReplacementJob(strings.Repeat("a", 126)); !ok || len(job) > successorNameMax {
+		t.Fatalf("a 126-character id gives successor %q (%d characters), ok=%v", job, len(job), ok)
 	}
 }
 

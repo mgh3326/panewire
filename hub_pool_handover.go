@@ -620,9 +620,6 @@ func hkRecordTaskID(record map[string]any) string {
 	return ""
 }
 
-// herdrAgentNameMax is herdr's agent name limit (fleet.ValidAgentName).
-const herdrAgentNameMax = 32
-
 // handoverSuccessorRequest is the stored successor: the quota replacement's
 // submission (same role, owner and brief, job <old>-q<n>, the spent pool
 // excluded) as a spec checkout of the branch at its last pushed commit — or,
@@ -655,13 +652,6 @@ func handoverSuccessorRequest(old fleet.Submission, oldJob, newJob, exclude, hos
 			next.Args = slices.Delete(next.Args, i, i+2)
 		}
 		next.Args = append(next.Args, "--report-relative", newJob+"/report.md")
-	}
-	if i := slices.Index(next.Args, "-l"); i >= 0 && i+1 < len(next.Args) && len(next.Args[i+1]) > herdrAgentNameMax {
-		// herdr's 32-character name rule: cut the inherited label and keep
-		// the -q<n> suffix that tells the successor apart.
-		suffix := strings.TrimPrefix(newJob, oldJob)
-		base := strings.TrimSuffix(next.Args[i+1], suffix)
-		next.Args[i+1] = strings.TrimRight(utf8PrefixWithin(base, herdrAgentNameMax-len(suffix)), "-_") + suffix
 	}
 	// The old job already passed its start gate; its conditions name the task
 	// the successor no longer carries.
