@@ -585,7 +585,13 @@ func TestSpawnGrantDrainStartsNoQuotaHandOff_t4612(t *testing.T) {
 // it again, and re-places it.
 func TestSpawnShortReplayFencesPastStartBy_t4612(t *testing.T) {
 	retryHK(t)
-	h := startProofHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	// The replay budget mirrors the recovery reprobe's 5 s (reprobeStaleSpawn):
+	// generous enough that dispatch's setup reads (the task, the fence state
+	// and start_by) cannot expire mid-read on a race-slowed runner. The start_by
+	// window is set longer than the replay budget plus the not-started probe,
+	// so a resend could not be fenced by its own start_by inside this test:
+	// only the fence before the resend produces the fenced row.
+	h := startProofHubWindow(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), 30*time.Second, 100*time.Millisecond)
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
 	startProofNode(t, h, server, "desktop", []string{"spawn_v2", "spawn_ops_v1", hubCapabilitySpawnGrant})
@@ -594,16 +600,16 @@ func TestSpawnShortReplayFencesPastStartBy_t4612(t *testing.T) {
 	if err := h.inbox.store.recordSpawnStartBy(t.Context(), node.RequestID, time.Now().Add(-time.Second).UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	h.executeSpawnTask(ctx, sent)
-	// The fence commits on the hub's close context, so the short replay proves
-	// it whatever its budget. The settle after the fence (exclusion and
-	// re-place) runs on the same 50 ms budget, which a race-slowed runner can
-	// spend before it finishes. The row then stays fenced and dispatching until
-	// the next replay settles it (TestSpawnCommittedFenceSettlesOnReplayWithoutResend_t4612).
-	// So the re-place is checked from that replay on a live context, not from
-	// the 50 ms budget. The replay is synchronous: nothing here is asynchronous.
+	// The fence commits on the hub's close context, so the replay proves it
+	// whatever its budget. The settle after the fence (exclusion and
+	// re-place) also runs on the replay budget; a runner that spends it there
+	// leaves the row fenced and dispatching until the next replay settles it
+	// (TestSpawnCommittedFenceSettlesOnReplayWithoutResend_t4612). So the
+	// re-place is checked from that replay on a live context, not from the
+	// replay budget. The replay is synchronous: nothing here is asynchronous.
 	if fenced, err := h.inbox.store.spawnAttemptFenced(t.Context(), node.RequestID); err != nil || !fenced {
 		t.Fatalf("short replay fenced=%v err=%v", fenced, err)
 	}
