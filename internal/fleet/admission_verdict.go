@@ -245,22 +245,52 @@ func admissionPct(v float64) *float64 {
 	return &v
 }
 
-// admissionRoleCheck is pacelever's roleCheck as of v0.3.28: a credit rung
-// (pi- profiles and commandcode-pool rungs) seats only an implementer, or a
-// builder on a placed default rung, and the consult models keep their seat
-// restrictions. cmd-dsflash41 is narrower still: implementer only.
+// Seat refusals of a credit rung. The pi- wording is pacelever's; the
+// commandcode wording names the roles that rung seats.
+const (
+	creditRoleRestricted       = "role_restricted: credit rung requires implementer; placed default rungs also allow builder"
+	commandcodeRoleRestricted  = "role_restricted: commandcode rung seats implementer, reviewer or verifier; placed default rungs also allow builder"
+	cmdDsflash41RoleRestricted = "role_restricted: cmd-dsflash41 seats only an implementer"
+)
+
+// admissionCreditRoleDenial is the role_restricted reason a credit rung refuses
+// role, or "" when it seats the role. A pi- rung seats an implementer, or a
+// builder on a placed default rung, as pacelever's roleCheck does. A
+// commandcode-pool rung also seats a reviewer and a verifier, still subject to
+// the pool's pace cutoff (hk 5898, operator decision 464). This is a deliberate
+// divergence from pacelever, which is retired. Consult and judge stay refused.
+// cmd-dsflash41 is narrower still: implementer only (hk 3248). Admission and
+// the launch path both read this one rule.
+func admissionCreditRoleDenial(profile, pool, role string, placedDefault bool) string {
+	// Operator 2026-11-07 (hk 3248): cmd-dsflash41 seats only an implementer,
+	// stricter than the commandcode rule, which admits a reviewer and a verifier.
+	if profile == "cmd-dsflash41" {
+		if role == "implementer" {
+			return ""
+		}
+		return cmdDsflash41RoleRestricted
+	}
+	if !admissionCredit(profile, pool) {
+		return ""
+	}
+	if role == "implementer" || (role == "builder" && placedDefault) {
+		return ""
+	}
+	if strings.HasPrefix(profile, "pi-") {
+		return creditRoleRestricted
+	}
+	if role == "reviewer" || role == "verifier" {
+		return ""
+	}
+	return commandcodeRoleRestricted
+}
+
+// admissionRoleCheck judges the seat a role asks for on a rung: the credit
+// rung rule above (cmd-dsflash41 included), then the astra seat alias.
 func admissionRoleCheck(req admissionRequest, row admissionRow) *gateDenial {
 	role := admissionNormalize(req.Role)
-	if admissionCredit(req.Profile, row.Pool) {
-		allowed := role == "implementer" || (role == "builder" && row.Placed && row.Gate == defaultGate)
-		if !allowed {
-			return &gateDenial{gateRoleDenied, "role_restricted: credit rung requires implementer; placed default rungs also allow builder"}
-		}
-	}
-	// Operator 2026-11-07 (hk 3248): cmd-dsflash41 seats only an implementer
-	// — stricter than pacelever, which also seats a builder.
-	if req.Profile == "cmd-dsflash41" && role != "implementer" {
-		return &gateDenial{gateRoleDenied, "role_restricted: cmd-dsflash41 seats only an implementer"}
+	if msg := admissionCreditRoleDenial(req.Profile, row.Pool, role, row.Placed && row.Gate == defaultGate); msg != "" {
+		return &gateDenial{gateRoleDenied, msg}
 	}
 	if strings.Contains(req.Profile, "astra") && req.Profile != "codex-astra" {
 		return &gateDenial{gateRoleDenied, "role_restricted: removed astra seat alias"}
@@ -561,7 +591,9 @@ func (in admissionInputs) judge(req admissionRequest) admissionVerdict {
 	return in.judgeWith(req, admissionUnratedRole(req))
 }
 
-// judgeWith is pacelever's gateWithUnrated, rule for rule.
+// judgeWith is pacelever's gateWithUnrated. It keeps pacelever's rules except
+// the commandcode seat: a commandcode reviewer or verifier is admitted here,
+// which pacelever refused (admissionCreditRoleDenial, hk 5898).
 // devinFreeRungs maps each SWE-2 profile to the free bucket it draws on. These
 // rungs run on Devin's invisible free-model quota, not the account's paid
 // window, so admission judges them on the stored free-bucket state only.
