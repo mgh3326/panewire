@@ -75,13 +75,18 @@ func TestNodePrepareSuccessorStaleRefuses5118(t *testing.T) {
 	}
 }
 
-// The branch another worktree of the clone holds is never forced or stolen.
+// The branch another worktree of the clone holds is never forced or stolen. The
+// holder here has unsaved work, so it is refused; a clean pushed holder is
+// released instead (checkout_successor_t5870_test.go, hk 5870).
 func TestNodePrepareSuccessorBranchInUse5118(t *testing.T) {
 	fixture := newNodeWorktreeFixture(t)
 	client := fixture.client()
 	fixture.cloneRepo(t)
 	held := filepath.Join(fixture.workRoot, "repo.parent")
 	nodeGit(t, fixture.clone, "worktree", "add", "-q", held, "feat")
+	if err := os.WriteFile(filepath.Join(held, "unsaved.txt"), []byte("work\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	dir := filepath.Join(fixture.workRoot, "repo.job")
 	args := fixture.prepareArgs(fleet.HubCheckoutSuccessor, "feat", fixture.feat, "", "repo.job")
 

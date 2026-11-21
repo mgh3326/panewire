@@ -1340,6 +1340,9 @@ func (s *TaskPaneSweeper) reapSweptPaneHeld(ctx context.Context, a *App, latest,
 		a.announceReplacedClose(ctx, latest, successor)
 		return
 	}
+	// A successor that ended releases the hand-over refs its branch contains,
+	// before its worktree goes (sweep_handover_ref.go, hk 5870).
+	s.releaseHandoverRefs(ctx, a, str(latest.Receipt, "cwd"), end)
 	s.sweepWorktree(ctx, a, latest, end)
 	s.closedFailure(ctx, a, j, task)
 }

@@ -347,6 +347,17 @@ Only a worktree of the clone under the node's own work root is the node's; a
 requester's design worktree, a worktree another job still uses, a dirty one
 on a merged end, and every remote branch stay.
 
+A successor that completed (or whose PR merged) also releases the hand-over
+refs its branch contains (hk 5870), before its worktree goes. The sweep lists
+`refs/panewire/handover/*` on origin, fetches the branch's origin tip, and
+deletes each ref whose snapshot commit is an ancestor of that tip, with
+`--force-with-lease` on the commit it proved. A ref the branch does not contain,
+a branch origin does not have, or a job lost or abandoned keeps its ref, and the
+sweep logs the reason (`hand-over ref kept`, `hand-over ref released`;
+`internal/fleet/sweep_handover_ref.go`). No separate keep marker exists: a
+hand-over that failed to push leaves the predecessor's worktree where it is,
+with no close, and nothing else records the keep.
+
 A `<job>-checkout` the node prepared from a checkout spec — a consult, a
 canonical checkout or a spec spawn — belongs to that job alone: the job's
 receipt names the directory and it carries the job-derived name

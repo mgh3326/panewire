@@ -46,7 +46,7 @@ const (
 	handoverRefusedUnmerged     = "unmerged_index"
 	handoverRefusedChanged      = "changed_during_snapshot"
 
-	handoverSnapshotRefPrefix = "refs/panewire/handover/"
+	handoverSnapshotRefPrefix = fleet.HandoverRefPrefix
 	// nodeHandoverSnapshotMaxListed bounds the untracked paths a result names
 	// and nodeHandoverSnapshotListBytes their bytes, so the result stays well
 	// inside nodeCommandMaxResultBytes.

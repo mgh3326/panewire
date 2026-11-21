@@ -1229,7 +1229,9 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGit
 // behind it:
 // `successor_stale want=<sha> origin=<sha>`. The branch is never forced or
 // stolen: a worktree of the clone that already holds it refuses with
-// `branch_in_use worktree=<dir>`. A worktree at dir is reused only on that
+// `branch_in_use worktree=<dir>`, unless it is a finished predecessor's clean
+// checkout at the pushed tip, which is removed first (nodeReleaseHeldBranch,
+// hk 5870). A worktree at dir is reused only on that
 // branch, clean, at the commit; a local branch behind it is fast-forwarded
 // and one ahead or diverged is someone else's work.
 func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
@@ -1278,16 +1280,22 @@ func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *node
 	if err != nil {
 		return nodeOutcomeGitFailed
 	}
+	if held := nodeBranchHolder(entries, dir, args.Branch); held != nil {
+		// Another worktree of this clone holds the branch. The node never
+		// forces or steals it; only a finished predecessor's clean, pushed
+		// checkout is released (hk 5870).
+		if !nodeReleaseHeldBranch(ctx, git, clone, *held, originTip) {
+			result.Reason = "worktree=" + held.Path
+			return nodePrepareBranchInUse
+		}
+		if entries, err = nodeListWorktrees(ctx, git, clone); err != nil {
+			return nodeOutcomeGitFailed
+		}
+	}
 	var atDir *nodeWorktreeEntry
 	for i := range entries {
-		switch {
-		case nodeSamePath(entries[i].Path, dir):
+		if nodeSamePath(entries[i].Path, dir) {
 			atDir = &entries[i]
-		case entries[i].Branch == args.Branch:
-			// Another worktree of this clone already holds the branch: the
-			// node never forces or steals it.
-			result.Reason = "worktree=" + entries[i].Path
-			return nodePrepareBranchInUse
 		}
 	}
 	intent := nodeWorktreeAddIntent{Mode: "branch", Branch: args.Branch, Sha: want}
@@ -1388,6 +1396,40 @@ func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *node
 		}
 	}
 	return nodePreparePrepared
+}
+
+// nodeBranchHolder is the worktree other than dir that holds branch, or nil.
+func nodeBranchHolder(entries []nodeWorktreeEntry, dir, branch string) *nodeWorktreeEntry {
+	for i := range entries {
+		if !nodeSamePath(entries[i].Path, dir) && entries[i].Branch == branch {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
+// nodeReleaseHeldBranch removes the worktree of a finished predecessor that
+// still holds the branch a successor continues, so the successor can check the
+// branch out on this node (hk 5870). It goes only when nothing in the worktree
+// would be lost: unlocked, on the branch, no tracked, untracked or ignored
+// change, and HEAD at the tip origin holds, so every commit it has is pushed.
+// The removal is `git worktree remove` without --force; the branch itself lives
+// in the clone, so it survives the worktree.
+func nodeReleaseHeldBranch(ctx context.Context, git relayCommandRunner, clone string, held nodeWorktreeEntry, originTip string) bool {
+	if held.Locked || held.Detached || originTip == "" {
+		return false
+	}
+	head, err := nodeGitHead(ctx, git, held.Path)
+	if err != nil || !strings.EqualFold(head, originTip) {
+		return false
+	}
+	// --ignored: `git worktree remove` deletes ignored files without --force.
+	status, err := git(ctx, "-C", held.Path, "status", "--porcelain", "--ignored")
+	if err != nil || strings.TrimSpace(string(status)) != "" {
+		return false
+	}
+	_, err = git(ctx, "-C", clone, "worktree", "remove", held.Path)
+	return err == nil
 }
 
 // nodeSetSuccessorUpstream makes the successor's local branch track
