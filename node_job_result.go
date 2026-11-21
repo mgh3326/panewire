@@ -47,6 +47,34 @@ type nodeJobResult struct {
 	// record could not be read. The hub reads unknown as one resume taken
 	// (hub_pool_handover.go nodeResumes), so it hands over rather than waits.
 	QuotaResumes *int `json:"quota_resumes,omitempty"`
+	// TerminalEvent is the kind of the job's newest terminal ledger event
+	// (nodeJobTerminalKinds), or "" when the ledger holds none. Nil is a
+	// ledger that could not be read, or a node that predates the field: the
+	// caller falls back to completed, never reads it as "".
+	TerminalEvent *string `json:"terminal_event,omitempty"`
+}
+
+// nodeJobTerminalKinds are the ledger kinds that end a job. The newest one in
+// sequence order is the job's terminal event.
+var nodeJobTerminalKinds = map[string]bool{"job.completed": true, "job.lost": true, "job.reaped": true, "job.revoked": true}
+
+// nodeJobTerminal reads the job's terminal event through the shared ledger
+// reader. A missing events/ holds no terminal event.
+func nodeJobTerminal(job *os.Root) (string, error) {
+	events, err := readNodeJobLedgerEvents(job)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	terminal := ""
+	for _, event := range events {
+		if nodeJobTerminalKinds[event.kind] {
+			terminal = event.kind
+		}
+	}
+	return terminal, nil
 }
 
 // nodeJobBookkeepingEvent reports whether an events/NNNNN-<kind>.json file
@@ -258,6 +286,9 @@ func (client *HubClient) nodeJobResult(args nodeJobResultArgs) (any, string) {
 		// were facts of the local file and go with it.
 		result.Report = nodeJobReport{Present: true, SHA256: completedSHA}
 	}
+	if terminal, err := nodeJobTerminal(root); err == nil {
+		result.TerminalEvent = &terminal
+	}
 	return result, ""
 }
 
@@ -268,8 +299,11 @@ func validNodeJobResult(r nodeJobResult) bool {
 	if r.QuotaResumes != nil && *r.QuotaResumes < 0 {
 		return false
 	}
+	if r.TerminalEvent != nil && *r.TerminalEvent != "" && !nodeJobTerminalKinds[*r.TerminalEvent] {
+		return false
+	}
 	if !r.Found {
-		return r.Findings == nil && r.FindingsError == "" && r.Report == (nodeJobReport{}) && !r.Completed
+		return r.Findings == nil && r.FindingsError == "" && r.Report == (nodeJobReport{}) && !r.Completed && r.TerminalEvent == nil
 	}
 	if r.Findings != nil {
 		if len(r.Findings) > nodeJobFindingsLimit || validNodeFindings(r.Findings) != "" || r.FindingsError != "" {

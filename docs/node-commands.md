@@ -1566,8 +1566,8 @@ available to the operator and services authorized for `worktree.inspect` on
 that host. The CLI is `panewire node job-result --host HOST --job NAME`, with
 the same hub connection flags as `node worktree-list`.
 
-The result contains `found`, `findings`, `findings_error`, `report`, and
-`completed`. `findings` is the JSON object from `findings.json` when it is at
+The result contains `found`, `findings`, `findings_error`, `report`, `completed`,
+and `terminal_event`. `findings` is the JSON object from `findings.json` when it is at
 most 24 KiB and contains a `findings` array. Otherwise it is null and
 `findings_error` is `missing`, `too_large`, `not_json`, or `schema`. A missing
 job has `found: false`. Files must be regular files inside the job directory.
@@ -1578,6 +1578,13 @@ still reads `present: true`, with `sha256` taken from the job's newest
 `job.completed` that named a document; `bytes` is 0 and `last_line` empty, both
 having been facts of the deleted file. `completed`
 is true when the local event ledger contains a `job.completed` event.
+`terminal_event` is the kind of the job's newest terminal ledger event: the last
+of `job.revoked`, `job.reaped`, `job.completed` and `job.lost` in `events/`
+in sequence order (the ledger's own order, read by the shared ledger reader),
+or `""` when the ledger holds none. A job with no `events/` directory is `""`.
+The field is omitted when the ledger cannot be read or the node predates it; a
+caller reads that as unknown and falls back to `completed`. `completed` keeps
+its meaning either way.
 `activity_events` counts the ledger's `events/` files that are not spawn
 bookkeeping: `job.claim`, `job.reclaim`, `job.placement`, `job.task_link`,
 `job.duplicate_override`, `job.spawn_retryable`, `job.spawn_aborted`,
