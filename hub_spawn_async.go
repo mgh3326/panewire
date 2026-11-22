@@ -658,7 +658,9 @@ func (h *HubServer) handleQueuedBinding(ctx context.Context, task hubSpawnTask) 
 	record := h.nodes[task.Node.Machine]
 	admitted := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"] && h.acceptingEffectiveLocked(task.Node.Machine, record.accepting)
 	h.mu.Unlock()
-	if admitted {
+	// A bound row whose (host, kind) gained a login need or a launch backoff
+	// since the bind is re-placed now, not when its turn at the slot comes.
+	if admitted && h.boundSpawnReadinessDrop(task, *task.Node) == "" {
 		return false
 	}
 	if _, err := h.inbox.store.unbindUnsentSpawn(ctx, task.Request.RequestID, task.Attempt, task.Node.RequestID); err == nil {
@@ -1557,7 +1559,7 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	t.h.releasePlacementCount(task.Job)
 	if !quotaFullOK {
 		// A full quota is the seat's state, not a launch fault of the host.
-		t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
+		t.h.observeLaunchResult(node.Machine, hubSpawnArg(node.Args, "-m"), result, reason, t.h.now().UTC())
 	}
 	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", reason)
 	t.h.kickSpawnPlacement()
@@ -1591,7 +1593,7 @@ func (t *directSpawnTransport) retryHarnessAfterClaim(ctx context.Context, node 
 	}
 	t.task, t.bound = task, false
 	t.h.releasePlacementCount(task.Job)
-	t.h.observeLaunchOutcome(node.Machine, profile, result.RC, reason, t.h.now().UTC())
+	t.h.observeLaunchResult(node.Machine, profile, result, reason, t.h.now().UTC())
 	t.h.logger.Warn("hub spawn harness refused; trying another on claimed host", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", profile, "rc", result.RC, "reason", reason)
 	t.h.kickSpawnPlacement()
 	return true, nil
@@ -1656,11 +1658,16 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 		}
 	}
+	// A bound attempt that has waited for the node's slot re-reads the pair's
+	// readiness: the attempt ahead of it may have failed at the login screen
+	// and armed the backoff, and sending this one would repeat that (hk 6073).
+	// Only status bound is unbound here, so no send is doubled.
+	readinessDropped := current.Status == "bound" && h.boundSpawnReadinessDrop(current, node) != ""
 	h.mu.Lock()
 	record := h.nodes[node.Machine]
 	// A grant-required attempt goes only to a node that asks for its grant.
 	connected := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"] && (!node.GrantRequired || record.capabilities[hubCapabilitySpawnGrant])
-	if current.Status == "bound" && (!connected || !h.acceptingEffectiveLocked(node.Machine, record.accepting)) {
+	if current.Status == "bound" && (readinessDropped || !connected || !h.acceptingEffectiveLocked(node.Machine, record.accepting)) {
 		h.mu.Unlock()
 		releaseAdmission()
 		if _, err := h.inbox.store.unbindUnsentSpawn(ctx, id, current.Attempt, node.RequestID); err == nil {
@@ -1902,7 +1909,7 @@ func (t *directSpawnTransport) settleNodeResult(ctx context.Context, node hubSpa
 		h.recordSpawnTrace(t.task, outcome)
 		// The first completion of a request is the launch outcome; a
 		// replayed completion must not count twice.
-		h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
+		h.observeLaunchResult(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result, outcome.Reason, h.now().UTC())
 	}
 	if result.RC == 0 {
 		h.seedLandedOwner(t.task.Job, node.Machine)

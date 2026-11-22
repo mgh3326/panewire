@@ -322,6 +322,18 @@ failed to launch counts:
 | `checkout_refused:<code>` (`busy`, `dirty`, `sha-missing`, `branch-elsewhere`, and the rest) | no | checkout state, not the harness's ability to launch, on either the terminal or next-host path |
 | any other reason, or none | no | not a host launch fault |
 
+A verified login-screen refusal (rc 88 with the `AUTH_UNAVAILABLE: selected
+quota account login missing` line) benches the pair on that one failure: a
+login does not fix itself between two tries. Every other failure keeps the
+threshold.
+
+A spawn bound to a pair but not yet sent re-reads the pair's backoff and
+standing login need right before the send (and on each coordinator pass while
+it waits for the node's slot). If either appeared after the bind, the attempt is
+unbound and placed again; only a `bound` attempt is unbound, so no send is
+doubled. A spawn that names its profile ignores the login need, as placement
+does, and honours the backoff.
+
 A profile with no harness kind is not counted. The
 constants live in `placement.json`:
 
