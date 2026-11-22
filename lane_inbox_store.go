@@ -248,6 +248,20 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		db.Close()
 		return nil, err
 	}
+	// The held and digest passes (hk 6081) scan these predicates in id order.
+	// Each index is partial on the pass's own predicate and holds only the
+	// rows the pass can claim; the Postgres twin is migration 0038 and MySQL's
+	// is 0031, which cannot be partial. The indexes are additive: an older
+	// binary never names them.
+	for _, q := range []string{
+		`CREATE INDEX IF NOT EXISTS lane_inbox_hold_pending ON lane_inbox(id) WHERE hold_until>0 AND digest_batch='' AND acked_at=0 AND superseded_at=0`,
+		`CREATE INDEX IF NOT EXISTS lane_inbox_digest_pending ON lane_inbox(id) WHERE class='interrupt' AND acked_at=0 AND superseded_at=0 AND digest_at>0 AND digest_batch='' AND hold_until=0`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return newLaneInboxStore(db, dialectSQLite), nil
 }
 
@@ -977,6 +991,11 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 	return err
 }
 
+// laneInboxDigestDueQuery is the digest half of makeBatchesDue's scan. Its
+// predicate is what the partial index lane_inbox_digest_pending (hk 6081)
+// covers.
+const laneInboxDigestDueQuery = `SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE class='interrupt' AND acked_at=0 AND superseded_at=0 AND digest_at>0 AND digest_batch='' AND hold_until=0 ORDER BY id`
+
 // makeBatchesDue is makeBatches that also returns the earliest time (unix
 // ms) a digest or escalation not yet claimed falls due, or 0 for none. A
 // value at or before now means unclaimed work is left for the next pass.
@@ -993,15 +1012,13 @@ func (s *laneInboxStore) makeBatchesDue(now time.Time) (int64, error) {
 	created := false
 	var due int64
 	for _, escalation := range []bool{false, true} {
-		filter := `class='interrupt' AND acked_at=0 AND superseded_at=0 AND digest_at>0 AND digest_batch='' AND hold_until=0`
-		if escalation {
-			filter = `class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND due_at>0 AND due_at<=? AND escalation_batch=''`
-		}
+		query := laneInboxDigestDueQuery
 		args := []any{}
 		if escalation {
+			query = `SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND due_at>0 AND due_at<=? AND escalation_batch='' ORDER BY id`
 			args = append(args, now.UnixMilli())
 		}
-		rows, err := tx.QueryContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE `+filter+` ORDER BY id`), args...)
+		rows, err := tx.QueryContext(ctx, s.q(query), args...)
 		if err != nil {
 			return 0, err
 		}

@@ -1,0 +1,13 @@
+-- hk 6081: the held-batch pass (makeHeldBatches, hub_inbox_hold.go) and the
+-- digest pass (makeBatchesDue, lane_inbox_store.go) scan lane_inbox by
+-- predicates that the lane-leading indexes in 0001 do not bind. MySQL has no
+-- partial indexes, so each key leads with the equality columns of its pass
+-- and then the range column, which the planner can seek on:
+--   held:   digest_batch='' AND hold_until>0       -> seek the unbatched group, range over hold_until
+--   digest: class='interrupt' AND digest_batch='' AND digest_at>0
+--                                                  -> seek the pending interrupt group, range over digest_at
+-- acked_at, superseded_at and hold_until=0 are checked on the rows the seek returns.
+-- One ALTER adds both keys, so the statement is atomic and the guard below
+-- sees both or neither.
+-- applied-if: SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='lane_inbox' AND index_name IN ('lane_inbox_hold_pending','lane_inbox_digest_pending')
+ALTER TABLE lane_inbox ADD KEY lane_inbox_hold_pending (digest_batch, hold_until), ADD KEY lane_inbox_digest_pending (class, digest_batch, digest_at);

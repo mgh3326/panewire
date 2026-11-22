@@ -28,7 +28,7 @@ func (h *HubServer) makeHeldBatches() (int64, []string, error) {
 		return 0, nil, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE hold_until>0 AND digest_batch='' AND acked_at=0 AND superseded_at=0 ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, laneInboxHeldQuery)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -77,6 +77,11 @@ func (h *HubServer) makeHeldBatches() (int64, []string, error) {
 	}
 	return due, watch, nil
 }
+
+// laneInboxHeldQuery is the held pass's scan. Its predicate is what the
+// partial index lane_inbox_hold_pending (hk 6081) covers, so the planner
+// searches that index instead of reading all of lane_inbox.
+const laneInboxHeldQuery = `SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE hold_until>0 AND digest_batch='' AND acked_at=0 AND superseded_at=0 ORDER BY id`
 
 var heldNoticeKind = regexp.MustCompile(`(?i)\b(?:READY|MERGED|FINDINGS|BLOCKED)\b`)
 
