@@ -287,7 +287,7 @@ func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 			failure = e
 		}
 	}
-	if tx == nil || tx.Transaction != "runtug.spawn" || len(tx.Spans) != 5 || failure == nil || strings.Join(failure.Fingerprint, ":") != "spawn:landing:"+spawnUnresolvedReason {
+	if tx == nil || tx.Transaction != "runtug.spawn" || spawnTraceStepSpans(tx) != 5 || failure == nil || strings.Join(failure.Fingerprint, ":") != "spawn:landing:"+spawnUnresolvedReason {
 		t.Fatalf("tx=%+v failure=%+v", tx, failure)
 	}
 	raw, _ := json.Marshal(transport.events)
@@ -328,4 +328,16 @@ func TestSpawnSentryKeepsRequiredTagsBeforePlacement(t *testing.T) {
 			t.Fatalf("invented placement: %+v", event.Tags)
 		}
 	}
+}
+
+// spawnTraceStepSpans counts the step spans of a spawn transaction, leaving out
+// the queue spans (hk 6074): a queue span is the wait before the first step.
+func spawnTraceStepSpans(tx *sentry.Event) int {
+	steps := 0
+	for _, span := range tx.Spans {
+		if span.Op != "queue" {
+			steps++
+		}
+	}
+	return steps
 }
