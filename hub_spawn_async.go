@@ -27,9 +27,18 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	} else {
 		app, err = fleet.New(out, errout)
 		if app != nil {
-			app.LiveSpawnProfiles = h.liveSpawnProfiles
-			app.LivePlacedByAccount = h.liveProfilesByAccount
-			app.LiveAccountJobs = h.liveAccountJobs
+			// One read of the live spawns serves all three for this App's
+			// selection (hk 6082); a later selection builds a new App.
+			snapshot := h.memoLiveSnapshot()
+			app.LiveSpawnProfiles = func(ctx context.Context, except string) (map[string]int, error) {
+				return h.liveSpawnProfilesFrom(ctx, snapshot, except)
+			}
+			app.LivePlacedByAccount = func(ctx context.Context, except string) (map[string]map[string]int, error) {
+				return h.liveProfilesByAccountFrom(ctx, snapshot, except)
+			}
+			app.LiveAccountJobs = func(ctx context.Context, except string) (map[string]string, error) {
+				return h.liveAccountJobsFrom(ctx, snapshot, except)
+			}
 			// Each placed selection's dropped SWE-2 candidates count into the daily
 			// loops row (docs/loops.md, selection_drops).
 			app.OnSelectionDrops = h.noteSelectionDrops
