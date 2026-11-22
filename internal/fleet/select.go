@@ -838,7 +838,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 		sp.presence = records
 	}
 	machine := a.machine()
-	excluded, _ := parseHosts(s.ExcludeHosts)
+	excluded, _ := a.excludedHostNames(s.ExcludeHosts)
 	threshold := a.loadThreshold()
 	// A consult has no grade, whatever the task title says; the
 	// placement plan clears it the same way (placeAuto, planHosts).

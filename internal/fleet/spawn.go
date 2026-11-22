@@ -1004,7 +1004,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if _, e := parseTags(s.Tags); e != nil {
 		return e
 	}
-	excluded, e := parseHosts(s.ExcludeHosts)
+	excluded, e := a.excludedHostNames(s.ExcludeHosts)
 	if e != nil {
 		return e
 	}

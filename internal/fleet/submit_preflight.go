@@ -99,7 +99,7 @@ func (a *App) SubmitHostRefusal(s Spawn) error {
 	if err != nil {
 		return err
 	}
-	excluded, err := parseHosts(s.ExcludeHosts)
+	excluded, err := a.excludedHostNames(s.ExcludeHosts)
 	if err != nil {
 		return err
 	}
