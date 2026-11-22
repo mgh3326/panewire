@@ -133,12 +133,19 @@ func (h *HubServer) noteOneTimeActionRefusal(machine, profile string, result hub
 	need := classifyLaunchDialog(kind, result.StdoutTail)
 	// Only the verified login-screen refusal is login evidence. An rc 88 for an
 	// account the host cannot confirm is not, and its notice would say "log in".
-	if need == "" && spawnFailureCode(result) == "auth_unavailable" && strings.Contains(result.StdoutTail, loginScreenAuthMessage) {
+	if need == "" && verifiedLoginScreenRefusal(result) {
 		need = oneTimeLoginMissing
 	}
 	if need != "" {
 		h.noteOneTimeAction(machine, kind, need, h.now().UTC())
 	}
+}
+
+// verifiedLoginScreenRefusal reports whether a failed node result is the
+// verified login-screen refusal (rc 88 with loginScreenAuthMessage), as
+// loginScreenSpawnRefusal writes it.
+func verifiedLoginScreenRefusal(result hubSpawnResult) bool {
+	return result.RC != 0 && spawnFailureCode(result) == "auth_unavailable" && strings.Contains(result.StdoutTail, loginScreenAuthMessage)
 }
 
 // noteReadinessActions hands a node's readiness report to the notice worker.

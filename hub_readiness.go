@@ -246,11 +246,55 @@ func (h *HubServer) hostRefusalBackoff() time.Duration {
 	return policy.launchBackoff()
 }
 
+// boundSpawnReadinessDrop re-reads the hub-owned readiness of the (machine,
+// kind) a bound-but-unsent attempt is about to be sent to, and answers the code
+// that would now drop the pair from placement (fleet.ReadyLaunchBackoff or
+// fleet.ReadyLoginMissing), or "". The bind decided on the readiness of its
+// moment; a refusal that landed since (the node's single slot was held by an
+// attempt that failed at the login screen) is what this catches, so the send
+// does not repeat it. A spawn that names its profile ignores the standing login
+// need, as placement does (fleet readinessView.drop). The node's own report is
+// not re-judged here: only what the hub owns can have changed under a bind.
+func (h *HubServer) boundSpawnReadinessDrop(task hubSpawnTask, node hubSpawnRequest) string {
+	kind := fleet.ProfileKind(hubSpawnArg(node.Args, "-m"))
+	if kind == "" || node.Machine == "" {
+		return ""
+	}
+	state := fleet.ReadinessState{Unknown: true}
+	if profile := hubSpawnArg(task.Request.Args, "-m"); profile == "" || profile == "auto" {
+		// Lock order (publishFleetReadiness): loginNeedMu, then h.mu.
+		h.loginNeedMu.Lock()
+		state.LoginNeeds = slices.Clone(h.loginNeeds[node.Machine])
+		h.loginNeedMu.Unlock()
+	}
+	now := h.now().UTC()
+	h.mu.Lock()
+	if entry := h.launchBackoffs[launchKey{node.Machine, kind}]; entry != nil {
+		state.BackoffUntil = map[string]time.Time{kind: entry.until}
+	}
+	h.mu.Unlock()
+	return state.Drop(fleet.ReadinessNeed{Kind: kind}, now)
+}
+
+// observeLaunchResult is observeLaunchOutcome for a node answer the hub holds
+// whole: a verified login-screen refusal arms the backoff at once.
+func (h *HubServer) observeLaunchResult(machine, profile string, result hubSpawnResult, reason string, now time.Time) {
+	h.recordLaunchOutcome(machine, profile, result.RC, reason, now, verifiedLoginScreenRefusal(result))
+}
+
 // observeLaunchOutcome counts one node answer to a spawn against its
 // (machine, kind). The threshold-th consecutive launch failure excludes the
 // pair for the policy's backoff; a success clears it. A failed answer that is
 // not a launch failure (launchFailureReason) changes nothing.
 func (h *HubServer) observeLaunchOutcome(machine, profile string, rc int, reason string, now time.Time) {
+	h.recordLaunchOutcome(machine, profile, rc, reason, now, false)
+}
+
+// recordLaunchOutcome is the shared body. immediate arms the backoff on this
+// failure instead of the threshold-th one: a verified login screen is not a
+// flake that a second try could clear, and a second attempt queued behind the
+// first would only be refused the same way (hk 6073).
+func (h *HubServer) recordLaunchOutcome(machine, profile string, rc int, reason string, now time.Time, immediate bool) {
 	kind := fleet.ProfileKind(profile)
 	if kind == "" || machine == "" || rc != 0 && !launchFailureReason(reason) {
 		return
@@ -282,7 +326,7 @@ func (h *HubServer) observeLaunchOutcome(machine, profile string, rc int, reason
 		}
 		entry.failures++
 		entry.last = now
-		if entry.failures >= policy.launchFailureThreshold() {
+		if immediate || entry.failures >= policy.launchFailureThreshold() {
 			entry.until = now.Add(policy.launchBackoff())
 			changed = true
 			h.logger.Warn("launch backoff", "machine", machine, "kind", kind, "failures", entry.failures, "until", entry.until.UTC().Format(time.RFC3339), "reason", strings.ToLower(reason))
