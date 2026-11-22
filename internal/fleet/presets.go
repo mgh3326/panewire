@@ -80,6 +80,46 @@ func (a *App) resolveHost(name string) (string, error) {
 	return "", fail(exitUsage, "unknown host %q; add it to hosts.<machine>.aliases or pass a configured machine id (panewire hosts)", name)
 }
 
+// excludedHostNames reads --exclude-host and names each entry by the hosts
+// keys placement compares its candidates against (placement.go plan, the
+// selection in select.go). An alias or ssh name stands for its configured
+// host, as it does for --host in resolveHost; an exclusion never refuses an
+// ambiguous name, so an alias that names two hosts excludes both.
+func (a *App) excludedHostNames(raw string) ([]string, error) {
+	names, err := parseHosts(raw)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, name := range names {
+		out = append(out, a.hostKeysNamed(name)...)
+	}
+	return out, nil
+}
+
+// hostKeysNamed is the hosts key(s) a name stands for: the name itself when it
+// is a configured key or the local machine id, else every host whose aliases
+// or ssh name it, else the name as written (no configured host it could mean).
+func (a *App) hostKeysNamed(name string) []string {
+	if _, ok := a.Config.Hosts[name]; ok || name == a.machine() {
+		return []string{name}
+	}
+	var keys []string
+	for id, host := range a.Config.Hosts {
+		if slices.Contains(stringList(host["aliases"]), name) || str(host, "ssh") == name {
+			keys = append(keys, id)
+		}
+	}
+	if slices.Contains(stringList(a.Config.Local["aliases"]), name) {
+		keys = append(keys, a.machine())
+	}
+	if len(keys) == 0 {
+		return []string{name}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
 func stringList(value any) []string {
 	if names, ok := value.([]string); ok {
 		return names

@@ -590,7 +590,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	if e != nil {
 		return nil, e
 	}
-	excluded, e := parseHosts(s.ExcludeHosts)
+	excluded, e := a.excludedHostNames(s.ExcludeHosts)
 	if e != nil {
 		return nil, e
 	}
