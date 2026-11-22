@@ -48,16 +48,36 @@ func newNotStartedSpawn(t *testing.T) *notStartedSpawn {
 	return &notStartedSpawn{hub: hub, node: node, task: task, server: server}
 }
 
-// dispatchOnce runs one dispatch whose landing wait ends after wait, with the
-// production probe window, and returns its outcome on a channel.
-func (s *notStartedSpawn) dispatchOnce(t *testing.T, wait time.Duration) <-chan error {
+// landingWait is the dispatch context of a test: its Done channel closes when
+// the test calls end, not when a clock runs out. A clock would also cut the
+// store writes before the frame leaves (recordSpawnStartBy, beginSpawnSend),
+// so a loaded host could expire it before any frame was sent (hk 6070). The
+// test ends the landing wait only after it has read the frame it sent.
+type landingWait struct {
+	context.Context
+	ended chan struct{}
+}
+
+func (w landingWait) Done() <-chan struct{} { return w.ended }
+
+func (w landingWait) Err() error {
+	select {
+	case <-w.ended:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+// dispatchOnce runs one dispatch with the production probe window and returns
+// its outcome on a channel, plus end, which ends the landing wait.
+func (s *notStartedSpawn) dispatchOnce(t *testing.T) (<-chan error, func()) {
 	t.Helper()
 	transport := &directSpawnTransport{h: s.hub, task: s.task, probeWait: 2 * time.Second}
-	ctx, cancel := context.WithTimeout(t.Context(), wait)
-	t.Cleanup(cancel)
+	ctx := landingWait{Context: t.Context(), ended: make(chan struct{})}
 	done := make(chan error, 1)
 	go func() { _, err := transport.dispatch(ctx, *s.task.Node); done <- err }()
-	return done
+	return done, func() { close(ctx.ended) }
 }
 
 func (s *notStartedSpawn) answer(t *testing.T, fields map[string]any) {
@@ -114,11 +134,12 @@ func (s *notStartedSpawn) requireSettledNotStarted(t *testing.T) {
 // it received late. The dispatch that gave up still settles the request.
 func TestLateNotStartedAnswerSettlesRequest_t4379(t *testing.T) {
 	s := newNotStartedSpawn(t)
-	done := s.dispatchOnce(t, 50*time.Millisecond)
+	done, end := s.dispatchOnce(t)
 	t14ReadNodeSpawn(t, s.node)
-	// Sleep: the landing wait (50 ms) must be over before the node answers, so
-	// the answer is late by construction.
-	time.Sleep(150 * time.Millisecond)
+	end()
+	// The probe replay proves the landing wait ended; the node answers after
+	// that, so the answer is late by construction. No sleep.
+	t14ReadNodeSpawn(t, s.node)
 	s.answerNotStarted(t)
 	if err := s.wait(t, done); err != nil {
 		t.Fatalf("settled dispatch returned %v", err)
@@ -130,8 +151,9 @@ func TestLateNotStartedAnswerSettlesRequest_t4379(t *testing.T) {
 // answers only the hub's replay after the wait, and that settles the request.
 func TestTimeoutWithoutNodeRowSettlesAsNotStarted_t4379(t *testing.T) {
 	s := newNotStartedSpawn(t)
-	done := s.dispatchOnce(t, 50*time.Millisecond)
+	done, end := s.dispatchOnce(t)
 	first := t14ReadNodeSpawn(t, s.node)
+	end()
 	replay := t14ReadNodeSpawn(t, s.node)
 	if replay.RequestID != first.RequestID || replay.DeadlineMS != first.DeadlineMS {
 		t.Fatalf("probe is not a replay of the same request: %+v vs %+v", first, replay)
@@ -157,8 +179,9 @@ func TestTimeoutKeepsOwnershipWithoutNotStartedProof_t4379(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newNotStartedSpawn(t)
-			done := s.dispatchOnce(t, 50*time.Millisecond)
+			done, end := s.dispatchOnce(t)
 			t14ReadNodeSpawn(t, s.node)
+			end()
 			t14ReadNodeSpawn(t, s.node)
 			if tc.fields != nil {
 				s.answer(t, tc.fields)
