@@ -30,7 +30,8 @@ func TestSpawnTraceChildSpansAfterPlacement(t *testing.T) {
 	}
 	task = sentSpawnFixture(t, h.inbox.store, task)
 	// A landed result: no error event, so the transaction is the only traffic.
-	stageMS := map[string]int64{"claim": 5, "placement": 20, "checkout": 30, "launch": 40, "submit": 60, "landing": 70}
+	// The checkout's sub-stages sit inside its 30ms total (hk 6075).
+	stageMS := map[string]int64{"claim": 5, "placement": 20, "checkout": 30, "lock_wait": 2, "fetch": 9, "worktree_add": 11, "launch": 40, "submit": 60, "landing": 70}
 	result := hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Profile: "model-a", Role: "implementer", StageMS: stageMS}
 	if _, err = h.inbox.store.completeSpawn(t.Context(), task, result, time.Now()); err != nil {
 		t.Fatal(err)
@@ -56,7 +57,7 @@ func TestSpawnTraceChildSpansAfterPlacement(t *testing.T) {
 	for _, span := range tx.Spans {
 		spans[span.Op] = span
 	}
-	for _, step := range []string{"claim", "placement", "checkout", "launch", "submit", "landing"} {
+	for _, step := range []string{"claim", "placement", "checkout", "lock_wait", "fetch", "worktree_add", "launch", "submit", "landing"} {
 		span := spans[step]
 		if span == nil {
 			t.Fatalf("no %q child span; spans=%v", step, spans)

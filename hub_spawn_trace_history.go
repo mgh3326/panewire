@@ -13,7 +13,7 @@ import (
 
 // spawnTraceStages are the steps a node reports, in the order the trace names
 // them. Each is end-aligned to its window's end (see layoutSpawnWindow).
-var spawnTraceStages = []string{"claim", "placement", "checkout", "launch", "submit", "landing"}
+var spawnTraceStages = []string{"claim", "placement", "checkout", "launch", "submit", "landing", checkoutStageLockWait, checkoutStageFetch, checkoutStageWorktreeAdd}
 
 // spawnTraceAttempt is one attempt that ended unstarted and was renewed: the
 // hub retried the request, so the next attempt's window opens at EndMS. It is

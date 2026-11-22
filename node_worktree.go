@@ -826,7 +826,9 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 	wait := client.nodeGitOpWait()
+	lockStarted := time.Now()
 	release, err := acquireNodeGitOpLock(ctx, lockPath, wait)
+	addCheckoutStage(ctx, checkoutStageLockWait, time.Since(lockStarted))
 	if err != nil {
 		switch {
 		case errors.Is(err, errNodeGitOpBusy):
@@ -921,7 +923,11 @@ func (tracker *nodeGitTracker) git(ctx context.Context, args ...string) ([]byte,
 	subcmd := nodeGitSubcommand(args)
 	tracker.step = subcmd
 	tracker.subcmd = subcmd
+	started := time.Now()
 	out, err := tracker.runner(ctx, args...)
+	if subcmd == "fetch" {
+		addCheckoutStage(ctx, checkoutStageFetch, time.Since(started))
+	}
 	if err != nil {
 		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
 	}
@@ -946,7 +952,9 @@ func (tracker *nodeGitTracker) gitStdin(ctx context.Context, stdin nodeGitStdinR
 func (tracker *nodeGitTracker) add(ctx context.Context, add nodeAddRunner, clone, dir string, intent nodeWorktreeAddIntent, args ...string) error {
 	tracker.step = "worktree"
 	tracker.subcmd = "worktree"
+	started := time.Now()
 	err := nodeAddWorktree(ctx, tracker.runner, add, clone, dir, intent, args...)
+	addCheckoutStage(ctx, checkoutStageWorktreeAdd, time.Since(started))
 	if err != nil {
 		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
 	}
