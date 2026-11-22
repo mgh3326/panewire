@@ -126,6 +126,9 @@ func (s *laneInboxStore) endUnstartedAttempt(ctx context.Context, tx *sql.Tx, ta
 		if n, _ := s.dialect.rowsMatched(result); n != 1 {
 			return false, nil
 		}
+		if err = s.appendSpawnTraceAttempt(ctx, tx, task.Request.RequestID, task.Attempt, outcome, now); err != nil {
+			return false, err
+		}
 		if err = s.syncSpawnQueueNextCheck(ctx, tx, task.Request.RequestID); err != nil {
 			return false, err
 		}

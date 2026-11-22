@@ -68,8 +68,16 @@ func TestSpawnTraceChildSpansAfterPlacement(t *testing.T) {
 			t.Fatalf("%q lasted %v, want %v", step, got, want)
 		}
 	}
-	if len(tx.Spans) != len(stageMS) {
-		t.Fatalf("child spans=%d, want %d", len(tx.Spans), len(stageMS))
+	// A queue span is the wait before the first step (hk 6074); the step spans
+	// are the ones this test holds.
+	steps := 0
+	for _, span := range tx.Spans {
+		if span.Op != "queue" {
+			steps++
+		}
+	}
+	if steps != len(stageMS) {
+		t.Fatalf("step spans=%d, want %d", steps, len(stageMS))
 	}
 }
 

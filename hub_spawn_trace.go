@@ -68,8 +68,15 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	// The established transaction name remains stable across the CLI rename.
 	trace := sentry.StartTransaction(sentry.SetHubOnContext(context.Background(), hub), "runtug.spawn", sentry.WithSpanSampled(sentry.SampledTrue))
 	trace.Op = "spawn"
-	trace.StartTime = task.Deadline.Add(-time.Duration(task.Request.DeadlineSeconds) * time.Second)
 	trace.EndTime = h.now().UTC()
+	// The trace starts at acceptance (task.Created), so the time an earlier
+	// attempt or a queue wait took is inside it, not an unattributed gap. A row
+	// from before the column has no acceptance time: it keeps the attempt window.
+	start := task.Created
+	if start.IsZero() {
+		start = task.Deadline.Add(-time.Duration(task.Request.DeadlineSeconds) * time.Second)
+	}
+	trace.StartTime = start
 	for key, value := range tags {
 		if value != "" {
 			trace.SetTag(key, value)
@@ -80,16 +87,20 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	// stage spans instead of inventing a cross-host causal timeline. The steps
 	// after placement are node claim, pane start (launch), brief submit (submit)
 	// and landing proof (landing); see docs/hub-spawn-operations.md (hk 5585).
-	for _, stage := range []string{"claim", "placement", "checkout", "launch", "submit", "landing"} {
-		if ms, ok := result.StageMS[stage]; ok && ms >= 0 && ms <= 3600000 {
-			child := trace.StartChild(stage)
-			child.EndTime = trace.EndTime
-			child.StartTime = child.EndTime.Add(-time.Duration(ms) * time.Millisecond)
-			if child.StartTime.Before(trace.StartTime) {
-				trace.StartTime = child.StartTime
-			}
-			child.Finish()
-		}
+	// Each attempt renewed before this one is a window of its own, and the
+	// landed attempt's window opens where the last of them ended (hk 6074; see
+	// docs/hub-spawn-operations.md#trace-attempts).
+	history, err := h.inbox.store.spawnTraceHistory(ctx, task.Request.RequestID)
+	if err != nil {
+		h.logger.Warn("hub spawn trace history unreadable; trace starts at the landed attempt", "request_id", task.Request.RequestID, "error", err)
+		history = nil
+	}
+	open, earliest := layoutRenewedAttempts(trace, start, history)
+	if reach := layoutSpawnWindow(trace, open, trace.EndTime, result.StageMS); reach.Before(earliest) {
+		earliest = reach
+	}
+	if earliest.Before(trace.StartTime) {
+		trace.StartTime = earliest
 	}
 	trace.Finish()
 }

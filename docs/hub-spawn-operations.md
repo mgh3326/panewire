@@ -1690,6 +1690,21 @@ and credentials are excluded. Export failure never authorizes a retry or changes
 the committed business outcome. `TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized`
 uses a fake transport and also checks that ordinary HTTP traffic is untraced.
 
+### Trace attempts
+
+A spawn's `runtug.spawn` trace starts at acceptance, not at the attempt that
+landed (hk 6074). Each attempt that ended unstarted and was renewed is kept on
+the operation in `trace_history` (postgres 0037, mysql 0030), with its end time,
+its bounded refusal reason and its stage durations. The renewal writes that
+record in the same transaction as the retry, and the next attempt's window opens
+at the instant the last one ended, so the windows cover acceptance to landed.
+
+In the trace, each renewed attempt is an `attempt` span with the reason as a tag,
+and the landed attempt's steps follow it. A `queue` span is the part of a window
+that no step accounts for, such as a wait for a node slot. Refusal text, briefs
+and argv never reach the trace. A row from before the column has no acceptance
+time in the history and keeps the attempt window as its start.
+
 ## Read gates (hk 5302)
 
 The coordinator and two other loops used to read their store on every tick even
