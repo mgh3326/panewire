@@ -87,7 +87,8 @@ func parseHubNodeCommandResult(raw []byte) (hubNodeCommandResult, bool) {
 			return hubNodeCommandResult{}, false
 		}
 		if detail, found := fields["detail"]; found {
-			if len(fields) != 5 || result.Error != "done_failed" || json.Unmarshal(detail, &result.Detail) != nil || len(result.Detail) > 240 || !utf8.ValidString(result.Detail) || strings.ContainsAny(result.Detail, "\r\n") {
+			detailed := result.Error == "done_failed" || result.Error == "invalid_args" && result.Op == nodeCommandWorktreeList
+			if len(fields) != 5 || !detailed || json.Unmarshal(detail, &result.Detail) != nil || len(result.Detail) > 240 || !utf8.ValidString(result.Detail) || strings.ContainsAny(result.Detail, "\r\n") {
 				return hubNodeCommandResult{}, false
 			}
 		} else if len(fields) != 4 {

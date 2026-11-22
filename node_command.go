@@ -1004,7 +1004,7 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 		}
 	}
 	reply.Error = code
-	if code == "done_failed" {
+	if code == "done_failed" || code == "invalid_args" && message.CommandOp == nodeCommandWorktreeList {
 		reply.Detail, _ = result.(string)
 	}
 	if message.CommandOp == nodeCommandJobResult {

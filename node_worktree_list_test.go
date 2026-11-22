@@ -147,6 +147,10 @@ func TestNodeWorktreeListPageSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The fixture is a main checkout (a .git entry), so the common-dir check passes.
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	var listing strings.Builder
 	for i := 0; i < 40; i++ {
 		p := root
@@ -236,5 +240,57 @@ func TestNodeWorktreeListSymlink(t *testing.T) {
 	status := nodeListStatus(t.Context(), func(context.Context, ...string) ([]byte, error) { called = true; return nil, nil }, link)
 	if called || status.Error == "" {
 		t.Fatal(status, called)
+	}
+}
+
+// TestNodeWorktreeListCommonDirMissing: a common dir that is absent or is not a
+// Git directory answers invalid_args with detail common_dir_missing and never
+// starts git; a real repository whose git call fails stays herdr_failed.
+func TestNodeWorktreeListCommonDirMissing(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		calls++
+		return nil, os.ErrInvalid
+	}
+	empty := filepath.Join(root, "empty")
+	if err := os.Mkdir(empty, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, common := range []string{filepath.Join(root, "missing"), empty} {
+		result, code := nodeWorktreeList(t.Context(), runner, nodeWorktreeListArgs{Common: common})
+		if code != "invalid_args" || result != "common_dir_missing" {
+			t.Fatalf("%s: result=%v code=%q", common, result, code)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("git ran %d times for a path that is not a repository", calls)
+	}
+	main := filepath.Join(root, "main")
+	if out, err := exec.Command("git", "init", main).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if _, code := nodeWorktreeList(t.Context(), runner, nodeWorktreeListArgs{Common: main}); code != "herdr_failed" || calls != 1 {
+		t.Fatalf("real repository with failing git: code=%q calls=%d", code, calls)
+	}
+}
+
+// TestHubNodeCommandWorktreeListDetailAccepted: the hub keeps the node's
+// common_dir_missing detail for worktree.list invalid_args, and still refuses a
+// detail on any other invalid_args.
+func TestHubNodeCommandWorktreeListDetailAccepted(t *testing.T) {
+	reply := func(op, code string) []byte {
+		encoded, _ := json.Marshal(map[string]any{"type": "node.command.result", "request_id": newHubNodeCommandID(), "op": op, "error": code, "detail": "common_dir_missing"})
+		return encoded
+	}
+	result, ok := parseHubNodeCommandResult(reply(nodeCommandWorktreeList, "invalid_args"))
+	if !ok || result.Detail != "common_dir_missing" {
+		t.Fatalf("worktree.list invalid_args detail: ok=%v detail=%q", ok, result.Detail)
+	}
+	if _, ok := parseHubNodeCommandResult(reply(nodeCommandPaneRead, "invalid_args")); ok {
+		t.Fatal("detail on another op's invalid_args must be refused")
 	}
 }
