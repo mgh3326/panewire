@@ -65,6 +65,15 @@ way.
   `NOT EXISTS`: the anti-join reads the quarantine table once per page instead
   of once per statement execution, and a null-safe `NOT IN` is a trap in any
   case.
+- The held pass (`makeHeldBatches`) and the digest pass (`makeBatchesDue`) run
+  at least every 60 s and after every write. Their scans lead with no `lane`,
+  so the lane-leading indexes never served them. Migration
+  `0038_lane_inbox_pass_indexes.sql` adds two indexes on `id`, each partial on
+  its pass's own predicate; MySQL's `0031` cannot use partial indexes, so it
+  keys `(digest_batch, hold_until)` and `(class, digest_batch, digest_at)`
+  instead. The SQLite schema creates the partial pair in `openLaneInboxStore`.
+  `TestLaneInboxPassQueriesUseTheirPartialIndexes_hk6081` guards the SQLite
+  plans.
 - The polls that exist to notice a time-based transition (`due_at`,
   `digest_at`, `next_check_ms`, `park_since_ms`) keep their cadence: "nothing
   changed" cannot be known without asking. The pending batch page is not one
