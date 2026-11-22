@@ -518,7 +518,10 @@ func TestNodeSpawnHubDrainsForQueuedExclusiveRequest_t4578(t *testing.T) {
 	if !slices.Equal(open, want) {
 		t.Fatalf("opened %v, want %v", open, want)
 	}
-	if err := wsjson.Write(t.Context(), node, nodeRefusal(tasks["job-a"].Node.RequestID, "spawn_disabled", false)); err != nil {
+	// The refusal only frees a slot. invalid_args is not a launch failure, so
+	// two of them do not bench the pair and unbind the rows queued behind them
+	// (hk 6073); spawn_disabled would.
+	if err := wsjson.Write(t.Context(), node, nodeRefusal(tasks["job-a"].Node.RequestID, "invalid_args", false)); err != nil {
 		t.Fatal(err)
 	}
 	// Window: with job-b still open, neither the exclusive request nor the
@@ -528,7 +531,7 @@ func TestNodeSpawnHubDrainsForQueuedExclusiveRequest_t4578(t *testing.T) {
 		t.Fatalf("hub refilled the drained slot with %s", id)
 	case <-time.After(2500 * time.Millisecond):
 	}
-	if err := wsjson.Write(t.Context(), node, nodeRefusal(tasks["job-b"].Node.RequestID, "spawn_disabled", false)); err != nil {
+	if err := wsjson.Write(t.Context(), node, nodeRefusal(tasks["job-b"].Node.RequestID, "invalid_args", false)); err != nil {
 		t.Fatal(err)
 	}
 	if got := next("after drain"); got != tasks[""].Node.RequestID {
