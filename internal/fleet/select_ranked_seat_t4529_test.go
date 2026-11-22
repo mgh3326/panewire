@@ -50,18 +50,17 @@ func chosenRung(sel *selPlan) string {
 }
 
 // Command Code takes B and C when it has more room than the other ranked
-// pools; with no policy seat (the embedded order names none, hk 5916) its
-// seat is the lowest fit, and with less room the codex or claude seat keeps
-// the task.
+// pools, through the embedded default policy seat; with less room the codex
+// or claude seat keeps the task.
 func TestRankedSeatsOrderPoolsByRoom_T4529(t *testing.T) {
 	cases := []struct {
 		grade                      string
 		commandcode, codex, claude float64
 		want                       string
 	}{
-		{"B", -0.083, -0.59, -0.176, "omp-dsflash41@low"},
+		{"B", -0.083, -0.59, -0.176, "omp-dsflash41@high"},
 		{"B", -0.083, -0.013, -0.176, "codex-luna@high"},
-		{"C", -0.083, -0.59, -0.176, "omp-dsflash41@low"},
+		{"C", -0.083, -0.59, -0.176, "omp-dsflash41@high"},
 		{"C", -0.2, -0.59, -0.176, "haiku@medium"},
 		{"C", -0.2, -0.13, -0.176, "codex-luna@high"},
 	}
