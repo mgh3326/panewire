@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -494,7 +495,27 @@ func (client *HubClient) sendSpawnStarted(ctx context.Context, peer *hubClientCo
 func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
 	result = spawnResultForHub(result, peer.acceptsLaunchProof.Load(), peer.acceptsCheckoutSparse.Load(), peer.acceptsCheckoutBranch.Load())
 	result = spawnStageMSForHub(result, peer.acceptsSpawnStageSubmit.Load())
+	result = spawnCheckoutStagesForHub(result, peer.acceptsSpawnStageCheckout.Load())
 	_ = peer.write(ctx, spawnResultWire(result, extended))
+}
+
+// spawnCheckoutStagesForHub gives the checkout sub-stage keys only to a hub that
+// lists hubFeatureSpawnStageCheckout (hk 6075). Any other hub gets the checkout
+// total alone, the figure it has always had. A copy, so the journaled result
+// keeps its own map.
+func spawnCheckoutStagesForHub(result hubSpawnResult, acceptsSpawnStageCheckout bool) hubSpawnResult {
+	if acceptsSpawnStageCheckout {
+		return result
+	}
+	folded := maps.Clone(result.StageMS)
+	for _, key := range checkoutStageKeys {
+		delete(folded, key)
+	}
+	if len(folded) == len(result.StageMS) {
+		return result
+	}
+	result.StageMS = folded
+	return result
 }
 
 // spawnStageMSForHub gives the submit timing only to a hub that lists its key
@@ -666,6 +687,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		briefText = fetched
 	}
 	var checkoutMS *int64
+	var checkoutStages *checkoutStageTimer
 	if message.Checkout != nil {
 		started := time.Now()
 		result.Stage = "checkout"
@@ -675,22 +697,30 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 					result.StageMS = map[string]int64{}
 				}
 				result.StageMS["checkout"] = *checkoutMS
+				// The sub-stage keys come only with the total they sit inside (hk 6075).
+				for key, ms := range checkoutStages.ms {
+					result.StageMS[key] = ms
+				}
 			}
 		}()
 		prepare := client.spawnPrepare
 		if prepare == nil {
 			prepare = client.nodeWorktreePrepare
 		}
-		unlock, locked := client.lockSpawnPrepare(runContext, message.Checkout)
+		stageCtx, stages := withCheckoutStageTimer(runContext)
+		lockStarted := time.Now()
+		unlock, locked := client.lockSpawnPrepare(stageCtx, message.Checkout)
+		addCheckoutStage(stageCtx, checkoutStageLockWait, time.Since(lockStarted))
 		if !locked {
 			result.Retryable = true
 			result.RC, result.Error = 81, "checkout_refused:"+nodeOutcomeBusy
 			return result
 		}
-		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir, VerifyReuse: message.Checkout.VerifyReuse, Exclude: message.Checkout.Exclude, Include: message.Checkout.Include})
+		prepared, code := prepare(stageCtx, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir, VerifyReuse: message.Checkout.VerifyReuse, Exclude: message.Checkout.Exclude, Include: message.Checkout.Include})
 		unlock()
 		ms := time.Since(started).Milliseconds()
 		checkoutMS = &ms
+		checkoutStages = stages
 		if code != "" {
 			result.Retryable = true
 			result.RC, result.Error = 81, "checkout_refused:"+code
