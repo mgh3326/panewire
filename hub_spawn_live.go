@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -32,7 +33,11 @@ const spawnLiveSettle = 2 * time.Minute
 // placed profile yet (an auto spawn still being placed) cannot be attributed
 // and is not counted; its job, once a node lists it with a profile, is.
 func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string) (map[string]int, error) {
-	tasks, reported, err := h.liveSpawnSnapshot(ctx)
+	return h.liveSpawnProfilesFrom(ctx, h.liveSpawnSnapshot, exceptRequest)
+}
+
+func (h *HubServer) liveSpawnProfilesFrom(ctx context.Context, snapshot liveSnapshotFunc, exceptRequest string) (map[string]int, error) {
+	tasks, reported, err := snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -71,10 +76,14 @@ func (h *HubServer) liveSpawnProfiles(ctx context.Context, exceptRequest string)
 // canon. The account comes from the placed columns while the attempt holds
 // its seat, from the terminal outcome after it succeeded (hk 5124).
 func (h *HubServer) liveProfilesByAccount(ctx context.Context, exceptRequest string) (map[string]map[string]int, error) {
+	return h.liveProfilesByAccountFrom(ctx, h.liveSpawnSnapshot, exceptRequest)
+}
+
+func (h *HubServer) liveProfilesByAccountFrom(ctx context.Context, snapshot liveSnapshotFunc, exceptRequest string) (map[string]map[string]int, error) {
 	if h.inbox == nil {
 		return map[string]map[string]int{}, nil
 	}
-	tasks, err := h.liveSpawnTasks(ctx)
+	tasks, _, err := snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -101,10 +110,14 @@ func (h *HubServer) liveProfilesByAccount(ctx context.Context, exceptRequest str
 // operations whose job is still live. A failed lookup refuses fail-closed:
 // the callers drop the seat with account_busy_unknown.
 func (h *HubServer) liveAccountJobs(ctx context.Context, exceptRequest string) (map[string]string, error) {
+	return h.liveAccountJobsFrom(ctx, h.liveSpawnSnapshot, exceptRequest)
+}
+
+func (h *HubServer) liveAccountJobsFrom(ctx context.Context, snapshot liveSnapshotFunc, exceptRequest string) (map[string]string, error) {
 	if h.inbox == nil {
 		return map[string]string{}, nil
 	}
-	tasks, err := h.liveSpawnTasks(ctx)
+	tasks, _, err := snapshot(ctx)
 	h.noteAccountJobsLookup(err)
 	if err != nil {
 		return nil, err
@@ -181,6 +194,37 @@ func (h *HubServer) liveSpawnTasks(ctx context.Context) ([]hubSpawnTask, error) 
 	return tasks, err
 }
 
+// liveSnapshotFunc is one read of the fleet's live spawns (liveSpawnSnapshot,
+// or a memo of it).
+type liveSnapshotFunc func(context.Context) ([]hubSpawnTask, map[string]string, error)
+
+// memoLiveSnapshot reads liveSpawnSnapshot once and serves every later call
+// the same result: the three live-spawn readers of one fleet.App selection
+// (pool cap, account launches, account occupancy) run once per candidate host
+// and each asked the store for the same ~10k-row set (hk 6082). A failed read is
+// not kept, so the next call asks again and still fails closed. The result is
+// shared and read-only; the App is built per selection, so the memo ends with
+// it. refuseBusyCommandcodeSeat does not use it: it must see what changed while
+// it waited for the account lock.
+func (h *HubServer) memoLiveSnapshot() liveSnapshotFunc {
+	var mu sync.Mutex
+	var tasks []hubSpawnTask
+	var profiles map[string]string
+	var have bool
+	return func(ctx context.Context) ([]hubSpawnTask, map[string]string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !have {
+			t, p, err := h.liveSpawnSnapshot(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			tasks, profiles, have = t, p, true
+		}
+		return tasks, profiles, nil
+	}
+}
+
 // liveSpawnSnapshot is one read of the fleet's live spawns: the operations
 // that count, and the profile of every job a node reports active (empty when
 // the node's job.spawned receipt named none). Both come from the same presence
@@ -255,18 +299,62 @@ func livePlacedProfile(task hubSpawnTask) string {
 // one may be placing and counts, hk 4661),
 // bound and dispatching ones, and succeeded ones whose job is in activeJobs or that
 // started after settled.
+//
+// It runs one statement per index instead of one OR over the table (hk 6082):
+// the live statuses use spawn_operations_queue, a succeeded row created after
+// settled uses spawn_operations_succeeded, one that last ran after settled uses
+// spawn_operations_succeeded_run, and one named by activeJobs uses
+// spawn_operations_job. The OR read every succeeded row's 12 KB payload. A row
+// two parts match is kept once, and rows only move toward succeeded, so a part
+// that runs later can add a row an earlier one missed only by its own test.
+// The result is ordered by creation, then request id.
 func (s *laneInboxStore) liveSpawns(parent context.Context, activeJobs []string, settled, now time.Time) ([]hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE (status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant') AND NOT (status='accepted' AND node_id IS NULL AND park_reason<>'' AND next_check_ms>?)) OR status='succeeded' AND (created_ms>=? OR last_run_ms>=?`
-	args := []any{now.UnixMilli(), settled.UnixMilli(), settled.UnixMilli()}
+	const from = `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE `
+	parts := []struct {
+		where string
+		args  []any
+	}{
+		{`status IN ('accepted','bound','dispatching','bound_grant','dispatching_grant') AND NOT (status='accepted' AND node_id IS NULL AND park_reason<>'' AND next_check_ms>?)`, []any{now.UnixMilli()}},
+		{`status='succeeded' AND created_ms>=?`, []any{settled.UnixMilli()}},
+		{`status='succeeded' AND last_run_ms>=?`, []any{settled.UnixMilli()}},
+	}
 	if len(activeJobs) > 0 {
-		query += ` OR job IN (` + strings.TrimSuffix(strings.Repeat("?,", len(activeJobs)), ",") + `)`
-		for _, id := range activeJobs {
-			args = append(args, id)
+		args := make([]any, len(activeJobs))
+		for i, id := range activeJobs {
+			args[i] = id
+		}
+		parts = append(parts, struct {
+			where string
+			args  []any
+		}{`status='succeeded' AND job IN (` + strings.TrimSuffix(strings.Repeat("?,", len(activeJobs)), ",") + `)`, args})
+	}
+	var tasks []hubSpawnTask
+	seen := map[string]bool{}
+	for _, part := range parts {
+		got, err := s.queryLiveSpawns(ctx, from+part.where, part.args)
+		if err != nil {
+			return nil, err
+		}
+		for _, task := range got {
+			if !seen[task.Request.RequestID] {
+				seen[task.Request.RequestID] = true
+				tasks = append(tasks, task)
+			}
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(query+`)`), args...)
+	slices.SortFunc(tasks, func(a, b hubSpawnTask) int {
+		if c := a.Created.Compare(b.Created); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Request.RequestID, b.Request.RequestID)
+	})
+	return tasks, nil
+}
+
+func (s *laneInboxStore) queryLiveSpawns(ctx context.Context, query string, args []any) ([]hubSpawnTask, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
 		return nil, err
 	}
