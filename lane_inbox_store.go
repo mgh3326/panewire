@@ -610,14 +610,10 @@ const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at
 
 type inboxScanner interface{ Scan(...any) error }
 
-func scanLaneInbox(row inboxScanner, surfaced ...bool) (laneInboxItem, error) {
+func scanLaneInbox(row inboxScanner) (laneInboxItem, error) {
 	var i laneInboxItem
 	var payload string
-	fields := []any{&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil, &i.DeliveredAt, &i.SupersededAt, &i.SupersededBy}
-	if len(surfaced) > 0 && surfaced[0] {
-		fields = append(fields, &i.SurfacedAt)
-	}
-	err := row.Scan(fields...)
+	err := row.Scan(&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil, &i.DeliveredAt, &i.SupersededAt, &i.SupersededBy)
 	if err == nil {
 		err = json.Unmarshal([]byte(payload), &i.Event)
 	}
@@ -765,28 +761,125 @@ func (s *laneInboxStore) firstUnread(parent context.Context, lane string) (*lane
 	return &item, nil
 }
 
+// list returns up to 500 items, newest first, each with SurfacedAt filled. It
+// reads the items once and the surfaced summaries of their lanes once, however
+// many items the page holds (hk 6080): a correlated subquery per item read
+// lane_inbox_surfaces once per row. Both reads share one transaction, so they
+// see one snapshot on SQLite.
 func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error) {
-	q := `SELECT ` + laneInboxColumns + `,(SELECT COALESCE(max(delivered_at),0) FROM lane_inbox_surfaces surfaced WHERE surfaced.lane=lane_inbox.lane AND surfaced.through_id>=lane_inbox.id) FROM lane_inbox WHERE (?='' OR lane=?)`
+	q := `SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE (?='' OR lane=?)`
 	if unread {
 		q += ` AND ` + laneInboxUnread
 	}
 	q += ` ORDER BY id DESC LIMIT 500`
 	ctx, done := s.op(s.life)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(q), lane, lane)
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	items, err := s.listItems(ctx, tx, q, lane, lane)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.fillSurfacedAt(ctx, tx, items); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// listItems runs one item query and reads every row before it returns, so the
+// connection is free for the next statement.
+func (s *laneInboxStore) listItems(ctx context.Context, tx *sql.Tx, q string, args ...any) ([]laneInboxItem, error) {
+	rows, err := tx.QueryContext(ctx, s.q(q), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := []laneInboxItem{}
 	for rows.Next() {
-		i, err := scanLaneInbox(rows, true)
+		i, err := scanLaneInbox(rows)
 		if err != nil {
 			return nil, err
 		}
 		items = append(items, i)
 	}
 	return items, rows.Err()
+}
+
+// surfacedRun is one lane's surfaced summaries in descending through_id order:
+// through[k] is the k-th row's through_id and max[k] the largest delivered_at
+// among rows 0..k.
+type surfacedRun struct {
+	through []int64
+	max     []int64
+}
+
+// fillSurfacedAt sets each item's SurfacedAt to the largest delivered_at among
+// its lane's surfaced summaries whose through_id is at least the item's id, or
+// 0 when there is none. Rows with delivered_at=0 are not surfaced and are left
+// out, which changes no maximum. The rows come from one read of the lanes on
+// the page. Rows with through_id >= id form a prefix of a lane's descending
+// order, so the running maximum at that prefix's end is the answer.
+func (s *laneInboxStore) fillSurfacedAt(ctx context.Context, tx *sql.Tx, items []laneInboxItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	var lanes []any
+	marks := []string{}
+	seen := map[string]bool{}
+	for _, i := range items {
+		if !seen[i.Lane] {
+			seen[i.Lane] = true
+			lanes = append(lanes, i.Lane)
+			marks = append(marks, "?")
+		}
+	}
+	runs, err := s.surfacedRuns(ctx, tx, strings.Join(marks, ","), lanes)
+	if err != nil {
+		return err
+	}
+	for k := range items {
+		run := runs[items[k].Lane]
+		// Rows with through_id < id are the suffix, so the prefix length n is
+		// the first index whose through_id falls below the item's id.
+		n := sort.Search(len(run.through), func(j int) bool { return run.through[j] < items[k].ID })
+		if n > 0 {
+			items[k].SurfacedAt = run.max[n-1]
+		}
+	}
+	return nil
+}
+
+// surfacedRuns reads the surfaced summaries of the given lanes, one statement,
+// and returns each lane's running maxima.
+func (s *laneInboxStore) surfacedRuns(ctx context.Context, tx *sql.Tx, marks string, lanes []any) (map[string]surfacedRun, error) {
+	rows, err := tx.QueryContext(ctx, s.q(`SELECT lane,through_id,delivered_at FROM lane_inbox_surfaces WHERE lane IN (`+marks+`) AND delivered_at>0 ORDER BY lane,through_id DESC`), lanes...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := map[string]surfacedRun{}
+	for rows.Next() {
+		var lane string
+		var through, delivered int64
+		if err := rows.Scan(&lane, &through, &delivered); err != nil {
+			return nil, err
+		}
+		run := runs[lane]
+		m := delivered
+		if n := len(run.max); n > 0 && run.max[n-1] > m {
+			m = run.max[n-1]
+		}
+		run.through = append(run.through, through)
+		run.max = append(run.max, m)
+		runs[lane] = run
+	}
+	return runs, rows.Err()
 }
 
 // laneInboxAckState is what the ack-state lookup may say about an event: the
