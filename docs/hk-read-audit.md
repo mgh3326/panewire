@@ -105,4 +105,9 @@ not add.
 - The coarse `Stage` never becomes `submit`: `fleet.CoarseSpawnStage` reports
   landing, so the hub's stage rules (`postLaunch`, the unconfirmed-landing check
   in `hub_spawn_async.go`) see the same values as before.
+- The checkout's sub-stages `lock_wait`, `fetch` and `worktree_add` (hk 6075,
+  `checkout_stage_timing.go`) are new keys in `stage_ms`, gated the same way by
+  `spawn_stage_checkout` in `hub.features`. `spawnCheckoutStagesForHub` drops
+  them for any other hub, which keeps the `checkout` total it has always had.
+  Each sub-stage lies inside that total, so their sum is at most `checkout`.
 - No deploy order is required between hub and nodes.

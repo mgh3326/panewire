@@ -3,7 +3,9 @@ package panewire
 // spawnStages are the timing keys a node may report in a spawn result's
 // stage_ms. "submit" is the brief's write, typing and record (hk 5585); a node
 // sends it only to a hub that listed hubFeatureSpawnStageSubmit.
-var spawnStages = []string{"claim", "placement", "checkout", "launch", "submit", "landing"}
+// The checkout sub-stage keys (checkout_stage_timing.go, hk 6075) are timing keys
+// too; a node sends them only to a hub that listed hubFeatureSpawnStageCheckout.
+var spawnStages = []string{"claim", "placement", "checkout", "launch", "submit", "landing", checkoutStageLockWait, checkoutStageFetch, checkoutStageWorktreeAdd}
 
 // spawnCoarseStages are the values a spawn result may carry in its coarse
 // stage field. "submit" is never one of them: it is a timing key only, and
@@ -16,6 +18,11 @@ var spawnCoarseStages = []string{"claim", "placement", "checkout", "launch", "la
 // for an unknown key, so a node folds submit into landing for any other hub
 // (spawnResultForHub).
 const hubFeatureSpawnStageSubmit = "spawn_stage_submit"
+
+// hubFeatureSpawnStageCheckout is listed in hub.features by a hub that accepts
+// the checkout sub-stage keys lock_wait, fetch and worktree_add in stage_ms
+// (hk 6075). A node folds them out for any other hub (spawnCheckoutStagesForHub).
+const hubFeatureSpawnStageCheckout = "spawn_stage_checkout"
 
 // validSpawnStage reports whether stage is a coarse spawn stage (the result's
 // stage field).

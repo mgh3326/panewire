@@ -155,7 +155,7 @@ func (agent *hubAgent) queueFeatures() {
 
 // hubFeaturesFrame is the hub.features frame this hub sends.
 func hubFeaturesFrame() hubFeaturesEvent {
-	return hubFeaturesEvent{Type: "hub.features", Features: []string{hubFeatureHostSignals, hubFeatureReadiness, hubFeatureLaneEventPane, hubFeatureLaneEventPriority, hubFeatureLaneEventLong, hubFeaturePaneCaptureDoc, hubFeatureHostActivity, hubFeatureCheckoutPull, hubFeatureLaunchProof, hubFeatureEndedPanes, hubFeatureCheckoutSparse, hubFeatureCheckoutBranch, hubFeatureNodeLoops, hubFeatureFinalLost, hubFeatureSpawnStageSubmit}}
+	return hubFeaturesEvent{Type: "hub.features", Features: []string{hubFeatureHostSignals, hubFeatureReadiness, hubFeatureLaneEventPane, hubFeatureLaneEventPriority, hubFeatureLaneEventLong, hubFeaturePaneCaptureDoc, hubFeatureHostActivity, hubFeatureCheckoutPull, hubFeatureLaunchProof, hubFeatureEndedPanes, hubFeatureCheckoutSparse, hubFeatureCheckoutBranch, hubFeatureNodeLoops, hubFeatureFinalLost, hubFeatureSpawnStageSubmit, hubFeatureSpawnStageCheckout}}
 }
 
 // hostSignalsForHeartbeat collects the signals when this connection's hub
