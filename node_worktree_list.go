@@ -86,7 +86,32 @@ func nodeListCursorOffset(cursor string, snapshot [32]byte, total int) (int, boo
 	return n, hmac.Equal([]byte(cursor), []byte(nodeListCursor(snapshot, n)))
 }
 
+// nodeWorktreeListCommonDirMissing is the detail for a common dir that is not a
+// Git directory. mergewake reads invalid_args with this detail as "not cloned
+// here", so it is not an ERROR for every repository a host does not carry.
+const nodeWorktreeListCommonDirMissing = "common_dir_missing"
+
+// nodeCommonDirIsGit reports whether path is a directory that Git can open: a
+// main checkout (it holds .git) or a bare or git directory (HEAD and objects).
+// It checks the filesystem only, so a path that is not a repository never
+// starts git.
+func nodeCommonDirIsGit(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+		return true
+	}
+	head, headErr := os.Stat(filepath.Join(path, "HEAD"))
+	objects, objectsErr := os.Stat(filepath.Join(path, "objects"))
+	return headErr == nil && !head.IsDir() && objectsErr == nil && objects.IsDir()
+}
+
 func nodeWorktreeList(ctx context.Context, git relayCommandRunner, args nodeWorktreeListArgs) (any, string) {
+	if !nodeCommonDirIsGit(args.Common) {
+		return nodeWorktreeListCommonDirMissing, "invalid_args"
+	}
 	out, err := git(ctx, "--no-optional-locks", "-C", args.Common, "worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return nil, "herdr_failed"

@@ -1166,6 +1166,11 @@ status cannot be read. Dirty includes tracked changes and untracked entries.
 Ignored and untracked counts follow Git's porcelain output, including collapsed
 directories. Missing worktrees remain in the list with a status error.
 
+If `common` does not exist or is not a Git directory (a main checkout with a
+`.git` entry, or a git directory with `HEAD` and `objects`), the node answers
+`invalid_args` with detail `common_dir_missing` and runs no Git. A Git failure
+on an existing repository stays `herdr_failed`.
+
 A cursor is valid only for the same repository snapshot and node process. If
 Git's worktree list changes or the node restarts, start again without a cursor.
 The node may return fewer than `limit` rows to keep the result under 28 KiB.
