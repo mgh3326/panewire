@@ -180,19 +180,27 @@ staged successor before anything is sent (the stage's `ladder_step.close`):
 - `marker`: any other node keeps `pane.close` plus the staged row's close
   marker, unchanged.
 
+The handler, the replay of a lost author's step, the expiry pass and every
+cancellation read the node's verdict through one reconciler
+(`reconcileLadderStage`, table `decideLadder`; hk 5866):
+
 | verdict | action |
 | --- | --- |
-| `closed`, `gone` | the closed path: the predecessor is marked lost, the stage is activated |
+| `unknown`, `closing`, no readable answer | the stage is kept and never activated or released; one decision event `ladder-step:<job>:<round>:unresolved:esc`, shared by every caller; the step answers `pending` and is retried |
+| `closed` | the closed path: a live predecessor is marked lost, the stage is activated if the task still names the job |
+| `gone` | a live predecessor is replaced like `closed`; a completed predecessor ended on its own, so the stage is released (`parent_ended`) |
 | `refused`, `fenced` | the node closed nothing: the stage is released, the holder's role restored, today's `pane_not_closed` refusal |
-| `unknown`, no readable answer | the stage is kept and never activated; one decision event `ladder-step:<job>:<round>:unresolved:esc`, shared with the expiry pass |
 
-A stage whose close was sent is withdrawn only after `pane.ladder_close_fence`
-for its request id answers `fenced` (or an already final `closed`/`gone`), so a
-close delayed past the release never runs; a fence with no answer keeps the
-stage. A replay or the expiry pass of a completed author reads the K from the node
-through the fence (never `pane.ladder_close`, which would run a close the node
-has no record of) instead of reading the marker. Step 4 (hk 5866)
-replaces this mapping with one reconciler.
+A cancellation reason (the task moved or closed, the stage expired, the pane is
+busy) releases a settled K but never overrides an ambiguous one: ambiguity wins.
+
+A stage whose close was sent is cancelled only after `pane.ladder_close_fence`
+for its request id settles the K (`fenced`, or an already final `closed`,
+`gone` or `refused`), so a close delayed past the release never runs. A fence
+that does not settle it keeps the stage, files the decision event and answers
+`pending`; it is never a hub error. A replay or the expiry pass of a completed
+author reads the K from the node through the fence (never `pane.ladder_close`,
+which would run a close the node has no record of) instead of reading the marker.
 
 ## Replay
 
