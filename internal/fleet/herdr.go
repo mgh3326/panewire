@@ -19,6 +19,7 @@ import (
 
 	"github.com/mgh3326/panewire/internal/agybusy"
 	"github.com/mgh3326/panewire/internal/herdrpanes"
+	"github.com/mgh3326/panewire/internal/loginscreen"
 )
 
 func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
@@ -731,6 +732,13 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 		visible, e := a.visible(ctx, pane)
 		if e != nil {
 			return e
+		}
+		// A harness at its login screen never takes the brief, and Return would
+		// only answer its prompt. Refuse on this poll, so no Return is sent to it.
+		// The node saves this capture on the way out (captureFailure), and the
+		// hub reads it as a login need (hub_spawn_node.go loginScreenSpawnRefusal).
+		if loginscreen.Matches(kind, visible) {
+			return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; harness shows its login screen", a.herdrSession(), pane)
 		}
 		// A pasted chip or the brief in the composer is not proof. Require the
 		// cold idle pane to start working, corroborated by no unsubmitted chip.
