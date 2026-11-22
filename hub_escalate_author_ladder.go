@@ -14,13 +14,9 @@ import (
 // author's pane with pane.ladder_close under a K the staged row froze before
 // anything was sent; any other node keeps pane.close plus the close marker.
 //
-// The verdict mapping is the smallest one that keeps today's outcomes (step 4,
-// hk 5866, replaces it with one reconciler):
-//
-//	closed, gone       today's closed path
-//	refused, fenced    the node closed nothing: release the stage, today's refusal
-//	unknown, no answer keep the stage, never activate, one decision event
-var errLadderFenceHeld = errors.New("the ladder close is not fenced")
+// Every caller (the handler, the replay of a lost author's step, the expiry
+// pass and a cancellation) reads the node's verdict through the one reconciler
+// below (hk 5866, step 4).
 
 // ladderVerdict is the node's answer to a ladder close. answered is false when
 // no readable answer arrived.
@@ -120,36 +116,125 @@ func (h *HubServer) fenceLadderClose(ctx context.Context, stage hubSpawnTask, bo
 	return ladderVerdict{state: result.State, reason: result.Reason, answered: true}
 }
 
-// stagedCloseOutcome says whether the step's close took the predecessor's pane,
-// for a stage whose pane is gone. A marker stage reads the close marker. A
-// ladder stage reads the node's record through the fence, never through
-// pane.ladder_close, which would run a close the node has no record of: a
-// fenced K means nothing was or will be closed. unresolved keeps the stage.
-func (h *HubServer) stagedCloseOutcome(ctx context.Context, stage hubSpawnTask) (marked, unresolved bool, err error) {
+// stagedCloseVerdict reads what the step's close did to the predecessor's pane.
+// A marker stage reads the close marker (closed or refused). A ladder stage
+// reads the node's record through the fence, never through pane.ladder_close,
+// which would run a close the node has no record of: a fenced K means nothing
+// was or will be closed.
+func (h *HubServer) stagedCloseVerdict(ctx context.Context, stage hubSpawnTask) (ladderVerdict, error) {
 	bound := stagedLadderClose(stage)
-	if bound == nil || bound.Protocol != fleet.LadderCloseProtocolV1 {
-		marked, err = h.inbox.store.stagedCloseMarked(ctx, stage.Request.RequestID)
-		return marked, false, err
+	if bound != nil && bound.Protocol == fleet.LadderCloseProtocolV1 {
+		return h.fenceLadderClose(ctx, stage, *bound), nil
 	}
-	verdict := h.fenceLadderClose(ctx, stage, *bound)
-	return verdict.state == nodeLadderClosed || verdict.state == nodeLadderGone, verdict.unresolved(), nil
+	marked, err := h.inbox.store.stagedCloseMarked(ctx, stage.Request.RequestID)
+	if marked {
+		return ladderVerdict{state: nodeLadderClosed, answered: true}, err
+	}
+	return ladderVerdict{state: nodeLadderRefused, answered: true}, err
 }
 
-// withdrawStage releases a stage. A stage whose close was sent to a capable
-// node is fenced first, so a close delayed past the release never runs; only a
-// fenced or already settled K may be released: an unknown one stays. previousID
-// is the holder whose role is restored, or "" for a discard.
-func (h *HubServer) withdrawStage(ctx context.Context, id, previousID, roleKey string) error {
-	stage, err := h.inbox.store.spawnTask(ctx, id)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+// ladderAction is what the reconciler decided for a staged step.
+type ladderAction int
+
+const (
+	// ladderKeep: the outcome is ambiguous (unknown, closing or no readable
+	// answer). The stage stays and the owner has one decision event.
+	ladderKeep ladderAction = iota
+	// ladderRelease: nothing closed, the predecessor ended on its own, or the
+	// caller cancels. The stage is released.
+	ladderRelease
+	// ladderActivate: the pane is closed. The caller marks a live predecessor
+	// lost and activates the stage if the task still names the job.
+	ladderActivate
+)
+
+// decideLadder is the table (docs/escalate-author.md):
+//
+//	unknown, closing, no answer  keep the stage, one decision event
+//	closed                       activate, marking a live predecessor lost
+//	gone                         activate a live predecessor, release a completed one
+//	refused, fenced              release
+//
+// cancel is a reason the caller wants the stage gone (the task moved or closed,
+// the stage expired, the pane is busy). It never overrides an ambiguous
+// verdict: a close that may have run is never released on a guess.
+func decideLadder(v ladderVerdict, predecessorLive, cancel bool) ladderAction {
+	switch {
+	case v.unresolved():
+		return ladderKeep
+	case cancel:
+		return ladderRelease
+	case v.state == nodeLadderClosed, v.state == nodeLadderGone && predecessorLive:
+		return ladderActivate
 	}
-	if bound := stagedLadderClose(stage); err == nil && bound != nil && bound.Protocol == fleet.LadderCloseProtocolV1 {
-		if state := h.fenceLadderClose(ctx, stage, *bound).state; state != nodeLadderFenced && state != nodeLadderClosed && state != nodeLadderGone {
-			return errLadderFenceHeld
+	return ladderRelease
+}
+
+// ladderStageCall is one reconciliation. verdict is the node's answer when the
+// caller already holds it (the close the handler just sent); nil reads it from
+// the node's record without sending a close.
+type ladderStageCall struct {
+	stage           hubSpawnTask
+	verdict         *ladderVerdict
+	predecessorLive bool
+	cancel          bool
+}
+
+// reconcileLadderStage is the one place a staged step's close verdict becomes an
+// action, for the handler, the replay, the expiry pass and every cancellation.
+// An ambiguous verdict files the one decision event here; the caller applies a
+// release or an activation.
+func (h *HubServer) reconcileLadderStage(ctx context.Context, c ladderStageCall) (ladderAction, error) {
+	var verdict ladderVerdict
+	switch bound := stagedLadderClose(c.stage); {
+	case c.verdict != nil:
+		verdict = *c.verdict
+	case c.cancel && (bound == nil || bound.Protocol != fleet.LadderCloseProtocolV1):
+		// No close was sent to a node: there is nothing to read.
+		return ladderRelease, nil
+	default:
+		var err error
+		if verdict, err = h.stagedCloseVerdict(ctx, c.stage); err != nil {
+			return ladderKeep, err
 		}
 	}
-	return h.releaseStagedRow(ctx, id, previousID, roleKey)
+	action := decideLadder(verdict, c.predecessorLive, c.cancel)
+	if action == ladderKeep {
+		h.escalateAuthorUnresolved(ctx, c.stage.Request.LadderStep, c.stage.Owner)
+	}
+	return action, nil
+}
+
+// ladderStageKept is the answer of a step whose stage the reconciler kept.
+var ladderStageKept = hubEscalateAuthorResult{Code: "pending", Reason: "the pane close outcome is unresolved; the stage is kept"}
+
+// withdrawStage cancels a stage: a stage whose close was sent to a capable node
+// is read through the fence first (which also fences an absent K), so a close
+// delayed past the release never runs. kept reports an ambiguous K: the stage
+// stays, the owner has its decision event, and the caller answers pending.
+// previousID is the holder whose role is restored, or "" for a discard.
+func (h *HubServer) withdrawStage(ctx context.Context, id, previousID, roleKey string) (kept bool, err error) {
+	stage, err := h.inbox.store.spawnTask(ctx, id)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if err == nil {
+		action, err := h.reconcileLadderStage(ctx, ladderStageCall{stage: stage, cancel: true})
+		if err != nil || action == ladderKeep {
+			return err == nil, err
+		}
+	}
+	return false, h.releaseStagedRow(ctx, id, previousID, roleKey)
+}
+
+// withdrawStageResult is withdrawStage for a handler step: stop is true when the
+// step must answer now, with the kept stage's pending result or the error.
+func (h *HubServer) withdrawStageResult(ctx context.Context, id, previousID, roleKey string) (result hubEscalateAuthorResult, stop bool, err error) {
+	kept, err := h.withdrawStage(ctx, id, previousID, roleKey)
+	if kept {
+		return ladderStageKept, true, nil
+	}
+	return hubEscalateAuthorResult{}, err != nil, err
 }
 
 // releaseStagedRow is the store release without a fence: for a stage whose

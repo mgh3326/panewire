@@ -49,6 +49,9 @@ func newLadderCloseFixture(t *testing.T, job string, capable bool) *ladderCloseF
 			}
 			return map[string]any{"result": result}
 		case nodeCommandLadderFence:
+			if f.fenceAnswer == "none" {
+				return map[string]any{"error": "journal_failed"}
+			}
 			return map[string]any{"result": nodeLadderCloseResult{State: f.fenceAnswer}}
 		}
 		return nil
@@ -146,7 +149,7 @@ func TestEscalateAuthorLadderCloseRefusedReleasesTheStage(t *testing.T) {
 }
 
 // Withdrawing a stage whose close was sent fences its request id first; a
-// fence the node does not answer keeps the stage.
+// fence the node does not settle keeps the stage and answers pending.
 func TestEscalateAuthorWithdrawingASentStageFencesFirst(t *testing.T) {
 	f := newLadderCloseFixture(t, "pw-task-5865-fence", true)
 	f.answer = nodeLadderUnknown
@@ -158,8 +161,8 @@ func TestEscalateAuthorWithdrawingASentStageFencesFirst(t *testing.T) {
 	f.taskBound = "another-job"
 	f.mu.Unlock()
 	f.fenceAnswer = nodeLadderUnknown
-	if _, err := f.hub.escalateAuthor(t.Context(), f.request()); err == nil {
-		t.Fatal("a stage whose fence was not confirmed was released")
+	if result, _ := f.escalate(t, nil); result.Code != "pending" {
+		t.Fatalf("a stage whose fence was not confirmed answered %+v", result)
 	}
 	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err != nil {
 		t.Fatalf("stage lost: %v", err)

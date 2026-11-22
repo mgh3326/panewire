@@ -181,7 +181,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	// successor ("<job>-q<n>") or an earlier ladder successor ("-l<n>"). A
 	// successor's submission names --parent-job and no --task, so its stored
 	// submission cannot say which task it holds; the record's task id and the
-	// live binding (escalateAuthorTaskNamesJob) do, and refuse any job that is
+	// live binding (escalateAuthorTaskStop) do, and refuse any job that is
 	// not the current holder, naming the one that is. Here only the shape of
 	// the stored submission is checked: the right job, an implementer, and a
 	// task that is the request's or inherited.
@@ -273,8 +273,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	}
 	if state != "claimed" && state != "spawned" && !resume && !finished {
 		if staged && hkTerminalState(state) {
-			if err := h.withdrawStage(ctx, prior.Request.RequestID, "", roleKey); err != nil {
-				return hubEscalateAuthorResult{}, err
+			if result, stop, err := h.withdrawStageResult(ctx, prior.Request.RequestID, "", roleKey); stop {
+				return result, err
 			}
 			return h.escalateAuthorParentEnded(ctx, request, owner), nil
 		}
@@ -297,32 +297,28 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			return h.escalateAuthorRefusal(ctx, request, owner, "job_not_live", "the job completed and its pane is gone", false)
 		}
 		// hk keeps a completed record terminal, so it cannot show who closed
-		// the pane. The staged row's close marker, written before the close was
-		// asked for, does: a marked stage closed the pane itself and goes on to
-		// activation, an unmarked one lost its author independently.
-		marked, unresolved, err := h.stagedCloseOutcome(ctx, prior)
-		if err != nil {
+		// the pane. The reconciler reads the stage's close verdict (the node's
+		// record, or the close marker written before the close was asked
+		// for): a closed pane goes on to activation, a pane that was never
+		// closed, or was gone already, lost its author independently.
+		action, err := h.reconcileLadderStage(ctx, ladderStageCall{stage: prior})
+		switch {
+		case err != nil:
 			return hubEscalateAuthorResult{}, err
-		}
-		if unresolved {
-			h.escalateAuthorUnresolved(ctx, prior.Request.LadderStep, owner)
-			return hubEscalateAuthorResult{Code: "pending", Reason: "the pane close outcome is unresolved; the stage is kept"}, nil
-		}
-		if !marked {
-			if err := h.withdrawStage(ctx, prior.Request.RequestID, "", roleKey); err != nil {
+		case action == ladderKeep:
+			return ladderStageKept, nil
+		case action == ladderRelease:
+			if err := h.releaseStagedRow(ctx, prior.Request.RequestID, "", roleKey); err != nil {
 				return hubEscalateAuthorResult{}, err
 			}
 			return h.escalateAuthorParentEnded(ctx, request, owner), nil
 		}
 		// The pane probe may have waited while the task was rebound or closed:
-		// read the binding again before a marked stage is activated. A moved or
+		// read the binding again before a closed stage is activated. A moved or
 		// closed task releases the stage; an unreadable one keeps it pending.
-		if result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner); stop {
-			if result.Code == "job_mismatch" || result.Code == "task_closed" {
-				if err := h.withdrawStage(ctx, prior.Request.RequestID, "", roleKey); err != nil {
-					return hubEscalateAuthorResult{}, err
-				}
-			}
+		if result, stop, err := h.reconcileStagedLadderStage(ctx, app, request, owner, prior.Request.RequestID, roleKey, ""); err != nil {
+			return hubEscalateAuthorResult{}, err
+		} else if stop {
 			return result, nil
 		}
 	}
@@ -412,10 +408,16 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		if finished {
 			previousHolder = ""
 		}
-		releaseStage := func() error { return h.withdrawStage(ctx, prior.Request.RequestID, previousHolder, roleKey) }
 		cancel := func(code, why string) (hubEscalateAuthorResult, error) {
-			if err := releaseStage(); err != nil {
+			result, stop, err := h.withdrawStageResult(ctx, prior.Request.RequestID, previousHolder, roleKey)
+			if err != nil {
 				return hubEscalateAuthorResult{}, fmt.Errorf("cannot cancel staged step: %w", err)
+			}
+			if stop {
+				return result, nil
+			}
+			if code == "pending" {
+				return hubEscalateAuthorResult{Code: code, Reason: why}, nil
 			}
 			return h.escalateAuthorRefusal(ctx, request, owner, code, why, false)
 		}
@@ -437,11 +439,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		// refusal itself; an unreadable binding is a retry and files nothing.
 		// Any stop releases the stage, because the close has not happened and
 		// the retry stages it again.
-		if result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner); stop {
-			if err := releaseStage(); err != nil {
-				return hubEscalateAuthorResult{}, fmt.Errorf("cannot cancel staged step: %w", err)
-			}
-			return result, nil
+		if code, why := h.escalateAuthorTaskStop(ctx, app, request); code != "" {
+			return cancel(code, why)
 		}
 		// A completed author's end leaves no hk record, so the step writes its
 		// intent on the staged row after the screen is saved and just before the
@@ -454,18 +453,25 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 		}
 		if bound.Protocol == fleet.LadderCloseProtocolV1 {
 			verdict, retry := h.closeStepLadder(ctx, holder, name, probe.row, prior, *bound)
-			switch {
-			case retry:
+			if retry {
 				return hubEscalateAuthorResult{Code: "pending", Reason: "the close binding could not be stored; retry"}, nil
-			case verdict.unresolved():
-				h.escalateAuthorUnresolved(ctx, prior.Request.LadderStep, owner)
-				return hubEscalateAuthorResult{Code: "pending", Reason: "the pane close outcome is unresolved; the stage is kept"}, nil
-			case verdict.state != nodeLadderClosed && verdict.state != nodeLadderGone:
+			}
+			action, err := h.reconcileLadderStage(ctx, ladderStageCall{stage: prior, verdict: &verdict, predecessorLive: !finished})
+			if err != nil {
+				return hubEscalateAuthorResult{}, err
+			}
+			if action == ladderKeep {
+				return ladderStageKept, nil
+			}
+			if action == ladderRelease {
 				// The node closed nothing (a guard refused, or a fence was
-				// recorded): the stage is released as a refused close, and no
-				// fence is needed for a K the node answered.
+				// recorded), or the pane was gone already: the stage is
+				// released, and no fence is needed for a K the node answered.
 				if err := h.releaseStagedRow(ctx, prior.Request.RequestID, previousHolder, roleKey); err != nil {
 					return hubEscalateAuthorResult{}, fmt.Errorf("cannot cancel staged step: %w", err)
+				}
+				if verdict.state == nodeLadderGone {
+					return h.escalateAuthorParentEnded(ctx, request, owner), nil
 				}
 				return h.escalateAuthorRefusal(ctx, request, owner, "pane_not_closed", "the author pane could not be closed: "+firstNonempty(verdict.reason, verdict.state), false)
 			}
@@ -499,8 +505,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 				return hubEscalateAuthorResult{Code: "pending", Reason: "the predecessor's end reason is unconfirmed; retry"}, nil
 			}
 			if hkTerminalState(escalateAuthorStr(current, "state")) && !(escalateAuthorStr(current, "state") == "lost" && escalateAuthorStr(current, "end_reason") == endReason) {
-				if err := h.withdrawStage(ctx, prior.Request.RequestID, "", roleKey); err != nil {
-					return hubEscalateAuthorResult{}, err
+				if result, stop, err := h.withdrawStageResult(ctx, prior.Request.RequestID, "", roleKey); stop {
+					return result, err
 				}
 				return h.escalateAuthorParentEnded(ctx, request, owner), nil
 			}
@@ -536,53 +542,54 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	return h.escalateAuthorOutcome(ctx, app, request, owner, newJob, prior)
 }
 
-// escalateAuthorTaskNamesJob reads the task's live binding (hk refs.job_id)
-// and stops a step the task no longer names its author for: a replacement
-// started with --parent-job rebinds the task, holds no task role of its own,
-// and leaves the old author's record and pane behind, so the record's own task
-// id and the free role prove nothing. An unreadable binding is a retry, not a
-// refusal. The caller returns the result when stop is true.
-func (h *HubServer) escalateAuthorTaskNamesJob(ctx context.Context, app *fleet.App, request hubEscalateAuthorRequest, owner string) (result hubEscalateAuthorResult, stop bool) {
+// escalateAuthorTaskStop reads the task's live binding (hk refs.job_id) and
+// names why a step the task no longer names its author for must stop: a
+// replacement started with --parent-job rebinds the task, holds no task role of
+// its own, and leaves the old author's record and pane behind, so the record's
+// own task id and the free role prove nothing. code is "" when the step goes
+// on, "pending" for an unreadable binding (a retry, not a refusal), or the
+// refusal code job_mismatch or task_closed.
+func (h *HubServer) escalateAuthorTaskStop(ctx context.Context, app *fleet.App, request hubEscalateAuthorRequest) (code, reason string) {
 	status, err := app.TaskStatus(ctx, request.Task)
-	if err != nil {
-		return hubEscalateAuthorResult{Code: "pending", Reason: "the task's binding is unreadable; retry"}, true
-	}
-	if status.JobID != request.Job {
-		result, _ = h.escalateAuthorRefusal(ctx, request, owner, "job_mismatch", "the current implementer is "+firstNonempty(status.JobID, "no job")+" (the task is bound to it), not "+request.Job, false)
-		return result, true
-	}
-	if hkTaskTerminalState(status.State) {
+	switch {
+	case err != nil:
+		return "pending", "the task's binding is unreadable; retry"
+	case status.JobID != request.Job:
+		return "job_mismatch", "the current implementer is " + firstNonempty(status.JobID, "no job") + " (the task is bound to it), not " + request.Job
+	case hkTaskTerminalState(status.State):
 		// The PR the step was asked for is done: there is no author to replace.
-		result, _ = h.escalateAuthorRefusal(ctx, request, owner, "task_closed", "the task is "+status.State, false)
-		return result, true
+		return "task_closed", "the task is " + status.State
 	}
-	return hubEscalateAuthorResult{}, false
+	return "", ""
 }
 
-// reconcileStagedLadderStage is the one staged-handoff check every activation
-// path shares: the handler, the replay of a lost author's step and the expiry
-// pass all read the task's live binding immediately before they activate a
-// staged successor (hk 5631). A task that moved to another job, or closed,
-// releases the stage and is never dispatched; the refusal is filed once, here.
-// An unreadable binding stops the step as a retry and keeps the stage.
+// reconcileStagedLadderStage is the staged-handoff check every activation path
+// shares: the handler, the replay of a lost author's step and the expiry pass
+// all read the task's live binding immediately before they activate a staged
+// successor (hk 5631). A task that moved to another job, or closed, cancels the
+// stage through the reconciler (which keeps an ambiguous one) and is never
+// dispatched; the refusal is filed once, after the release. An unreadable
+// binding stops the step as a retry and keeps the stage.
 //
 // liveHolder names the predecessor whose live reservation the stage took, or
 // "" when it ended. Only a live holder gets its role back: a terminal job is
 // never handed a reservation again.
 func (h *HubServer) reconcileStagedLadderStage(ctx context.Context, app *fleet.App, request hubEscalateAuthorRequest, owner, stageID, roleKey, liveHolder string) (hubEscalateAuthorResult, bool, error) {
-	result, stop := h.escalateAuthorTaskNamesJob(ctx, app, request, owner)
-	if !stop || stageID == "" || result.Code != "job_mismatch" && result.Code != "task_closed" {
-		return result, stop, nil
+	code, why := h.escalateAuthorTaskStop(ctx, app, request)
+	switch code {
+	case "":
+		return hubEscalateAuthorResult{}, false, nil
+	case "pending":
+		return hubEscalateAuthorResult{Code: code, Reason: why}, true, nil
 	}
-	var err error
-	if liveHolder != "" {
-		err = h.withdrawStage(ctx, stageID, liveHolder, roleKey)
-	} else {
-		err = h.withdrawStage(ctx, stageID, "", roleKey)
+	if stageID != "" {
+		if result, stop, err := h.withdrawStageResult(ctx, stageID, liveHolder, roleKey); err != nil {
+			return hubEscalateAuthorResult{}, false, fmt.Errorf("cannot release staged step: %w", err)
+		} else if stop {
+			return result, true, nil
+		}
 	}
-	if err != nil {
-		return hubEscalateAuthorResult{}, false, fmt.Errorf("cannot release staged step: %w", err)
-	}
+	result, _ := h.escalateAuthorRefusal(ctx, request, owner, code, why, false)
 	return result, true, nil
 }
 
@@ -732,53 +739,45 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 			}
 			continue
 		}
+		request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 		if state == "completed" {
 			// A completed record says nothing of the pane: the author may still
 			// be fixing the PR (hk 5521). Only a probe that finds the pane gone
 			// makes the predecessor's end independent; a pane still there is an
-			// author the expired stage never touched.
-			marked, unresolved, markErr := h.stagedCloseOutcome(ctx, task)
-			if markErr != nil {
+			// author the expired stage never touched, which cancels the stage.
+			probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record))
+			action, err := h.reconcileLadderStage(ctx, ladderStageCall{stage: task, cancel: probe.state == heldPanePresent})
+			if err != nil || action == ladderKeep {
 				continue
 			}
-			if unresolved {
-				h.escalateAuthorUnresolved(ctx, id, task.Owner)
-				continue
-			}
-			request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
-			switch h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state {
-			case heldPanePresent:
-				if h.withdrawStage(ctx, task.Request.RequestID, "", roleKey) == nil {
-					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-					_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
-				}
-				continue
-			case heldPaneUnknown:
-				if marked {
-					// The step asked for the close and no read says whether it
-					// happened: keep the stage and tell the owner once.
+			switch {
+			case probe.state == heldPaneUnknown:
+				if action == ladderActivate {
+					// The step closed the pane and no read says whether the
+					// author is back: keep the stage and tell the owner once.
 					h.escalateAuthorUnresolved(ctx, id, task.Owner)
 				}
-				continue
-			default:
-				if marked {
-					// The pane is gone and the step asked for the close: finish
-					// it only while the task still names this author and is open.
-					// A task another job took over, or closed, supersedes the
-					// stage (released, never dispatched); an unreadable one
-					// keeps it. The shared reconciler reads the binding and files
-					// the refusal.
-					if h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey) {
-						h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-					}
-					continue
+			case action == ladderActivate:
+				// The pane is gone and the step closed it: finish the step only
+				// while the task still names this author and is open. A task
+				// another job took over, or closed, supersedes the stage
+				// (released, never dispatched); an unreadable one keeps it.
+				if h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey) {
+					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
+				}
+			case h.releaseStagedRow(ctx, task.Request.RequestID, "", roleKey) == nil:
+				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
+				if probe.state == heldPanePresent {
+					_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
+				} else {
+					h.escalateAuthorParentEnded(ctx, request, task.Owner)
 				}
 			}
+			continue
 		}
 		if hkTerminalState(state) {
-			if h.withdrawStage(ctx, task.Request.RequestID, "", roleKey) == nil {
+			if kept, err := h.withdrawStage(ctx, task.Request.RequestID, "", roleKey); err == nil && !kept {
 				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-				request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 				h.escalateAuthorParentEnded(ctx, request, task.Owner)
 			}
 			continue
@@ -789,11 +788,10 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		if h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record)).state != heldPanePresent {
 			continue
 		}
-		if err := h.withdrawStage(ctx, task.Request.RequestID, holder.Request.RequestID, roleKey); err != nil {
+		if kept, err := h.withdrawStage(ctx, task.Request.RequestID, holder.Request.RequestID, roleKey); err != nil || kept {
 			continue
 		}
 		h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-		request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
 		_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 	}
 }
