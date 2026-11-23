@@ -103,6 +103,14 @@ func newSessionWakeNode(t *testing.T, lanes sessionMessageLanes) claudeWakeNode 
 	return claudeWakeNode{client: client, root: client.jobsInboxRoot, typed: typed}
 }
 
+// runClaudeSocketTestCLI is runClaudeSocketCLI with an empty stdin. The real
+// one reads the test process's stdin for a session id when --session and
+// CLAUDE_SESSION_ID are both unset, and a pipe that never closes would block
+// that read forever, so no test may reach it.
+func runClaudeSocketTestCLI(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+	return runClaudeSocketCLIStdin(args, strings.NewReader(""), stdout, stderr, now)
+}
+
 func registerClaudeSocket(t *testing.T, root, lane, socket string) int {
 	t.Helper()
 	return registerClaudeSocketWithSession(t, root, lane, socket, testClaudeSessionID)
@@ -119,7 +127,7 @@ func registerClaudeSocketWithSession(t *testing.T, root, lane, socket, sessionID
 		t.Setenv("CLAUDE_SESSION_ID", "")
 	}
 	var stdout, stderr bytes.Buffer
-	code := runClaudeSocketCLI([]string{"register", "--lane", lane, "--inbox-root", root}, &stdout, &stderr, time.Now)
+	code := runClaudeSocketTestCLI([]string{"register", "--lane", lane, "--inbox-root", root}, &stdout, &stderr, time.Now)
 	if stdout.Len() != 0 {
 		t.Fatalf("register printed %q: a SessionStart hook's stdout becomes session context", stdout.String())
 	}
@@ -305,7 +313,7 @@ func TestClaudeSocketRegisterRefusals(t *testing.T) {
 	t.Setenv("PANEWIRE_LANE", "")
 	t.Setenv(claudeSocketEnv, "")
 	var out bytes.Buffer
-	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, &out, &out, time.Now); code != ExitUsage {
+	if code := runClaudeSocketTestCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, &out, &out, time.Now); code != ExitUsage {
 		t.Fatalf("a session without messaging exited %d", code)
 	}
 	regular := filepath.Join(t.TempDir(), "plain")
@@ -326,7 +334,7 @@ func TestClaudeSocketRegisterRefusals(t *testing.T) {
 	// The lane defaults to PANEWIRE_LANE, as for the other pane-side commands.
 	t.Setenv("PANEWIRE_LANE", "routing-policy")
 	t.Setenv(claudeSocketEnv, newFakeClaudeSession(t).path)
-	if code := runClaudeSocketCLI([]string{"register", "--inbox-root", root}, &out, &out, time.Now); code != ExitOK {
+	if code := runClaudeSocketTestCLI([]string{"register", "--inbox-root", root}, &out, &out, time.Now); code != ExitOK {
 		t.Fatalf("PANEWIRE_LANE default exited %d: %s", code, out.String())
 	}
 	if _, err := readClaudeSocketRegistration(root, "routing-policy", "w:p4"); err != nil {
@@ -343,7 +351,7 @@ func TestClaudeWakeIgnoresRegistrationFromAnotherPane(t *testing.T) {
 	t.Setenv(claudeSocketEnv, session.path)
 	t.Setenv("HERDR_PANE_ID", "w:old")
 	var out bytes.Buffer
-	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", node.root}, &out, &out, time.Now); code != ExitOK {
+	if code := runClaudeSocketTestCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", node.root}, &out, &out, time.Now); code != ExitOK {
 		t.Fatalf("register exited %d", code)
 	}
 	message := wakeInject("routing-policy", 1, "decision") // routed to w:p4
@@ -359,7 +367,7 @@ func TestClaudeWakeIgnoresRegistrationFromAnotherPane(t *testing.T) {
 	}
 	// Re-registering from the routed pane (the new session's hook) takes over.
 	t.Setenv("HERDR_PANE_ID", "w:p4")
-	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", node.root}, &out, &out, time.Now); code != ExitOK {
+	if code := runClaudeSocketTestCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", node.root}, &out, &out, time.Now); code != ExitOK {
 		t.Fatalf("register exited %d", code)
 	}
 	*node.typed = nil
@@ -375,13 +383,13 @@ func TestClaudeSocketRegisterNeedsAPane(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", "")
 	t.Setenv(claudeSocketEnv, newFakeClaudeSession(t).path)
 	var out bytes.Buffer
-	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, &out, &out, time.Now); code != ExitUsage {
+	if code := runClaudeSocketTestCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, &out, &out, time.Now); code != ExitUsage {
 		t.Fatalf("a registration with no pane exited %d", code)
 	}
 	if entries, _ := os.ReadDir(root); len(entries) != 0 {
 		t.Fatalf("left %v", entries)
 	}
-	if code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--pane", "w:p4", "--inbox-root", root}, &out, &out, time.Now); code != ExitOK {
+	if code := runClaudeSocketTestCLI([]string{"register", "--lane", "routing-policy", "--pane", "w:p4", "--inbox-root", root}, &out, &out, time.Now); code != ExitOK {
 		t.Fatalf("--pane exited %d", code)
 	}
 }
@@ -410,7 +418,7 @@ func registerClaudeSocketAt(t *testing.T, lane, socket string) {
 	t.Setenv("HERDR_PANE_ID", "w:p4")
 	t.Setenv("CLAUDE_SESSION_ID", testClaudeSessionID)
 	var out bytes.Buffer
-	if code := runClaudeSocketCLI([]string{"register", "--lane", lane}, &out, &out, time.Now); code != ExitOK {
+	if code := runClaudeSocketTestCLI([]string{"register", "--lane", lane}, &out, &out, time.Now); code != ExitOK {
 		t.Fatalf("register exited %d: %s", code, out.String())
 	}
 }
@@ -528,7 +536,7 @@ func TestClaudeSocketRegisterSessionCapture(t *testing.T) {
 
 	// 1. Via --session flag
 	var out bytes.Buffer
-	code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--session", "flag-session-id", "--inbox-root", root}, &out, &out, time.Now)
+	code := runClaudeSocketTestCLI([]string{"register", "--lane", "routing-policy", "--session", "flag-session-id", "--inbox-root", root}, &out, &out, time.Now)
 	if code != ExitOK {
 		t.Fatalf("--session exited %d: %s", code, out.String())
 	}
@@ -540,7 +548,7 @@ func TestClaudeSocketRegisterSessionCapture(t *testing.T) {
 	// 2. Via CLAUDE_SESSION_ID env
 	t.Setenv("CLAUDE_SESSION_ID", "env-session-id")
 	out.Reset()
-	code = runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, &out, &out, time.Now)
+	code = runClaudeSocketTestCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, &out, &out, time.Now)
 	if code != ExitOK {
 		t.Fatalf("env register exited %d: %s", code, out.String())
 	}
