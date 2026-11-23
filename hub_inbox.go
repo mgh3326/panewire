@@ -522,6 +522,7 @@ func (h *HubServer) runInbox(ctx context.Context) {
 			h.pruneInbox()
 			h.flushInbox()
 			h.flushInboxWakes()
+			h.rewakeInboxLanes()
 		}
 	}
 }

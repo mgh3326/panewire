@@ -36,7 +36,7 @@ func TestInboxWakeDeskPanelessDecisionAndDeskRouteShareOneSnapshot(t *testing.T)
 	}
 	t4150Snapshot(t, r, "w1:design", "w1:desk-before", "w1:desk-after")
 	hk4220FileUnread(t, r, t3602Design)
-	if outcome := r.h.sendInboxWakeWithRoutes(snapshot, t3602Design, "design", false); outcome != inboxWakeSent {
+	if outcome := r.h.sendInboxWakeWithRoutes(snapshot, t3602Design, "design", false, 0); outcome != inboxWakeSent {
 		t.Fatalf("wake outcome=%v, want sent", outcome)
 	}
 	t3602OneWake(t, t3426Injected(r.agent), "w1:desk-before", t4150DeskWake(t3602Design, 1, "order"))
@@ -62,7 +62,7 @@ func TestInboxWakeDeskLaneRouteAndPanelessDecisionShareOneSnapshot(t *testing.T)
 		t.Fatal("swapped lanes file still routes the design lane")
 	}
 	hk4220FileUnread(t, r, t3602Design)
-	if outcome := r.h.sendInboxWakeWithRoutes(snapshot, t3602Design, "design", false); outcome != inboxWakeSent {
+	if outcome := r.h.sendInboxWakeWithRoutes(snapshot, t3602Design, "design", false, 0); outcome != inboxWakeSent {
 		t.Fatalf("wake outcome=%v, want sent", outcome)
 	}
 	t3602OneWake(t, t3426Injected(r.agent), "w1:design", t3602Wake(t3602Design, 1, "order"))

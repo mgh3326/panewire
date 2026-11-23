@@ -2206,6 +2206,8 @@ embedded `delivery-policy.yaml`) carries the lane classes under `relay:`. See
 | `relay.design_lanes` | `["*-design"]` | Design lanes: inbox-only, quieted worker results, no idle-wake or digest. |
 | `relay.desk_lanes` | `["operator-desk", "*-operator-desk"]` | Desk lanes: inbox-only. A desk lane is never a design lane. |
 | `relay.inbox_wake_window` | `5m` | Coalescing window of the one-line wake, `10s` to `1h`. |
+| `relay.inbox_rewake_interval` | `30m` | Least gap between an inbox-only lane's wake lines while its unread set stays unannounced and its pane idle, `5m` to `24h`. See [the re-wake](quiet-delivery.md#the-re-wake). |
+| `relay.inbox_rewake_max` | `3` | Re-wake lines sent for one unread set, `1` to `20`. A new unread item starts a new set. |
 | `relay.worker_inbox_trial` | `[]` | Worker lane patterns that are inbox-only with the wake during the trial. |
 | `relay.worker_inbox_trial_until` | none | RFC3339 end of the trial. It is required with a trial list, and the trial is off from this instant. |
 | `relay.drain_wake_interval` | `1h` | Least gap between two drain lines for one design lane, `10m` to `24h`. |
@@ -2306,7 +2308,7 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | `relay` | `delivered`, `dropped:<reason>` or `unconfirmed:<reason>` | the drop code, or the first token of the report | the hub saw one worker or design lane row's outcome |
 | `spawn_held` | the held branch (`succeeded_pane_held`, `failed_pane_held`, ...) | the pane-probe reason | a refused reclaim kept a role reservation |
 | `job_result` | `conflict` or `missing` | `different_result` or `no_result` | a `done` conflicted with, or lacked, a result |
-| `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`), or `startup` for the line a hub start owes, when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
+| `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`), `startup` for the line a hub start owes, or `rewake` for a re-wake, when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`, and a re-wake adds `rewake=` with its line number in the unread set. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
 
 The relay, held-reservation and job-result kinds and their Sentry fingerprints
 are in [observability](observability.md).

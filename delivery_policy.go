@@ -131,6 +131,14 @@ var defaultDeskLanePatterns = []string{deskPolicyLane, "*-" + deskPolicyLane}
 // coalesces later arrivals (relay.inbox_wake_window).
 const defaultInboxWakeWindow = 5 * time.Minute
 
+// defaultInboxRewakeInterval and defaultInboxRewakeMax bound the re-wake of an
+// inbox-only lane's unread set (relay.inbox_rewake_interval, relay.inbox_rewake_max;
+// inbox_rewake.go).
+const (
+	defaultInboxRewakeInterval = 30 * time.Minute
+	defaultInboxRewakeMax      = 3
+)
+
 // defaultDrainWakeInterval is the least gap between two drain lines for one
 // design lane (relay.drain_wake_interval).
 const defaultDrainWakeInterval = time.Hour
@@ -155,10 +163,16 @@ type deliveryRelayPolicy struct {
 	// SpawnNoticeMustFix lists the spawn-failure causes a design owner is
 	// always told about, whatever the replay or repeat rules say (hk 5360).
 	// Nil takes defaultSpawnNoticeMustFix; an explicit empty list has none.
-	SpawnNoticeMustFix    []string `yaml:"spawn_notice_must_fix"`
-	InboxWakeWindow       string   `yaml:"inbox_wake_window"`
-	DrainWakeInterval     string   `yaml:"drain_wake_interval"`
-	DrainWakeThreshold    int      `yaml:"drain_wake_threshold"`
+	SpawnNoticeMustFix  []string `yaml:"spawn_notice_must_fix"`
+	InboxWakeWindow     string   `yaml:"inbox_wake_window"`
+	InboxRewakeInterval string   `yaml:"inbox_rewake_interval"`
+	// InboxRewakeMax is a pointer so an explicit 0 is refused, not taken as
+	// the default; the range starts at 1.
+	InboxRewakeMax        *int `yaml:"inbox_rewake_max"`
+	rewakeInterval        time.Duration
+	rewakeMax             int
+	DrainWakeInterval     string `yaml:"drain_wake_interval"`
+	DrainWakeThreshold    int    `yaml:"drain_wake_threshold"`
 	drainWakeInterval     time.Duration
 	WorkerInboxTrial      []string `yaml:"worker_inbox_trial"`
 	WorkerInboxTrialUntil string   `yaml:"worker_inbox_trial_until"`
@@ -364,6 +378,21 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 			return nil, fmt.Errorf("relay.inbox_wake_window must be 10s..1h")
 		}
 		p.Relay.wakeWindow = window
+	}
+	p.Relay.rewakeInterval = defaultInboxRewakeInterval
+	if p.Relay.InboxRewakeInterval != "" {
+		interval, err := time.ParseDuration(p.Relay.InboxRewakeInterval)
+		if err != nil || interval < 5*time.Minute || interval > 24*time.Hour {
+			return nil, fmt.Errorf("relay.inbox_rewake_interval must be 5m..24h")
+		}
+		p.Relay.rewakeInterval = interval
+	}
+	p.Relay.rewakeMax = defaultInboxRewakeMax
+	if p.Relay.InboxRewakeMax != nil {
+		if *p.Relay.InboxRewakeMax < 1 || *p.Relay.InboxRewakeMax > 20 {
+			return nil, fmt.Errorf("relay.inbox_rewake_max must be 1..20")
+		}
+		p.Relay.rewakeMax = *p.Relay.InboxRewakeMax
 	}
 	p.Relay.drainWakeInterval = defaultDrainWakeInterval
 	if p.Relay.DrainWakeInterval != "" {

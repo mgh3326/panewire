@@ -317,6 +317,8 @@ relay:
   design_lanes: ["*-design"]                         # default
   desk_lanes: ["operator-desk", "*-operator-desk"]   # default
   inbox_wake_window: 5m                              # default; 10s..1h
+  inbox_rewake_interval: 30m                         # default; 5m..24h
+  inbox_rewake_max: 3                                # default; 1..20
   drain_wake_interval: 1h                            # default; 10m..24h
   drain_wake_threshold: 0                            # default; 0..10
   worker_inbox_trial: []                             # default: no trial
@@ -425,7 +427,8 @@ When the line is sent:
   A lane whose unread items cannot be read gets none.
 
 The wake decision lives in the hub, which owns the inbox store and sees each
-arrival. The node does not keep an inbox copy, so it would have to poll the
+arrival. Unread items that stay unacted on are announced again later: see
+[the re-wake](#the-re-wake). The node does not keep an inbox copy, so it would have to poll the
 hub for counts. The node daemon still types the line. The line is a plain
 inject with no handoffkeep row, so a hub restart never replays it. The
 window state is in memory, so a window open during a restart is dropped; the
@@ -436,8 +439,45 @@ warning, records the skip and retries at the next window's end. A lane whose
 pane cannot be reached (no route, no connected node) is retried the same way,
 or at once when a node next says hello. Every wake writes one
 [fleet event](config.md#fleet-events) of kind `inbox_wake`: outcome `sent`
-with the lane class (`design`, `desk` or `trial`), `startup` or `desk_fallback`
-as the reason, or `skipped` with `count_failed` or `unrouted`.
+with the lane class (`design`, `desk` or `trial`), `startup`, `desk_fallback`
+or `rewake` as the reason, or `skipped` with `count_failed` or `unrouted`.
+
+### The re-wake
+
+An item that does not ask for a wake (an `info` record, a quiet READY, a MERGED
+notice) stays unread with nothing to announce it. A pane that was busy when its
+one line went out gets no second line either. The re-wake (hk 6111) sends the
+same line again for an unread set that is still unacted on. Decision 481
+reverses part of hk 3426 and hk 3602 here: an idle inbox-only pane is woken
+again, not left after its one line. Quiet delivery still decides the first
+wake. The hub sends a re-wake when all of these hold:
+
+- The lane is inbox-only and has unread-and-unacked items of any kind: `info`,
+  READY and MERGED included.
+- The receiving pane is idle. A working pane is never woken, and a pane whose
+  state the hub cannot read counts as not idle.
+- The lane's coalescing window is closed and no line is owed.
+- At least `relay.inbox_rewake_interval` (default `30m`) has passed since the
+  lane's last wake line of any reason, or since the hub first saw the set,
+  whichever is later.
+- Fewer than `relay.inbox_rewake_max` (default `3`) re-wake lines went out for
+  the set.
+
+A new unread item starts a new set, so the count resets. When nothing is left
+unread and unacked, nothing is sent. A re-wake sends the wake line unchanged: the
+same text and transport, with `most urgent: <kind>` as today. No item body is
+typed, and the re-wake opens the lane's window like any line, so an arrival in
+the next five minutes waits for the window's end.
+
+Each re-wake is one [fleet event](config.md#fleet-events) of kind `inbox_wake`
+with outcome `sent` and reason `rewake`. Its detail carries `unread=` and
+`rewake=N`, where N is the line's number in the unread set; `hk 5509` counts
+them per lane.
+
+The re-wake state (the set, its count and the last line) is kept in memory, like
+the window. A hub restart forgets it: after a restart a lane may get up to
+`relay.inbox_rewake_max` more re-wakes, and the startup line above still
+announces what is unread.
 
 ### A design lane with no live pane
 
