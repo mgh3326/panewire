@@ -6,6 +6,9 @@ on:
       - main
     paths:
       - 'hub_mysql_migrations/**'
+      - 'store.go'
+      - 'node_spawn_journal.go'
+      - 'internal/arbiter/store.go'
       - '.github/workflows/schema-doc.yml'
   workflow_dispatch:
 
@@ -74,4 +77,58 @@ jobs:
         with:
           name: hub-schema-doc
           path: schema-doc/
+          if-no-files-found: error
+
+      # The node's SQLite stores are built by the repo's own code at temporary
+      # paths (schema_doc_node_hk6117_test.go, internal/arbiter/schema_doc_arbiter_hk6117_test.go)
+      # and documented from per-store configs in .tbls/ (hk 6117). Each store
+      # uses the same pinned tbls as the hub; no secrets and no services.
+      - name: Create node store directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PANEWIRE_SCHEMA_DOC_NODE_DIR=$(mktemp -d)" >> "$GITHUB_ENV"
+          echo "PANEWIRE_SCHEMA_DOC_ARBITER_DIR=$(mktemp -d)" >> "$GITHUB_ENV"
+          echo "PANEWIRE_SCHEMA_DOC_SQLITE_VERSION_FILE=${{ runner.temp }}/sqlite-version.txt" >> "$GITHUB_ENV"
+
+      - name: Build node SQLite stores with the repo's code
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v -count=1 -run '^TestSchemaDocNodeStores$' .
+          go test -v -count=1 -run '^TestSchemaDocArbiterState$' ./internal/arbiter
+          SQLITE_VERSION=$(cat "${{ runner.temp }}/sqlite-version.txt")
+          echo "SQLITE_VERSION=${SQLITE_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Generate node store schema documentation with tbls
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in panewire_node spawn_inbox arbiter_state; do
+            start_sec=$(date +%s)
+            tbls doc -c ".tbls/node_${name}.yml" --er-format mermaid
+            tbls out -c ".tbls/node_${name}.yml" -t json -o "schema-doc-node/${name}/schema.json"
+            end_sec=$(date +%s)
+            echo "tbls ${name} took $(( end_sec - start_sec )) seconds"
+          done
+
+      - name: Upload node schema doc artifact (panewire_node)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-schema-doc-panewire_node
+          path: schema-doc-node/panewire_node/
+          if-no-files-found: error
+
+      - name: Upload node schema doc artifact (spawn_inbox)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-schema-doc-spawn_inbox
+          path: schema-doc-node/spawn_inbox/
+          if-no-files-found: error
+
+      - name: Upload node schema doc artifact (arbiter_state)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-schema-doc-arbiter_state
+          path: schema-doc-node/arbiter_state/
           if-no-files-found: error

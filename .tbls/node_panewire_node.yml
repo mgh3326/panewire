@@ -1,0 +1,6 @@
+name: panewire_node
+desc: "Node event store (panewire.sqlite3) on SQLite ${SQLITE_VERSION:-unknown} via the modernc.org/sqlite driver. The schema is created by code (OpenStore), not by a migration file, and is identical on every node at the same panewire version. Built at a temporary path in CI."
+dsn: sqlite3://${PANEWIRE_SCHEMA_DOC_NODE_DIR}/panewire.sqlite3
+docPath: schema-doc-node/panewire_node
+er:
+  format: mermaid
