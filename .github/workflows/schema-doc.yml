@@ -7,8 +7,14 @@ on:
     paths:
       - 'hub_mysql_migrations/**'
       - 'store.go'
+      - 'stall_store.go'
+      - 'quota_stop_runtime.go'
+      - 'job_inactivity_state.go'
       - 'node_spawn_journal.go'
       - 'internal/arbiter/store.go'
+      - 'schema_doc_node_hk6117_test.go'
+      - 'internal/arbiter/schema_doc_arbiter_hk6117_test.go'
+      - '.tbls/**'
       - '.github/workflows/schema-doc.yml'
   workflow_dispatch:
 

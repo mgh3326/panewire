@@ -1,5 +1,5 @@
 name: panewire_node
-desc: "Node event store (panewire.sqlite3) on SQLite ${SQLITE_VERSION:-unknown} via the modernc.org/sqlite driver. The schema is created by code (OpenStore), not by a migration file, and is identical on every node at the same panewire version. Built at a temporary path in CI."
+desc: "Node event store (panewire.sqlite3) on SQLite ${SQLITE_VERSION:-unknown} via the modernc.org/sqlite driver. Tables are created by code: OpenStore, plus the quota-stop and stall-safety constructors the daemon runs at start (quota_stop_decisions, quota_blocked_wakes, quota_stall_wakes, stall_safety_episodes, stall_safety_examinations); the doc builds all of them. Tables from the daemon-start constructors exist only on nodes that start those managers (herdr socket configured). Built at a temporary path in CI."
 dsn: sqlite3://${PANEWIRE_SCHEMA_DOC_NODE_DIR}/panewire.sqlite3
 docPath: schema-doc-node/panewire_node
 er:
