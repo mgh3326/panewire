@@ -812,6 +812,9 @@ func (s *laneInboxStore) writeSpawnOutcome(parent context.Context, task hubSpawn
 		return s.endUnstartedAttempt(ctx, tx, task, outcome, now)
 	}
 	if status == "retryable" {
+		if err = s.dequeueSpawn(ctx, tx, task.Request.RequestID); err != nil {
+			return false, err
+		}
 		if _, err = tx.ExecContext(ctx, s.q(`DELETE FROM spawn_reservations WHERE job=? AND request_id=?`), task.Job, task.Request.RequestID); err != nil {
 			return false, err
 		}
@@ -1401,6 +1404,12 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	n, _ := s.dialect.rowsMatched(result)
 	if n != 1 {
 		return task, errSpawnClaimed
+	}
+	if err = s.enqueueSpawn(ctx, tx, task.Request.RequestID); err != nil {
+		return task, err
+	}
+	if err = s.syncSpawnQueueNextCheck(ctx, tx, task.Request.RequestID); err != nil {
+		return task, err
 	}
 	if err = s.appendSpawnTraceAttempt(ctx, tx, task.Request.RequestID, task.Attempt, task.Outcome, now); err != nil {
 		return task, err

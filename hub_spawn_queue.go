@@ -45,9 +45,16 @@ const taskFailNoticeOutboxTable = `CREATE TABLE IF NOT EXISTS task_fail_notice_o
 const taskFailNoticeOutboxIndex = `CREATE INDEX IF NOT EXISTS task_fail_notice_outbox_retry ON task_fail_notice_outbox(retry_ms,request_id)`
 
 // The terminal statuses are spawnTerminalStatuses (hub_store_retention.go):
-// retryable is not one of them (a replay or the expiry gives it a new attempt
-// or ends it), nor is deadline_exceeded (a late node result can still land
-// it), nor any *_grant refinement.
+// 'succeeded','failed','refused','given_up','cancelled' (confirmed at
+// hub_store_retention.go:30). Dead retryable operations ('retryable') also leave
+// the queue: an attempt that ended retryable is not work the coordinator will
+// ever run again (confirmed at hub_spawn_task_store.go:1336,
+// hub_spawn_queue.go:178, and docs/hub-spawn-operations.md:119,1748); only an
+// explicit client replay (resumeCleanedSpawn, hub_spawn_task_store.go:1366)
+// wakes it by moving it back to accepted and re-enqueuing it. Active statuses
+// (accepted, waiting, deadline_exceeded, deadline_exceeded_grant, bound,
+// dispatching, reconciling, and *_grant forms) stay in the queue (hk 6084).
+const spawnQueueExcludedStatuses = spawnTerminalStatuses + `,'retryable'`
 
 // spawnStatusOwesTaskFailNotice reports whether a request that ended as
 // status owes the hk task comment of hk 5137.
@@ -122,9 +129,9 @@ func (s *laneInboxStore) reconcileSpawnQueue(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 	for _, statement := range []string{
-		s.dialect.insertIgnore(`INSERT INTO spawn_queue(request_id,next_check_ms) SELECT request_id,next_check_ms FROM spawn_operations WHERE status NOT IN (`+spawnTerminalStatuses+`)`, "request_id"),
+		s.dialect.insertIgnore(`INSERT INTO spawn_queue(request_id,next_check_ms) SELECT request_id,next_check_ms FROM spawn_operations WHERE status NOT IN (`+spawnQueueExcludedStatuses+`)`, "request_id"),
 		`UPDATE spawn_queue SET next_check_ms=(SELECT next_check_ms FROM spawn_operations WHERE spawn_operations.request_id=spawn_queue.request_id) WHERE next_check_ms<>(SELECT next_check_ms FROM spawn_operations WHERE spawn_operations.request_id=spawn_queue.request_id)`,
-		`DELETE FROM spawn_queue WHERE NOT EXISTS (SELECT 1 FROM spawn_operations o WHERE o.request_id=spawn_queue.request_id AND o.status NOT IN (` + spawnTerminalStatuses + `))`,
+		`DELETE FROM spawn_queue WHERE NOT EXISTS (SELECT 1 FROM spawn_operations o WHERE o.request_id=spawn_queue.request_id AND o.status NOT IN (` + spawnQueueExcludedStatuses + `))`,
 		s.dialect.insertIgnore(`INSERT INTO task_fail_notice_outbox(request_id,retry_ms) SELECT request_id,task_fail_retry_ms FROM spawn_operations WHERE status IN ('failed','refused') AND task_fail_notice_ms=0`, "request_id"),
 		`DELETE FROM task_fail_notice_outbox WHERE NOT EXISTS (SELECT 1 FROM spawn_operations o WHERE o.request_id=task_fail_notice_outbox.request_id AND o.status IN ('failed','refused') AND o.task_fail_notice_ms=0)`,
 	} {
