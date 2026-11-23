@@ -33,14 +33,13 @@ func stagedLadderClose(stage hubSpawnTask) *fleet.LadderCloseBinding {
 	return stage.Request.LadderStep.Close
 }
 
-// ladderCloseCandidate is the binding a stage with none takes: the marker
-// protocol for a node without the capability, else K read from the hub's grant
-// and the node's current attempt. nil means K cannot be built now; nothing has
+// ladderCloseCandidate is the binding a stage with none takes: nil when the node
+// does not advertise ladder_close_v1 (or K cannot be built now); nothing has
 // been sent and the step retries.
 func (h *HubServer) ladderCloseCandidate(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow) *fleet.LadderCloseBinding {
 	machine := spawnHolderHost(holder)
 	if !h.nodeHasCapability(machine, hubCapabilityLadderClose) {
-		return &fleet.LadderCloseBinding{Protocol: fleet.LadderCloseProtocolMarker}
+		return nil
 	}
 	h.mu.Lock()
 	var epoch uint64
@@ -117,20 +116,19 @@ func (h *HubServer) fenceLadderClose(ctx context.Context, stage hubSpawnTask, bo
 }
 
 // stagedCloseVerdict reads what the step's close did to the predecessor's pane.
-// A marker stage reads the close marker (closed or refused). A ladder stage
-// reads the node's record through the fence, never through pane.ladder_close,
-// which would run a close the node has no record of: a fenced K means nothing
-// was or will be closed.
+// A ladder stage reads the node's record through the fence, never through
+// pane.ladder_close, which would run a close the node has no record of: a
+// fenced K means nothing was or will be closed. A stage persisted with the
+// legacy marker protocol is ambiguous: nothing closed it on this hub (hk 5867).
 func (h *HubServer) stagedCloseVerdict(ctx context.Context, stage hubSpawnTask) (ladderVerdict, error) {
 	bound := stagedLadderClose(stage)
 	if bound != nil && bound.Protocol == fleet.LadderCloseProtocolV1 {
 		return h.fenceLadderClose(ctx, stage, *bound), nil
 	}
-	marked, err := h.inbox.store.stagedCloseMarked(ctx, stage.Request.RequestID)
-	if marked {
-		return ladderVerdict{state: nodeLadderClosed, answered: true}, err
+	if bound != nil && bound.Protocol == fleet.LadderCloseProtocolMarker {
+		return ladderVerdict{state: nodeLadderUnknown, answered: true}, nil
 	}
-	return ladderVerdict{state: nodeLadderRefused, answered: true}, err
+	return ladderVerdict{state: nodeLadderRefused, answered: true}, nil
 }
 
 // ladderAction is what the reconciler decided for a staged step.
@@ -189,7 +187,7 @@ func (h *HubServer) reconcileLadderStage(ctx context.Context, c ladderStageCall)
 	switch bound := stagedLadderClose(c.stage); {
 	case c.verdict != nil:
 		verdict = *c.verdict
-	case c.cancel && (bound == nil || bound.Protocol != fleet.LadderCloseProtocolV1):
+	case c.cancel && bound == nil:
 		// No close was sent to a node: there is nothing to read.
 		return ladderRelease, nil
 	default:

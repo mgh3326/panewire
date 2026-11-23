@@ -297,9 +297,8 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 			return h.escalateAuthorRefusal(ctx, request, owner, "job_not_live", "the job completed and its pane is gone", false)
 		}
 		// hk keeps a completed record terminal, so it cannot show who closed
-		// the pane. The reconciler reads the stage's close verdict (the node's
-		// record, or the close marker written before the close was asked
-		// for): a closed pane goes on to activation, a pane that was never
+		// the pane. The reconciler reads the stage's close verdict through the
+		// fence: a closed pane goes on to activation, a pane that was never
 		// closed, or was gone already, lost its author independently.
 		action, err := h.reconcileLadderStage(ctx, ladderStageCall{stage: prior})
 		switch {
@@ -475,23 +474,20 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 				}
 				return h.escalateAuthorRefusal(ctx, request, owner, "pane_not_closed", "the author pane could not be closed: "+firstNonempty(verdict.reason, verdict.state), false)
 			}
-		} else if closed, closeReason := h.closeHeldPaneAfter(ctx, holder, name, probe.row, holder.Job, func() error {
-			if _, err := h.inbox.store.bindStagedClose(ctx, prior.Request.RequestID, *bound); err != nil {
-				return err
+		} else {
+			action, err := h.reconcileLadderStage(ctx, ladderStageCall{stage: prior, predecessorLive: !finished})
+			if err != nil {
+				return hubEscalateAuthorResult{}, err
 			}
-			if finished {
-				return h.inbox.store.markStagedClose(ctx, prior.Request.RequestID, h.now().UTC())
+			if action == ladderKeep {
+				return ladderStageKept, nil
 			}
-			return nil
-		}); !closed {
-			again := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
-			if again.state == heldPanePresent {
-				// The close refusal says why (question_open, pane_changed, ...):
-				// the owner and mergewake tell a pane that went back to work from
-				// one that is waiting on an answer.
-				return cancel("pane_not_closed", "the author pane could not be closed: "+firstNonempty(closeReason, "unknown"))
+			if action == ladderRelease {
+				if err := h.releaseStagedRow(ctx, prior.Request.RequestID, previousHolder, roleKey); err != nil {
+					return hubEscalateAuthorResult{}, fmt.Errorf("cannot cancel staged step: %w", err)
+				}
+				return h.escalateAuthorRefusal(ctx, request, owner, "pane_not_closed", "the author pane could not be closed", false)
 			}
-			return hubEscalateAuthorResult{Code: "pending", Reason: "pane close outcome is unknown; retry"}, nil
 		}
 	}
 	if !resume && !finished {

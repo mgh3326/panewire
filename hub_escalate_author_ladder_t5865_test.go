@@ -81,19 +81,21 @@ func TestEscalateAuthorLadderCloseOnACapableNode(t *testing.T) {
 	}
 }
 
-// A node without the capability keeps pane.close and the close marker; the
-// stage records the marker protocol.
-func TestEscalateAuthorOlderNodeKeepsPaneClose(t *testing.T) {
+// A holder on a node without the capability gets no close and no marker; the
+// stage stays and retries (hk 5867).
+func TestEscalateAuthorNodeWithoutCapabilityGetsNoCloseAndRetries(t *testing.T) {
 	f := newLadderCloseFixture(t, "pw-task-5865-old", false)
-	placed := placedAnywhere
-	result, commands := f.escalate(t, &placed)
+	result, commands := f.escalate(t, nil)
 	ops := commandOps(commands)
-	if result.Job != f.job+"-l1" || !slices.Contains(ops, nodeCommandPaneClose) || slices.Contains(ops, nodeCommandLadderClose) || slices.Contains(ops, nodeCommandLadderFence) {
+	if result.Code != "pending" || slices.Contains(ops, nodeCommandPaneClose) || slices.Contains(ops, nodeCommandLadderClose) || slices.Contains(ops, nodeCommandLadderFence) {
 		t.Fatalf("result=%+v ops=%v", result, ops)
 	}
 	stage, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
-	if bound := stagedLadderClose(stage); err != nil || bound == nil || bound.Protocol != fleet.LadderCloseProtocolMarker {
-		t.Fatalf("stage binding=%+v err=%v", bound, err)
+	if err != nil || stage.Status != "staged" {
+		t.Fatalf("stage=%+v err=%v", stage, err)
+	}
+	if bound := stagedLadderClose(stage); bound != nil {
+		t.Fatalf("stage binding=%+v, want nil", bound)
 	}
 }
 

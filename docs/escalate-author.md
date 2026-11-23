@@ -167,18 +167,19 @@ Quota can change after the plan; a refusal during placement after close
 reports the ended author. An unknown pane or placement result is `pending`;
 it is not reported as a successful escalation.
 
-## The close protocol (hk 5865)
+## The close protocol (hk 5865, hk 5867)
 
-The close of the author's pane runs under one of two protocols, frozen on the
-staged successor before anything is sent (the stage's `ladder_step.close`):
-
-- `ladder_close_v1`: the author's node advertises `ladder_close_v1`. The stage
-  stores K (job, node, epoch, attempt, pane), the request id and the pane row
-  the node's guards compare; the hub sends `pane.ladder_close` with exactly
-  that. The first binding written wins, so a second step for the same stage
-  reuses it. The node's record answers every replay.
-- `marker`: any other node keeps `pane.close` plus the staged row's close
-  marker, unchanged.
+The close of the author's pane runs under `ladder_close_v1`, frozen on the
+staged successor before anything is sent (the stage's `ladder_step.close`). The
+author's node must advertise `ladder_close_v1`. The stage stores K (job, node,
+epoch, attempt, pane), the request id and the pane row the node's guards
+compare; the hub sends `pane.ladder_close` with exactly that. The first binding
+written wins, so a second step for the same stage reuses it. The node's record
+answers every replay. A node without the capability gets no close and no marker;
+the step retries (hk 5867). A stage persisted with the legacy `marker` protocol
+reconciles as ambiguous (`unknown`). A legacy marker stage stays staged and files
+the unresolved decision once; releasing it needs a hub command that does not
+exist yet (hk 6115).
 
 The handler, the replay of a lost author's step, the expiry pass and every
 cancellation read the node's verdict through one reconciler

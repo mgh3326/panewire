@@ -92,7 +92,7 @@ func (h *HubServer) closeHeldPaneAndMarkLostBecause(ctx context.Context, app *fl
 // holder's node. pane.close re-reads the pane and refuses one that changed, so
 // a true result means the pane is closed or already gone.
 func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string) (bool, string) {
-	return h.closeHeldPaneAfter(ctx, holder, name, row, questionJob, nil)
+	return h.closeHeldPaneFenced(ctx, holder, name, row, questionJob, nil)
 }
 
 // closeHeldPaneStopped is closeHeldPane for a pane stopped on a provider limit:
@@ -104,15 +104,7 @@ func (h *HubServer) closeHeldPaneStopped(ctx context.Context, holder hubSpawnTas
 	if stopSeq != nil && !h.nodeHasCapability(spawnHolderHost(holder), hubCapabilityCloseStopSeq) {
 		return false, "stop_seq_unsupported"
 	}
-	return h.closeHeldPaneFenced(ctx, holder, name, row, questionJob, nil, stopSeq)
-}
-
-// closeHeldPaneAfter is closeHeldPane with beforeClose run once the screen is
-// saved and immediately before the pane.close request goes out: the step that
-// must know a later "pane gone" is its own close writes its intent there, so a
-// stop during the capture leaves none. An error from it closes nothing.
-func (h *HubServer) closeHeldPaneAfter(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string, beforeClose func() error) (bool, string) {
-	return h.closeHeldPaneFenced(ctx, holder, name, row, questionJob, beforeClose, nil)
+	return h.closeHeldPaneFenced(ctx, holder, name, row, questionJob, stopSeq)
 }
 
 // captureHeldPane saves the pane's screen through its node.
@@ -122,7 +114,7 @@ func (h *HubServer) captureHeldPane(ctx context.Context, machine, name string, r
 	return h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) && captured.Outcome == nodeCaptureScreen
 }
 
-func (h *HubServer) closeHeldPaneFenced(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string, beforeClose func() error, stopSeq *int64) (bool, string) {
+func (h *HubServer) closeHeldPaneFenced(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow, questionJob string, stopSeq *int64) (bool, string) {
 	machine := spawnHolderHost(holder)
 	// An older node decodes pane.close strictly and would refuse the whole
 	// call, and closing without question_job would drop the open-question
@@ -132,9 +124,6 @@ func (h *HubServer) closeHeldPaneFenced(ctx context.Context, holder hubSpawnTask
 	}
 	if !h.captureHeldPane(ctx, machine, name, row) {
 		return false, "capture_failed"
-	}
-	if beforeClose != nil && beforeClose() != nil {
-		return false, "intent_unwritten"
 	}
 	var closed nodePaneCloseResult
 	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd, AllowUnnamed: row.Name == "", QuestionJob: questionJob, StopSeq: stopSeq}

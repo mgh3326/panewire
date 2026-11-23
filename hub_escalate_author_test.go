@@ -72,9 +72,10 @@ type escalateFixture struct {
 	// that many fail (0: never).
 	taskState     string
 	taskFailAfter int
-	// markerAtCapture and markerAtClose record whether the staged successor
-	// carried the close marker when the node was asked to capture and to close.
-	markerAtCapture, markerAtClose bool
+
+	// fenceAnswer is the node's answer to pane.ladder_close_fence (default:
+	// nodeLadderFenced).
+	fenceAnswer string
 
 	// extraReply answers an op before the defaults, for a test that needs a
 	// node answer the common fixture does not model; nil/absent falls through.
@@ -136,6 +137,7 @@ func newEscalateChainFixture(t *testing.T, job, predecessor string, successor fu
 	hub.quotaReplacePoll = 5 * time.Millisecond
 	hub.quotaMarkBackoff = time.Millisecond
 	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
+	first := firstNonempty(predecessor, job)
 	hub.mu.Lock()
 	hub.nodes["machine-b"] = &hubNodeRecord{agent: destination}
 	hub.mu.Unlock()
@@ -156,7 +158,13 @@ func newEscalateChainFixture(t *testing.T, job, predecessor string, successor fu
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
 	node := t14Node(t, hub, server, true)
-	first := firstNonempty(predecessor, job)
+	hub.mu.Lock()
+	hub.nodes["machine-a"].capabilities[hubCapabilityLadderClose] = true
+	hub.jobs[first] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: first, Epoch: 1}, Node: "machine-a"}
+	if predecessor != "" {
+		hub.jobs[job] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: job, Epoch: 1}, Node: "machine-a"}
+	}
+	hub.mu.Unlock()
 	held, _, err := hub.inbox.store.claimSpawn(t.Context(), escalateHolderRequest(first), first, "parent", time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -217,16 +225,6 @@ func (f *escalateFixture) boundJob(ctx context.Context, job string) (bound, stat
 		return job + "-l1", state, nil
 	}
 	return job, state, nil
-}
-
-// markerSet reports whether the staged successor carries the close marker.
-func (f *escalateFixture) markerSet(ctx context.Context) bool {
-	successor, err := f.hub.inbox.store.latestSpawnForJob(ctx, f.job+"-l1")
-	if err != nil {
-		return false
-	}
-	marked, err := f.hub.inbox.store.stagedCloseMarked(ctx, successor.Request.RequestID)
-	return err == nil && marked
 }
 
 func (f *escalateFixture) request() hubEscalateAuthorRequest {
@@ -306,11 +304,23 @@ func (f *escalateFixture) reply(op string) map[string]any {
 			check = "unreadable"
 		}
 		return map[string]any{"result": nodeWorktreeInspectResult{Worktree: &nodeWorktree{Path: paneCwd, Branch: "wk/task", Head: strings.Repeat("b", 40), OriginURL: "https://github.com/example/project.git"}, Check: check}}
+	case nodeCommandPaneCloseStatus:
+		return map[string]any{"result": nodeCloseOpStatusResult{State: nodeCloseOpNone, Attempt: "attempt-1"}}
+	case nodeCommandLadderClose:
+		if f.closeLost {
+			f.paneAbsent = true
+			return map[string]any{"error": "close_failed"}
+		}
+		return map[string]any{"result": nodeLadderCloseResult{State: nodeLadderClosed}}
+	case nodeCommandLadderFence:
+		ans := nodeLadderFenced
+		if f.fenceAnswer != "" {
+			ans = f.fenceAnswer
+		}
+		return map[string]any{"result": nodeLadderCloseResult{State: ans}}
 	case "pane.capture":
-		f.markerAtCapture = f.markerSet(context.Background())
 		return map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}}
 	case "pane.close":
-		f.markerAtClose = f.markerSet(context.Background())
 		if f.closeLost {
 			// The node closed the pane and its reply never arrived.
 			f.paneAbsent = true
@@ -458,10 +468,10 @@ func TestEscalateAuthorStartsTheNextRungOnTheSameWorktree(t *testing.T) {
 			t.Fatalf("the brief must carry %q:\n%s", want, request.Brief)
 		}
 	}
-	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect", "pane.capture", "pane.close", "job.mark_lost"}) {
+	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect", "pane.close_status", "pane.capture", "pane.ladder_close", "job.mark_lost"}) {
 		t.Fatalf("node commands %v", ops)
 	}
-	if reason := endReasonOf(t, commands[5]); reason != "ladder step round=5 replaced_by=pw-task-42-l1" {
+	if reason := endReasonOf(t, commands[6]); reason != "ladder step round=5 replaced_by=pw-task-42-l1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
 	f.awaitInfo(t, "ladder step pw-task-42 -> pw-task-42-l1 on sonnet@xhigh")
@@ -496,7 +506,7 @@ func TestEscalateAuthorInspectsWorktreeWithoutPreparingBeforeClose(t *testing.T)
 	placed := placedAnywhere
 	_, commands := f.escalate(t, &placed)
 	ops := commandOps(commands)
-	if slices.Contains(ops, "worktree.prepare") || !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect", "pane.capture", "pane.close", "job.mark_lost"}) {
+	if slices.Contains(ops, "worktree.prepare") || !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect", "pane.close_status", "pane.capture", "pane.ladder_close", "job.mark_lost"}) {
 		t.Fatalf("unexpected operations: %v", ops)
 	}
 	var inspect nodeWorktreeInspectArgs
@@ -516,10 +526,10 @@ func TestEscalateAuthorRefusesWhenTheRungIsNotAdmitted(t *testing.T) {
 	if result.Code != "quota_refused" || !result.AuthorEnded {
 		t.Fatalf("result=%+v", result)
 	}
-	if len(commands) != 6 {
+	if len(commands) != 7 {
 		t.Fatalf("the pane is closed and the record marked lost: %v", commandOps(commands))
 	}
-	if reason := endReasonOf(t, commands[5]); reason != "ladder step round=5 replaced_by=pw-task-43-l1" {
+	if reason := endReasonOf(t, commands[6]); reason != "ladder step round=5 replaced_by=pw-task-43-l1" {
 		t.Fatalf("end_reason=%q", reason)
 	}
 	f.awaitInfo(t, "[panewire] ESC | authorless:", "quota_refused", "mgh3326/panewire#77 has no author")
@@ -1370,19 +1380,5 @@ func TestEscalateAuthorRefusesAKeptAuthor(t *testing.T) {
 	}
 	if decisions != 1 {
 		t.Fatalf("owner received %d author_kept events, want 1", decisions)
-	}
-}
-
-// A node whose hello predates pane_close_question_v1 cannot check the pane's
-// open question, so the close is refused and the escalation keeps the author
-// pane rather than close it unguarded (hk 4658).
-func TestEscalateAuthorOldNodeKeepsThePane(t *testing.T) {
-	f := newEscalateFixture(t, "pw-task-old-node")
-	f.hub.mu.Lock()
-	delete(f.hub.nodes["machine-a"].capabilities, hubCapabilityCloseQuestion)
-	f.hub.mu.Unlock()
-	result, _ := f.escalate(t, nil)
-	if result.Code != "pane_not_closed" {
-		t.Fatalf("code=%q reason=%q, want pane_not_closed on a node without the capability", result.Code, result.Reason)
 	}
 }
