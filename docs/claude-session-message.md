@@ -143,17 +143,16 @@ and `panewire inbox status` remain the record of what the lane has and has not
 read.
 
 Fallbacks to the typed line, each logged as `stage=fell_back_to_typed` with a
-reason (`not_registered`, `registration_invalid`, `other_pane`, `socket_gone`, `timeout`,
+reason (`not_registered`, `registration_invalid`, `other_pane`, `stale_session`, `socket_gone`, `timeout`,
 `post_failed`): no registration; a registration that is not a socket or names
-another lane; a socket that no longer exists or refuses the connection; a failed
+another lane; a registered session that is not the pane's live session (`stale_session`, hk 6103);
+a socket that no longer exists or refuses the connection; a failed
 write; a read error after the write.
 
 ### Not covered
 
 - The idle-wake line (`docs/idle-wake.md`) and every other typed line keep their
   path.
-- A second Claude session started in the same pane without the hook is not
-  detected until the first one's socket is gone (then the line is typed).
 - Claude Code's `--messaging-socket-path` flag (in the binary, not in
   `claude --help`) would give a panewire-started session a path the node already
   knows, with no hook. It is undocumented and not used.

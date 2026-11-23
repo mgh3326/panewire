@@ -22,7 +22,9 @@ names it (claude, codex, omp), so one line is never delivered twice.
 
 Every registration is bound to the herdr pane the session runs in (`--pane`, else
 `HERDR_PANE_ID`); the node delivers only when that is the pane the hub routed the
-wake line to (`reason=other_pane` otherwise). Files are mode 0600, replaced
+wake line to (`reason=other_pane` otherwise). For Claude sessions, the node also
+verifies that the registered session matches the pane's live `agent_session` from herdr
+(`reason=stale_session` on mismatch or unknown, hk 6103). Files are mode 0600, replaced
 atomically, and hold no token. Every miss falls back to the typed line, logged by
 the node as `stage=fell_back_to_typed` with a `reason` and a `harness`; the
 thread id, the socket path and the line are never logged. `panewire` stages are

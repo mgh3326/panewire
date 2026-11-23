@@ -154,6 +154,8 @@ func sessionFailureReason(err error) string {
 		return "not_registered"
 	case errors.Is(err, errSessionOtherPane):
 		return "other_pane"
+	case errors.Is(err, errSessionStale):
+		return "stale_session"
 	case errors.Is(err, errSessionRegistrationInvalid):
 		return "registration_invalid"
 	case errors.Is(err, errSessionNoAck):
