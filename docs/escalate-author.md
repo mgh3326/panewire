@@ -177,9 +177,9 @@ compare; the hub sends `pane.ladder_close` with exactly that. The first binding
 written wins, so a second step for the same stage reuses it. The node's record
 answers every replay. A node without the capability gets no close and no marker;
 the step retries (hk 5867). A stage persisted with the legacy `marker` protocol
-reconciles as ambiguous (`unknown`). If a legacy marker stage row must be
-freed manually by an operator answering the unresolved ESC, it can be released
-directly from the store via `UPDATE spawn_operations SET status='canceled' WHERE request_id=? AND status='staged'`.
+reconciles as ambiguous (`unknown`). A legacy marker stage stays staged and files
+the unresolved decision once; releasing it needs a hub command that does not
+exist yet (hk 6115).
 
 The handler, the replay of a lost author's step, the expiry pass and every
 cancellation read the node's verdict through one reconciler
