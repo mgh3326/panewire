@@ -81,7 +81,8 @@ relations:
     parentTable: lane_inbox
     parentColumns:
       - id
-    def: "a summary covers its lane's items through this lane_inbox id; the unread page and the surfaced-at pass compare through_id with lane_inbox.id"
+    parentCardinality: zero or one
+    def: "a watermark, not a reference: a summary covers its lane's items through this lane_inbox id (0 when the lane has nothing unsurfaced, and the named item may be pruned); the unread page and the surfaced-at pass compare through_id with lane_inbox.id"
   - table: pool_actions
     columns:
       - job
