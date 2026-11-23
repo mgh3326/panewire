@@ -4,3 +4,38 @@ dsn: sqlite3://${PANEWIRE_SCHEMA_DOC_ARBITER_DIR}/arbiter/state.db
 docPath: schema-doc-node/arbiter_state
 er:
   format: mermaid
+# The relations the arbiter store's code walks. The schema is frozen at version
+# 2 with no foreign keys, so every entry below is a JOIN, a lookup, or the
+# epoch side table's delete trigger, named in its def (hk 6128). See the PR body
+# for the file:line evidence.
+relations:
+  - table: leases
+    columns:
+      - job_id
+    parentTable: jobs
+    parentColumns:
+      - job_id
+    def: "a lease belongs to a registered job; orphan state reads the job row and then that job's leases by job_id"
+  - table: quota_pool_records
+    columns:
+      - job_id
+    parentTable: jobs
+    parentColumns:
+      - job_id
+    def: "a quota pool record belongs to a registered job; orphan state reads the job row and then that job's quota records by job_id"
+  - table: events
+    columns:
+      - job_id
+    parentTable: jobs
+    parentColumns:
+      - job_id
+    def: "an event belongs to a registered job; the job snapshot and job view read the job row and then its events by job_id"
+  - table: quota_pool_epochs
+    columns:
+      - job_id
+      - pool
+    parentTable: quota_pool_records
+    parentColumns:
+      - job_id
+      - pool
+    def: "the epoch side row describes one quota record; the grant check joins it to the record and the delete trigger removes it with that record"

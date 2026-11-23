@@ -4,3 +4,133 @@ dsn: ${TBLS_DSN:-my://root@127.0.0.1:53306/panewire}
 docPath: schema-doc
 er:
   format: mermaid
+# The relations the hub's store code walks. MySQL has no foreign keys here
+# (hk 6128); each entry below is a JOIN, a lookup, or a retention sweep in the
+# code, named in its def. See the PR body for the file:line evidence.
+relations:
+  - table: spawn_queue
+    columns:
+      - request_id
+    parentTable: spawn_operations
+    parentColumns:
+      - request_id
+    def: "spawn_queue keeps one row per non-terminal operation; the coordinator joins the queue to its operation and rebuilds or sweeps the queue from those rows"
+  - table: spawn_reservations
+    columns:
+      - request_id
+    parentTable: spawn_operations
+    parentColumns:
+      - request_id
+    def: "a reservation names the operation that claimed the job; releasing a task role reads that operation's terminal status by request_id"
+  - table: spawn_notifications
+    columns:
+      - request_id
+    parentTable: spawn_operations
+    parentColumns:
+      - request_id
+    def: "a notice belongs to the operation whose result it carries; delivery checks that operation's status and attempt, and retention holds an operation that still owes a notice"
+  - table: spawn_notice_outbox
+    columns:
+      - event_id
+    parentTable: spawn_notifications
+    parentColumns:
+      - event_id
+    def: "the outbox names the notices still owed; the route joins the outbox to spawn_notifications by event_id and drops the row once the notice is delivered"
+  - table: placement_record_outbox
+    columns:
+      - request_id
+      - attempt
+    parentTable: spawn_placement_snapshots
+    parentColumns:
+      - request_id
+      - attempt
+    def: "the outbox names the snapshots whose placement record is still owed; the record pass joins each outbox row to its snapshot on request_id and attempt"
+  - table: spawn_placement_snapshots
+    columns:
+      - request_id
+    parentTable: spawn_operations
+    parentColumns:
+      - request_id
+    def: "a snapshot is one bound attempt's placement record; building the record joins the snapshot to its operation for the job, status and attempt"
+  - table: lane_inbox_batch_quarantine
+    columns:
+      - batch_id
+    parentTable: lane_inbox_batches
+    parentColumns:
+      - id
+    def: "quarantine names the batch the hub refused; the digest pass skips a quarantined batch and the escalation reset joins quarantine to batches by batch_id"
+  - table: lane_inbox
+    columns:
+      - digest_batch
+    parentTable: lane_inbox_batches
+    parentColumns:
+      - id
+    parentCardinality: zero or one
+    def: "the item's digest batch; batch counts and batch pruning walk from the batch row to its items by digest_batch"
+  - table: lane_inbox
+    columns:
+      - escalation_batch
+    parentTable: lane_inbox_batches
+    parentColumns:
+      - id
+    parentCardinality: zero or one
+    def: "the item's escalation batch; batch counts and batch pruning walk from the batch row to its items by escalation_batch"
+  - table: lane_inbox_surfaces
+    columns:
+      - through_id
+    parentTable: lane_inbox
+    parentColumns:
+      - id
+    def: "a summary covers its lane's items through this lane_inbox id; the unread page and the surfaced-at pass compare through_id with lane_inbox.id"
+  - table: pool_actions
+    columns:
+      - job
+    parentTable: spawn_operations
+    parentColumns:
+      - job
+    parentCardinality: zero or more
+    def: "a pool action is deduped and retained per job; retention keeps a final action while an operation with that job is not terminal"
+  - table: spawn_attempt_grants
+    columns:
+      - node_id
+    parentTable: spawn_operations
+    parentColumns:
+      - node_id
+    def: "a grant is the start proof of the operation bound to that node; the grant check and its retention read the grant by the operation's node_id"
+  - table: spawn_attempt_start_by
+    columns:
+      - node_id
+    parentTable: spawn_operations
+    parentColumns:
+      - node_id
+    def: "the latest start_by sent for a node's bound attempt; retention walks from a terminal operation to this row by node_id"
+  - table: task_fail_notice_outbox
+    columns:
+      - request_id
+    parentTable: spawn_operations
+    parentColumns:
+      - request_id
+    def: "the outbox names failed or refused operations whose task comment is still owed; the sweep inserts and deletes it from the operation rows by request_id"
+  - table: supersede_landings
+    columns:
+      - request_id
+    parentTable: spawn_operations
+    parentColumns:
+      - request_id
+    def: "a landing is armed for the successor request; retention holds an operation while a landing for that request is not done"
+  - table: consult_requests
+    columns:
+      - request_id
+    parentTable: spawn_operations
+    parentColumns:
+      - request_id
+    parentCardinality: zero or one
+    def: "a consult stores the spawn operation that answers it; settling a consult reads that operation by request_id and retention holds it while the consult is active"
+  - table: spawn_operations
+    columns:
+      - replaced_from
+    parentTable: spawn_operations
+    parentColumns:
+      - job
+    parentCardinality: zero or more
+    def: "a quota-stop successor records the job it replaces; the replacement ladder and the hand-over resolve the predecessor's operation by that job"

@@ -4,3 +4,66 @@ dsn: sqlite3://${PANEWIRE_SCHEMA_DOC_NODE_DIR}/panewire.sqlite3
 docPath: schema-doc-node/panewire_node
 er:
   format: mermaid
+# The relations the node's store code walks, besides the real foreign key
+# delivery_bodies.delivery_id -> deliveries.delivery_id that tbls reads from the
+# schema. Each entry is a JOIN or a lookup in the code, named in its def
+# (hk 6128). See the PR body for the file:line evidence.
+relations:
+  - table: idle_wake_candidates
+    columns:
+      - pane_id
+      - state_change_seq
+    parentTable: idle_wake_panes
+    parentColumns:
+      - pane_id
+      - state_change_seq
+    def: "a candidate is the pane state one wake was observed in; settle and route join it to the pane row at the same local sequence"
+  - table: quota_blocked_wakes
+    columns:
+      - pane_id
+      - state_change_seq
+    parentTable: idle_wake_panes
+    parentColumns:
+      - pane_id
+      - state_change_seq
+    def: "a blocked wake is drained only while the pane is still blocked at the same local sequence; the drain joins the wake to its pane row"
+  - table: quota_stall_wakes
+    columns:
+      - pane_id
+      - state_change_seq
+    parentTable: idle_wake_panes
+    parentColumns:
+      - pane_id
+      - state_change_seq
+    def: "a stall wake is acted on only while the pane is idle or done at the same local sequence; the action check joins the wake to its pane row"
+  - table: quota_stop_decisions
+    columns:
+      - event_id
+    parentTable: idle_wake_candidates
+    parentColumns:
+      - event_id
+    parentCardinality: zero or one
+    def: "a decision reserved for an idle-wake candidate keeps that candidate's event id; the attempt check looks the candidate up by it"
+  - table: quota_stop_decisions
+    columns:
+      - event_id
+    parentTable: quota_stall_wakes
+    parentColumns:
+      - event_id
+    parentCardinality: zero or one
+    def: "a decision reserved for a stall wake keeps the stall wake's event id; the attempt check looks the stall wake up by it"
+  - table: quota_stop_decisions
+    columns:
+      - event_id
+    parentTable: quota_blocked_wakes
+    parentColumns:
+      - event_id
+    parentCardinality: zero or one
+    def: "a decision reserved for a blocked wake keeps the blocked wake's event id, and the drain marks that wake processed by the same id"
+  - table: quota_stop_decisions
+    columns:
+      - pane
+    parentTable: idle_wake_panes
+    parentColumns:
+      - pane_id
+    def: "a decision is reserved for one pane and resolves that pane's herdr state sequence from idle_wake_panes while it is written"
