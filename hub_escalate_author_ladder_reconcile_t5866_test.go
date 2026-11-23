@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,53 @@ func TestLadderReconcilerEveryVerdictEveryCaller(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// A stage already persisted with Protocol: marker goes through the reconciler as
+// ambiguous: the stage is kept, exactly one decision event is filed, and no
+// pane.close is sent (hk 5867).
+func TestLadderReconcilerLegacyMarkerStageIsAmbiguous(t *testing.T) {
+	f := newLadderCloseFixture(t, "pw-task-5867-marker", true)
+	next, err := escalateAuthorSubmission(escalateHolderRequest(f.job), f.request(), f.job+"-l1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setEscalateAuthorHost(&next, "machine-a")
+	next.Repository.Checkout.Sha = strings.Repeat("b", 40)
+	next.Repository.Checkout.VerifyReuse = true
+	next.LadderStep = &fleet.LadderStepIdentity{Parent: f.job, Round: 5, PR: f.request().PR, Profile: "sonnet", Effort: "xhigh"}
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), holder.Request.RequestID, "42:implementer", "staged", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.bindStagedClose(t.Context(), next.RequestID, fleet.LadderCloseBinding{Protocol: fleet.LadderCloseProtocolMarker}); err != nil {
+		t.Fatal(err)
+	}
+	placed := placedAnywhere
+	for range 2 {
+		result, commands := f.escalate(t, &placed)
+		if result.Code != "pending" {
+			t.Fatalf("result=%+v", result)
+		}
+		ops := commandOps(commands)
+		if slices.Contains(ops, nodeCommandPaneClose) || slices.Contains(ops, nodeCommandLadderClose) || slices.Contains(ops, nodeCommandLadderFence) {
+			t.Fatalf("unexpected close commands: %v", ops)
+		}
+	}
+	stage, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+	if err != nil || stage.Status != "staged" {
+		t.Fatalf("stage=%+v err=%v", stage, err)
+	}
+	f.awaitInfo(t, "unresolved")
+	time.Sleep(200 * time.Millisecond)
+	for _, text := range f.infoTexts() {
+		if strings.Contains(text, "unresolved") {
+			t.Fatalf("a second decision event: %q", text)
 		}
 	}
 }

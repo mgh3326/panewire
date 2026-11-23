@@ -88,8 +88,10 @@ const (
 	// LadderCloseProtocolV1 is pane.ladder_close on a node advertising
 	// ladder_close_v1; the node's durable record per K answers every replay.
 	LadderCloseProtocolV1 = "ladder_close_v1"
-	// LadderCloseProtocolMarker is pane.close plus the staged row's close marker,
-	// for a node without the capability.
+	// LadderCloseProtocolMarker is the legacy close protocol (pane.close plus
+	// the staged row's close marker) written by older hubs (hk 5867). Kept only
+	// to recognise persisted rows from v0.0.637-v0.0.651, which reconcile as
+	// ambiguous.
 	LadderCloseProtocolMarker = "marker"
 )
 

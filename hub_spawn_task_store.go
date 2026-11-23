@@ -522,25 +522,6 @@ func (s *laneInboxStore) claimSpawnReplacing(parent context.Context, request fle
 	return accepted, true, nil
 }
 
-// markStagedClose records, on a staged ladder successor, that its step is
-// about to ask for the predecessor's pane close. A staged row is not placed,
-// so it has no use for claimed_ms (the node's claim stamp, always 0 until a
-// placement binds); the stamp holds the intent's time until activation clears
-// it. It is how a replay tells a pane this step closed from one that went on
-// its own when hk cannot (a completed predecessor stays terminal).
-func (s *laneInboxStore) markStagedClose(parent context.Context, id string, now time.Time) error {
-	ctx, done := s.op(parent)
-	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET claimed_ms=? WHERE request_id=? AND status='staged' AND node_id IS NULL`), now.UnixMilli(), id)
-	if err != nil {
-		return err
-	}
-	if n, _ := s.dialect.rowsMatched(result); n != 1 {
-		return errSpawnClaimed
-	}
-	return nil
-}
-
 // bindStagedClose freezes the close binding on a staged ladder successor before
 // any close is sent (hk 5865). The first binding wins: a stage that has one
 // returns it unchanged, so a second step for the same K reuses it.
@@ -571,18 +552,6 @@ func (s *laneInboxStore) bindStagedClose(parent context.Context, id string, bind
 		return fleet.LadderCloseBinding{}, errSpawnClaimed
 	}
 	return binding, nil
-}
-
-// stagedCloseMarked reports whether markStagedClose ran for the staged row.
-func (s *laneInboxStore) stagedCloseMarked(parent context.Context, id string) (bool, error) {
-	ctx, done := s.op(parent)
-	defer done()
-	var stamp int64
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT claimed_ms FROM spawn_operations WHERE request_id=? AND status='staged'`), id).Scan(&stamp)
-	if err != nil {
-		return false, err
-	}
-	return stamp > 0, nil
 }
 
 func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, now time.Time, deadlineSeconds int) error {

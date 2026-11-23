@@ -43,7 +43,7 @@ func TestEscalateAuthorStepsAnAuthorWhoseRecordCompleted(t *testing.T) {
 		t.Fatalf("a completed record with a live pane must step: %+v", result)
 	}
 	// hk holds the completed record terminal: nothing writes lost over it.
-	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect", "pane.capture", "pane.close"}) {
+	if ops := commandOps(commands); !slices.Equal(ops, []string{"agents.list", "worktree.inspect", "worktree.inspect", "pane.close_status", "pane.capture", "pane.ladder_close"}) {
 		t.Fatalf("node commands %v", ops)
 	}
 	if state := f.jobs.records[f.job]["state"]; state != "completed" {
@@ -139,9 +139,9 @@ func TestEscalateAuthorRefusesARecordBoundToAnotherTask(t *testing.T) {
 }
 
 // stageCompletedSuccessor stages the successor of a completed author by hand,
-// as a step that died after staging leaves it; marked adds the close marker
-// the step writes before it asks for the close.
-func (f *escalateFixture) stageCompletedSuccessor(t *testing.T, marked bool) {
+// as a step that died after staging leaves it; bound freezes the close
+// binding on the stage.
+func (f *escalateFixture) stageCompletedSuccessor(t *testing.T, bound bool) {
 	t.Helper()
 	next, err := escalateAuthorSubmission(escalateHolderRequest(f.job), f.request(), f.job+"-l1")
 	if err != nil {
@@ -154,8 +154,14 @@ func (f *escalateFixture) stageCompletedSuccessor(t *testing.T, marked bool) {
 	if _, _, err := f.hub.inbox.store.claimSpawnReplacing(t.Context(), next, f.job+"-l1", "parent", time.Now().Add(-10*time.Minute), "", "42:implementer", "staged", ""); err != nil {
 		t.Fatal(err)
 	}
-	if marked {
-		if err := f.hub.inbox.store.markStagedClose(t.Context(), next.RequestID, time.Now()); err != nil {
+	if bound {
+		f.fenceAnswer = nodeLadderClosed
+		requestID, err := fleet.NewRequestID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.hub.inbox.store.bindStagedClose(t.Context(), next.RequestID, fleet.LadderCloseBinding{Protocol: fleet.LadderCloseProtocolV1,
+			RequestID: requestID, Node: "machine-a", Epoch: 1, Attempt: "attempt-1", Pane: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/" + f.job + "-checkout"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -212,8 +218,9 @@ func TestEscalateAuthorResumesAfterALostCloseReplyForACompletedAuthor(t *testing
 	f := newEscalateFixture(t, "pw-task-67")
 	f.completeAuthorRecord(t)
 	f.closeLost = true
+	f.fenceAnswer = nodeLadderClosed
 	result, commands := f.escalate(t, nil)
-	if result.Code != "pending" || !slices.Contains(commandOps(commands), "pane.close") {
+	if result.Code != "pending" || !slices.Contains(commandOps(commands), nodeCommandLadderClose) {
 		t.Fatalf("result=%+v commands=%v", result, commandOps(commands))
 	}
 	if staged, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err != nil || staged.Status != "staged" {
@@ -225,7 +232,7 @@ func TestEscalateAuthorResumesAfterALostCloseReplyForACompletedAuthor(t *testing
 	if result.Code != "" || result.Job != "pw-task-67-l1" {
 		t.Fatalf("the retry must place the successor: %+v", result)
 	}
-	if slices.Contains(commandOps(commands), "pane.close") {
+	if slices.Contains(commandOps(commands), nodeCommandLadderClose) || slices.Contains(commandOps(commands), nodeCommandPaneClose) {
 		t.Fatalf("the pane is gone already: %v", commandOps(commands))
 	}
 }
@@ -246,10 +253,10 @@ func TestEscalateAuthorUnmarkedStageOfACompletedAuthorWithoutPaneEndedIndependen
 	}
 }
 
-// The expiry reconciler follows the same marker: a marked stage whose pane is
-// gone is finished, a marked stage with no readable pane list is kept and the
+// The expiry reconciler follows the node verdict: a stage whose close closed
+// the pane is finished when the pane is gone, one with no readable pane list is kept and the
 // owner is asked once, an unmarked one is released.
-func TestExpiredStagedLadderStageOfACompletedAuthorFollowsTheCloseMarker(t *testing.T) {
+func TestExpiredStagedLadderStageOfACompletedAuthorFollowsTheVerdict(t *testing.T) {
 	cases := []struct {
 		name            string
 		marked, absent  bool
@@ -278,22 +285,6 @@ func TestExpiredStagedLadderStageOfACompletedAuthorFollowsTheCloseMarker(t *test
 				f.awaitInfo(t, tc.wantInfoContain)
 			}
 		})
-	}
-}
-
-// The close marker is written after the screen is saved and before the close
-// is requested, so a stop during the capture leaves none (mergewake review of
-// #750: the first marker preceded pane.capture).
-func TestEscalateAuthorWritesTheCloseMarkerBetweenCaptureAndClose(t *testing.T) {
-	f := newEscalateFixture(t, "pw-task-70")
-	f.completeAuthorRecord(t)
-	placed := placedAnywhere
-	result, _ := f.escalate(t, &placed)
-	if result.Job != "pw-task-70-l1" {
-		t.Fatalf("result=%+v", result)
-	}
-	if f.markerAtCapture || !f.markerAtClose {
-		t.Fatalf("marker at capture=%v at close=%v, want false then true", f.markerAtCapture, f.markerAtClose)
 	}
 }
 

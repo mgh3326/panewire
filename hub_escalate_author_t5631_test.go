@@ -60,6 +60,7 @@ func TestEscalateAuthorRefusalForALiveAuthorReleasesTheStagedSuccessor_t5631(t *
 			if result, _ := f.escalate(t, nil); result.Code != "pending" {
 				t.Fatalf("the lost close reply must leave the stage: %+v", result)
 			}
+			f.awaitInfo(t, "unresolved")
 			if staged, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1"); err != nil || staged.Status != "staged" {
 				t.Fatalf("stage=%+v err=%v", staged, err)
 			}
