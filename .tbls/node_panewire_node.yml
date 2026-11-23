@@ -17,7 +17,8 @@ relations:
     parentColumns:
       - pane_id
       - state_change_seq
-    def: "a candidate is the pane state one wake was observed in; settle and route join it to the pane row at the same local sequence"
+    parentCardinality: zero or one
+    def: "a candidate is the pane state one wake was observed in; settle and route join it to the pane row at the same local sequence; state_change_seq is updated in place on each state change, so a stale wake matches no pane row and is skipped"
   - table: quota_blocked_wakes
     columns:
       - pane_id
@@ -26,7 +27,8 @@ relations:
     parentColumns:
       - pane_id
       - state_change_seq
-    def: "a blocked wake is drained only while the pane is still blocked at the same local sequence; the drain joins the wake to its pane row"
+    parentCardinality: zero or one
+    def: "a blocked wake is drained only while the pane is still blocked at the same local sequence; the drain joins the wake to its pane row; state_change_seq is updated in place on each state change, so a stale wake matches no pane row and is skipped"
   - table: quota_stall_wakes
     columns:
       - pane_id
@@ -35,7 +37,8 @@ relations:
     parentColumns:
       - pane_id
       - state_change_seq
-    def: "a stall wake is acted on only while the pane is idle or done at the same local sequence; the action check joins the wake to its pane row"
+    parentCardinality: zero or one
+    def: "a stall wake is acted on only while the pane is idle or done at the same local sequence; the action check joins the wake to its pane row; state_change_seq is updated in place on each state change, so a stale wake matches no pane row and is skipped"
   - table: quota_stop_decisions
     columns:
       - event_id
