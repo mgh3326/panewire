@@ -238,8 +238,14 @@ func (h *HubServer) withdrawStageResult(ctx context.Context, id, previousID, rol
 // releaseStagedRow is the store release without a fence: for a stage whose
 // close was never sent, or whose node answered that nothing closed.
 func (h *HubServer) releaseStagedRow(ctx context.Context, id, previousID, roleKey string) error {
+	return h.releaseStagedRowNoting(ctx, id, previousID, roleKey, nil)
+}
+
+// releaseStagedRowNoting is releaseStagedRow with a note committed in the same
+// transaction as the release, so the note exists exactly when the release does.
+func (h *HubServer) releaseStagedRowNoting(ctx context.Context, id, previousID, roleKey string, note stagedNote) error {
 	if previousID == "" {
-		return h.inbox.store.discardStagedSpawn(ctx, id, roleKey)
+		return h.inbox.store.discardStagedSpawnNoting(ctx, id, roleKey, note)
 	}
-	return h.inbox.store.cancelStagedSpawn(ctx, id, previousID, roleKey)
+	return h.inbox.store.cancelStagedSpawnNoting(ctx, id, previousID, roleKey, note)
 }

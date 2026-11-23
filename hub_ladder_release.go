@@ -14,20 +14,23 @@ import (
 )
 
 // `POST /v1/ladder/stages/{request_id}/release` is the operator's release of a
-// ladder stage the reconciler cannot settle (hk 6115; docs/escalate-author.md,
-// "Releasing an unresolved stage"). It is the one way a legacy marker stage, or
-// a v1 stage whose node answered unknown or closing, leaves the staged state
-// without the node's verdict deciding it. It is operator-only and never runs
-// on its own: nothing in the hub calls it.
+// ladder stage the reconciler keeps (hk 6115; docs/escalate-author.md,
+// "Releasing an unresolved stage"). It is operator-only and never runs on its
+// own: nothing in the hub calls it.
 //
-// The release goes through releaseStagedRow, the same path a normal release
-// takes, so the holder's role and the reservation come back exactly as they
-// would after any other release.
+// The release goes through releaseStagedRowNoting, the same store release a
+// normal release takes, so the holder's role and the reservation come back as
+// after any other release. The release record and the release commit in one
+// transaction, so a failed release leaves neither a record nor a changed stage.
 
-// ladderReleaseEventPrefix keys the durable record and the owner notice of a
-// release by the stage's request id: one release per stage, however often the
-// operator repeats it.
+// ladderReleaseEventPrefix keys the record and the owner notice of a release by
+// the stage's request id: one release per stage, however often it is repeated.
 const ladderReleaseEventPrefix = "ladder-release:"
+
+// ladderReleaseNoticeTimeout bounds the owner notice filed after a release
+// commits. It runs on a context that outlives the request, so a client that
+// gave up cannot cut the notice off.
+const ladderReleaseNoticeTimeout = 10 * time.Second
 
 // hubLadderReleaseBody is the answer to a release. Status is "released" on
 // success and the stage's own status when the stage is not staged. Error names
@@ -39,6 +42,13 @@ type hubLadderReleaseBody struct {
 	Reason    string `json:"reason,omitempty"`
 	State     string `json:"state,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+// ladderReleaseRecord is the durable answer of a release that committed: the
+// body a repeat returns, and the owner notice a repeat files again.
+type ladderReleaseRecord struct {
+	Body   hubLadderReleaseBody `json:"body"`
+	Notice string               `json:"notice"`
 }
 
 func (h *HubServer) handleLadderRelease(w http.ResponseWriter, r *http.Request) {
@@ -62,9 +72,12 @@ func (h *HubServer) handleLadderRelease(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, status, result)
 }
 
-// releaseLadderStage releases the staged successor id when its close verdict is
-// unresolved, and reports what it did. It holds ladderMu, as every other ladder
-// step does, so the reconciler and the expiry pass never read the stage midway.
+// releaseLadderStage releases the staged successor id when its close verdict
+// settles that no close can run for it, and reports what it did. It holds
+// ladderMu, as every other ladder step does.
+//
+// The verdict is read before the holder. The fence wait can be long, and the
+// holder's state must be the one at the release, not the one before the wait.
 func (h *HubServer) releaseLadderStage(ctx context.Context, id, reason string) (hubLadderReleaseBody, int) {
 	h.ladderMu.Lock()
 	defer h.ladderMu.Unlock()
@@ -81,24 +94,48 @@ func (h *HubServer) releaseLadderStage(ctx context.Context, id, reason string) (
 	if stage.Request.LadderStep == nil {
 		return hubLadderReleaseBody{RequestID: id, Job: stage.Job, Status: stage.Status, Error: "not_ladder_stage"}, http.StatusConflict
 	}
-	parent := stage.Request.LadderStep.Parent
-	holder, err := h.inbox.store.latestSpawnForJob(ctx, parent)
+	step := stage.Request.LadderStep
+	// stagedCloseVerdict is the read the reconciler uses: for a v1 stage it is
+	// the fence, which sends no close and settles the K. A legacy marker stage
+	// has no K to fence and reads as unknown; a stage with no close binding reads
+	// as refused, as the reconciler reads it.
+	verdict, err := h.stagedCloseVerdict(ctx, stage)
 	if err != nil {
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Error: "store_unavailable"}, http.StatusServiceUnavailable
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "hub_error"}, http.StatusServiceUnavailable
+	}
+	switch {
+	case !verdict.answered:
+		// The fence did not answer: whether the K is settled is unknown, so
+		// nothing is released. The operator retries once the node answers.
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "verdict_unreadable"}, http.StatusServiceUnavailable
+	case verdict.state == nodeLadderClosing:
+		// A close has started on the node and release does not stop it: the
+		// holder's role must not come back while that close runs.
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: stage.Status, State: verdict.state, Error: "verdict_pending"}, http.StatusServiceUnavailable
+	case verdict.state == nodeLadderClosed, verdict.state == nodeLadderGone:
+		// The pane was closed or ended on its own: the reconciler activates or
+		// releases these, not the operator.
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: stage.Status, State: verdict.state, Error: "verdict_resolved"}, http.StatusConflict
+	}
+	// unknown (answered), fenced and refused: nothing closed the predecessor
+	// for this K, or the answer is the ambiguity the operator decides on.
+	holder, err := h.inbox.store.latestSpawnForJob(ctx, step.Parent)
+	if err != nil {
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "store_unavailable"}, http.StatusServiceUnavailable
 	}
 	// The role key and the restore target are read as the expiry pass reads
 	// them: the holder's submission names the role, the record the task.
 	spawn, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil {
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Error: "job_unreadable"}, http.StatusConflict
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "job_unreadable"}, http.StatusConflict
 	}
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Error: "hub_error"}, http.StatusServiceUnavailable
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "hub_error"}, http.StatusServiceUnavailable
 	}
-	record, exists, err := app.ExistingJob(ctx, parent)
+	record, exists, err := app.ExistingJob(ctx, step.Parent)
 	if err != nil || !exists {
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Error: "record_unreadable"}, http.StatusServiceUnavailable
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "record_unreadable"}, http.StatusServiceUnavailable
 	}
 	roleKey := fleet.SpawnRoleKey(firstNonempty(spawn.Task, hkRecordTaskID(record)), spawn.Role, spawn.ReviewPass)
 	// A live holder gets its role back; a holder that ended is never restored
@@ -107,86 +144,80 @@ func (h *HubServer) releaseLadderStage(ctx context.Context, id, reason string) (
 	if state := escalateAuthorStr(record, "state"); state == "claimed" || state == "spawned" {
 		previousID = holder.Request.RequestID
 	}
-	// stagedCloseVerdict is the read the reconciler uses: for a v1 stage it is
-	// the fence, which sends no close and fences the K so none runs afterwards.
-	// A legacy marker stage has no K to fence and reads as unknown.
-	verdict, err := h.stagedCloseVerdict(ctx, stage)
+	body := hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: "released", Reason: reason}
+	notice := ladderReleaseNotice(step, id, previousID != "", reason)
+	payload, err := json.Marshal(ladderReleaseRecord{Body: body, Notice: notice})
 	if err != nil {
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Error: "hub_error"}, http.StatusServiceUnavailable
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "hub_error"}, http.StatusServiceUnavailable
 	}
-	if !verdict.unresolved() {
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Status: stage.Status, State: verdict.state, Error: "verdict_resolved"}, http.StatusConflict
+	now := h.now().UTC()
+	note := func(ctx context.Context, tx *sql.Tx) error {
+		return h.inbox.store.noteLadderRelease(ctx, tx, id, stage.Job, stage.Owner, payload, now)
 	}
-	body := hubLadderReleaseBody{RequestID: id, Job: parent, Status: "released", Reason: reason}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Error: "hub_error"}, http.StatusServiceUnavailable
-	}
-	// The record is written before the release, so a release that lands always
-	// has one to answer its repeat from; a release that fails takes it back.
-	if err := h.inbox.store.recordLadderRelease(ctx, id, stage.Job, stage.Owner, payload, h.now().UTC()); err != nil {
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Error: "store_unavailable"}, http.StatusServiceUnavailable
-	}
-	if err := h.releaseStagedRow(ctx, id, previousID, roleKey); err != nil {
-		_ = h.inbox.store.forgetLadderRelease(ctx, id)
+	if err := h.releaseStagedRowNoting(ctx, id, previousID, roleKey, note); err != nil {
 		if errors.Is(err, errSpawnClaimed) {
-			return hubLadderReleaseBody{RequestID: id, Job: parent, Status: "changed", Error: "not_staged"}, http.StatusConflict
+			return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: "changed", Error: "not_staged"}, http.StatusConflict
 		}
-		return hubLadderReleaseBody{RequestID: id, Job: parent, Error: "store_unavailable"}, http.StatusServiceUnavailable
+		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "store_unavailable"}, http.StatusServiceUnavailable
 	}
-	restored := "freed"
-	if previousID != "" {
-		restored = "restored to its holder"
-	}
-	round, pr := stage.Request.LadderStep.Round, stage.Request.LadderStep.PR
-	text := fmt.Sprintf("ladder step %s (round %d, %s): the operator released the unresolved staged successor %s; its role is %s. Reason: %s", parent, round, pr, id, restored, reason)
-	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: ladderReleaseEventPrefix + id, JobID: parent, OwnerLane: stage.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(parent, "ladder_released", false)}, nil)
+	h.fileLadderReleaseNotice(ctx, stage.Owner, step.Parent, id, notice)
 	return body, http.StatusOK
 }
 
-// replayLadderRelease answers a repeat of a release that already landed: the
-// stage row is gone, and its record holds the answer the first release gave.
+// ladderReleaseNotice is the owner's notice of a release: the stage, the step
+// it belonged to, what happened to the holder's role and the operator's reason.
+func ladderReleaseNotice(step *fleet.LadderStepIdentity, id string, restored bool, reason string) string {
+	role := "freed"
+	if restored {
+		role = "restored to its holder"
+	}
+	return fmt.Sprintf("ladder step %s (round %d, %s): the operator released the unresolved staged successor %s; its role is %s. Reason: %s", step.Parent, step.Round, step.PR, id, role, reason)
+}
+
+// fileLadderReleaseNotice files the owner notice under the release's event id,
+// on a context that outlives the request. The lane store drops a duplicate, so
+// filing it again on a replay is safe.
+func (h *HubServer) fileLadderReleaseNotice(ctx context.Context, owner, parent, id, notice string) {
+	noticeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ladderReleaseNoticeTimeout)
+	defer cancel()
+	h.relayLaneEventContext(noticeCtx, hubJobEventPayload{EventID: ladderReleaseEventPrefix + id, JobID: parent, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(notice, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(parent, "ladder_released", false)}, nil)
+}
+
+// replayLadderRelease answers a repeat of a release that committed: the stage
+// row is gone, and its record holds the answer the first release gave. The
+// owner notice is filed again, so one the hub did not get to deliver lands now.
 func (h *HubServer) replayLadderRelease(ctx context.Context, id string) (hubLadderReleaseBody, int) {
-	raw, found, err := h.inbox.store.ladderReleaseRecord(ctx, id)
+	raw, owner, found, err := h.inbox.store.ladderReleaseRecord(ctx, id)
 	if err != nil {
 		return hubLadderReleaseBody{RequestID: id, Error: "store_unavailable"}, http.StatusServiceUnavailable
 	}
 	if !found {
 		return hubLadderReleaseBody{RequestID: id, Error: "not_found"}, http.StatusNotFound
 	}
-	var body hubLadderReleaseBody
-	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+	var record ladderReleaseRecord
+	if err := json.Unmarshal([]byte(raw), &record); err != nil {
 		return hubLadderReleaseBody{RequestID: id, Error: "store_unavailable"}, http.StatusServiceUnavailable
 	}
-	return body, http.StatusOK
+	h.fileLadderReleaseNotice(ctx, owner, record.Body.Job, id, record.Notice)
+	return record.Body, http.StatusOK
 }
 
-// recordLadderRelease writes the release's durable answer. The row is inert: it
-// is delivered and its telemetry recorded, so no notice route or trace sends it.
-// An existing row is kept, so the first release's answer stands.
-func (s *laneInboxStore) recordLadderRelease(parent context.Context, id, job, owner string, payload []byte, now time.Time) error {
-	ctx, done := s.op(parent)
-	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered,telemetry_recorded) VALUES(?,?,?,?,?,?,1,1)`, "")), ladderReleaseEventPrefix+id, id, job, owner, string(payload), now.UnixMilli())
+// noteLadderRelease writes the release's record inside the transaction that
+// deletes the stage, so the record exists exactly when the release commits. The
+// row is inert: delivered and telemetry-recorded, so no notice route sends it.
+func (s *laneInboxStore) noteLadderRelease(ctx context.Context, tx *sql.Tx, id, job, owner string, payload []byte, now time.Time) error {
+	_, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered,telemetry_recorded) VALUES(?,?,?,?,?,?,1,1)`), ladderReleaseEventPrefix+id, id, job, owner, string(payload), now.UnixMilli())
 	return err
 }
 
-// ladderReleaseRecord returns the answer a release recorded, if one landed.
-func (s *laneInboxStore) ladderReleaseRecord(parent context.Context, id string) (string, bool, error) {
+// ladderReleaseRecord returns the record of a committed release and the owner
+// it was filed for.
+func (s *laneInboxStore) ladderReleaseRecord(parent context.Context, id string) (raw, owner string, found bool, err error) {
 	ctx, done := s.op(parent)
 	defer done()
-	var raw string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT result FROM spawn_notifications WHERE event_id=? AND request_id=?`), ladderReleaseEventPrefix+id, id).Scan(&raw)
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT result,owner FROM spawn_notifications WHERE event_id=? AND request_id=?`), ladderReleaseEventPrefix+id, id).Scan(&raw, &owner)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return "", "", false, nil
 	}
-	return raw, err == nil, err
-}
-
-// forgetLadderRelease removes a record whose release did not land.
-func (s *laneInboxStore) forgetLadderRelease(parent context.Context, id string) error {
-	ctx, done := s.op(parent)
-	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`DELETE FROM spawn_notifications WHERE event_id=? AND request_id=?`), ladderReleaseEventPrefix+id, id)
-	return err
+	return raw, owner, err == nil, err
 }

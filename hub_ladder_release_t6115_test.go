@@ -142,9 +142,10 @@ func TestLadderReleaseV1UnknownFencesThenReleases(t *testing.T) {
 	}
 }
 
-// A v1 stage whose verdict is settled is not released: the reconciler owns it.
+// A v1 stage whose pane was closed or ended is not released: the reconciler
+// activates or releases it.
 func TestLadderReleaseRefusesASettledVerdict(t *testing.T) {
-	for _, state := range []string{nodeLadderClosed, nodeLadderGone, nodeLadderRefused, nodeLadderFenced} {
+	for _, state := range []string{nodeLadderClosed, nodeLadderGone} {
 		t.Run(state, func(t *testing.T) {
 			f := newLadderCloseFixture(t, "pw-task-6115-settled", true)
 			f.fenceAnswer = state
@@ -185,6 +186,10 @@ func TestLadderReleaseRefusals(t *testing.T) {
 		body := releaseLadderBody(t, recorder)
 		if recorder.Code != http.StatusConflict || body.Error != "not_staged" || body.Status != "accepted" {
 			t.Fatalf("status=%d body=%+v; want 409 not_staged accepted", recorder.Code, body)
+		}
+		var records int
+		if err := f.hub.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE event_id=?`, ladderReleaseEventPrefix+stage.Request.RequestID).Scan(&records); err != nil || records != 0 {
+			t.Fatalf("a refused release wrote a record: %d err=%v", records, err)
 		}
 	})
 	t.Run("not a ladder stage", func(t *testing.T) {
@@ -276,5 +281,112 @@ func TestHubLadderCLIInvocation(t *testing.T) {
 	args := []string{"release", id, "--reason", "operator check", "--hub-url", "https://hub.example.test", "--hub-token-env", missing}
 	if code := runHubLadderCLI(args, &stdout, &stderr, hubCLIDeps{}); code != ExitConditionInvalid || !strings.Contains(stderr.String(), "hub ladder release rejected: invalid operator token env") {
 		t.Fatalf("missing operator env: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+// A fenced or refused v1 stage is released: the fence (or the node's record that
+// nothing closed) settles that no close runs for the K, so the role comes back.
+func TestLadderReleaseReleasesAFencedOrRefusedStage(t *testing.T) {
+	for _, state := range []string{nodeLadderFenced, nodeLadderRefused} {
+		t.Run(state, func(t *testing.T) {
+			f := newLadderCloseFixture(t, "pw-task-6115-"+state, true)
+			f.fenceAnswer = state
+			f.stageBoundLiveSuccessor(t)
+			stage, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.take()
+			recorder := releaseLadderHTTP(t, f.hub, stage.Request.RequestID, t14OperatorToken, "", "fence settled the K")
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s; want 200", recorder.Code, recorder.Body.String())
+			}
+			if ops := commandOps(f.take()); !slices.Contains(ops, nodeCommandLadderFence) || slices.Contains(ops, nodeCommandLadderClose) {
+				t.Fatalf("ops=%v; want the fence and no close", ops)
+			}
+			if rows, reservations := stagedRowCount(t, f.hub, stage.Request.RequestID); rows != 0 || reservations != 0 {
+				t.Fatalf("stage rows=%d reservations=%d; want both gone", rows, reservations)
+			}
+		})
+	}
+}
+
+// A close already running on the node (closing) keeps the stage, and so does a
+// fence that does not answer: the operator is told to retry, and nothing is
+// released while a close may still run.
+func TestLadderReleaseWaitsOnACloseOrAnUnreadableFence(t *testing.T) {
+	for _, tc := range []struct{ fence, code string }{
+		{nodeLadderClosing, "verdict_pending"},
+		{"none", "verdict_unreadable"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			f := newLadderCloseFixture(t, "pw-task-6115-wait-"+tc.code, true)
+			f.fenceAnswer = tc.fence
+			f.stageBoundLiveSuccessor(t)
+			stage, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.take()
+			recorder := releaseLadderHTTP(t, f.hub, stage.Request.RequestID, t14OperatorToken, "", "retry after the node answers")
+			body := releaseLadderBody(t, recorder)
+			if recorder.Code != http.StatusServiceUnavailable || body.Error != tc.code {
+				t.Fatalf("status=%d body=%+v; want 503 %s", recorder.Code, body, tc.code)
+			}
+			if ops := commandOps(f.take()); slices.Contains(ops, nodeCommandLadderClose) || slices.Contains(ops, nodeCommandPaneClose) {
+				t.Fatalf("a waiting release sent a close: %v", ops)
+			}
+			if rows, _ := stagedRowCount(t, f.hub, stage.Request.RequestID); rows != 1 {
+				t.Fatalf("a waiting release removed the stage: rows=%d", rows)
+			}
+		})
+	}
+}
+
+// A stage with no close binding has nothing to fence: the reconciler reads it as
+// refused, so the release goes through with no node command.
+func TestLadderReleaseStageWithoutACloseBinding(t *testing.T) {
+	f := newLadderCloseFixture(t, "pw-task-6115-nobind", true)
+	stageID := f.stageLiveSuccessorWithClose(t, nil, true)
+	f.take()
+	recorder := releaseLadderHTTP(t, f.hub, stageID, t14OperatorToken, "", "no close was ever frozen")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s; want 200", recorder.Code, recorder.Body.String())
+	}
+	if ops := commandOps(f.take()); len(ops) != 0 {
+		t.Fatalf("a release of an unbound stage sent node commands: %v", ops)
+	}
+}
+
+// The holder's state is read after the fence. A holder that completes while the
+// fence is in flight is not handed its role back: the reservation is freed.
+func TestLadderReleaseReadsTheHolderAfterTheFence(t *testing.T) {
+	f := newLadderCloseFixture(t, "pw-task-6115-holder", true)
+	f.fenceAnswer = nodeLadderUnknown
+	f.stageBoundLiveSuccessor(t)
+	stage, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := f.extraReply
+	f.extraReply = func(op string, command map[string]json.RawMessage) map[string]any {
+		if op == nodeCommandLadderFence {
+			// The author finishes while the fence is in flight.
+			f.jobs.mu.Lock()
+			f.jobs.records[f.job]["state"] = "completed"
+			f.jobs.mu.Unlock()
+		}
+		return inner(op, command)
+	}
+	recorder := releaseLadderHTTP(t, f.hub, stage.Request.RequestID, t14OperatorToken, "", "holder finished during the fence")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s; want 200", recorder.Code, recorder.Body.String())
+	}
+	if got := reservationTaskRole(t, f.hub, holder.Request.RequestID); got.Valid {
+		t.Fatalf("a holder that completed during the fence got its role back: %+v", got)
 	}
 }

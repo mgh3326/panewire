@@ -572,9 +572,25 @@ func (s *laneInboxStore) activateStagedSpawn(parent context.Context, id string, 
 	return nil
 }
 
+// stagedNote writes a row in the transaction that releases a staged step.
+type stagedNote func(ctx context.Context, tx *sql.Tx) error
+
+func writeStagedNote(ctx context.Context, tx *sql.Tx, note stagedNote) error {
+	if note == nil {
+		return nil
+	}
+	return note(ctx, tx)
+}
+
 // cancelStagedSpawn restores the old holder only while the staged step has
 // not been activated. Both changes commit together.
 func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousID, roleKey string) error {
+	return s.cancelStagedSpawnNoting(parent, id, previousID, roleKey, nil)
+}
+
+// cancelStagedSpawnNoting is cancelStagedSpawn with a note written in the same
+// transaction: the note lands only when the release commits (hk 6115).
+func (s *laneInboxStore) cancelStagedSpawnNoting(parent context.Context, id, previousID, roleKey string, note stagedNote) error {
 	ctx, done := s.op(parent)
 	defer done()
 	tx, err := s.beginTx(ctx)
@@ -606,12 +622,21 @@ func (s *laneInboxStore) cancelStagedSpawn(parent context.Context, id, previousI
 	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return errSpawnClaimed
 	}
+	if err = writeStagedNote(ctx, tx, note); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 // discardStagedSpawn releases a staged role when its predecessor ended for a
 // different reason. It never restores a reservation to a terminal job.
 func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey string) error {
+	return s.discardStagedSpawnNoting(parent, id, roleKey, nil)
+}
+
+// discardStagedSpawnNoting is discardStagedSpawn with a note written in the same
+// transaction (hk 6115).
+func (s *laneInboxStore) discardStagedSpawnNoting(parent context.Context, id, roleKey string, note stagedNote) error {
 	ctx, done := s.op(parent)
 	defer done()
 	tx, err := s.beginTx(ctx)
@@ -635,6 +660,9 @@ func (s *laneInboxStore) discardStagedSpawn(parent context.Context, id, roleKey 
 	}
 	if n, _ := s.dialect.rowsMatched(result); n != 1 {
 		return errSpawnClaimed
+	}
+	if err = writeStagedNote(ctx, tx, note); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

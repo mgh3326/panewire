@@ -9,14 +9,14 @@ import (
 const hubLadderUsage = `Usage:
   panewire hub ladder release STAGE_REQUEST_ID --reason TEXT [` + hubCredentialUsage + `]
 
-release frees a ladder stage that is still staged and whose close verdict is
-unresolved: a legacy marker stage, or a v1 stage whose node answers unknown or
-closing (or does not answer). A v1 stage is fenced first, so no close for its K
-runs afterwards; a marker stage has no K to fence. The holder's role and the
-reservation come back as after a normal release. A stage whose verdict is
-settled (closed, gone, refused, fenced), that is not staged, or that is not a
-ladder stage is refused, and the normal reconciler keeps it. A repeat of a
-release that landed answers the same result.
+release frees a ladder stage that is still staged and whose close verdict settles
+that no close can run for it: a legacy marker stage, or a v1 stage the node
+answers unknown, fenced or refused (a v1 stage is fenced first, so no close for
+its K runs afterwards). A stage whose close is in progress (closing) or whose
+fence does not answer is refused and retried; a stage whose pane was closed or
+ended (closed, gone) is the reconciler's. Not staged or not a ladder step is
+refused too. The holder's role and the reservation come back as after a normal
+release. A repeat of a release that landed answers the same result.
 It needs an operator token env (HUB_MACHINE_ID=operator); see docs/escalate-author.md.
 --hub-url, --hub-token-env and --hub-cf-env default to PANEWIRE_HUB_URL,
 PANEWIRE_HUB_TOKEN_ENV and PANEWIRE_HUB_CF_ENV.`
