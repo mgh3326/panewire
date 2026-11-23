@@ -247,7 +247,7 @@ func deskDietReplay500(t *testing.T, policy string, wantInterrupts, wantInbox in
 				if group.typ != "decision" {
 					t.Fatal("routine interrupt", d)
 				}
-				if wantInterrupts == 1 && (d.EventID != 0 || !strings.HasPrefix(d.Text, "[inbox] operator-desk: ") || !strings.Contains(d.Text, "(most urgent: decision) | panewire inbox list --lane operator-desk")) {
+				if wantInterrupts == 1 && (d.EventID != 0 || !strings.HasPrefix(d.Text, "[inbox] operator-desk: ") || !strings.Contains(d.Text, "(most urgent: decision) | panewire inbox list --lane operator-desk --unread")) {
 					t.Fatal("inbox-only desk got a body", d)
 				}
 			}

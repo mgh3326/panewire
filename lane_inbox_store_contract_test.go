@@ -330,9 +330,9 @@ func TestLaneInboxStoreContractDigestAndEscalationBatches(t *testing.T) {
 		}
 		// Digests are created first, lanes sorted, then escalations.
 		want := []string{
-			"2 interrupt events | lane lane-a | panewire inbox list --lane lane-a",
-			"2 interrupt events | lane lane-b | panewire inbox list --lane lane-b",
-			"1 unread inbox items | lane lane-a | panewire inbox list --lane lane-a",
+			"2 interrupt events | lane lane-a | panewire inbox list --lane lane-a --unread",
+			"2 interrupt events | lane lane-b | panewire inbox list --lane lane-b --unread",
+			"1 unread inbox items | lane lane-a | panewire inbox list --lane lane-a --unread",
 		}
 		for i, b := range batches {
 			if b.Text != want[i] || b.invalidReason() != "" {

@@ -249,7 +249,7 @@ func TestCodexWakeOnlyForConfiguredLanesAndExactLine(t *testing.T) {
 	node.client.relayBusyManager().offer(t.Context(), wakeInject("other-lane", 1, "order"))
 	// The desk's "no pane" line shares the lane's transport id but not its text.
 	paneless := wakeInject("routing-policy", 1, "order")
-	paneless.Text = "[inbox] routing-policy: has no pane; read it with panewire inbox list --lane routing-policy"
+	paneless.Text = "[inbox] routing-policy: has no pane; read it with panewire inbox list --lane routing-policy --unread"
 	node.client.relayBusyManager().offer(t.Context(), paneless)
 	if calls := queue.seen(); len(calls) != 0 {
 		t.Fatalf("queued %+v for lines that are not a configured lane's wake line", calls)

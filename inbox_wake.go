@@ -13,7 +13,7 @@ import (
 // pane: receiveInbox files it as an unread inbox item, and this file types one
 // line instead, coalesced per lane:
 //
-//	[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>
+//	[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane> --unread
 //
 // The first wake-worthy arrival is announced at once and opens a window
 // (relay.inbox_wake_window, default 5m). Later arrivals inside the window
@@ -112,7 +112,7 @@ func inboxOnlyExempt(e hubJobEventPayload) bool {
 
 // inboxWakeText is the wake line. N comes from a successful count read only.
 func inboxWakeText(lane string, unread int, mostUrgent string) string {
-	return fmt.Sprintf("[inbox] %s: %d unread (most urgent: %s) | panewire inbox list --lane %s", lane, unread, mostUrgent, lane)
+	return fmt.Sprintf("[inbox] %s: %d unread (most urgent: %s) | panewire inbox list --lane %s --unread", lane, unread, mostUrgent, lane)
 }
 
 type inboxWakeLane struct {

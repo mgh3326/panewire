@@ -562,3 +562,46 @@ func TestClaudeSocketRegisterSessionCapture(t *testing.T) {
 		t.Fatalf("reg=%+v err=%v, want Session=stdin-session-id", reg, err)
 	}
 }
+
+func TestWakeLaneInMatchesBothNewAndOldTails(t *testing.T) {
+	const lane = "routing-policy"
+	lanes := []string{lane, "other-lane"}
+
+	newWake := hubOutboundMessage{
+		Type:  "relay.inject",
+		JobID: laneEventTransportID(lane, "inbox-wake"),
+		Text:  "[inbox] routing-policy: 3 unread (most urgent: order) | panewire inbox list --lane routing-policy --unread",
+	}
+	oldWake := hubOutboundMessage{
+		Type:  "relay.inject",
+		JobID: laneEventTransportID(lane, "inbox-wake"),
+		Text:  "[inbox] routing-policy: 3 unread (most urgent: order) | panewire inbox list --lane routing-policy",
+	}
+
+	if got := wakeLaneIn(newWake, lanes); got != lane {
+		t.Fatalf("wakeLaneIn(newWake) = %q, want %q", got, lane)
+	}
+	if got := wakeLaneIn(oldWake, lanes); got != lane {
+		t.Fatalf("wakeLaneIn(oldWake) = %q, want %q", got, lane)
+	}
+
+	// Desk's no pane line must not match
+	deskLine := hubOutboundMessage{
+		Type:  "relay.inject",
+		JobID: laneEventTransportID(lane, "inbox-wake"),
+		Text:  "[inbox] routing-policy: 3 unread (most urgent: order) | no pane: desk takes it | panewire inbox list --lane routing-policy --unread",
+	}
+	if got := wakeLaneIn(deskLine, lanes); got != "" {
+		t.Fatalf("wakeLaneIn(deskLine) = %q, want empty", got)
+	}
+
+	// Suffix with wrong lane must not match
+	wrongLaneTail := hubOutboundMessage{
+		Type:  "relay.inject",
+		JobID: laneEventTransportID(lane, "inbox-wake"),
+		Text:  "[inbox] routing-policy: 3 unread (most urgent: order) | panewire inbox list --lane other-lane --unread",
+	}
+	if got := wakeLaneIn(wrongLaneTail, lanes); got != "" {
+		t.Fatalf("wakeLaneIn(wrongLaneTail) = %q, want empty", got)
+	}
+}

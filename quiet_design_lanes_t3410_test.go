@@ -291,7 +291,7 @@ func TestQuietDesignLaneKeepsDecisionsAndFailures(t *testing.T) {
 	}
 	// Since hk 3602 the three are filed and the first wakes the lane once.
 	got := t3426Injected(agent)
-	if len(got) != 1 || got[0].EventID != 0 || got[0].Text != "[inbox] panewire-design: 1 unread (most urgent: automation-failed) | panewire inbox list --lane panewire-design" {
+	if len(got) != 1 || got[0].EventID != 0 || got[0].Text != "[inbox] panewire-design: 1 unread (most urgent: automation-failed) | panewire inbox list --lane panewire-design --unread" {
 		t.Fatalf("design lane injections=%+v, want one wake line", got)
 	}
 	if unread, err := h.inbox.store.list("panewire-design", true); err != nil || len(unread) != 3 {

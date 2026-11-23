@@ -86,8 +86,18 @@ func wakeLaneIn(message hubOutboundMessage, lanes []string) string {
 		if message.JobID != laneEventTransportID(lane, "inbox-wake") {
 			continue
 		}
-		head, tail := "[inbox] "+lane+": ", " | panewire inbox list --lane "+lane
-		if middle, ok := strings.CutSuffix(strings.TrimPrefix(message.Text, head), tail); ok && strings.HasPrefix(message.Text, head) && wakeLineCounts.MatchString(middle) {
+		head := "[inbox] " + lane + ": "
+		if !strings.HasPrefix(message.Text, head) {
+			continue
+		}
+		rest := strings.TrimPrefix(message.Text, head)
+		tailNew := " | panewire inbox list --lane " + lane + " --unread"
+		tailOld := " | panewire inbox list --lane " + lane
+		middle, ok := strings.CutSuffix(rest, tailNew)
+		if !ok {
+			middle, ok = strings.CutSuffix(rest, tailOld)
+		}
+		if ok && wakeLineCounts.MatchString(middle) {
 			return lane
 		}
 	}

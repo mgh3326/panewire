@@ -8,10 +8,8 @@ import (
 	"time"
 )
 
-const t4150DeskWakeTail = " | no pane: desk takes it | panewire inbox list --lane "
-
 func t4150DeskWake(lane string, unread int, most string) string {
-	return "[inbox] " + lane + ": " + strconv.Itoa(unread) + " unread (most urgent: " + most + ")" + t4150DeskWakeTail + lane
+	return "[inbox] " + lane + ": " + strconv.Itoa(unread) + " unread (most urgent: " + most + ") | no pane: desk takes it | panewire inbox list --lane " + lane + " --unread"
 }
 
 func t4150Routes(t *testing.T, r *t3602Rig, routes map[string]reportRelayRoute) {

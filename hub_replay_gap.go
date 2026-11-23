@@ -90,7 +90,7 @@ func (h *HubServer) summarizeReplayGap(ctx context.Context, lane string, candida
 	}
 	first, last := covered[0].record, covered[len(covered)-1].record
 	eventID := "replay-gap-" + strconv.FormatInt(last.ID, 10)
-	text := fmt.Sprintf("[panewire] gap: %d events for %s were not replayed after the restart (first %s, last %s) | panewire inbox list --lane %s",
+	text := fmt.Sprintf("[panewire] gap: %d events for %s were not replayed after the restart (first %s, last %s) | panewire inbox list --lane %s --unread",
 		len(covered), lane, replayGapStamp(first), replayGapStamp(last), lane)
 	event := hubJobEventPayload{JobID: laneEventTransportID(lane, eventID), Epoch: 1, OwnerLane: lane, EventID: eventID, Text: text, DeliveryClass: "interrupt", DeliverPolicy: "now", noDigest: true}
 	result := h.relayLaneEventContext(ctx, event, nil)
