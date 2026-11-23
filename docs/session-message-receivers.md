@@ -7,7 +7,7 @@ through omp), `devin` and `agy` keep the typed line, no Rust.
 For the lanes a harness's switch names, the node delivers the lane's inbox wake
 line
 
-    [inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>
+    [inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane> --unread
 
 to the lane's own session instead of typing it into the pane. The hub's wire is
 unchanged; the line gets the sender prefix `panewire-hub: ` as for Claude; the

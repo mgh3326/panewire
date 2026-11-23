@@ -1161,10 +1161,10 @@ func (s *laneInboxStore) makeBatchesDue(now time.Time) (int64, error) {
 			// always satisfies the lane.event text contract (no control
 			// bytes, far under the length cap) and never breaks receivers.
 			// Full originals stay in the store, readable by `inbox list`.
-			text := fmt.Sprintf("%d interrupt events | lane %s | panewire inbox list --lane %s", len(items), lane, lane)
+			text := fmt.Sprintf("%d interrupt events | lane %s | panewire inbox list --lane %s --unread", len(items), lane, lane)
 			column := "digest_batch"
 			if escalation {
-				text = fmt.Sprintf("%d unread inbox items | lane %s | panewire inbox list --lane %s", len(items), lane, lane)
+				text = fmt.Sprintf("%d unread inbox items | lane %s | panewire inbox list --lane %s --unread", len(items), lane, lane)
 				column = "escalation_batch"
 			}
 			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`), id, lane, text); err != nil {
@@ -1251,9 +1251,9 @@ func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]lan
 		}
 		if total > active && !strings.HasPrefix(b.ID, "held-") {
 			if strings.Contains(b.Text, " unread inbox items | ") {
-				b.Text = fmt.Sprintf("%d unread inbox items | lane %s | panewire inbox list --lane %s", active, b.Lane, b.Lane)
+				b.Text = fmt.Sprintf("%d unread inbox items | lane %s | panewire inbox list --lane %s --unread", active, b.Lane, b.Lane)
 			} else {
-				b.Text = fmt.Sprintf("%d interrupt events | lane %s | panewire inbox list --lane %s", active, b.Lane, b.Lane)
+				b.Text = fmt.Sprintf("%d interrupt events | lane %s | panewire inbox list --lane %s --unread", active, b.Lane, b.Lane)
 			}
 		}
 		batches = append(batches, b)

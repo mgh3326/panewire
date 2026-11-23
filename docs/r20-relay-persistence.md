@@ -107,7 +107,7 @@ already read (hk 3435).
   `lane.event` row that passed the replay gates until the walk has counted its
   lane. A lane owed more than `relayReplayGapThreshold` (20) rows gets one
   summary line — `[panewire] gap: N events for <lane> were not replayed after
-  the restart (first …, last …) | panewire inbox list --lane <lane>` — filed as
+  the restart (first …, last …) | panewire inbox list --lane <lane> --unread` — filed as
   an interrupt lane.event with id `replay-gap-<last row id>`, and the rows the
   lane inbox holds retire with `hub/replay-retired:gap`. The summary is filed
   first, so a failure replays the rows and a repeated walk reuses the same

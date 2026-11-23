@@ -13,7 +13,7 @@ import (
 // that can change it, plus a bounded fallback for a writer the gate does not
 // know about.
 func TestQuietBatchPageReadsOnChange(t *testing.T) {
-	const batchText = "1 interrupt events | lane lane-a | panewire inbox list --lane lane-a"
+	const batchText = "1 interrupt events | lane lane-a | panewire inbox list --lane lane-a --unread"
 
 	t.Run("unchanged page is not re-read before the fallback", func(t *testing.T) {
 		now := time.Now().UTC()

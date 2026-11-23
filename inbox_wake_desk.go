@@ -5,7 +5,7 @@ import "fmt"
 // inboxWakeDeskText is the line the operator desk receives when a design
 // lane has no live pane. The unread count and urgency still belong to lane.
 func inboxWakeDeskText(lane string, unread int, mostUrgent string) string {
-	return fmt.Sprintf("[inbox] %s: %d unread (most urgent: %s) | no pane: desk takes it | panewire inbox list --lane %s", lane, unread, mostUrgent, lane)
+	return fmt.Sprintf("[inbox] %s: %d unread (most urgent: %s) | no pane: desk takes it | panewire inbox list --lane %s --unread", lane, unread, mostUrgent, lane)
 }
 
 // inboxWakeDestination keeps the normal lane route unless the design lane is
