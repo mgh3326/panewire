@@ -28,7 +28,7 @@ Off by default. For the lanes named in the node daemon's
 `PANEWIRE_CLAUDE_SESSION_MESSAGE_LANES` (comma separated, for example
 `routing-policy`), the node posts the lane's inbox wake line
 
-    [inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>
+    [inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane> --unread
 
 to the lane's Claude Code session instead of typing it into the pane. The
 session message carries the sender prefix `panewire-hub: ` before the line;

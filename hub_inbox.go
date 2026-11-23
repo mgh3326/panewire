@@ -731,7 +731,7 @@ func (h *HubServer) flushInbox() {
 		}
 		relayText := b.Text
 		if held {
-			relayText = strings.Split(b.Text, " | ")[0] + " | panewire inbox list --lane " + b.Lane
+			relayText = strings.Split(b.Text, " | ")[0] + " | panewire inbox list --lane " + b.Lane + " --unread"
 		}
 		event := hubJobEventPayload{JobID: laneEventTransportID(b.Lane, b.ID), Epoch: 1, OwnerLane: b.Lane, EventID: b.ID, Text: relayText, DeliveryClass: "interrupt", DeliverPolicy: "now", noDigest: true}
 		result := h.relayLaneEventContext(h.closeCtx, event, nil)

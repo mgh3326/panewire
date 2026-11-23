@@ -2212,7 +2212,7 @@ embedded `delivery-policy.yaml`) carries the lane classes under `relay:`. See
 | `relay.drain_wake_threshold` | `0` | A design lane counts as drained at or below this many in-flight jobs, `0` to `10`. |
 
 The wake line is
-`[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>`.
+`[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane> --unread`.
 Policy changes need a hub restart. The trial's end needs none.
 
 ## Local job ledger

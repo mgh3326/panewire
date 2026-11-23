@@ -268,7 +268,7 @@ func TestRegistrationOverThresholdSendsOneSummaryLine(t *testing.T) {
 	})
 	directive := <-rig.dest.relays
 	want := fmt.Sprintf("[panewire] gap: %d events for %s were not replayed", len(ids), t989Lane)
-	if !strings.Contains(directive.Text, want) || !strings.Contains(directive.Text, "panewire inbox list --lane "+t989Lane) {
+	if !strings.Contains(directive.Text, want) || !strings.Contains(directive.Text, "panewire inbox list --lane "+t989Lane+" --unread") {
 		t.Fatalf("summary text %q does not carry %q and the inbox command", directive.Text, want)
 	}
 	if extra := drainRelays(rig.dest); extra != 0 {

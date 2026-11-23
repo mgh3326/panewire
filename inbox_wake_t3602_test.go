@@ -47,7 +47,7 @@ func TestInboxWakeOrderKeepsDisplayKindAndDecisionUrgency(t *testing.T) {
 	if got := inboxWakeMostUrgent(items); got != "order" {
 		t.Fatalf("most urgent = %q, want order", got)
 	}
-	if got, want := inboxWakeText("panewire-design", 1, inboxWakeMostUrgent(items)), "[inbox] panewire-design: 1 unread (most urgent: order) | panewire inbox list --lane panewire-design"; got != want {
+	if got, want := inboxWakeText("panewire-design", 1, inboxWakeMostUrgent(items)), "[inbox] panewire-design: 1 unread (most urgent: order) | panewire inbox list --lane panewire-design --unread"; got != want {
 		t.Fatalf("wake line = %q, want %q", got, want)
 	}
 }
@@ -174,7 +174,7 @@ func t3602Event(lane, notifyType, text string) hubJobEventPayload {
 }
 
 func t3602Wake(lane string, unread int, most string) string {
-	return "[inbox] " + lane + ": " + strconv.Itoa(unread) + " unread (most urgent: " + most + ") | panewire inbox list --lane " + lane
+	return "[inbox] " + lane + ": " + strconv.Itoa(unread) + " unread (most urgent: " + most + ") | panewire inbox list --lane " + lane + " --unread"
 }
 
 // fileQuiet relays e from sender (nil: a hub notice) and fails unless it was
@@ -462,7 +462,7 @@ func TestInboxWakeHubRestartReplaysNoInjection(t *testing.T) {
 // interrupted.
 func t3602AssertWoken(t *testing.T, h *HubServer, got []hubRelayInjectEvent, lane, pane, kind, jobID, most string) {
 	t.Helper()
-	if len(got) != 1 || got[0].Pane != pane || got[0].EventID != 0 || !strings.HasPrefix(got[0].Text, "[inbox] "+lane+": ") || !strings.HasSuffix(got[0].Text, " unread (most urgent: "+most+") | panewire inbox list --lane "+lane) {
+	if len(got) != 1 || got[0].Pane != pane || got[0].EventID != 0 || !strings.HasPrefix(got[0].Text, "[inbox] "+lane+": ") || !strings.HasSuffix(got[0].Text, " unread (most urgent: "+most+") | panewire inbox list --lane "+lane+" --unread") {
 		t.Fatalf("injections=%+v, want one wake line for %s in %s, most urgent %s", got, lane, pane, most)
 	}
 	item := t3426Item(t, h, lane, kind, jobID)

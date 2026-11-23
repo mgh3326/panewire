@@ -361,7 +361,7 @@ The hub types one line into the lane's pane when the lane gets new unread
 work, through the lane's node daemon like any relay:
 
 ```text
-[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>
+[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane> --unread
 ```
 
 `N` is the lane's unread count, the same number `panewire inbox count` shows.
