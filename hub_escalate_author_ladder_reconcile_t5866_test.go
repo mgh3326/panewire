@@ -207,9 +207,8 @@ func TestLadderReconcilerLegacyMarkerStageIsAmbiguous(t *testing.T) {
 	if _, err := f.hub.inbox.store.bindStagedClose(t.Context(), next.RequestID, fleet.LadderCloseBinding{Protocol: fleet.LadderCloseProtocolMarker}); err != nil {
 		t.Fatal(err)
 	}
-	placed := placedAnywhere
 	for range 2 {
-		result, commands := f.escalate(t, &placed)
+		result, commands := f.escalate(t, nil)
 		if result.Code != "pending" {
 			t.Fatalf("result=%+v", result)
 		}
