@@ -20,8 +20,11 @@ import (
 //
 // The release goes through releaseStagedRowNoting, the same store release a
 // normal release takes, so the holder's role and the reservation come back as
-// after any other release. The release record and the release commit in one
-// transaction, so a failed release leaves neither a record nor a changed stage.
+// after any other release. The release record and its owner notice commit in
+// the same transaction as the release, so a failed release leaves neither a
+// record nor a notice nor a changed stage. The notice is an outbox row of the
+// spawn notice outbox (hub_spawn_notice_route.go), relayed after the commit and
+// retried until the owner's lane takes it (hk 6137).
 
 // ladderReleaseEventPrefix keys the record and the owner notice of a release by
 // the stage's request id: one release per stage, however often it is repeated.
@@ -45,7 +48,7 @@ type hubLadderReleaseBody struct {
 }
 
 // ladderReleaseRecord is the durable answer of a release that committed: the
-// body a repeat returns, and the owner notice a repeat files again.
+// body a repeat returns, and the owner notice the outbox routes.
 type ladderReleaseRecord struct {
 	Body   hubLadderReleaseBody `json:"body"`
 	Notice string               `json:"notice"`
@@ -104,14 +107,13 @@ func (h *HubServer) releaseLadderStage(ctx context.Context, id, reason string) (
 		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "hub_error"}, http.StatusServiceUnavailable
 	}
 	switch {
-	case !verdict.answered:
-		// The fence did not answer: whether the K is settled is unknown, so
-		// nothing is released. The operator retries once the node answers.
+	case !verdict.answered, verdict.state == nodeLadderClosing:
+		// The fence did not answer, or answered closing. A node settles a closing
+		// record to unknown under its lock before it answers (nodeLadderFence), so
+		// a fence never reports closing; an answer that says so settles nothing.
+		// Nothing is released on it: a close may still run. The operator retries
+		// once the node answers.
 		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "verdict_unreadable"}, http.StatusServiceUnavailable
-	case verdict.state == nodeLadderClosing:
-		// A close has started on the node and release does not stop it: the
-		// holder's role must not come back while that close runs.
-		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: stage.Status, State: verdict.state, Error: "verdict_pending"}, http.StatusServiceUnavailable
 	case verdict.state == nodeLadderClosed, verdict.state == nodeLadderGone:
 		// The pane was closed or ended on its own: the reconciler activates or
 		// releases these, not the operator.
@@ -138,51 +140,47 @@ func (h *HubServer) releaseLadderStage(ctx context.Context, id, reason string) (
 		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "record_unreadable"}, http.StatusServiceUnavailable
 	}
 	roleKey := fleet.SpawnRoleKey(firstNonempty(spawn.Task, hkRecordTaskID(record)), spawn.Role, spawn.ReviewPass)
-	// A live holder gets its role back; a holder that ended is never restored
-	// to, the same rule the reconciler applies (reconcileStagedLadderStage).
+	// hk's state of the holder is read here, before the lock. Whether the hub has
+	// seen the holder complete is read under h.mu below, at the write.
+	holderState := escalateAuthorStr(record, "state")
+	body := hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: "released", Reason: reason}
+	now := h.now().UTC()
+	// The holder's role comes back only while it is live in both sources: hk
+	// still says claimed or spawned, and the hub has not seen it complete (a
+	// holder that ended is never restored to, the rule reconcileStagedLadderStage
+	// applies). The decision and the write share h.mu. A completion sets the job
+	// record's Completed flag under h.mu, so one that landed before this lock is
+	// seen here, and one that starts now waits for the commit. A completed holder
+	// is therefore never restored: its role is freed, the discard path.
+	// A holder restored here that completes later is not freed by completion:
+	// observeJobCompletion does not call releaseEndedJobRole, which only the
+	// settled-lost paths (observeJobLost, lateRegisterJobEnd) run (hk 6137).
+	h.mu.Lock()
 	previousID := ""
-	if state := escalateAuthorStr(record, "state"); state == "claimed" || state == "spawned" {
+	if job := h.jobs[holder.Job]; (holderState == "claimed" || holderState == "spawned") && (job == nil || !job.Completed) {
 		previousID = holder.Request.RequestID
 	}
-	body := hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: "released", Reason: reason}
 	notice := ladderReleaseNotice(step, id, previousID != "", reason)
 	payload, err := json.Marshal(ladderReleaseRecord{Body: body, Notice: notice})
 	if err != nil {
+		h.mu.Unlock()
 		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "hub_error"}, http.StatusServiceUnavailable
 	}
-	now := h.now().UTC()
-	// The holder's liveness is compared at the write. A completion sets the job
-	// record's Completed flag under h.mu, and h.mu is held across the release
-	// transaction below, so a completion that starts now waits for the commit
-	// and then frees the role itself (releaseEndedJobRole). A completion that
-	// landed after the record was read, before this lock, is seen here.
-	note := func(ctx context.Context, tx *sql.Tx) error {
-		if previousID != "" {
-			if job := h.jobs[holder.Job]; job != nil && job.Completed {
-				return errLadderHolderChanged
-			}
-		}
+	err = h.releaseStagedRowNoting(ctx, id, previousID, roleKey, func(ctx context.Context, tx *sql.Tx) error {
 		return h.inbox.store.noteLadderRelease(ctx, tx, id, stage.Job, stage.Owner, payload, now)
-	}
-	h.mu.Lock()
-	err = h.releaseStagedRowNoting(ctx, id, previousID, roleKey, note)
+	})
 	h.mu.Unlock()
 	if err != nil {
-		if errors.Is(err, errLadderHolderChanged) {
-			return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: holder.Status, Error: "holder_changed"}, http.StatusConflict
-		}
 		if errors.Is(err, errSpawnClaimed) {
 			return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: "changed", Error: "not_staged"}, http.StatusConflict
 		}
 		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "store_unavailable"}, http.StatusServiceUnavailable
 	}
-	h.fileLadderReleaseNotice(ctx, stage.Owner, step.Parent, id, notice)
+	// The notice is in the outbox from the commit on: it is relayed now, and
+	// the spawn notice router retries it until the owner's lane takes it.
+	h.relayLadderReleaseNotice(ctx, spawnNotification{id: ladderReleaseEventPrefix + id, request: id, owner: stage.Owner, raw: string(payload)})
 	return body, http.StatusOK
 }
-
-// errLadderHolderChanged is a release whose holder row changed between the read
-// and the write: nothing is released, and the operator repeats the release.
-var errLadderHolderChanged = errors.New("the holder changed during the release")
 
 // ladderReleaseNotice is the owner's notice of a release: the stage, the step
 // it belonged to, what happened to the holder's role and the operator's reason.
@@ -194,20 +192,22 @@ func ladderReleaseNotice(step *fleet.LadderStepIdentity, id string, restored boo
 	return fmt.Sprintf("ladder step %s (round %d, %s): the operator released the unresolved staged successor %s; its role is %s. Reason: %s", step.Parent, step.Round, step.PR, id, role, reason)
 }
 
-// fileLadderReleaseNotice files the owner notice under the release's event id,
-// on a context that outlives the request. The lane store drops a duplicate, so
-// filing it again on a replay is safe.
-func (h *HubServer) fileLadderReleaseNotice(ctx context.Context, owner, parent, id, notice string) {
+// relayLadderReleaseNotice routes a release's owner notice through the spawn
+// notice outbox, on a context that outlives the request. The row was committed
+// with the release (noteLadderRelease), so a notice the hub did not relay before
+// it stopped is routed by the next flush. A duplicate event id is dropped by the
+// lane store.
+func (h *HubServer) relayLadderReleaseNotice(ctx context.Context, n spawnNotification) {
 	noticeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ladderReleaseNoticeTimeout)
 	defer cancel()
-	h.relayLaneEventContext(noticeCtx, hubJobEventPayload{EventID: ladderReleaseEventPrefix + id, JobID: parent, OwnerLane: owner, NotifyType: "info", Text: utf8PrefixWithin(notice, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(parent, "ladder_released", false)}, nil)
+	h.routeSpawnNotification(noticeCtx, n)
 }
 
 // replayLadderRelease answers a repeat of a release that committed: the stage
-// row is gone, and its record holds the answer the first release gave. The
-// owner notice is filed again, so one the hub did not get to deliver lands now.
+// row is gone, and its record holds the answer the first release gave. A notice
+// still owed is routed again; one already delivered is not filed a second time.
 func (h *HubServer) replayLadderRelease(ctx context.Context, id string) (hubLadderReleaseBody, int) {
-	raw, owner, found, err := h.inbox.store.ladderReleaseRecord(ctx, id)
+	n, owed, found, err := h.inbox.store.ladderReleaseNotice(ctx, id)
 	if err != nil {
 		return hubLadderReleaseBody{RequestID: id, Error: "store_unavailable"}, http.StatusServiceUnavailable
 	}
@@ -215,29 +215,41 @@ func (h *HubServer) replayLadderRelease(ctx context.Context, id string) (hubLadd
 		return hubLadderReleaseBody{RequestID: id, Error: "not_found"}, http.StatusNotFound
 	}
 	var record ladderReleaseRecord
-	if err := json.Unmarshal([]byte(raw), &record); err != nil {
+	if err := json.Unmarshal([]byte(n.raw), &record); err != nil {
 		return hubLadderReleaseBody{RequestID: id, Error: "store_unavailable"}, http.StatusServiceUnavailable
 	}
-	h.fileLadderReleaseNotice(ctx, owner, record.Body.Job, id, record.Notice)
+	if owed {
+		h.relayLadderReleaseNotice(ctx, n)
+	}
 	return record.Body, http.StatusOK
 }
 
-// noteLadderRelease writes the release's record inside the transaction that
-// deletes the stage, so the record exists exactly when the release commits. The
-// row is inert: delivered and telemetry-recorded, so no notice route sends it.
+// noteLadderRelease writes the release's record and its owner notice inside the
+// transaction that deletes the stage, so both exist exactly when the release
+// commits. The notice is owed (delivered=0) and queued in spawn_notice_outbox,
+// the same outbox a spawn notice waits in. The row is marked telemetry-recorded,
+// so the spawn telemetry loop skips it.
 func (s *laneInboxStore) noteLadderRelease(ctx context.Context, tx *sql.Tx, id, job, owner string, payload []byte, now time.Time) error {
-	_, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered,telemetry_recorded) VALUES(?,?,?,?,?,?,1,1)`), ladderReleaseEventPrefix+id, id, job, owner, string(payload), now.UnixMilli())
-	return err
+	eventID := ladderReleaseEventPrefix + id
+	if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered,telemetry_recorded) VALUES(?,?,?,?,?,?,0,1)`), eventID, id, job, owner, string(payload), now.UnixMilli()); err != nil {
+		return err
+	}
+	return s.enqueueSpawnNotice(ctx, tx, eventID)
 }
 
-// ladderReleaseRecord returns the record of a committed release and the owner
-// it was filed for.
-func (s *laneInboxStore) ladderReleaseRecord(parent context.Context, id string) (raw, owner string, found bool, err error) {
+// ladderReleaseNotice returns the notice of a committed release as the outbox
+// routes it, and whether it is still owed.
+func (s *laneInboxStore) ladderReleaseNotice(parent context.Context, id string) (n spawnNotification, owed, found bool, err error) {
 	ctx, done := s.op(parent)
 	defer done()
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT result,owner FROM spawn_notifications WHERE event_id=? AND request_id=?`), ladderReleaseEventPrefix+id, id).Scan(&raw, &owner)
+	var delivered int
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT result,owner,delivered FROM spawn_notifications WHERE event_id=? AND request_id=?`), ladderReleaseEventPrefix+id, id).Scan(&n.raw, &n.owner, &delivered)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", false, nil
+		return spawnNotification{}, false, false, nil
 	}
-	return raw, owner, err == nil, err
+	if err != nil {
+		return spawnNotification{}, false, false, err
+	}
+	n.id, n.request = ladderReleaseEventPrefix+id, id
+	return n, delivered == spawnNoticePending, true, nil
 }

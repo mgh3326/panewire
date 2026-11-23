@@ -12,11 +12,12 @@ const hubLadderUsage = `Usage:
 release frees a ladder stage that is still staged and whose close verdict settles
 that no close can run for it: a legacy marker stage, or a v1 stage the node
 answers unknown, fenced or refused (a v1 stage is fenced first, so no close for
-its K runs afterwards). A stage whose close is in progress (closing) or whose
-fence does not answer is refused and retried; a stage whose pane was closed or
-ended (closed, gone) is the reconciler's. Not staged or not a ladder step is
+its K runs afterwards). A stage whose fence does not answer, or answers closing
+(which a fence never does), is refused and retried; a stage whose pane was closed
+or ended (closed, gone) is the reconciler's. Not staged or not a ladder step is
 refused too. The holder's role and the reservation come back as after a normal
-release. A repeat of a release that landed answers the same result.
+release, unless the holder's job has completed: then its role is freed. A repeat
+of a release that landed answers the same result.
 It needs an operator token env (HUB_MACHINE_ID=operator); see docs/escalate-author.md.
 --hub-url, --hub-token-env and --hub-cf-env default to PANEWIRE_HUB_URL,
 PANEWIRE_HUB_TOKEN_ENV and PANEWIRE_HUB_CF_ENV.`
