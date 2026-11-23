@@ -390,3 +390,39 @@ func TestLadderReleaseReadsTheHolderAfterTheFence(t *testing.T) {
 		t.Fatalf("a holder that completed during the fence got its role back: %+v", got)
 	}
 }
+
+// A completion that lands between the release's read of the holder's record
+// and its write is not overwritten: the release compares the holder's liveness
+// at the write and answers 409 holder_changed, releasing nothing; the holder is
+// not handed its role back.
+func TestLadderReleaseHolderCompletionInTheWindow(t *testing.T) {
+	f := newLadderCloseFixture(t, "pw-task-6115-window", true)
+	stageID := f.stageLiveSuccessorWithClose(t, &fleet.LadderCloseBinding{Protocol: fleet.LadderCloseProtocolMarker}, true)
+	holder, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageRole := reservationTaskRole(t, f.hub, stageID)
+	f.jobs.afterGet = func(id string) {
+		if id != f.job {
+			return
+		}
+		f.jobs.afterGet = nil
+		// The record the release just read still says the author is live; the
+		// author completes before the release writes.
+		f.hub.mu.Lock()
+		f.hub.jobs[f.job].Completed = true
+		f.hub.mu.Unlock()
+	}
+	recorder := releaseLadderHTTP(t, f.hub, stageID, t14OperatorToken, "", "author completed in the window")
+	body := releaseLadderBody(t, recorder)
+	if recorder.Code != http.StatusConflict || body.Error != "holder_changed" {
+		t.Fatalf("status=%d body=%+v; want 409 holder_changed", recorder.Code, body)
+	}
+	if rows, _ := stagedRowCount(t, f.hub, stageID); rows != 1 {
+		t.Fatalf("a refused release removed the stage: rows=%d", rows)
+	}
+	if got := reservationTaskRole(t, f.hub, holder.Request.RequestID); got.Valid {
+		t.Fatalf("a holder that completed in the window got its role back: %+v (stage role %+v)", got, stageRole)
+	}
+}

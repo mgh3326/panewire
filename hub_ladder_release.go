@@ -151,10 +151,26 @@ func (h *HubServer) releaseLadderStage(ctx context.Context, id, reason string) (
 		return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Error: "hub_error"}, http.StatusServiceUnavailable
 	}
 	now := h.now().UTC()
+	// The holder's liveness is compared at the write. A completion sets the job
+	// record's Completed flag under h.mu, and h.mu is held across the release
+	// transaction below, so a completion that starts now waits for the commit
+	// and then frees the role itself (releaseEndedJobRole). A completion that
+	// landed after the record was read, before this lock, is seen here.
 	note := func(ctx context.Context, tx *sql.Tx) error {
+		if previousID != "" {
+			if job := h.jobs[holder.Job]; job != nil && job.Completed {
+				return errLadderHolderChanged
+			}
+		}
 		return h.inbox.store.noteLadderRelease(ctx, tx, id, stage.Job, stage.Owner, payload, now)
 	}
-	if err := h.releaseStagedRowNoting(ctx, id, previousID, roleKey, note); err != nil {
+	h.mu.Lock()
+	err = h.releaseStagedRowNoting(ctx, id, previousID, roleKey, note)
+	h.mu.Unlock()
+	if err != nil {
+		if errors.Is(err, errLadderHolderChanged) {
+			return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: holder.Status, Error: "holder_changed"}, http.StatusConflict
+		}
 		if errors.Is(err, errSpawnClaimed) {
 			return hubLadderReleaseBody{RequestID: id, Job: step.Parent, Status: "changed", Error: "not_staged"}, http.StatusConflict
 		}
@@ -163,6 +179,10 @@ func (h *HubServer) releaseLadderStage(ctx context.Context, id, reason string) (
 	h.fileLadderReleaseNotice(ctx, stage.Owner, step.Parent, id, notice)
 	return body, http.StatusOK
 }
+
+// errLadderHolderChanged is a release whose holder row changed between the read
+// and the write: nothing is released, and the operator repeats the release.
+var errLadderHolderChanged = errors.New("the holder changed during the release")
 
 // ladderReleaseNotice is the owner's notice of a release: the stage, the step
 // it belonged to, what happened to the holder's role and the operator's reason.

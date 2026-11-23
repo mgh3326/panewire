@@ -228,6 +228,9 @@ refused (401).
     Retry once the node answers.
   - `verdict_resolved` (409, with `state` `closed` or `gone`): the reconciler
     activates or releases these.
+  - `holder_changed` (409): the holder's job completed after the release read
+    its record and before the release wrote. Nothing is released and the role is
+    not restored; the reconciler handles the stage on its next pass.
   - `not_staged` (409; the stage was activated or otherwise left `staged`),
     `not_ladder_stage` (409), `job_unreadable` (409), `not_found` (404; no staged
     row and no release record), and `store_unavailable`, `hub_error` or

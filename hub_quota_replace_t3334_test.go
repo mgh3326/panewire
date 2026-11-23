@@ -26,6 +26,9 @@ type quotaJobs struct {
 	records map[string]map[string]any
 	// failGets is how many reads fail first, as a brief hk outage does.
 	failGets int
+	// afterGet, when set, runs under mu after a Get has copied the record: a
+	// test uses it to commit an event between a read and the write that follows.
+	afterGet func(id string)
 }
 
 func (q *quotaJobs) Claim(context.Context, string, string, string) error { return nil }
@@ -54,6 +57,9 @@ func (q *quotaJobs) Get(_ context.Context, id string) (map[string]any, error) {
 	out := map[string]any{}
 	for key, value := range record {
 		out[key] = value
+	}
+	if q.afterGet != nil {
+		q.afterGet(id)
 	}
 	return out, nil
 }
