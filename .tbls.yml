@@ -1,0 +1,6 @@
+name: panewire_hub
+desc: "Built with MySQL ${MYSQL_VERSION:-8.4} in CI (production is MySQL 26.10.0-cloud, CI is 8.4)"
+dsn: ${TBLS_DSN:-my://root@127.0.0.1:53306/panewire}
+docPath: schema-doc
+er:
+  format: mermaid
