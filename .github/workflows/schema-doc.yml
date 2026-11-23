@@ -1,0 +1,77 @@
+name: hub-schema-doc
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'hub_mysql_migrations/**'
+      - '.github/workflows/schema-doc.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  schema-doc:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: panewire
+        ports: ["127.0.0.1:53306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go-cached
+
+      - name: Migrate MySQL schema to head
+        env:
+          PANEWIRE_SCHEMA_DOC_MYSQL_URL: mysql://root@127.0.0.1:53306/panewire
+          PANEWIRE_SCHEMA_DOC_VERSION_FILE: ${{ runner.temp }}/mysql-version.txt
+        shell: bash
+        run: |
+          go test -v -count=1 -run '^TestHubMySQLMigrateForSchemaDoc$' .
+          MYSQL_VERSION=$(cat "${{ runner.temp }}/mysql-version.txt")
+          echo "MYSQL_VERSION=${MYSQL_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install tbls v1.97.0
+        env:
+          TBLS_VERSION: 1.97.0
+          TBLS_SHA256: 43c81f408495d9b626d0265a6ebb57c6d1c4a5e072d3eecc3e88825cc6c64e9a
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSL -o tbls.tar.gz "https://github.com/k1LoW/tbls/releases/download/v${TBLS_VERSION}/tbls_v${TBLS_VERSION}_linux_amd64.tar.gz"
+          echo "${TBLS_SHA256}  tbls.tar.gz" | sha256sum -c -
+          tar -xzf tbls.tar.gz tbls
+          sudo install -m 0755 tbls /usr/local/bin/tbls
+          rm -f tbls.tar.gz tbls
+          tbls version
+
+      - name: Generate schema documentation with tbls
+        shell: bash
+        run: |
+          set -euo pipefail
+          start_sec=$(date +%s)
+          tbls doc --er-format mermaid
+          tbls out -t json -o schema-doc/schema.json
+          end_sec=$(date +%s)
+          echo "tbls step took $(( end_sec - start_sec )) seconds"
+
+      - name: Upload schema doc artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hub-schema-doc
+          path: schema-doc/
+          if-no-files-found: error
