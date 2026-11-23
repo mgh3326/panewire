@@ -1,0 +1,6 @@
+name: arbiter_state
+desc: "Arbiter state.db on SQLite ${SQLITE_VERSION:-unknown} via the modernc.org/sqlite driver. The schema is created by code (Store bootstrap in internal/arbiter), not by a migration file, and is identical on every node at the same panewire version. Built at a temporary path in CI."
+dsn: sqlite3://${PANEWIRE_SCHEMA_DOC_ARBITER_DIR}/arbiter/state.db
+docPath: schema-doc-node/arbiter_state
+er:
+  format: mermaid

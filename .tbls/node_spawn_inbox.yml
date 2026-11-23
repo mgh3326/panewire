@@ -1,0 +1,6 @@
+name: spawn_inbox
+desc: "Node spawn journal (spawn-inbox.sqlite3) on SQLite ${SQLITE_VERSION:-unknown} via the modernc.org/sqlite driver. The schema is created by code (openNodeSpawnJournal), not by a migration file, and is identical on every node at the same panewire version. Built at a temporary path in CI."
+dsn: sqlite3://${PANEWIRE_SCHEMA_DOC_NODE_DIR}/spawn_inbox/spawn-inbox.sqlite3
+docPath: schema-doc-node/spawn_inbox
+er:
+  format: mermaid
