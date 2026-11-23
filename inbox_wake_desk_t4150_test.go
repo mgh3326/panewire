@@ -289,7 +289,7 @@ func TestInboxWakePanelessNonDesignLanesDoNotFallback(t *testing.T) {
 			t.Fatal(err)
 		}
 		class := r.h.inbox.policy.inboxOnlyClass(lane, r.clock.Now())
-		r.h.sendInboxWake(lane, class, false)
+		r.h.sendInboxWakeWithRoutes(r.h.inboxWakeRoutes(), lane, class, false, 0)
 	}
 	if got := t3426Injected(r.agent); len(got) != 0 {
 		t.Fatalf("non-design desk injections=%+v", got)

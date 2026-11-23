@@ -28,7 +28,9 @@ import (
 // The line is a plain, unidentified inject: it writes no handoffkeep row, so
 // nothing replays it after a hub restart, and the window state is in memory:
 // a hub start owes each inbox-only lane with unread items above info one line
-// instead (seedStartupInboxWakes). See docs/quiet-delivery.md#inbox-only-lanes.
+// instead (seedStartupInboxWakes). An unread set nobody acts on is announced
+// again by the re-wake pass (inbox_rewake.go). See
+// docs/quiet-delivery.md#inbox-only-lanes and docs/quiet-delivery.md#the-re-wake.
 
 // inboxWakeUrgency is the closed urgency order of the line's "most urgent"
 // field, least urgent first. info counts toward N but never wakes by itself.
@@ -136,6 +138,11 @@ type inboxWakes struct {
 	// two lines for one window.
 	mu    sync.Mutex
 	lanes map[string]*inboxWakeLane
+	// rewake is each lane's re-wake bookkeeping (inbox_rewake.go), and
+	// nextRewakeScan throttles the store scan that feeds it. Both are in
+	// memory, like lanes.
+	rewake         map[string]*inboxRewake
+	nextRewakeScan time.Time
 }
 
 // inboxWakeOutcome is what one attempt at a lane's line came to.
@@ -171,18 +178,19 @@ func (h *HubServer) noteInboxWakeArrival(lane, class string) {
 		state.pending = true
 		return
 	}
-	h.attemptInboxWake(lane, state, now)
+	h.attemptInboxWake(lane, state, now, 0)
 }
 
 // attemptInboxWake sends the lane's line now. A sent line opens the window;
 // a lane with nothing unread owes nothing, so its window closes and the next
 // arrival is announced at once; a line that could not be sent stays owed at
-// the next window's end. The caller holds the wake mutex.
-func (h *HubServer) attemptInboxWake(lane string, state *inboxWakeLane, now time.Time) {
-	outcome := h.sendInboxWake(lane, state.class, state.startup)
+// the next window's end. rewake is the line's number in its unread set when
+// it is a re-wake (inbox_rewake.go), else 0. The caller holds the wake mutex.
+func (h *HubServer) attemptInboxWake(lane string, state *inboxWakeLane, now time.Time, rewake int) inboxWakeOutcome {
+	outcome := h.sendInboxWakeWithRoutes(h.inboxWakeRoutes(), lane, state.class, state.startup, rewake)
 	if outcome == inboxWakeNothing {
 		delete(h.inbox.wakes.lanes, lane)
-		return
+		return outcome
 	}
 	state.windowEnd = now.Add(h.inbox.policy.Relay.wakeWindow)
 	state.pending = outcome != inboxWakeSent
@@ -190,6 +198,7 @@ func (h *HubServer) attemptInboxWake(lane string, state *inboxWakeLane, now time
 	if outcome == inboxWakeSent {
 		state.startup = false
 	}
+	return outcome
 }
 
 // flushInboxWakes sends the window-end line of every lane whose window has
@@ -215,7 +224,7 @@ func (h *HubServer) flushInboxWakes() {
 		}
 		state.class = class
 		h.loopNoteMade(loopInbox, "wake:"+lane)
-		h.attemptInboxWake(lane, state, now)
+		h.attemptInboxWake(lane, state, now, 0)
 		if _, owed := w.lanes[lane]; !owed || !w.lanes[lane].pending {
 			h.loopNoteDone(loopInbox, "wake:"+lane)
 		}
@@ -301,18 +310,14 @@ func (h *HubServer) inboxWakeRoutes() map[string]reportRelayRoute {
 	return loadReportRelayRoutes(h.reportRelayPath)
 }
 
-// sendInboxWake reads the lane's unread count and its most urgent unread
-// item and types the line into the lane's pane. A failed read never becomes
-// "0 unread": the line is skipped and stays owed. A lane with nothing unread
-// owes nothing. The caller holds the wake mutex.
-func (h *HubServer) sendInboxWake(lane, class string, startup bool) inboxWakeOutcome {
-	return h.sendInboxWakeWithRoutes(h.inboxWakeRoutes(), lane, class, startup)
-}
-
-// sendInboxWakeWithRoutes is sendInboxWake over one routes snapshot: the
-// paneless decision and the route the line is sent to read the same view, so
-// a lanes-file write between them cannot make them disagree.
-func (h *HubServer) sendInboxWakeWithRoutes(routes map[string]reportRelayRoute, lane, class string, startup bool) inboxWakeOutcome {
+// sendInboxWakeWithRoutes reads the lane's unread count and its most urgent
+// unread item and types the line into the lane's pane, over one routes
+// snapshot: the paneless decision and the route the line is sent to read the
+// same view, so a lanes-file write between them cannot make them disagree. A
+// failed read never becomes "0 unread": the line is skipped and stays owed. A
+// lane with nothing unread owes nothing. rewake is the line's number in its
+// unread set for a re-wake, else 0. The caller holds the wake mutex.
+func (h *HubServer) sendInboxWakeWithRoutes(routes map[string]reportRelayRoute, lane, class string, startup bool, rewake int) inboxWakeOutcome {
 	counts, err := h.inbox.store.counts(lane)
 	var items []laneInboxItem
 	if err == nil {
@@ -349,7 +354,12 @@ func (h *HubServer) sendInboxWakeWithRoutes(routes map[string]reportRelayRoute, 
 	if deskFallback {
 		reason = "desk_fallback"
 	}
+	if rewake > 0 {
+		reason = "rewake"
+		detail += fmt.Sprintf(" rewake=%d", rewake)
+	}
 	h.emitFleet(fleetEvent{Kind: "inbox_wake", Job: lane, Outcome: "sent", Reason: reason, Detail: detail})
+	h.noteInboxLine(lane, h.now())
 	return inboxWakeSent
 }
 
