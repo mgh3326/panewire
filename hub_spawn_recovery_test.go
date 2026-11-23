@@ -46,11 +46,15 @@ func TestAsyncSpawnLateResultReconcilesAgainstSameNode(t *testing.T) {
 				t.Fatal(err)
 			}
 			first := &directSpawnTransport{h: h, task: task}
-			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-			defer cancel()
+			// The deadline starts only after the node has read the frame. A
+			// timer would race the durable steps that precede the send (hk
+			// 6129): an expired context there returns without sending, so the
+			// node read would wait for a frame that never left.
+			ctx := landingWait{Context: t.Context(), ended: make(chan struct{})}
 			done := make(chan error, 1)
 			go func() { _, err := first.dispatch(ctx, dispatch); done <- err }()
 			sent := t14ReadNodeSpawn(t, node)
+			close(ctx.ended)
 			select {
 			case err := <-done:
 				if err == nil {
