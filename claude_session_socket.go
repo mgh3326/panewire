@@ -33,13 +33,13 @@ const (
 	sessionSocketPathLimit = 108
 )
 
-const claudeSocketUsage = `usage: panewire claude-socket register [--lane L] [--pane P] [--inbox-root DIR]
+const claudeSocketUsage = `usage: panewire claude-socket register [--lane L] [--pane P] [--session S] [--inbox-root DIR]
 Records this Claude Code session's inbox socket path for its lane, so the node
 daemon can deliver the lane's inbox wake line as a session message. Run it from
 the session's SessionStart hook: the path comes from CLAUDE_CODE_MESSAGING_SOCKET.
-Defaults: --lane from PANEWIRE_LANE; --pane from HERDR_PANE_ID; --inbox-root as
-for panewire emit. The pane is required: the node posts only to the lane's
-routed pane.
+Defaults: --lane from PANEWIRE_LANE; --pane from HERDR_PANE_ID; --session from
+CLAUDE_SESSION_ID or hook stdin JSON; --inbox-root as for panewire emit. The
+pane is required: the node posts only to the lane's routed pane.
 Nothing is printed on success. The messaging token is never read or stored.`
 
 // sessionRegistration is the stored record for one lane's session, whatever
@@ -49,6 +49,7 @@ Nothing is printed on success. The messaging token is never read or stored.`
 type sessionRegistration struct {
 	Lane         string `json:"lane"`
 	Pane         string `json:"pane"`
+	Session      string `json:"session,omitempty"`
 	Socket       string `json:"socket,omitempty"`
 	Thread       string `json:"thread,omitempty"`
 	CodexHome    string `json:"codex_home,omitempty"`
@@ -61,6 +62,7 @@ var (
 	// errSessionOtherPane: the session registered from a pane other than the
 	// one the wake line was routed to.
 	errSessionOtherPane = errors.New("registered session runs in another pane than the routed one")
+	errSessionStale     = errors.New("registered session is not the pane's live session")
 )
 
 // sessionRegistryPath is <inbox-root>/<subdir>/<lane>.json.
@@ -137,23 +139,37 @@ func readSessionRegistration(inboxRoot, subdir, lane, pane string) (sessionRegis
 }
 
 func writeClaudeSocketRegistration(inboxRoot, lane, pane, socket string, now time.Time) error {
+	return writeClaudeSocketRegistrationWithSession(inboxRoot, lane, pane, "", socket, now)
+}
+
+func writeClaudeSocketRegistrationWithSession(inboxRoot, lane, pane, session, socket string, now time.Time) error {
 	if !validRegistrationKey(inboxRoot, lane, pane) {
 		return errSessionRegistrationInvalid
 	}
 	if err := validSessionSocketPath(socket); err != nil {
 		return err
 	}
-	return writeSessionRegistration(inboxRoot, claudeSocketRegistryDir, sessionRegistration{Lane: lane, Pane: pane, Socket: socket}, now)
+	return writeSessionRegistration(inboxRoot, claudeSocketRegistryDir, sessionRegistration{Lane: lane, Pane: pane, Session: session, Socket: socket}, now)
+}
+
+// readClaudeSocketRegistrationRecord returns the lane's registration record
+// when it was made from pane and points to a valid socket.
+func readClaudeSocketRegistrationRecord(inboxRoot, lane, pane string) (sessionRegistration, error) {
+	registration, err := readSessionRegistration(inboxRoot, claudeSocketRegistryDir, lane, pane)
+	if err != nil {
+		return sessionRegistration{}, err
+	}
+	if err := validSessionSocketPath(registration.Socket); err != nil {
+		return sessionRegistration{}, err
+	}
+	return registration, nil
 }
 
 // readClaudeSocketRegistration returns the lane's registered socket path when
 // the registration was made from pane.
 func readClaudeSocketRegistration(inboxRoot, lane, pane string) (string, error) {
-	registration, err := readSessionRegistration(inboxRoot, claudeSocketRegistryDir, lane, pane)
+	registration, err := readClaudeSocketRegistrationRecord(inboxRoot, lane, pane)
 	if err != nil {
-		return "", err
-	}
-	if err := validSessionSocketPath(registration.Socket); err != nil {
 		return "", err
 	}
 	return registration.Socket, nil
@@ -161,6 +177,12 @@ func readClaudeSocketRegistration(inboxRoot, lane, pane string) (string, error) 
 
 // runClaudeSocketCLI is `panewire claude-socket`. now is a seam for tests.
 func runClaudeSocketCLI(args []string, stdout, stderr io.Writer, now func() time.Time) int {
+	return runClaudeSocketCLIStdin(args, hookStdin(os.Stdin), stdout, stderr, now)
+}
+
+// runClaudeSocketCLIStdin is runClaudeSocketCLI with an explicit stdin reader
+// for hook inputs.
+func runClaudeSocketCLIStdin(args []string, stdin io.Reader, stdout, stderr io.Writer, now func() time.Time) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, claudeSocketUsage)
 		return ExitUsage
@@ -173,10 +195,10 @@ func runClaudeSocketCLI(args []string, stdout, stderr io.Writer, now func() time
 		fmt.Fprintln(stderr, claudeSocketUsage)
 		return ExitUsage
 	}
-	lane, pane, root := os.Getenv("PANEWIRE_LANE"), os.Getenv("HERDR_PANE_ID"), ""
+	lane, pane, session, root := os.Getenv("PANEWIRE_LANE"), os.Getenv("HERDR_PANE_ID"), os.Getenv("CLAUDE_SESSION_ID"), ""
 	rest := args[1:]
 	for len(rest) > 0 {
-		if len(rest) < 2 || (rest[0] != "--lane" && rest[0] != "--pane" && rest[0] != "--inbox-root") {
+		if len(rest) < 2 || (rest[0] != "--lane" && rest[0] != "--pane" && rest[0] != "--session" && rest[0] != "--inbox-root") {
 			fmt.Fprintln(stderr, claudeSocketUsage)
 			return ExitUsage
 		}
@@ -185,6 +207,8 @@ func runClaudeSocketCLI(args []string, stdout, stderr io.Writer, now func() time
 			lane = rest[1]
 		case "--pane":
 			pane = rest[1]
+		case "--session":
+			session = rest[1]
 		default:
 			root = rest[1]
 		}
@@ -198,12 +222,20 @@ func runClaudeSocketCLI(args []string, stdout, stderr io.Writer, now func() time
 		fmt.Fprintln(stderr, "panewire claude-socket: a --pane (or HERDR_PANE_ID) is required: the registration is bound to the session's pane")
 		return ExitUsage
 	}
+	if session == "" && stdin != nil {
+		var input struct {
+			SessionID string `json:"session_id"`
+		}
+		if json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&input) == nil {
+			session = input.SessionID
+		}
+	}
 	socket := os.Getenv(claudeSocketEnv)
 	if socket == "" {
 		fmt.Fprintln(stderr, "panewire claude-socket: "+claudeSocketEnv+" is not set; this is not a Claude Code session with messaging")
 		return ExitUsage
 	}
-	if err := writeClaudeSocketRegistration(emitInboxRoot(root), lane, pane, socket, now()); err != nil {
+	if err := writeClaudeSocketRegistrationWithSession(emitInboxRoot(root), lane, pane, session, socket, now()); err != nil {
 		// The path and the lane are the caller's; the error names neither.
 		fmt.Fprintln(stderr, "panewire claude-socket: registration refused or failed:", claudeSocketFailureKind(err))
 		return ExitInternal

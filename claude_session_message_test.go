@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -73,6 +74,8 @@ type claudeWakeNode struct {
 	typed  *[]string
 }
 
+const testClaudeSessionID = "00000000-0000-4000-8000-000000000001"
+
 // newClaudeWakeNode is a node whose typed path is a recording seam, with the
 // trial switched on for lanes.
 func newClaudeWakeNode(t *testing.T, lanes ...string) claudeWakeNode {
@@ -83,6 +86,7 @@ func newClaudeWakeNode(t *testing.T, lanes ...string) claudeWakeNode {
 // newSessionWakeNode is newClaudeWakeNode for any harness's trial switches.
 func newSessionWakeNode(t *testing.T, lanes sessionMessageLanes) claudeWakeNode {
 	t.Helper()
+	t.Setenv("CLAUDE_SESSION_ID", testClaudeSessionID)
 	typed := new([]string)
 	var mu sync.Mutex
 	client := &HubClient{jobsInboxRoot: t.TempDir(), relayInject: func(_ context.Context, pane, text string) bool {
@@ -91,6 +95,9 @@ func newSessionWakeNode(t *testing.T, lanes sessionMessageLanes) claudeWakeNode 
 		*typed = append(*typed, pane+"\x00"+text)
 		return true
 	}}
+	client.nodeHerdr = func(_ context.Context, args ...string) ([]byte, error) {
+		return []byte(`{"result":{"panes":[{"pane_id":"w:p4","agent":"claude","agent_session":{"value":"` + testClaudeSessionID + `"}}]}}`), nil
+	}
 	client.relayControl.sessionMessageLanes = lanes
 	client.setRelayEmitter(func(hubClientEvent) {})
 	return claudeWakeNode{client: client, root: client.jobsInboxRoot, typed: typed}
@@ -98,9 +105,19 @@ func newSessionWakeNode(t *testing.T, lanes sessionMessageLanes) claudeWakeNode 
 
 func registerClaudeSocket(t *testing.T, root, lane, socket string) int {
 	t.Helper()
+	return registerClaudeSocketWithSession(t, root, lane, socket, testClaudeSessionID)
+}
+
+func registerClaudeSocketWithSession(t *testing.T, root, lane, socket, sessionID string) int {
+	t.Helper()
 	t.Setenv(claudeSocketEnv, socket)
 	t.Setenv("HERDR_PANE_ID", "w:p4")
 	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", claudeTestTokenCanary)
+	if sessionID != "" {
+		t.Setenv("CLAUDE_SESSION_ID", sessionID)
+	} else {
+		t.Setenv("CLAUDE_SESSION_ID", "")
+	}
 	var stdout, stderr bytes.Buffer
 	code := runClaudeSocketCLI([]string{"register", "--lane", lane, "--inbox-root", root}, &stdout, &stderr, time.Now)
 	if stdout.Len() != 0 {
@@ -391,8 +408,157 @@ func registerClaudeSocketAt(t *testing.T, lane, socket string) {
 	t.Helper()
 	t.Setenv(claudeSocketEnv, socket)
 	t.Setenv("HERDR_PANE_ID", "w:p4")
+	t.Setenv("CLAUDE_SESSION_ID", testClaudeSessionID)
 	var out bytes.Buffer
 	if code := runClaudeSocketCLI([]string{"register", "--lane", lane}, &out, &out, time.Now); code != ExitOK {
 		t.Fatalf("register exited %d: %s", code, out.String())
+	}
+}
+
+// Acceptance 1: a registration whose session is not the pane's live session
+// falls back to typing with reason=stale_session. Fails on base (base posts to socket).
+func TestClaudeWakeFallsBackWhenSessionStale(t *testing.T) {
+	logs := captureSlog(t)
+	session := newFakeClaudeSession(t)
+	node := newClaudeWakeNode(t, "routing-policy")
+	// The registered session is session-registered.
+	if code := registerClaudeSocketWithSession(t, node.root, "routing-policy", session.path, "session-registered"); code != ExitOK {
+		t.Fatalf("register exited %d", code)
+	}
+	// The routed pane w:p4 is running session-newer-in-pane.
+	node.client.nodeHerdr = func(_ context.Context, args ...string) ([]byte, error) {
+		return []byte(`{"result":{"panes":[{"pane_id":"w:p4","agent":"claude","agent_session":{"value":"session-newer-in-pane"}}]}}`), nil
+	}
+	message := wakeInject("routing-policy", 1, "order")
+	node.client.relayBusyManager().offer(t.Context(), message)
+
+	if len(session.messages()) != 0 {
+		t.Fatalf("stale session socket received %d messages, want none", len(session.messages()))
+	}
+	if len(*node.typed) != 1 || !strings.HasPrefix((*node.typed)[0], "w:p4\x00") || !strings.HasSuffix((*node.typed)[0], message.Text) {
+		t.Fatalf("typed %q, want the wake line typed once into w:p4", *node.typed)
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "stage="+sessionStageFellBack) || !strings.Contains(logged, "reason=stale_session") {
+		t.Fatalf("log must report fell_back_to_typed with reason=stale_session: %s", logged)
+	}
+}
+
+// Acceptance 2: a matching registration still posts to the socket (no regression).
+func TestClaudeWakePostsWhenSessionMatches(t *testing.T) {
+	logs := captureSlog(t)
+	session := newFakeClaudeSession(t)
+	node := newClaudeWakeNode(t, "routing-policy")
+	matchingSession := "session-matching-12345"
+	if code := registerClaudeSocketWithSession(t, node.root, "routing-policy", session.path, matchingSession); code != ExitOK {
+		t.Fatalf("register exited %d", code)
+	}
+	node.client.nodeHerdr = func(_ context.Context, args ...string) ([]byte, error) {
+		return []byte(`{"result":{"panes":[{"pane_id":"w:p4","agent":"claude","agent_session":{"value":"` + matchingSession + `"}}]}}`), nil
+	}
+	message := wakeInject("routing-policy", 2, "order")
+	node.client.relayBusyManager().offer(t.Context(), message)
+
+	eventually(t, 2*time.Second, "the session socket to receive the wake line", func() bool { return len(session.messages()) == 1 })
+	if len(*node.typed) != 0 {
+		t.Fatalf("typed %q, want no typed delivery on match", *node.typed)
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "stage="+sessionStageReachedSocket) {
+		t.Fatalf("log must report reached_socket: %s", logged)
+	}
+}
+
+// Acceptance 3: herdr cannot tell (no agent_session) -> falls back to typing with reason=stale_session.
+func TestClaudeWakeFallsBackWhenHerdrCannotTell(t *testing.T) {
+	cases := map[string]struct {
+		sessionID string
+		herdr     relayCommandRunner
+	}{
+		"pane has no agent_session": {
+			sessionID: "session-active",
+			herdr: func(_ context.Context, args ...string) ([]byte, error) {
+				return []byte(`{"result":{"panes":[{"pane_id":"w:p4","agent":"claude"}]}}`), nil
+			},
+		},
+		"herdr command failed": {
+			sessionID: "session-active",
+			herdr: func(_ context.Context, args ...string) ([]byte, error) {
+				return nil, errors.New("herdr daemon down")
+			},
+		},
+		"registration has no session id": {
+			sessionID: "",
+			herdr: func(_ context.Context, args ...string) ([]byte, error) {
+				return []byte(`{"result":{"panes":[{"pane_id":"w:p4","agent":"claude","agent_session":{"value":"some-session"}}]}}`), nil
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			logs := captureSlog(t)
+			session := newFakeClaudeSession(t)
+			node := newClaudeWakeNode(t, "routing-policy")
+			if code := registerClaudeSocketWithSession(t, node.root, "routing-policy", session.path, tc.sessionID); code != ExitOK {
+				t.Fatalf("register exited %d", code)
+			}
+			node.client.nodeHerdr = tc.herdr
+			message := wakeInject("routing-policy", 1, "order")
+			node.client.relayBusyManager().offer(t.Context(), message)
+
+			if len(session.messages()) != 0 {
+				t.Fatalf("%s: message delivered to socket, want fallback to typing", name)
+			}
+			if len(*node.typed) != 1 || !strings.HasPrefix((*node.typed)[0], "w:p4\x00") {
+				t.Fatalf("%s: typed %q, want typed once", name, *node.typed)
+			}
+			logged := logs.String()
+			if !strings.Contains(logged, "stage="+sessionStageFellBack) || !strings.Contains(logged, "reason=stale_session") {
+				t.Fatalf("%s: log = %s, want stage=fell_back_to_typed reason=stale_session", name, logged)
+			}
+		})
+	}
+}
+
+func TestClaudeSocketRegisterSessionCapture(t *testing.T) {
+	root := t.TempDir()
+	session := newFakeClaudeSession(t)
+	t.Setenv(claudeSocketEnv, session.path)
+	t.Setenv("HERDR_PANE_ID", "w:p4")
+
+	// 1. Via --session flag
+	var out bytes.Buffer
+	code := runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--session", "flag-session-id", "--inbox-root", root}, &out, &out, time.Now)
+	if code != ExitOK {
+		t.Fatalf("--session exited %d: %s", code, out.String())
+	}
+	reg, err := readClaudeSocketRegistrationRecord(root, "routing-policy", "w:p4")
+	if err != nil || reg.Session != "flag-session-id" {
+		t.Fatalf("reg=%+v err=%v, want Session=flag-session-id", reg, err)
+	}
+
+	// 2. Via CLAUDE_SESSION_ID env
+	t.Setenv("CLAUDE_SESSION_ID", "env-session-id")
+	out.Reset()
+	code = runClaudeSocketCLI([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, &out, &out, time.Now)
+	if code != ExitOK {
+		t.Fatalf("env register exited %d: %s", code, out.String())
+	}
+	reg, err = readClaudeSocketRegistrationRecord(root, "routing-policy", "w:p4")
+	if err != nil || reg.Session != "env-session-id" {
+		t.Fatalf("reg=%+v err=%v, want Session=env-session-id", reg, err)
+	}
+	t.Setenv("CLAUDE_SESSION_ID", "")
+
+	// 3. Via hook stdin JSON
+	out.Reset()
+	stdin := strings.NewReader(`{"session_id":"stdin-session-id","hook_event_name":"SessionStart"}`)
+	code = runClaudeSocketCLIStdin([]string{"register", "--lane", "routing-policy", "--inbox-root", root}, stdin, &out, &out, time.Now)
+	if code != ExitOK {
+		t.Fatalf("stdin register exited %d: %s", code, out.String())
+	}
+	reg, err = readClaudeSocketRegistrationRecord(root, "routing-policy", "w:p4")
+	if err != nil || reg.Session != "stdin-session-id" {
+		t.Fatalf("reg=%+v err=%v, want Session=stdin-session-id", reg, err)
 	}
 }
