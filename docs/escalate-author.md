@@ -178,8 +178,8 @@ written wins, so a second step for the same stage reuses it. The node's record
 answers every replay. A node without the capability gets no close and no marker;
 the step retries (hk 5867). A stage persisted with the legacy `marker` protocol
 reconciles as ambiguous (`unknown`). A legacy marker stage stays staged and files
-the unresolved decision once; releasing it needs a hub command that does not
-exist yet (hk 6115).
+the unresolved decision once; the operator releases it with
+`panewire hub ladder release` (see "Releasing an unresolved stage").
 
 The handler, the replay of a lost author's step, the expiry pass and every
 cancellation read the node's verdict through one reconciler
@@ -202,6 +202,32 @@ that does not settle it keeps the stage, files the decision event and answers
 `pending`; it is never a hub error. A replay or the expiry pass of a completed
 author reads the K from the node through the fence (never `pane.ladder_close`,
 which would run a close the node has no record of) instead of reading the marker.
+
+## Releasing an unresolved stage (hk 6115)
+
+`panewire hub ladder release STAGE_REQUEST_ID --reason TEXT` (operator token
+env, `HUB_MACHINE_ID=operator`) is the only way to release a staged successor
+the reconciler keeps: a legacy `marker` stage, or a v1 stage whose verdict is
+unresolved (`unknown`, `closing` or no answer). It is never run by the hub
+itself. The endpoint is `POST /v1/ladder/stages/{request_id}/release`, and the
+operator token is required; a node's token is refused (401).
+
+- A v1 stage is read through the fence (`pane.ladder_close_fence`) before anything is
+  released, so no close for its K runs afterwards. A legacy marker stage has no
+  K to fence, so nothing is sent to a node.
+- A release goes through the same store release as every other one: the holder's
+  role is restored while the holder is live, otherwise the role is freed. The
+  reservation is released with it.
+- It refuses, with a distinct code: `not_staged` (409; the stage was activated or
+  otherwise left `staged`), `not_ladder_stage` (409), `verdict_resolved` (409,
+  with the verdict in `state`: `closed`, `gone`, `refused` or `fenced`; the
+  reconciler owns those), `job_unreadable` (409), `not_found` (404; no staged
+  row and no release record), and `store_unavailable`, `hub_error` or
+  `record_unreadable` (503; nothing was released).
+- The reason is recorded in the owner lane's info event `ladder-release:<request_id>`
+  (cause `ladder_released`), and in a durable record under the same id. A repeat of
+  a release that landed answers that first result unchanged, and a release that
+  fails takes its record back.
 
 ## Replay
 

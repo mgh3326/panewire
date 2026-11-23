@@ -1179,6 +1179,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
 	mux.HandleFunc("POST /v1/spawns/{request_id}/abandon", h.handleSpawnAbandon)
+	mux.HandleFunc("POST /v1/ladder/stages/{request_id}/release", h.handleLadderRelease)
 	mux.HandleFunc("POST /v1/spawns/{request_id}/withdraw", h.handleSpawnWithdraw)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
