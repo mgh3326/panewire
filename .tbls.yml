@@ -65,6 +65,7 @@ relations:
     parentTable: lane_inbox_batches
     parentColumns:
       - id
+    parentCardinality: zero or one
     def: "the item's digest batch; batch counts and batch pruning walk from the batch row to its items by digest_batch"
   - table: lane_inbox
     columns:
@@ -72,6 +73,7 @@ relations:
     parentTable: lane_inbox_batches
     parentColumns:
       - id
+    parentCardinality: zero or one
     def: "the item's escalation batch; batch counts and batch pruning walk from the batch row to its items by escalation_batch"
   - table: lane_inbox_surfaces
     columns:
@@ -86,6 +88,7 @@ relations:
     parentTable: spawn_operations
     parentColumns:
       - job
+    parentCardinality: zero or more
     def: "a pool action is deduped and retained per job; retention keeps a final action while an operation with that job is not terminal"
   - table: spawn_attempt_grants
     columns:
@@ -121,6 +124,7 @@ relations:
     parentTable: spawn_operations
     parentColumns:
       - request_id
+    parentCardinality: zero or one
     def: "a consult stores the spawn operation that answers it; settling a consult reads that operation by request_id and retention holds it while the consult is active"
   - table: spawn_operations
     columns:
@@ -128,4 +132,5 @@ relations:
     parentTable: spawn_operations
     parentColumns:
       - job
+    parentCardinality: zero or more
     def: "a quota-stop successor records the job it replaces; the replacement ladder and the hand-over resolve the predecessor's operation by that job"

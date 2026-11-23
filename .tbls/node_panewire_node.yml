@@ -36,27 +36,30 @@ relations:
       - pane_id
       - state_change_seq
     def: "a stall wake is acted on only while the pane is idle or done at the same local sequence; the action check joins the wake to its pane row"
-  - table: quota_stall_wakes
-    columns:
-      - event_id
-    parentTable: idle_wake_candidates
-    parentColumns:
-      - event_id
-    def: "a stall wake keeps the candidate it was written for; the reservation reads its local sequence by that candidate's event_id"
   - table: quota_stop_decisions
     columns:
       - event_id
     parentTable: idle_wake_candidates
     parentColumns:
       - event_id
-    def: "a decision is reserved for a candidate's event id; the attempt check looks the candidate up by that id before it marks the decision attempted"
+    parentCardinality: zero or one
+    def: "a decision reserved for an idle-wake candidate keeps that candidate's event id; the attempt check looks the candidate up by it"
   - table: quota_stop_decisions
     columns:
       - event_id
     parentTable: quota_stall_wakes
     parentColumns:
       - event_id
-    def: "a stall-derived decision keeps the stall wake's event id; the attempt check looks the stall wake up by that id"
+    parentCardinality: zero or one
+    def: "a decision reserved for a stall wake keeps the stall wake's event id; the attempt check looks the stall wake up by it"
+  - table: quota_stop_decisions
+    columns:
+      - event_id
+    parentTable: quota_blocked_wakes
+    parentColumns:
+      - event_id
+    parentCardinality: zero or one
+    def: "a decision reserved for a blocked wake keeps the blocked wake's event id, and the drain marks that wake processed by the same id"
   - table: quota_stop_decisions
     columns:
       - pane
