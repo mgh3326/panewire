@@ -68,9 +68,20 @@ func (c hubStoreRetentionCounts) attrs() []any {
 // items age out under the lane_inbox retention, so the batch follows them.
 const sentBatchesPrunable = `SELECT b.id FROM lane_inbox_batches b WHERE b.sent=1 AND NOT EXISTS (SELECT 1 FROM lane_inbox i WHERE i.digest_batch=b.id) AND NOT EXISTS (SELECT 1 FROM lane_inbox i WHERE i.escalation_batch=b.id) ORDER BY b.id LIMIT ?`
 
-// retiredSpawnNodes are the node request ids of operations terminal past the
-// given cut. An attempt's grant and start_by rows are keyed by its node id.
-const retiredSpawnNodes = `SELECT node_id FROM spawn_operations WHERE status IN (` + spawnTerminalStatuses + `) AND terminal_ms>0 AND terminal_ms<? AND node_id IS NOT NULL ORDER BY terminal_ms,request_id LIMIT ?`
+// retiredSpawnGrants are the node request ids of grant rows whose operation is
+// terminal past the given cut. An attempt's grant row is deletable when its
+// operation is terminal (spawnTerminalStatuses: 'succeeded','failed','refused',
+// 'given_up','cancelled', confirmed at hub_store_retention.go:30) and its
+// terminal_ms is older than spawnAttemptFenceRetention (24h, confirmed at
+// hub_store_retention.go:21). Selecting only rows that currently exist in
+// spawn_attempt_grants ensures older undeletable rows (or rows whose grants were
+// already pruned) never block newer deletable rows from advancing (hk 6084).
+const retiredSpawnGrants = `SELECT so.node_id FROM spawn_operations so WHERE so.status IN (` + spawnTerminalStatuses + `) AND so.terminal_ms>0 AND so.terminal_ms<? AND so.node_id IS NOT NULL AND EXISTS (SELECT 1 FROM spawn_attempt_grants g WHERE g.node_id=so.node_id) ORDER BY so.terminal_ms,so.request_id LIMIT ?`
+
+// retiredSpawnStartBy are the node request ids of start_by rows whose operation
+// is terminal past the given cut, filtering to rows that currently exist in
+// spawn_attempt_start_by so retention advances (hk 6084).
+const retiredSpawnStartBy = `SELECT so.node_id FROM spawn_operations so WHERE so.status IN (` + spawnTerminalStatuses + `) AND so.terminal_ms>0 AND so.terminal_ms<? AND so.node_id IS NOT NULL AND EXISTS (SELECT 1 FROM spawn_attempt_start_by sb WHERE sb.node_id=so.node_id) ORDER BY so.terminal_ms,so.request_id LIMIT ?`
 
 // spawnOperationsRetirable are operations terminal past the cut that no other
 // row still needs. Each NOT EXISTS is one table that points at the operation
@@ -103,10 +114,10 @@ func (s *laneInboxStore) pruneHubStore(now time.Time, limit int) (hubStoreRetent
 		return c, err
 	}
 	fenceCut := now.Add(-spawnAttemptFenceRetention).UnixMilli()
-	if c.AttemptGrants, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("spawn_attempt_grants", "node_id", retiredSpawnNodes), fenceCut, limit); err != nil {
+	if c.AttemptGrants, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("spawn_attempt_grants", "node_id", retiredSpawnGrants), fenceCut, limit); err != nil {
 		return c, err
 	}
-	if c.AttemptStartBy, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("spawn_attempt_start_by", "node_id", retiredSpawnNodes), fenceCut, limit); err != nil {
+	if c.AttemptStartBy, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("spawn_attempt_start_by", "node_id", retiredSpawnStartBy), fenceCut, limit); err != nil {
 		return c, err
 	}
 	if c.SpawnOperations, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("spawn_operations", "request_id", spawnOperationsRetirable), now.Add(-spawnOperationRetention).UnixMilli(), limit); err != nil {
