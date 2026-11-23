@@ -178,8 +178,8 @@ written wins, so a second step for the same stage reuses it. The node's record
 answers every replay. A node without the capability gets no close and no marker;
 the step retries (hk 5867). A stage persisted with the legacy `marker` protocol
 reconciles as ambiguous (`unknown`). A legacy marker stage stays staged and files
-the unresolved decision once; releasing it needs a hub command that does not
-exist yet (hk 6115).
+the unresolved decision once; the operator releases it with
+`panewire hub ladder release` (see "Releasing an unresolved stage").
 
 The handler, the replay of a lost author's step, the expiry pass and every
 cancellation read the node's verdict through one reconciler
@@ -202,6 +202,45 @@ that does not settle it keeps the stage, files the decision event and answers
 `pending`; it is never a hub error. A replay or the expiry pass of a completed
 author reads the K from the node through the fence (never `pane.ladder_close`,
 which would run a close the node has no record of) instead of reading the marker.
+
+## Releasing an unresolved stage (hk 6115)
+
+`panewire hub ladder release STAGE_REQUEST_ID --reason TEXT` (operator token
+env, `HUB_MACHINE_ID=operator`) releases a staged successor the reconciler keeps
+when the release is safe: a legacy `marker` stage, or a v1 stage whose verdict
+settles that no close can run for its K. It is never run by the hub itself. The
+endpoint is `POST /v1/ladder/stages/{request_id}/release`; a node's token is
+refused (401).
+
+- A v1 stage is read through the fence (`pane.ladder_close_fence`) before
+  anything is released, so no close for its K runs afterwards. A legacy marker
+  stage has no K to fence, so nothing is sent to a node.
+- The release goes through the same store release as every other one: the
+  holder's role is restored while the holder is live (read after the fence),
+  otherwise the role is freed, and the reservation goes with it. The release
+  record is written in the same transaction as the release.
+- Released: a marker stage; a v1 stage the node answers `unknown`, `fenced` or
+  `refused` (or a stage with no close binding, which reads as `refused`).
+- Refused, with the stage kept:
+  - `verdict_pending` (503): the node answers `closing`; a close has started, so
+    the holder's role must not come back while it runs. Retry later.
+  - `verdict_unreadable` (503): the fence did not answer; nothing was released.
+    Retry once the node answers.
+  - `verdict_resolved` (409, with `state` `closed` or `gone`): the reconciler
+    activates or releases these.
+  - `holder_changed` (409): the holder's job completed after the release read
+    its record and before the release wrote. Nothing is released and the role is
+    not restored; the reconciler handles the stage on its next pass.
+  - `not_staged` (409; the stage was activated or otherwise left `staged`),
+    `not_ladder_stage` (409), `job_unreadable` (409), `not_found` (404; no staged
+    row and no release record), and `store_unavailable`, `hub_error` or
+    `record_unreadable` (503).
+- The reason is filed to the owner lane as an info event with the id
+  `ladder-release:<request_id>` (cause `ladder_released`).
+  A repeat of a committed release answers the first result unchanged and files
+  the notice again under the same id, so a notice the hub did not get to deliver
+  lands on the repeat. The hub does not retry it by itself: a notice lost in the
+  window between the commit and the relay waits for the operator to repeat.
 
 ## Replay
 

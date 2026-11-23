@@ -373,6 +373,9 @@ func runHubCLI(args []string) int {
 	if len(args) > 0 && args[0] == "spawn" {
 		return runHubSpawnCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if len(args) > 0 && args[0] == "ladder" {
+		return runHubLadderCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	hub, _, code, err := newHubServerForCLI(args, slog.Default())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub configuration rejected:", err)
