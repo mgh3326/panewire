@@ -177,7 +177,29 @@ func (h *HubServer) spawnNoticeFor(ctx context.Context, n spawnNotification, res
 	return h.decideSpawnNotice(ctx, n, result)
 }
 
+// routeLadderReleaseNotice relays an operator release's owner notice (hk 6137).
+// Its raw is the release record, not a spawn outcome, so it is routed here and
+// never decided by spawnNoticeFor. The row settles once the lane takes it.
+func (h *HubServer) routeLadderReleaseNotice(ctx context.Context, n spawnNotification) {
+	if h.spawnNoticeRelayFilter != nil && h.spawnNoticeRelayFilter(n.id) {
+		return // held unrouted for this pass, as a failed relay leaves it
+	}
+	var record ladderReleaseRecord
+	if json.Unmarshal([]byte(n.raw), &record) != nil {
+		return
+	}
+	job := record.Body.Job
+	event := hubJobEventPayload{EventID: n.id, JobID: job, OwnerLane: n.owner, NotifyType: "info", Text: utf8PrefixWithin(record.Notice, laneEventTextLimit), Host: "hub", Epoch: 1, Notice: ownerNoticeFor(job, "ladder_released", false)}
+	if h.relayLaneEventContext(ctx, event, nil).ID != 0 {
+		h.setSpawnNotificationState(ctx, n.id, spawnNoticePending, spawnNoticeDone)
+	}
+}
+
 func (h *HubServer) routeSpawnNotification(ctx context.Context, n spawnNotification) {
+	if strings.HasPrefix(n.id, ladderReleaseEventPrefix) {
+		h.routeLadderReleaseNotice(ctx, n)
+		return
+	}
 	var result hubSpawnOutcome
 	if json.Unmarshal([]byte(n.raw), &result) != nil {
 		return

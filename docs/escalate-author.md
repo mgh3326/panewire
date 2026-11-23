@@ -216,31 +216,33 @@ refused (401).
   anything is released, so no close for its K runs afterwards. A legacy marker
   stage has no K to fence, so nothing is sent to a node.
 - The release goes through the same store release as every other one: the
-  holder's role is restored while the holder is live (read after the fence),
-  otherwise the role is freed, and the reservation goes with it. The release
-  record is written in the same transaction as the release.
+  holder's role is restored while the holder is live, otherwise the role is
+  freed, and the reservation goes with it. The holder is live when hk still says
+  `claimed` or `spawned` and the hub has not seen its job complete; hk is read
+  after the fence, and the hub's record is read under the same lock as the
+  write (hk 6137). A holder the hub saw complete has its role freed, not restored.
+  The release record and its owner notice are written in the same transaction as
+  the release.
 - Released: a marker stage; a v1 stage the node answers `unknown`, `fenced` or
   `refused` (or a stage with no close binding, which reads as `refused`).
 - Refused, with the stage kept:
-  - `verdict_pending` (503): the node answers `closing`; a close has started, so
-    the holder's role must not come back while it runs. Retry later.
-  - `verdict_unreadable` (503): the fence did not answer; nothing was released.
-    Retry once the node answers.
+  - `verdict_unreadable` (503): the fence did not answer, or answered `closing`.
+    A node settles a closing record to `unknown` before it answers, so `closing`
+    is never a settled verdict; nothing was released. Retry once the node
+    answers.
   - `verdict_resolved` (409, with `state` `closed` or `gone`): the reconciler
     activates or releases these.
-  - `holder_changed` (409): the holder's job completed after the release read
-    its record and before the release wrote. Nothing is released and the role is
-    not restored; the reconciler handles the stage on its next pass.
   - `not_staged` (409; the stage was activated or otherwise left `staged`),
     `not_ladder_stage` (409), `job_unreadable` (409), `not_found` (404; no staged
     row and no release record), and `store_unavailable`, `hub_error` or
     `record_unreadable` (503).
-- The reason is filed to the owner lane as an info event with the id
-  `ladder-release:<request_id>` (cause `ladder_released`).
-  A repeat of a committed release answers the first result unchanged and files
-  the notice again under the same id, so a notice the hub did not get to deliver
-  lands on the repeat. The hub does not retry it by itself: a notice lost in the
-  window between the commit and the relay waits for the operator to repeat.
+- The reason is an owner notice: an info event with the id
+  `ladder-release:<request_id>` (cause `ladder_released`). It is an outbox row of
+  `spawn_notifications` written in the release's transaction, and is relayed right
+  after the commit. The spawn notice outbox retries it until the owner's lane
+  takes it, including across a hub restart. A repeat of a committed release
+  answers the first result unchanged, and routes the notice again only while it
+  is still owed, so it is never filed twice.
 
 ## Replay
 

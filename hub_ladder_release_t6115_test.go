@@ -311,16 +311,18 @@ func TestLadderReleaseReleasesAFencedOrRefusedStage(t *testing.T) {
 	}
 }
 
-// A close already running on the node (closing) keeps the stage, and so does a
-// fence that does not answer: the operator is told to retry, and nothing is
-// released while a close may still run.
-func TestLadderReleaseWaitsOnACloseOrAnUnreadableFence(t *testing.T) {
+// A fence that does not answer keeps the stage, and so does a fence that answers
+// closing (hk 6137): a node settles a closing record to unknown under its lock
+// before it answers, so a fence never reports closing, and an answer that says
+// so is no verdict. The operator is told to retry, and nothing is released while
+// a close may still run.
+func TestLadderReleaseKeepsTheStageWithoutASettledFence(t *testing.T) {
 	for _, tc := range []struct{ fence, code string }{
-		{nodeLadderClosing, "verdict_pending"},
+		{nodeLadderClosing, "verdict_unreadable"},
 		{"none", "verdict_unreadable"},
 	} {
-		t.Run(tc.code, func(t *testing.T) {
-			f := newLadderCloseFixture(t, "pw-task-6115-wait-"+tc.code, true)
+		t.Run(tc.fence, func(t *testing.T) {
+			f := newLadderCloseFixture(t, "pw-task-6115-wait-"+tc.fence, true)
 			f.fenceAnswer = tc.fence
 			f.stageBoundLiveSuccessor(t)
 			stage, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), f.job+"-l1")
@@ -392,9 +394,9 @@ func TestLadderReleaseReadsTheHolderAfterTheFence(t *testing.T) {
 }
 
 // A completion that lands between the release's read of the holder's record
-// and its write is not overwritten: the release compares the holder's liveness
-// at the write and answers 409 holder_changed, releasing nothing; the holder is
-// not handed its role back.
+// and its write is not overwritten: the holder's liveness is decided under the
+// hub's lock at the write, so the holder is not handed its role back. The release
+// frees the role and answers 200 (hk 6137; before, it answered 409 holder_changed).
 func TestLadderReleaseHolderCompletionInTheWindow(t *testing.T) {
 	f := newLadderCloseFixture(t, "pw-task-6115-window", true)
 	stageID := f.stageLiveSuccessorWithClose(t, &fleet.LadderCloseBinding{Protocol: fleet.LadderCloseProtocolMarker}, true)
@@ -415,12 +417,11 @@ func TestLadderReleaseHolderCompletionInTheWindow(t *testing.T) {
 		f.hub.mu.Unlock()
 	}
 	recorder := releaseLadderHTTP(t, f.hub, stageID, t14OperatorToken, "", "author completed in the window")
-	body := releaseLadderBody(t, recorder)
-	if recorder.Code != http.StatusConflict || body.Error != "holder_changed" {
-		t.Fatalf("status=%d body=%+v; want 409 holder_changed", recorder.Code, body)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s; want 200 with the role freed", recorder.Code, recorder.Body.String())
 	}
-	if rows, _ := stagedRowCount(t, f.hub, stageID); rows != 1 {
-		t.Fatalf("a refused release removed the stage: rows=%d", rows)
+	if rows, _ := stagedRowCount(t, f.hub, stageID); rows != 0 {
+		t.Fatalf("the release left the stage row: rows=%d", rows)
 	}
 	if got := reservationTaskRole(t, f.hub, holder.Request.RequestID); got.Valid {
 		t.Fatalf("a holder that completed in the window got its role back: %+v (stage role %+v)", got, stageRole)
