@@ -334,8 +334,10 @@ func TestDeployStageLeavesTheMergeGateAlone(t *testing.T) {
 // checkReleaseGate verifies that release.yml configures the main-stage gate:
 // it runs on all non-PR events, requires checks, statuses, and actions read permissions,
 // default context ci-ok switchable via PANEWIRE_RELEASE_GATE_CONTEXT, waits for check-runs
-// and commit status, and fails early only when CONTEXT=ci-ok, main CI push run is completed
-// cancelled, and no CI (any ref) rescue run is active.
+// and commit status, and fails early only when CONTEXT=ci-ok, the main CI push run is
+// completed cancelled, and a definite zero of unfinished CI (any ref) dispatches created
+// since then is probed by workflow (not head_sha). It rejects an empty probe read as zero,
+// and requires a final verdict re-read before exiting 1.
 func checkReleaseGate(raw []byte) error {
 	var wf struct {
 		Permissions struct {
@@ -377,19 +379,26 @@ func checkReleaseGate(raw []byte) error {
 		return fmt.Errorf("the gate context must default to ci-ok and be switchable: %q", gateEnv["CONTEXT"])
 	}
 	for _, want := range []string{
+		"gate_read() {",
 		"check-runs?check_name=",
 		"commits/${SHA}/status",
 		"actions/runs?head_sha=${SHA}&event=push",
 		`[ "$CONTEXT" = "ci-ok" ]`,
-		`[ "$ci_run" = "completed cancelled" ]`,
-		`select(.name == "CI (any ref)" and (.status == "in_progress" or .status == "queued"))`,
+		`"completed cancelled "*)`,
+		"actions/workflows/ci-any-ref.yml/runs?event=workflow_dispatch",
+		`select(.status != "completed" and .created_at >= env.SINCE)`,
 		`[ "$rescue_runs" = "0" ]`,
+		"final=$(gate_read)",
 		"SECONDS",
 		"sleep 30",
 	} {
 		if !strings.Contains(gateRun, want) {
 			return fmt.Errorf("the release gate is missing required check or loop element %q", want)
 		}
+	}
+	// An empty or failed probe read must never count as a definite zero.
+	if strings.Contains(gateRun, `-z "$rescue_runs"`) {
+		return errors.New("the release gate treats an empty rescue probe as zero; only a definite 0 may stop early")
 	}
 	for _, job := range []string{"build", "test", "publish"} {
 		if !slices.Contains(wf.Jobs[job].Needs, "gate") {
@@ -419,8 +428,10 @@ func TestReleaseWaitsForMainStage(t *testing.T) {
 }
 
 // TestReleaseGateCancelledMutantsFail proves through checkReleaseGate that
-// dropping the cancelled early exit, dropping the CONTEXT=ci-ok condition,
-// or dropping the rescue-run check is rejected.
+// each early-exit rule is load-bearing: dropping the cancelled early exit, the
+// CONTEXT=ci-ok condition, the rescue-run zero check, probing by head_sha again,
+// treating an empty probe as zero, counting only in_progress/queued, or dropping
+// the final verdict re-read is rejected.
 func TestReleaseGateCancelledMutantsFail(t *testing.T) {
 	raw, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
@@ -437,8 +448,8 @@ func TestReleaseGateCancelledMutantsFail(t *testing.T) {
 	}{
 		{
 			name:   "drop cancelled early exit",
-			target: `[ "$ci_run" = "completed cancelled" ]`,
-			repl:   `[ "$ci_run" = "completed something_else" ]`,
+			target: `"completed cancelled "*)`,
+			repl:   `"completed something_else "*)`,
 		},
 		{
 			name:   "drop CONTEXT=ci-ok condition",
@@ -446,9 +457,29 @@ func TestReleaseGateCancelledMutantsFail(t *testing.T) {
 			repl:   "",
 		},
 		{
-			name:   "drop rescue-run check",
-			target: `select(.name == "CI (any ref)" and (.status == "in_progress" or .status == "queued"))`,
-			repl:   `select(false)`,
+			name:   "drop rescue-run zero check",
+			target: `if [ "$rescue_runs" = "0" ]; then`,
+			repl:   `if false; then`,
+		},
+		{
+			name:   "probe by head_sha again",
+			target: `actions/workflows/ci-any-ref.yml/runs?event=workflow_dispatch`,
+			repl:   `actions/runs?head_sha=${SHA}&event=workflow_dispatch`,
+		},
+		{
+			name:   "treat empty probe as zero",
+			target: `[ "$rescue_runs" = "0" ]`,
+			repl:   `[ -z "$rescue_runs" ] || [ "$rescue_runs" = "0" ]`,
+		},
+		{
+			name:   "count only in_progress and queued",
+			target: `select(.status != "completed" and .created_at >= env.SINCE)`,
+			repl:   `select(.status == "in_progress" or .status == "queued")`,
+		},
+		{
+			name:   "drop final verdict re-read",
+			target: `final=$(gate_read)`,
+			repl:   `final=pending`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
