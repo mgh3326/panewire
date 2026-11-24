@@ -3,10 +3,12 @@ package panewire
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -23,7 +25,19 @@ type hubOwnerWork struct {
 	confirmed  map[string]hubOwnerGrant
 	seeding    map[string]bool
 	recovering map[string]bool
+	// refused remembers a grant hk refused with job_host_forbidden until its
+	// backoff passes. A different grant for the job is not held back by it.
+	refused map[string]hubOwnerRefusal
 }
+
+type hubOwnerRefusal struct {
+	grant hubOwnerGrant
+	until time.Time
+}
+
+// ownerHostForbiddenCode is hk's refusal when the hub's client lacks a host
+// grant for the job's record.
+const ownerHostForbiddenCode = "job_host_forbidden"
 
 // scheduleOwnerSeed keeps HK I/O off the node's heartbeat reader and makes
 // overlapping landings and heartbeats share one attempt per job.
@@ -35,6 +49,10 @@ func (h *HubServer) scheduleOwnerSeed(assignment hubOwnerAssignment) {
 	work := &h.ownerWork
 	work.mu.Lock()
 	if work.closed || work.confirmed[assignment.Job] == grant || work.seeding[assignment.Job] {
+		work.mu.Unlock()
+		return
+	}
+	if refusal, ok := work.refused[assignment.Job]; ok && refusal.grant == grant && h.now().Before(refusal.until) {
 		work.mu.Unlock()
 		return
 	}
@@ -59,6 +77,41 @@ func (h *HubServer) scheduleOwnerSeed(assignment hubOwnerAssignment) {
 		}
 		work.mu.Unlock()
 	}()
+}
+
+// noteOwnerSeedOutcome records what hk said about this grant's owner write. A
+// job_host_forbidden refusal starts the backoff for that grant; any other
+// outcome clears it, so the next attempt follows the ordinary retry rules.
+func (h *HubServer) noteOwnerSeedOutcome(assignment hubOwnerAssignment, err error) {
+	var backend *fleet.BackendError
+	forbidden := errors.As(err, &backend) && backend.Status == http.StatusForbidden && backend.Code == ownerHostForbiddenCode
+	work := &h.ownerWork
+	work.mu.Lock()
+	defer work.mu.Unlock()
+	if !forbidden {
+		delete(work.refused, assignment.Job)
+		return
+	}
+	if work.refused == nil {
+		work.refused = make(map[string]hubOwnerRefusal)
+	}
+	work.refused[assignment.Job] = hubOwnerRefusal{
+		grant: hubOwnerGrant{job: assignment.Job, node: assignment.Node, epoch: assignment.Epoch},
+		until: h.now().Add(hubOwnerForbiddenBackoff),
+	}
+}
+
+// ownerSeedFailureAttrs is the adoption warning's attributes. The hk code is
+// included only when it is a bare identifier; the reason text and body never are.
+func ownerSeedFailureAttrs(job string, err error) []any {
+	attrs := []any{"job", job}
+	var backend *fleet.BackendError
+	if errors.As(err, &backend) {
+		if code := backend.SafeCode(); code != "" {
+			attrs = append(attrs, "code", code)
+		}
+	}
+	return append(attrs, "error", err)
 }
 
 func (h *HubServer) scheduleOwnerRecovery(machine string, agent *hubAgent) {
