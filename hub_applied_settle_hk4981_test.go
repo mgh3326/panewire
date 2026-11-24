@@ -25,17 +25,25 @@ import (
 	"github.com/coder/websocket"
 )
 
-// blockAppliedList makes the fake handoffkeep hold every undelivered listing
-// for lane inside the request until release is called; entered is signalled
-// when the first one is in flight.
-func (rig *t989Rig) blockAppliedList(lane string) (entered chan struct{}, release func()) {
+// blockAppliedList makes the fake handoffkeep hold the first undelivered
+// listing that follows the arm inside the request until release is called;
+// entered is signalled when it is in flight. A settlement walk is one fleet-wide
+// listing with no lane filter (hub_undelivered_walk.go), so it is the first one
+// the report starts after the hello; later listings pass through.
+func (rig *t989Rig) blockAppliedList() (entered chan struct{}, release func()) {
 	entered = make(chan struct{}, 1)
 	gate := make(chan struct{})
 	var once sync.Once
 	release = func() { once.Do(func() { close(gate) }) }
+	var blocked sync.Once
 	rig.fake.mu.Lock()
 	rig.fake.observeQuery = func(method, path, query string) {
-		if method != http.MethodGet || !strings.Contains(query, "undelivered") || !strings.Contains(query, "lane="+lane) {
+		if method != http.MethodGet || !strings.Contains(query, "undelivered") {
+			return
+		}
+		held := false
+		blocked.Do(func() { held = true })
+		if !held {
 			return
 		}
 		select {
@@ -68,7 +76,7 @@ func TestAppliedReportSettleDoesNotHoldReplayMu(t *testing.T) {
 	rig.herdr.getStatusByPane["w1:pA"] = "working"
 	ids, _ := rig.deliverAndLoseAcks([]string{"already read"}, 1)
 	rig.startHub()
-	entered, release := rig.blockAppliedList(t989Lane)
+	entered, release := rig.blockAppliedList()
 	rig.helloWithReportCapability()
 	rig.reportApplied(t989Lane, ids[0])
 	select {
@@ -120,7 +128,7 @@ func TestReplaySkipsReportRowsWhileSettlementRuns(t *testing.T) {
 	ids, _ := rig.deliverAndLoseAcks([]string{"already read"}, 1)
 	attempts := rig.row(ids[0]).Attempts
 	rig.startHub()
-	entered, release := rig.blockAppliedList(t989Lane)
+	entered, release := rig.blockAppliedList()
 	rig.helloWithReportCapability()
 	rig.reportApplied(t989Lane, ids[0])
 	select {
