@@ -52,8 +52,20 @@ func (f *fakeHerdrDir) setPanes(session, jsonPanes string) {
 	_ = os.WriteFile(filepath.Join(f.dir, session+".rc"), []byte("0"), 0o600)
 }
 
+// setServerNotRunning answers like herdr for a stopped session: the session exists
+// and `herdr session attach` restores it, so it is unreadable, not absent (hk 6214).
 func (f *fakeHerdrDir) setServerNotRunning(session string) {
-	errJSON := fmt.Sprintf(`{"id":"cli:pane:list","error":{"code":"server_not_running","message":"no herdr server is running at /sessions/%s/herdr.sock; run \x60herdr session attach %s\x60 to start or attach it"}}`, session, session)
+	_ = os.Remove(filepath.Join(f.dir, session+".out"))
+	// Same text herdr 0.9.5 prints for a socket with no server behind it.
+	errJSON := fmt.Sprintf("{\"id\":\"cli:pane:list\",\"error\":{\"code\":\"server_not_running\",\"message\":\"no herdr server is running at /sessions/%s/herdr.sock; run `herdr session attach %s` to start or attach it\"}}", session, session)
+	_ = os.WriteFile(filepath.Join(f.dir, session+".err"), []byte(errJSON), 0o600)
+	_ = os.WriteFile(filepath.Join(f.dir, session+".rc"), []byte("1"), 0o600)
+}
+
+// setSessionNotFound answers with the one code that proves the session is absent.
+func (f *fakeHerdrDir) setSessionNotFound(session string) {
+	_ = os.Remove(filepath.Join(f.dir, session+".out"))
+	errJSON := fmt.Sprintf(`{"id":"cli:pane:list","error":{"code":"session_not_found","message":"no such session: %s"}}`, session)
 	_ = os.WriteFile(filepath.Join(f.dir, session+".err"), []byte(errJSON), 0o600)
 	_ = os.WriteFile(filepath.Join(f.dir, session+".rc"), []byte("1"), 0o600)
 }
@@ -101,10 +113,11 @@ func setupEndedJobSession(t *testing.T, inbox, jobID, paneID, session, createdAt
 	}
 }
 
-// TestNodePaneSessionsFilteringEndedJobs6187 proves that nodePaneSessions skips
-// bindings of ended jobs outside the active window, while keeping live jobs,
-// recently ended jobs within the active window, and the spawn session.
-func TestNodePaneSessionsFilteringEndedJobs6187(t *testing.T) {
+// TestNodePaneSessionsKeepEndedJobs6187 proves that nodePaneSessions keeps the
+// binding of every job, ended or live, whatever its age: a job ending does not
+// close its pane, so an old ended job's session is still scanned (hk 6214 removed
+// the age skip that hk 6210 added). The spawn session is listed first.
+func TestNodePaneSessionsKeepEndedJobs6187(t *testing.T) {
 	inbox := t.TempDir()
 	now := time.Now().UTC()
 
@@ -150,16 +163,19 @@ func TestNodePaneSessionsFilteringEndedJobs6187(t *testing.T) {
 	if !seen["sess-recent-ended"] {
 		t.Errorf("recent ended job session not in sessions: %v", sessions)
 	}
-	if seen["sess-old-ended"] {
-		t.Errorf("old ended job session unexpectedly in sessions: %v", sessions)
+	if !seen["sess-old-ended"] {
+		t.Errorf("old ended job session not in sessions (age must not skip it): %v", sessions)
 	}
 }
 
-// TestNodePaneGuardEndedSessions6187 verifies the 3 acceptance cases for both
-// held branch release and worktree.remove:
-// (1) an ended job's session that no longer exists: release proceeds and worktree.remove succeeds;
-// (2) a live job's session that exists but errors on read: both fail closed;
-// (3) a live pane in a live job's non-spawn session still counts as in use.
+// TestNodePaneGuardEndedSessions6187 verifies the acceptance cases for both
+// held branch release and worktree.remove (hk 6214):
+// (a) a job session answering server_not_running is unreadable: fail closed;
+// (b) the spawn session answering server_not_running is unreadable: fail closed;
+// (c) a session answering session_not_found is absent: release and removal proceed;
+// (d) an ended job older than the active window whose session has a pane in the
+// worktree still counts as in use. Also: a live job whose session errors on read
+// (fail closed) and a live pane in a live job's session (in use).
 func TestNodePaneGuardEndedSessions6187(t *testing.T) {
 	now := time.Now().UTC()
 
@@ -171,20 +187,19 @@ func TestNodePaneGuardEndedSessions6187(t *testing.T) {
 			wantKept  bool
 		}{
 			{
-				name: "case 1a: old ended job whose session no longer exists (absent/unreadable)",
+				name: "case c: old ended job whose session is absent (session_not_found)",
 				setupJob: func(t *testing.T, inbox string) string {
 					sess := "sess-old-ended"
 					setupEndedJobSession(t, inbox, "job-ended", "w9:p1", sess, now.Add(-100*time.Hour).Format(time.RFC3339))
 					return sess
 				},
 				setupFake: func(fake *fakeHerdrDir, session, held string) {
-					// session is absent / unreadable from fake herdr. Because the job is an old
-					// ended job, nodePaneSessions skips it and release proceeds.
+					fake.setSessionNotFound(session)
 				},
 				wantKept: false,
 			},
 			{
-				name: "case 1b: ended job whose session no longer exists (server_not_running)",
+				name: "case a: recent ended job whose session is stopped (server_not_running)",
 				setupJob: func(t *testing.T, inbox string) string {
 					sess := "sess-recent-ended"
 					setupEndedJobSession(t, inbox, "job-ended", "w9:p1", sess, now.Add(-1*time.Hour).Format(time.RFC3339))
@@ -193,7 +208,29 @@ func TestNodePaneGuardEndedSessions6187(t *testing.T) {
 				setupFake: func(fake *fakeHerdrDir, session, held string) {
 					fake.setServerNotRunning(session)
 				},
-				wantKept: false,
+				wantKept: true,
+			},
+			{
+				name: "case b: spawn session stopped (server_not_running)",
+				setupJob: func(t *testing.T, inbox string) string {
+					return "spawn-a"
+				},
+				setupFake: func(fake *fakeHerdrDir, session, held string) {
+					fake.setServerNotRunning("spawn-a")
+				},
+				wantKept: true,
+			},
+			{
+				name: "case d: old ended job whose session still has a pane in the worktree",
+				setupJob: func(t *testing.T, inbox string) string {
+					sess := "sess-old-pane"
+					setupEndedJobSession(t, inbox, "job-ended", "w9:p1", sess, now.Add(-100*time.Hour).Format(time.RFC3339))
+					return sess
+				},
+				setupFake: func(fake *fakeHerdrDir, session, held string) {
+					fake.setPanes(session, herdrPanesAt(t, filepath.Join(held, "sub")))
+				},
+				wantKept: true,
 			},
 			{
 				name: "case 2: live job whose session exists but errors on read",
@@ -272,19 +309,19 @@ func TestNodePaneGuardEndedSessions6187(t *testing.T) {
 			wantOut   string
 		}{
 			{
-				name: "case 1a: old ended job whose session no longer exists (absent/unreadable)",
+				name: "case c: old ended job whose session is absent (session_not_found)",
 				setupJob: func(t *testing.T, inbox string) string {
 					sess := "sess-old-ended"
 					setupEndedJobSession(t, inbox, "job-ended", "w9:p1", sess, now.Add(-100*time.Hour).Format(time.RFC3339))
 					return sess
 				},
 				setupFake: func(fake *fakeHerdrDir, session, dir string) {
-					// session is absent / unreadable from fake herdr
+					fake.setSessionNotFound(session)
 				},
 				wantOut: nodeRemoveRemoved,
 			},
 			{
-				name: "case 1b: ended job whose session no longer exists (server_not_running)",
+				name: "case a: recent ended job whose session is stopped (server_not_running)",
 				setupJob: func(t *testing.T, inbox string) string {
 					sess := "sess-recent-ended"
 					setupEndedJobSession(t, inbox, "job-ended", "w9:p1", sess, now.Add(-1*time.Hour).Format(time.RFC3339))
@@ -293,7 +330,29 @@ func TestNodePaneGuardEndedSessions6187(t *testing.T) {
 				setupFake: func(fake *fakeHerdrDir, session, dir string) {
 					fake.setServerNotRunning(session)
 				},
-				wantOut: nodeRemoveRemoved,
+				wantOut: nodeRemovePaneScanFailed,
+			},
+			{
+				name: "case b: spawn session stopped (server_not_running)",
+				setupJob: func(t *testing.T, inbox string) string {
+					return "spawn-a"
+				},
+				setupFake: func(fake *fakeHerdrDir, session, dir string) {
+					fake.setServerNotRunning("spawn-a")
+				},
+				wantOut: nodeRemovePaneScanFailed,
+			},
+			{
+				name: "case d: old ended job whose session still has a pane in the worktree",
+				setupJob: func(t *testing.T, inbox string) string {
+					sess := "sess-old-pane"
+					setupEndedJobSession(t, inbox, "job-ended", "w9:p1", sess, now.Add(-100*time.Hour).Format(time.RFC3339))
+					return sess
+				},
+				setupFake: func(fake *fakeHerdrDir, session, dir string) {
+					fake.setPanes(session, herdrPanesAt(t, dir))
+				},
+				wantOut: nodeRemovePaneInUse,
 			},
 			{
 				name: "case 2: live job whose session exists but errors on read",

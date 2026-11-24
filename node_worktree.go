@@ -1810,11 +1810,12 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 
 // nodePaneInUse reports whether any live pane — agent or plain shell — sits
 // inside path, read fresh from `herdr pane list` in every session the node can
-// reach (nodePaneSessions, hk 5883). A session that does not exist (herdr says
-// so) counts as having no panes (hk 6187). A session that exists but cannot be
-// read counts as in use: the answer is true with an error naming that session.
-// Both callers refuse on the error, and worktree.remove does not pass it on, so
-// the warning logged here is where the session name is recorded.
+// reach (nodePaneSessions, hk 5883). Only a session herdr reports as
+// session_not_found counts as having no panes (hk 6187, narrowed in hk 6214).
+// Every other failure, server_not_running included, counts as in use: the answer
+// is true with an error naming that session. Both callers refuse on the error,
+// and worktree.remove does not pass it on, so the warning logged here is where
+// the session name is recorded.
 func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, error) {
 	sessions, err := client.nodePaneSessions()
 	if err != nil {
@@ -1843,24 +1844,19 @@ func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, 
 
 // nodePaneSessions lists the herdr sessions a pane scan reads: the spawn session
 // first, then each other session a job pane binding under the inbox root records.
-// Bindings from ended jobs outside the active window are skipped, as they cannot
-// hold a live pane (hk 6187). A missing jobs directory means no job has bound a pane;
-// any other failure to read the bindings is returned, so the caller fails closed.
+// Bindings of ended jobs are kept whatever their age: a job ending does not close
+// its pane, so an ended job's session can still hold a live pane (hk 6214). A
+// session that is gone is skipped at read time by nodePaneInUse instead. A missing
+// jobs directory means no job has bound a pane; any other failure to read the
+// bindings is returned, so the caller fails closed.
 func (client *HubClient) nodePaneSessions() ([]string, error) {
 	spawn := client.herdrSessionFor("", "")
 	sessions := []string{spawn}
 	if client == nil || client.jobsInboxRoot == "" {
 		return sessions, nil
 	}
-	activeCutoff := time.Now().Add(-hubJobActiveMaxAge())
-	if client != nil {
-		activeCutoff = client.nowUTC().Add(-hubJobActiveMaxAge())
-	}
 	seen := map[string]bool{spawn: true}
 	err := hubIndexFor(client.jobsInboxRoot).visitJobs(nil, true, func(job *hubIndexedJob) bool {
-		if job.ended && job.dormant(activeCutoff) {
-			return true
-		}
 		for _, binding := range job.bindings {
 			if !seen[binding.session] {
 				seen[binding.session] = true
