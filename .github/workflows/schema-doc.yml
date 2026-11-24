@@ -15,6 +15,7 @@ on:
       - 'schema_doc_node_hk6117_test.go'
       - 'internal/arbiter/schema_doc_arbiter_hk6117_test.go'
       - '.tbls/**'
+      - '.tbls.yml'
       - '.github/workflows/schema-doc.yml'
   workflow_dispatch:
 
@@ -67,6 +68,15 @@ jobs:
           sudo install -m 0755 tbls /usr/local/bin/tbls
           rm -f tbls.tar.gz tbls
           tbls version
+
+      # Fails the run when a table has no comment or sits in no viewpoint
+      # (lint rules in .tbls.yml). Post-merge only: this workflow never runs on
+      # pull requests, so pull-request CI is unchanged.
+      - name: Lint schema documentation with tbls
+        shell: bash
+        run: |
+          set -euo pipefail
+          tbls lint
 
       - name: Generate schema documentation with tbls
         shell: bash

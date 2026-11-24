@@ -1,9 +1,56 @@
 name: panewire_hub
-desc: "Built with MySQL ${MYSQL_VERSION:-8.4} in CI (production is MySQL 26.10.0-cloud, CI is 8.4)"
+desc: |
+  Built with MySQL ${MYSQL_VERSION:-8.4} in CI (production is MySQL 26.10.0-cloud, CI is 8.4).
+
+  The hub's MySQL store: 25 tables in seven domains (viewpoints). Each table's comment says why it exists, its role, the store functions that read and write it (file.go:function), and its retention rule as the code has it. MySQL has no foreign keys here (hk 6128); the relations below name each join, lookup or sweep the code walks. Store-to-store copy (hub_store_copy.go) is a migration path and is not listed per table.
+
+  Roles (one per table):
+  - source of record: the row a fact is read from
+  - queue/outbox: work owed, removed when done
+  - history: a record kept for later reads
+  - lock/fence/cursor: a row lock, a generation or a watermark
+  - ledger: an append-only record of decisions or applied migrations
+  - bookkeeping: small per-key state that survives a restart
+
+  | Domain (viewpoint) | Tables |
+  |---|---|
+  | Lane inbox and digests | 5 |
+  | Spawn operations | 5 |
+  | Spawn notices, outboxes and placement records | 5 |
+  | Supersede and pool actions | 4 |
+  | Consults and owner notices | 2 |
+  | Quota, accounts and operator notices | 3 |
+  | Schema ledger | 1 |
+
+  Edges between domains:
+
+  ```mermaid
+  flowchart LR
+    inbox["Lane inbox and digests (5)"]
+    ops["Spawn operations (5)"]
+    notices["Spawn notices, outboxes, placement (5)"]
+    supersede["Supersede and pool actions (4)"]
+    consults["Consults and owner notices (2)"]
+    accounts["Quota, accounts, operator notices (3)"]
+    ledger["Schema ledger (1)"]
+    notices -->|"spawn notices become lane events"| inbox
+    consults -->|"consult_requests.request_id"| ops
+    consults -->|"owner_notice_decisions.event_key"| notices
+    supersede -->|"pool actions and landings name operations"| ops
+    accounts -->|"refresh waits and placement"| ops
+  ```
 dsn: ${TBLS_DSN:-my://root@127.0.0.1:53306/panewire}
 docPath: schema-doc
 er:
   format: mermaid
+# Every table has a comment (requireTableComment) and sits in at least one
+# viewpoint (requireViewpoints). A new table without either fails the post-merge
+# schema-doc run: see the lint step in .github/workflows/schema-doc.yml.
+lint:
+  requireTableComment:
+    enabled: true
+  requireViewpoints:
+    enabled: true
 # The relations the hub's store code walks. MySQL has no foreign keys here
 # (hk 6128); each entry below is a JOIN, a lookup, or a retention sweep in the
 # code, named in its def. See the PR body for the file:line evidence.
@@ -135,3 +182,257 @@ relations:
       - job
     parentCardinality: zero or more
     def: "a quota-stop successor records the job it replaces; the replacement ladder and the hand-over resolve the predecessor's operation by that job"
+  - table: owner_notice_decisions
+    columns:
+      - event_key
+    parentTable: spawn_notifications
+    parentColumns:
+      - event_id
+    parentCardinality: zero or one
+    def: "a spawn notice's decision is keyed by its outbox event id: decideSpawnNotice (hub_spawn_notice_silence.go:131) looks the decision up by that id before it sends or counts the notice. The same column also holds job:, notice: and unconfirmed: keys that name no spawn_notifications row"
+
+# Each table's comment: why it exists, its role, the store functions that read and
+# write it (file.go:function, the unit the code is checked against at edde0a89),
+# and its retention as the code has it. "Relations:" says why a table has no
+# relation line.
+comments:
+  - table: lane_inbox
+    tableComment: |
+      Why: one row per item sent to a lane's inbox or interrupt channel, with the state the hub needs to read, ack, digest, deliver or supersede it.
+      Role: source of record.
+      Read: lane_inbox_store.go:list, counts, firstUnread, unclaimedUnread, ackStates; hub_inbox_summary.go:unsurfacedInbox; inbox_retention.go:settled, holds.
+      Write: lane_inbox_store.go:putFrom (INSERT through hub_sql_dialect.go:laneInboxInsert), read, ack, recoverMustAct, makeBatchesDue; inbox_supersede.go:supersede; inbox_retention.go:recordDelivery, recordStage; hub_inbox_hold.go:makeHeldBatches.
+      Retention: inbox_retention.go:prune, run hourly by pruneInbox. Deletes a terminal item (acked, superseded, or delivered/read) older than the relay replay age (relay.go:1205) and either older than retention.days (delivery-policy.yaml sets 14; the code default is 30) or outside its lane's newest per_lane rows. Never unread, held or awaiting a digest, or in an unsent batch.
+  - table: lane_inbox_batches
+    tableComment: |
+      Why: a digest batch: the text the hub sends a lane as one message. Items name their batch by digest_batch or escalation_batch.
+      Role: queue/outbox.
+      Read: lane_inbox_store.go:invalidBatches, earliestDue; hub_inbox_hold.go:isHeldBatch, inboxRelayDirective; inbox_batch_release.go:isDigestBatch; inbox_only_delivery.go:hasBatch.
+      Write: hub_inbox_hold.go:makeHeldBatches (INSERT), prepareHeldBatch (text); lane_inbox_store.go:makeBatchesDue (INSERT), markBatchSent (sent=1).
+      Retention: hub_store_retention.go:pruneSentBatches, run by pruneHubStore each hour. Deletes a sent batch that no lane_inbox item names (digest_batch or escalation_batch), up to hubStoreRetentionBatch (1000) per pass.
+  - table: lane_inbox_batch_quarantine
+    tableComment: |
+      Why: a batch the hub refused to deliver, and the reason. The digest pass skips a quarantined batch.
+      Role: history.
+      Read: lane_inbox_store.go:invalidBatches, earliestDue (NOT EXISTS), recoverMustAct.
+      Write: lane_inbox_store.go:quarantineBatch (INSERT IGNORE).
+      Retention: hub_store_retention.go:pruneSentBatches deletes the row with its sent batch, using the same candidate set.
+  - table: lane_inbox_surfaces
+    tableComment: |
+      Why: a delivery-confirmation watermark: a summary of a lane's unsurfaced items, covering them through one lane_inbox id, so the same items are not summarised twice.
+      Role: lock/fence/cursor.
+      Read: hub_inbox_summary.go:summaryFor; lane_inbox_store.go:surfacedRuns.
+      Write: hub_inbox_summary.go:saveInboxSummary (INSERT IGNORE), surfaceInboxSummary (delivered_at).
+      Retention: none: no statement deletes a row.
+  - table: drain_wake_lanes
+    tableComment: |
+      Why: each design lane's owed drain line and last send time, so a hub restart still sends the drain wakes it owes (hk 4567).
+      Role: queue/outbox.
+      Read: hub_drain_wake.go:drainWakeOwed, called from hub_drain_wake.go:52.
+      Write: hub_drain_wake.go:saveDrainWake (upsert).
+      Retention: none: one row per lane, upserted, never deleted.
+      Relations: none by design. Keyed by lane name only; nothing joins to it.
+  - table: spawn_operations
+    tableComment: |
+      Why: the durable record of one spawn request: job, owner, payload, status, node binding, attempts, parks and terminal result. The other spawn tables name it by request_id, job or node_id.
+      Role: source of record.
+      Read: hub_spawn_task_store.go:spawnTask, queryPendingSpawns, pendingSpawnPage, retryableSpawns, latestSpawnForJob, spawnStartReceipt, spawnRoleOwner; hub_spawn_live.go:liveSpawns; hub_spawn_park.go:spawnRollbackBlockingRows.
+      Write: hub_spawn_task_store.go:claimSpawnReplacing (INSERT, and replaced_from), markSpawnStarted, bindSpawnPlaced, unbindSpawn, touchSpawn, writeSpawnOutcome (terminal); hub_spawn_park.go:parkSpawn; hub_spawn_expiry.go:endUnstartedAttempt, releaseEndedSpawn; hub_spawn_start_conditions.go:recordWaitingSpawnResult, giveUpWaitingSpawn; hub_spawn_task_fail.go:markSpawnTaskFailNotice.
+      Retention: hub_store_retention.go:pruneHubStore (spawnOperationsRetirable). Deletes a terminal operation older than 30 days (spawnOperationRetention) that no live row still needs: no undelivered or unrecorded notice, no unrecorded placement snapshot, no unfinished supersede landing, no queued, running or unnotified consult, no pending, guarded or settled pool action for its job, no reservation, and, for failed or refused operations, a posted task-failure comment.
+  - table: spawn_queue
+    tableComment: |
+      Why: one row per non-terminal spawn operation, so the coordinator scans only the work still owed. next_check_ms mirrors the operation's wake time.
+      Role: queue/outbox.
+      Read: hub_spawn_task_store.go:queryPendingSpawns, pendingSpawnPage (JOIN to spawn_operations); hub_spawn_queue.go:spawnQueueWake.
+      Write: hub_spawn_queue.go:enqueueSpawn (INSERT), dequeueSpawn (DELETE), syncSpawnQueueNextCheck, syncSpawnQueueNextChecks, reconcileSpawnQueue.
+      Retention: none of its own. dequeueSpawn deletes the row when the operation's outcome is written, or when staging is cancelled or discarded (hub_spawn_task_store.go:608, 665, 823); reconcileSpawnQueue deletes rows with no non-terminal operation.
+  - table: spawn_reservations
+    tableComment: |
+      Why: one claim per job, request and task role. A role on a job belongs to one request at a time, so a second spawn cannot claim it while the first is live. The role key is built in internal/fleet/spawn.go:RoleKey.
+      Role: lock/fence/cursor.
+      Read: hub_spawn_task_store.go:spawnRoleOwner, spawnJobReserved; hub_pool_action_store.go:claimHandoverSuccessor.
+      Write: hub_spawn_task_store.go:claimSpawnReplacing, resumeCleanedSpawn (INSERT), writeSpawnOutcome, releaseCompletedSpawnRole, releaseCompletedSpawnRoleOf, cancelStagedSpawnNoting, discardStagedSpawnNoting; hub_spawn_expiry.go:releaseEndedSpawn (DELETE); hub_spawn_reviewer_cleanup.go:clearReviewerReservations (task_role NULL).
+      Retention: none of its own. A row is deleted on release or has its task_role cleared. spawnOperationsRetirable keeps an operation while its reservation exists.
+  - table: spawn_attempt_grants
+    tableComment: |
+      Why: the start proof of a grant-required spawn attempt: one row per node request id, in state granted or fenced, whichever was written first.
+      Role: lock/fence/cursor.
+      Read: hub_spawn_grant.go:spawnAttemptFenced, decideSpawnGrant, fenceSpawnAttempt.
+      Write: hub_spawn_grant.go:decideSpawnGrant (INSERT granted), fenceSpawnAttempt (INSERT fenced).
+      Retention: hub_store_retention.go:pruneHubStore (retiredSpawnGrants). Deletes a grant once its operation is terminal and terminal_ms is older than 24 hours (spawnAttemptFenceRetention).
+  - table: spawn_attempt_start_by
+    tableComment: |
+      Why: the latest start_by deadline sent for a node's bound attempt (hk 4612).
+      Role: lock/fence/cursor.
+      Read: hub_spawn_grant.go:spawnAttemptStartBy.
+      Write: hub_spawn_grant.go:recordSpawnStartBy (upsert keeping the greater value).
+      Retention: hub_store_retention.go:pruneHubStore (retiredSpawnStartBy). Same rule as spawn_attempt_grants: deleted 24 hours after its operation is terminal.
+  - table: spawn_notifications
+    tableComment: |
+      Why: one row per spawn notice: the result of a spawn as the owner sees it, with its delivered state and whether its telemetry was recorded. spawn_notice_outbox names the rows still owed.
+      Role: source of record.
+      Read: hub_spawn_notice_route.go:readSpawnNotifications (JOIN to spawn_notice_outbox); hub_ladder_release.go:ladderReleaseNotice; hub_spawn_deadline_hold.go:correctionAwaitsUnresolved, spawnUnresolvedNoticed; hub_spawn_orphan.go:pendingSpawnStuck.
+      Write: hub_spawn_outbox.go:saveSpawnNotice (INSERT); hub_spawn_task_store.go:queueSpawnNoticeRows; hub_ladder_release.go:noteLadderRelease; hub_spawn_orphan.go:pendingSpawnStuck (INSERT); hub_spawn_notice_route.go:setSpawnNotificationState, claimHeldSpawnNotification (delivered); hub_spawn_trace.go:recordSpawnTrace, hub_spawn_deadline_hold.go:recordUnresolvedSpawnError, hub_spawn_orphan.go:recordSpawnStuck (telemetry_recorded).
+      Retention: none: no statement deletes a row. spawnOperationsRetirable keeps an operation while one of its notices is undelivered or unrecorded; the notice itself stays.
+  - table: spawn_notice_outbox
+    tableComment: |
+      Why: the spawn notices still owed to an owner lane. A row exists from routing until its notice is delivered.
+      Role: queue/outbox.
+      Read: hub_spawn_notice_route.go:readSpawnNotifications (JOIN to spawn_notifications).
+      Write: hub_spawn_outbox.go:enqueueSpawnNotice (INSERT), dequeueDeliveredSpawnNotice (DELETE), reconcileSpawnOutboxes (INSERT and DELETE).
+      Retention: hub_spawn_outbox.go:dequeueDeliveredSpawnNotice deletes the row once its notice is delivered; reconcileSpawnOutboxes deletes rows with no undelivered notice.
+  - table: task_fail_notice_outbox
+    tableComment: |
+      Why: one row per failed or refused spawn whose hk task comment is still owed. retry_ms is the next attempt.
+      Role: queue/outbox.
+      Read: hub_spawn_task_fail.go:pendingSpawnTaskFailNoticeIDs, nextSpawnTaskFailNotice.
+      Write: hub_spawn_queue.go:endSpawnQueue (INSERT), reconcileSpawnQueue (INSERT and DELETE); hub_spawn_task_fail.go:deferSpawnTaskFailNotice (retry_ms), markSpawnTaskFailNotice, dropSpawnTaskFailNotice, judgeSpawnTaskFailBacklog, backfillSpawnTaskFailNotices (DELETE).
+      Retention: hub_spawn_task_fail.go:markSpawnTaskFailNotice sets spawn_operations.task_fail_notice_ms and deletes the row in one transaction; dropSpawnTaskFailNotice deletes it when dropped; reconcileSpawnQueue deletes it when its operation is no longer failed or refused, or the comment is already recorded.
+  - table: placement_record_outbox
+    tableComment: |
+      Why: placement records still owed: one row per attempt whose placement snapshot is not yet recorded.
+      Role: queue/outbox.
+      Read: hub_placement_record.go:pendingPlacementSnapshots (JOIN to spawn_placement_snapshots and spawn_operations), pendingPlacementRecords.
+      Write: hub_spawn_outbox.go:enqueuePlacementRecord (INSERT), dequeuePlacementRecord (DELETE), reconcileSpawnOutboxes.
+      Retention: hub_spawn_outbox.go:dequeuePlacementRecord deletes the row when its snapshot is recorded; reconcileSpawnOutboxes deletes rows with no unrecorded snapshot.
+  - table: spawn_placement_snapshots
+    tableComment: |
+      Why: the durable placement record each bound attempt leaves, so the record can be built after the placing process is gone (hk 4615).
+      Role: source of record.
+      Read: hub_placement_record.go:spawnPlacementSnapshot, pendingPlacementSnapshots, freezeSpawnPlacementForRetry; hub_placement_reconcile.go (through spawnPlacementSnapshot).
+      Write: hub_placement_record.go:saveSpawnPlacementSnapshot (INSERT), saveDeferredPlacementSnapshot, freezeSpawnPlacementForRetry (payload), markSpawnPlacementRecorded (recorded=1); hub_placement_reconcile.go:sealReconciledPlacement (recorded=1).
+      Retention: none: no statement deletes a row. spawnOperationsRetirable keeps an operation while its snapshot is unrecorded.
+  - table: pool_actions
+    tableComment: |
+      Why: pool action intents, such as a supersede close, with their phase (pending, guarded, settled, done, refused). A final row is the dedupe fence for its job.
+      Role: queue/outbox.
+      Read: hub_pool_action_store.go:activePoolActions, poolActionsOf, pendingPoolAction, guardedPoolAction, hasPoolAction, poolRetryReady, observePoolActionStuck.
+      Write: hub_pool_action_store.go:insertPoolAction, retryPoolAction, savePoolAction, observePoolActionStuck, replaceSupersedeAction, insertSupersedeAction (INSERT ... SELECT from supersede_fence).
+      Retention: hub_store_retention.go:pruneHubStore. Deletes a done or refused row 30 days (poolActionRetention) after final_ms, when no spawn operation for its job is still non-terminal.
+  - table: supersede_fence
+    tableComment: |
+      Why: the generation fence that revokes supersede landings. One row (singleton=1) holds the current generation.
+      Role: lock/fence/cursor.
+      Read: hub_pool_action_store.go:supersedeGeneration.
+      Write: lane_inbox_store.go:openLaneInboxStore (seed, INSERT OR IGNORE at generation 1); hub_pool_action_store.go:advanceSupersedeFence (generation+1), called from hub_spawn_supersede.go.
+      Retention: none: one row.
+      Relations: none by design. supersede_landings and pool_actions carry the generation by value (copied on insert, compared on activate), not by a key, so no relation line describes a join.
+  - table: supersede_landings
+    tableComment: |
+      Why: durable intents of successor spawns that may owe their parent's pane a close. A landing is armed until its supersede runs, pending while the close is owed, and done when settled.
+      Role: queue/outbox.
+      Read: hub_pool_action_store.go:pendingSupersedeLandings; hub_store_retention.go:pruneHubStore (through spawnOperationsRetirable).
+      Write: hub_pool_action_store.go:insertSupersedeLanding (INSERT ... SELECT generation from supersede_fence), activateSupersedeLanding (pending), settleSupersedeLanding (pending or done), endSupersedeLandings (done for old rows, called from hub_spawn_supersede.go).
+      Retention: none deleted. endSupersedeLandings marks old armed or pending rows done. spawnOperationsRetirable holds an operation while its landing is not done.
+  - table: supersede_lane_cause
+    tableComment: |
+      Why: the row lock of one (lane, cause) supersede. Postgres takes an advisory lock for the life of the transaction; MySQL has no such form (GET_LOCK outlives the transaction), so the lock is an upsert on a row keyed by the SHA-256 of the pair (migration 0025).
+      Role: lock/fence/cursor.
+      Read: none; the row is locked, never read.
+      Write: hub_mysql.go:lockLaneCause (INSERT ... ON DUPLICATE KEY UPDATE inside the transaction).
+      Retention: none. One row per distinct (lane, cause) ever superseded.
+      Relations: none by design. lock_key is a hash of the pair; nothing joins to it.
+  - table: consult_requests
+    tableComment: |
+      Why: the durable consult: its idempotency key (task, repo#pr, head), the resolved seat, the spawn operation that answers it, and the stored answer.
+      Role: source of record.
+      Read: hub_consult_store.go:consultByKey, consultByID, consultsWhere; hub_spawn_park.go:spawnRollbackBlockingRows (active count).
+      Write: hub_consult_store.go:insertConsult (INSERT), updateConsult (UPDATE); ensureConsults (added columns).
+      Retention: hub_store_retention.go:pruneHubStore. Deletes a consult 30 days (consultRetention) after updated_ms, once it is not queued or running and not answered-but-unnotified.
+  - table: owner_notice_decisions
+    tableComment: |
+      Why: the decision taken for each owner notice, keyed by its event key. The first decision is the only one, so a notice is not decided twice after a restart.
+      Role: ledger.
+      Read: hub_owner_notice_decisions.go:ownerNoticeDecision, ownerNoticeRepeatDue, ownerNoticeCounts (the daily group, hub_loop_ledger.go).
+      Write: hub_owner_notice_decisions.go:recordOwnerNoticeDecision (INSERT IGNORE, then reads back the stored decision).
+      Retention: none: rows are never deleted.
+      Relations: event_key is declared against spawn_notifications.event_id (see relations).
+  - table: account_credit_marks
+    tableComment: |
+      Why: the provider credit-rejection mark per account (pool and the time it was marked), so a hub restart still knows which accounts are held.
+      Role: bookkeeping.
+      Read: hub_account_credit_store.go:accountCreditMarks, loaded through hub_account_credit.go.
+      Write: hub_account_credit_store.go:putAccountCreditMark (upsert), called by hub_account_credit.go:markAccountCreditExhausted; deleteAccountCreditMark.
+      Retention: hub_account_credit.go:snapshotAccountCreditMarks deletes a row once its mark has lifted (through deleteAccountCreditMark).
+      Relations: none by design. The hub matches account names against these marks in memory; no SQL joins them to spawn_operations.placed_account_key.
+  - table: quota_refresh_attempts
+    tableComment: |
+      Why: the last finished quota refresh per machine and pool (outcome empty for success), so a spawn waiting on a refresh can tell a failed measurement from one that never ran (hk 4600).
+      Role: bookkeeping.
+      Read: hub_spawn_task_store.go:quotaRefreshAttempt, called by hub_spawn_async.go:spawnRefreshAttempt.
+      Write: hub_spawn_task_store.go:recordQuotaRefreshAttempt (upsert), called by hub_quota_refresh.go.
+      Retention: none. The upsert overwrites one row per machine and pool.
+      Relations: none by design. Keyed by (machine, pool). A spawn names them only inside its refresh_waits JSON, which is not a column.
+  - table: one_time_action_notices
+    tableComment: |
+      Why: the one-time operator actions the hub has already told an operator about (per host, harness kind and need), so a restart does not tell again. The wait behind a need is kept here too (hk 5250).
+      Role: bookkeeping.
+      Read: hub_one_time_action_store.go:oneTimeActions.
+      Write: hub_one_time_action_store.go:putOneTimeAction (upsert) through putOneTimeActionLocked; deleteOneTimeAction through deleteOneTimeActionLocked.
+      Retention: hub_one_time_action_store.go:saveOneTimeLocked deletes the row once oneTimeRowKept reports the need gone.
+      Relations: none by design. Keyed by machine, kind and need; no table names them.
+  - table: panewire_schema_migrations
+    tableComment: |
+      Why: the ledger of applied migration files for the MySQL hub store, so each file runs once.
+      Role: ledger.
+      Read: hub_mysql.go:migrateHubMySQLConn (COUNT by version).
+      Write: hub_mysql.go:migrateHubMySQLConn (INSERT version); the table is created by hubMySQLLedger.
+      Retention: none.
+      Relations: none by design. It describes the schema, not the data; nothing references it.
+
+# Domain viewpoints. Every table is in exactly one (lint: requireViewpoints).
+viewpoints:
+  - id: inbox
+    name: "Lane inbox and digests"
+    desc: "The items a lane's inbox holds, the digest batches they are sent in, the batches refused, the summaries already surfaced, and the per-lane drain wakes owed."
+    tables:
+      - lane_inbox
+      - lane_inbox_batches
+      - lane_inbox_batch_quarantine
+      - lane_inbox_surfaces
+      - drain_wake_lanes
+  - id: spawn_ops
+    name: "Spawn operations"
+    desc: "One spawn request and what keeps its job, node binding and start proof: the queue of live operations, reservations, and the grant and start-by fences."
+    tables:
+      - spawn_operations
+      - spawn_queue
+      - spawn_reservations
+      - spawn_attempt_grants
+      - spawn_attempt_start_by
+  - id: spawn_notices
+    name: "Spawn notices, outboxes and placement records"
+    desc: "What an owner is told about a spawn: the notice rows and their outboxes, the failed-spawn task comments still owed, and the placement record each attempt leaves."
+    tables:
+      - spawn_notifications
+      - spawn_notice_outbox
+      - task_fail_notice_outbox
+      - placement_record_outbox
+      - spawn_placement_snapshots
+  - id: supersede
+    name: "Supersede and pool actions"
+    desc: "Pool action intents and the supersede close: landings owed to a parent pane, the generation fence that revokes them, and the lane lock taken per supersede."
+    tables:
+      - pool_actions
+      - supersede_fence
+      - supersede_landings
+      - supersede_lane_cause
+  - id: consults
+    name: "Consults and owner notices"
+    desc: "Consult requests answered by a spawn operation, and the recorded decision for each owner notice."
+    tables:
+      - consult_requests
+      - owner_notice_decisions
+  - id: accounts
+    name: "Quota, accounts and operator notices"
+    desc: "Account credit marks, the last quota refresh per machine and pool, and the one-time operator notices already given."
+    tables:
+      - account_credit_marks
+      - quota_refresh_attempts
+      - one_time_action_notices
+  - id: ledger
+    name: "Schema ledger"
+    desc: "The migration ledger the MySQL store records its applied files in."
+    tables:
+      - panewire_schema_migrations
+
