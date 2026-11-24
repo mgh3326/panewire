@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -1808,21 +1809,58 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 }
 
 // nodePaneInUse reports whether any live pane — agent or plain shell — sits
-// inside path, read fresh from `herdr pane list`.
+// inside path, read fresh from `herdr pane list` in every session the node can
+// reach (nodePaneSessions, hk 5883). A session that cannot be read counts as in
+// use: the answer is true with an error naming that session. Both callers refuse
+// on the error, and worktree.remove does not pass it on, so the warning logged
+// here is where the session name is recorded.
 func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, error) {
-	var panes []nodeHerdrRow
-	if _, err := herdrpanes.List(ctx, client.nodeHerdrRunner(), func(out []byte) (err error) {
-		panes, err = nodeHerdrRows(out, "panes")
-		return err
-	}); err != nil {
-		return false, err
+	sessions, err := client.nodePaneSessions()
+	if err != nil {
+		return true, fmt.Errorf("pane scan: job pane bindings: %w", err)
 	}
-	for _, pane := range panes {
-		if nodePathWithin(path, pane.Cwd) {
-			return true, nil
+	for _, session := range sessions {
+		var panes []nodeHerdrRow
+		if _, err := herdrpanes.List(ctx, client.nodeHerdrRunnerForSession(session), func(out []byte) (err error) {
+			panes, err = nodeHerdrRows(out, "panes")
+			return err
+		}); err != nil {
+			slog.Warn("pane scan: herdr session unreadable, holder kept", "session", session, "err", err)
+			return true, fmt.Errorf("herdr session %q: %w", session, err)
+		}
+		for _, pane := range panes {
+			if nodePathWithin(path, pane.Cwd) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
+}
+
+// nodePaneSessions lists the herdr sessions a pane scan reads: the spawn session
+// first, then each other session a job pane binding under the inbox root records.
+// A missing jobs directory means no job has bound a pane; any other failure to
+// read the bindings is returned, so the caller fails closed.
+func (client *HubClient) nodePaneSessions() ([]string, error) {
+	spawn := client.herdrSessionFor("", "")
+	sessions := []string{spawn}
+	if client == nil || client.jobsInboxRoot == "" {
+		return sessions, nil
+	}
+	seen := map[string]bool{spawn: true}
+	err := hubIndexFor(client.jobsInboxRoot).visitJobs(nil, true, func(job *hubIndexedJob) bool {
+		for _, binding := range job.bindings {
+			if !seen[binding.session] {
+				seen[binding.session] = true
+				sessions = append(sessions, binding.session)
+			}
+		}
+		return true
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	return sessions, nil
 }
 
 // nodeQuotaRefresh is a closed call: the pools this host measures natively are
