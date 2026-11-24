@@ -767,9 +767,16 @@ func (s *laneInboxStore) firstUnread(parent context.Context, lane string) (*lane
 // lane_inbox_surfaces once per row. Both reads share one transaction, so they
 // see one snapshot on SQLite.
 func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error) {
-	q := `SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE (?='' OR lane=?)`
-	if unread {
-		q += ` AND ` + laneInboxUnread
+	q := `SELECT ` + laneInboxColumns + ` FROM lane_inbox`
+	var args []any
+	if lane != "" {
+		q += ` WHERE lane=?`
+		args = append(args, lane)
+		if unread {
+			q += ` AND ` + laneInboxUnread
+		}
+	} else if unread {
+		q += ` WHERE ` + laneInboxUnread
 	}
 	q += ` ORDER BY id DESC LIMIT 500`
 	ctx, done := s.op(s.life)
@@ -779,7 +786,7 @@ func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error)
 		return nil, err
 	}
 	defer tx.Rollback()
-	items, err := s.listItems(ctx, tx, q, lane, lane)
+	items, err := s.listItems(ctx, tx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -913,16 +920,21 @@ type laneInboxAckRow struct {
 // delivery is the row whose stage last changed. An id with no visible row is
 // absent from the result, so a hidden row and a missing one look the same.
 func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string]laneInboxAckState, error) {
-	args := make([]any, 0, len(eventIDs)+2)
+	args := make([]any, 0, len(eventIDs)+1)
 	marks := make([]string, len(eventIDs))
 	for i, id := range eventIDs {
 		marks[i] = "?"
 		args = append(args, id)
 	}
-	args = append(args, sender, sender)
+	q := `SELECT event_id,lane,delivery_stage,delivery_reason,delivery_machine,delivery_pane,delivery_at,delivered_at,acked_at,superseded_at FROM lane_inbox WHERE event_id IN (` + strings.Join(marks, ",") + `)`
+	if sender != "" {
+		q += ` AND sender=?`
+		args = append(args, sender)
+	}
+	q += ` ORDER BY event_id,id`
 	ctx, done := s.op(s.life)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT event_id,lane,delivery_stage,delivery_reason,delivery_machine,delivery_pane,delivery_at,delivered_at,acked_at,superseded_at FROM lane_inbox WHERE event_id IN (`+strings.Join(marks, ",")+`) AND (?='' OR sender=?) ORDER BY event_id,id`), args...)
+	rows, err := s.db.QueryContext(ctx, s.q(q), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -994,7 +1006,16 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxItem, error) {
 	ctx, done := s.op(s.life)
 	defer done()
-	updated, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE id=? AND (?='' OR lane=?)`), now.UnixMilli(), id, lane, lane)
+	updateQ := `UPDATE lane_inbox SET read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE id=?`
+	selectQ := `SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE id=?`
+	args := []any{id}
+	if lane != "" {
+		updateQ += ` AND lane=?`
+		selectQ += ` AND lane=?`
+		args = append(args, lane)
+	}
+	updateArgs := append([]any{now.UnixMilli()}, args...)
+	updated, err := s.db.ExecContext(ctx, s.q(updateQ), updateArgs...)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
@@ -1002,7 +1023,7 @@ func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxIt
 		s.noteBatchesChanged()
 		s.noteWorkChanged()
 	}
-	return scanLaneInbox(s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE id=? AND (?='' OR lane=?)`), id, lane, lane))
+	return scanLaneInbox(s.db.QueryRowContext(ctx, s.q(selectQ), args...))
 }
 
 // itemLane is the lane that owns item id; sql.ErrNoRows when there is none.
@@ -1017,7 +1038,22 @@ func (s *laneInboxStore) itemLane(id int64) (string, error) {
 func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (int64, error) {
 	ctx, done := s.op(s.life)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET acked_at=?,read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE acked_at=0 AND superseded_at=0 AND ((? AND (?='' OR lane=?)) OR (NOT ? AND id=? AND (?='' OR lane=?)))`), now.UnixMilli(), now.UnixMilli(), all, lane, lane, all, id, lane, lane)
+	q := `UPDATE lane_inbox SET acked_at=?,read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE acked_at=0 AND superseded_at=0`
+	args := []any{now.UnixMilli(), now.UnixMilli()}
+	if all {
+		if lane != "" {
+			q += ` AND lane=?`
+			args = append(args, lane)
+		}
+	} else {
+		q += ` AND id=?`
+		args = append(args, id)
+		if lane != "" {
+			q += ` AND lane=?`
+			args = append(args, lane)
+		}
+	}
+	result, err := s.db.ExecContext(ctx, s.q(q), args...)
 	if err != nil {
 		return 0, err
 	}
@@ -1056,7 +1092,14 @@ func (s *laneInboxStore) laneNames() ([]string, error) {
 func (s *laneInboxStore) counts(lane string) (map[string]int, error) {
 	ctx, done := s.op(s.life)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT lane,count(*) FROM lane_inbox WHERE `+laneInboxUnread+` AND (?='' OR lane=?) GROUP BY lane`), lane, lane)
+	q := `SELECT lane,count(*) FROM lane_inbox WHERE ` + laneInboxUnread
+	var args []any
+	if lane != "" {
+		q += ` AND lane=?`
+		args = append(args, lane)
+	}
+	q += ` GROUP BY lane`
+	rows, err := s.db.QueryContext(ctx, s.q(q), args...)
 	if err != nil {
 		return nil, err
 	}
