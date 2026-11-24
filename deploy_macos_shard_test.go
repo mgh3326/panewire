@@ -71,12 +71,12 @@ func checkDeployMacOSShards(raw []byte) error {
 	}
 	hasShardRun := false
 	for _, step := range shardJob.Steps {
-		if strings.Contains(step.Run, "scripts/ci-test-shard.sh") {
+		if strings.Contains(step.Run, "scripts/ci-test-shard.sh ${{ matrix.shard }}") {
 			hasShardRun = true
 		}
 	}
 	if !hasShardRun {
-		return errors.New("macos-shard job does not run scripts/ci-test-shard.sh")
+		return errors.New("macos-shard job does not run scripts/ci-test-shard.sh ${{ matrix.shard }}")
 	}
 	return verifyShardSpecsCoverEveryRootTest(specs)
 }
@@ -169,5 +169,24 @@ func TestDeployMacOSShardsDroppedShardMutantFails(t *testing.T) {
 	}
 	if err := checkDeployMacOSShards([]byte(mutant)); err == nil {
 		t.Fatal("dropping a root test shard went undetected")
+	}
+}
+
+// TestDeployMacOSShardsFixedArgumentMutantFails proves that hardcoding a single
+// shard argument instead of passing ${{ matrix.shard }} is rejected.
+func TestDeployMacOSShardsFixedArgumentMutantFails(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/deploy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkDeployMacOSShards(raw); err != nil {
+		t.Fatalf("unmutated deploy.yml is invalid: %v", err)
+	}
+	mutant := strings.Replace(string(raw), "scripts/ci-test-shard.sh ${{ matrix.shard }}", "scripts/ci-test-shard.sh 0/3", 1)
+	if mutant == string(raw) {
+		t.Fatal("mutant did not apply")
+	}
+	if err := checkDeployMacOSShards([]byte(mutant)); err == nil {
+		t.Fatal("hardcoding a fixed shard argument went undetected")
 	}
 }
