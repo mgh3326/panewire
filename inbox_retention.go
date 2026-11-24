@@ -60,7 +60,15 @@ func (s *laneInboxStore) prune(now time.Time, policy inboxRetentionPolicy) (int6
 	if err != nil {
 		return 0, err
 	}
-	return count, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		// A lane can lose its last row. Pruned rows are never unread, so no
+		// lane's unread set moves, but the lane list does.
+		s.noteInboxChanged("")
+	}
+	return count, nil
 }
 
 // pruneInbox owns its schedule under flushMu, including when digest delivery

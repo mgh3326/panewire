@@ -22,6 +22,16 @@ import "time"
 // leaves nothing unread sends nothing. No item body is typed: only the wake
 // line, as inbox_wake.go does (docs/quiet-delivery.md#the-re-wake).
 //
+// The pass reads the store only for what changed (hk 6257). An unread set
+// changes only when a row of its lane is written, so the pass keeps, per lane,
+// whether it has unread items and the newest unread id, with the store's
+// change version at the read (inbox_change_signal.go), and reads the lane again
+// only when that version moved. The lane list is read again only when a write
+// may have added or removed a lane. Every inboxRewakeHealEvery the pass reads
+// both regardless, to heal a writer that missed its bump. Every time rule is
+// still evaluated on the cached state at each scan, so a re-wake falls due at
+// the same scan as when every scan read the store.
+//
 // The bookkeeping is in memory (inboxWakes.rewake). A hub restart forgets each
 // lane's set and last line, so a lane may get up to relay.inbox_rewake_max
 // more re-wakes after a restart; the startup seed still announces what is
@@ -29,6 +39,14 @@ import "time"
 // fleet event lines are the record hk 5509 counts.
 
 const inboxRewakeScanEvery = 10 * time.Second
+
+// inboxRewakeHealEvery is how often the pass reads the lane list and every
+// lane it would otherwise skip, whatever the change signal says. It only heals
+// a writer that missed its noteInboxChanged call; it is not the cadence, and
+// every correct writer is read at the next scan by the signal. Like
+// inboxBatchPageFallback for the batch page, it bounds how long a missed bump
+// can hide an unread set.
+const inboxRewakeHealEvery = 5 * time.Minute
 
 // inboxRewake is one inbox-only lane's re-wake state.
 type inboxRewake struct {
@@ -40,6 +58,13 @@ type inboxRewake struct {
 	setMaxID int64
 	// lines counts the re-wake lines sent for the current set.
 	lines int
+	// read is set once the lane's unread state below was read from the store,
+	// at store version readVer. unread and newest are that read's result: the
+	// lane had unread items, and the newest one's id.
+	read    bool
+	readVer uint64
+	unread  bool
+	newest  int64
 }
 
 // rewakeFor returns the lane's re-wake state, creating it. The caller holds
@@ -63,9 +88,10 @@ func (h *HubServer) noteInboxLine(lane string, now time.Time) {
 }
 
 // rewakeInboxLanes is the re-wake pass runInbox calls after flushInboxWakes.
-// It reads the store at most once per inboxRewakeScanEvery: the scan lists the
-// lanes and reads two counts per inbox-only lane with unread items, while a
-// re-wake is due in tens of minutes.
+// Every inboxRewakeScanEvery it evaluates each inbox-only lane's rules. It
+// reads the store only when a write may have changed what it knows: the lane
+// list when a lane may have appeared or gone, a lane's unread state when a row
+// of that lane was written (see the header).
 func (h *HubServer) rewakeInboxLanes() {
 	if h.inbox == nil {
 		return
@@ -78,43 +104,83 @@ func (h *HubServer) rewakeInboxLanes() {
 		return
 	}
 	w.nextRewakeScan = now.Add(inboxRewakeScanEvery)
-	lanes, err := h.inbox.store.laneNames()
-	if err != nil {
-		h.logger.Warn("inbox re-wake skipped: lanes unreadable", "error", h.inbox.store.loggable("inbox rewake", err))
-		return
+	// The version is taken before the read: a write that lands in between is
+	// read now and costs one more read at the next scan, never a missed one.
+	// heal re-reads everything this scan; the first scan reads everything
+	// because nothing is cached yet.
+	heal := !w.rewakeLanesRead || !now.Before(w.rewakeHealAt)
+	if version := h.inbox.store.inboxMembersVersion(); heal || version != w.rewakeLanesVersion {
+		w.noteRewakeRead("lanes", "")
+		lanes, err := h.inbox.store.laneNames()
+		if err != nil {
+			h.logger.Warn("inbox re-wake skipped: lanes unreadable", "error", h.inbox.store.loggable("inbox rewake", err))
+			return
+		}
+		w.rewakeLanes, w.rewakeLanesVersion, w.rewakeLanesRead = lanes, version, true
 	}
-	for _, lane := range lanes {
+	if heal {
+		w.rewakeHealAt = now.Add(inboxRewakeHealEvery)
+	}
+	for _, lane := range w.rewakeLanes {
 		if class := h.inbox.policy.inboxOnlyClass(lane, now); class != "" {
-			h.rewakeLane(lane, class, now)
+			h.rewakeLane(lane, class, now, heal)
 		}
 	}
+}
+
+// noteRewakeRead reports a store read of the pass to a test; it is nil in
+// production. what is "lanes" or "unread".
+func (w *inboxWakes) noteRewakeRead(what, lane string) {
+	if w.rewakeRead != nil {
+		w.rewakeRead(what, lane)
+	}
+}
+
+// refreshRewakeUnread brings st's unread state up to date: it reads the lane
+// only if the store's version for it moved since the last read. A failed read
+// leaves the state as it was, so the next scan reads again, and reports the
+// failure as false; force reads regardless of the version (the heal scan).
+// The caller holds the wake mutex.
+func (h *HubServer) refreshRewakeUnread(lane string, st *inboxRewake, force bool) bool {
+	store := h.inbox.store
+	version := store.inboxLaneVersion(lane)
+	if !force && st.read && st.readVer == version {
+		return true
+	}
+	h.inbox.wakes.noteRewakeRead("unread", lane)
+	counts, err := store.counts(lane)
+	if err != nil {
+		h.logger.Warn("inbox re-wake skipped: unread count unavailable", "lane", lane, "error", store.loggable("inbox rewake", err))
+		return false
+	}
+	unread, newest := false, int64(0)
+	if counts[lane] > 0 {
+		items, err := store.list(lane, true)
+		if err != nil {
+			h.logger.Warn("inbox re-wake skipped: unread items unreadable", "lane", lane, "error", store.loggable("inbox rewake", err))
+			return false
+		}
+		// The list is newest first.
+		if len(items) > 0 {
+			unread, newest = true, items[0].ID
+		}
+	}
+	st.read, st.readVer, st.unread, st.newest = true, version, unread, newest
+	return true
 }
 
 // rewakeLane sends the lane's next re-wake line when its unread set is due.
 // A failed read sends nothing: a count that cannot be read is not "0 unread",
 // and a set that cannot be read is not "empty". The caller holds the wake mutex.
-func (h *HubServer) rewakeLane(lane, class string, now time.Time) {
-	counts, err := h.inbox.store.counts(lane)
-	if err != nil {
-		h.logger.Warn("inbox re-wake skipped: unread count unavailable", "lane", lane, "error", h.inbox.store.loggable("inbox rewake", err))
-		return
-	}
-	if counts[lane] == 0 {
-		return
-	}
-	items, err := h.inbox.store.list(lane, true)
-	if err != nil {
-		h.logger.Warn("inbox re-wake skipped: unread items unreadable", "lane", lane, "error", h.inbox.store.loggable("inbox rewake", err))
-		return
-	}
-	if len(items) == 0 {
+func (h *HubServer) rewakeLane(lane, class string, now time.Time, heal bool) {
+	st := h.inbox.wakes.rewakeFor(lane)
+	if !h.refreshRewakeUnread(lane, st, heal) || !st.unread {
 		return
 	}
 	policy := h.inbox.policy.Relay
-	st := h.inbox.wakes.rewakeFor(lane)
-	// The list is newest first: an id above the set's newest is an arrival.
-	if newest := items[0].ID; newest > st.setMaxID {
-		st.setMaxID, st.lines = newest, 0
+	// An id above the set's newest is an arrival.
+	if st.newest > st.setMaxID {
+		st.setMaxID, st.lines = st.newest, 0
 		if now.After(st.lastLine) {
 			st.lastLine = now
 		}

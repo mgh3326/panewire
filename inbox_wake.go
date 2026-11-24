@@ -143,6 +143,16 @@ type inboxWakes struct {
 	// memory, like lanes.
 	rewake         map[string]*inboxRewake
 	nextRewakeScan time.Time
+	// rewakeLanes is the lane list the re-wake pass last read, at store
+	// version rewakeLanesVersion (inbox_rewake.go).
+	rewakeLanes        []string
+	rewakeLanesVersion uint64
+	rewakeLanesRead    bool
+	// rewakeHealAt is when the pass next reads everything regardless of the
+	// change signal (inboxRewakeHealEvery).
+	rewakeHealAt time.Time
+	// rewakeRead, set by a test, sees each store read the pass makes.
+	rewakeRead func(what, lane string)
 }
 
 // inboxWakeOutcome is what one attempt at a lane's line came to.
