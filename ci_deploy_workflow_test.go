@@ -164,7 +164,7 @@ func deployShape(raw []byte) error {
 			return errors.New("race job is missing " + want)
 		}
 	}
-	for _, job := range []string{"race", "macos", "release", "postgres", "compat", "deploy-ok"} {
+	for _, job := range []string{"race", "macos", "macos-shard", "release", "postgres", "compat", "deploy-ok"} {
 		if _, ok := w.Jobs[job]; !ok {
 			return errors.New("deploy job missing: " + job)
 		}
@@ -344,6 +344,7 @@ func TestReleaseWaitsForMainStage(t *testing.T) {
 			Contents string `yaml:"contents"`
 			Checks   string `yaml:"checks"`
 			Statuses string `yaml:"statuses"`
+			Actions  string `yaml:"actions"`
 		} `yaml:"permissions"`
 		Jobs map[string]struct {
 			If    string    `yaml:"if"`
@@ -361,8 +362,8 @@ func TestReleaseWaitsForMainStage(t *testing.T) {
 	if gate.If != "github.event_name != 'pull_request'" {
 		t.Errorf("the release gate must run for every non-PR event: %q", gate.If)
 	}
-	if wf.Permissions.Checks != "read" || wf.Permissions.Statuses != "read" {
-		t.Errorf("the release gate needs checks: read and statuses: read: %+v", wf.Permissions)
+	if wf.Permissions.Checks != "read" || wf.Permissions.Statuses != "read" || wf.Permissions.Actions != "read" {
+		t.Errorf("the release gate needs checks: read, statuses: read, and actions: read: %+v", wf.Permissions)
 	}
 	var gateRun string
 	var gateEnv map[string]string
@@ -374,7 +375,7 @@ func TestReleaseWaitsForMainStage(t *testing.T) {
 	if gateEnv["CONTEXT"] != "${{ vars.PANEWIRE_RELEASE_GATE_CONTEXT || 'ci-ok' }}" {
 		t.Fatalf("the gate context must default to ci-ok and be switchable: %q", gateEnv["CONTEXT"])
 	}
-	for _, want := range []string{"check-runs?check_name=", "commits/${SHA}/status", "SECONDS", "sleep 30"} {
+	for _, want := range []string{"check-runs?check_name=", "commits/${SHA}/status", "actions/runs?head_sha=${SHA}&event=push", "completed cancelled", "SECONDS", "sleep 30"} {
 		if !strings.Contains(gateRun, want) {
 			t.Errorf("the release gate never waits with %q", want)
 		}
@@ -390,6 +391,39 @@ func TestReleaseWaitsForMainStage(t *testing.T) {
 		if !strings.Contains(wf.Jobs[job].If, "needs.gate.result == 'skipped'") {
 			t.Errorf("release job %s must still run when the gate is skipped", job)
 		}
+	}
+}
+
+// TestReleaseGateCancelledMutantFails proves that the release gate must stop
+// early when the latest main CI push run completed cancelled.
+func TestReleaseGateCancelledMutantFails(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutant := strings.Replace(string(raw), `"completed cancelled"`, `"completed something_else"`, 1)
+	if mutant == string(raw) {
+		t.Fatal("mutant did not apply: release.yml has no completed cancelled check")
+	}
+	var wf struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Env map[string]string `yaml:"env"`
+				Run string            `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(mutant), &wf); err != nil {
+		t.Fatal(err)
+	}
+	var gateRun string
+	for _, step := range wf.Jobs["gate"].Steps {
+		if step.Env["CONTEXT"] != "" {
+			gateRun = step.Run
+		}
+	}
+	if strings.Contains(gateRun, `"completed cancelled"`) {
+		t.Fatal("mutant still contains completed cancelled")
 	}
 }
 
