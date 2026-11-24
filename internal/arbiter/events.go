@@ -147,7 +147,7 @@ func (s *Store) recordEventGuarded(ctx context.Context, c *conn, job, kind strin
 	if e := os.MkdirAll(dir, 0o755); e != nil {
 		return 0, errf(ExitStorage, "cannot create the events directory: %v", e)
 	}
-	lock, e := os.OpenFile(filepath.Join(filepath.Dir(dir), ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0o644)
+	lock, e := os.OpenFile(s.eventsLockPath(job), os.O_WRONLY|os.O_CREATE, 0o644)
 	if e != nil {
 		return 0, errf(ExitStorage, "cannot open the events lock: %v", e)
 	}
@@ -160,6 +160,9 @@ func (s *Store) recordEventGuarded(ctx context.Context, c *conn, job, kind strin
 		if e = guard(); e != nil {
 			return 0, e
 		}
+	}
+	if s.AfterGuard != nil {
+		s.AfterGuard()
 	}
 	var n int
 	if seq != nil {
@@ -192,6 +195,34 @@ func (s *Store) recordEventGuarded(ctx context.Context, c *conn, job, kind strin
 		return 0, e
 	}
 	return n, nil
+}
+
+// eventsLockPath is the job's events lock file: every sequence allocation,
+// event append and reader of the events that needs the lock takes this one.
+func (s *Store) eventsLockPath(job string) string {
+	return filepath.Join(filepath.Dir(s.eventsDir(job)), ".wrk-events.lock")
+}
+
+// LockEvents takes the job's events lock and returns its release. ctx bounds the
+// wait: a lock not taken before ctx ends is an error, and the caller decides what
+// that means. A reader that must see every event numbered under the lock holds it
+// across the read (hk 6172).
+func (s *Store) LockEvents(ctx context.Context, job string) (func(), error) {
+	if e := validJobID(job); e != nil {
+		return nil, e
+	}
+	lock, e := os.OpenFile(s.eventsLockPath(job), os.O_WRONLY|os.O_CREATE, 0o644)
+	if e != nil {
+		return nil, errf(ExitStorage, "cannot open the events lock: %v", e)
+	}
+	if e = flockContext(ctx, lock); e != nil {
+		lock.Close()
+		return nil, errf(ExitStorage, "cannot take the events lock: %v", e)
+	}
+	return func() {
+		syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		lock.Close()
+	}, nil
 }
 
 // eventsLockPoll paces flockContext's retries.

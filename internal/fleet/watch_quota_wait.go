@@ -171,9 +171,23 @@ func RequestQuotaWait(ctx context.Context, jobs, job, pane, attempt string, stop
 // this attempt, this until, and a completion deadline that reaches until, and the
 // attempt is still the current, unended one. It says nothing about the watcher
 // being alive now; QuotaWatcherLive does.
+//
+// The ledger is read under the job's events lock (hk 6172, docs/quota-stop.md "A
+// reviewer's short reset"). The watcher stamps an ack and writes it while it holds
+// that lock, so a read under the lock sees either the whole ack or none of it: an
+// ack stamped before the manager's bound is visible once it is written, and one
+// stamped after the bound is written after this read and is refused. A lock wait
+// past quotaRecordLockWait is an error, which the manager treats as not acked.
 func QuotaWaitAckedAt(jobs, job, attempt string, until time.Time) (time.Time, error) {
 	a := quotaWaitApp(jobs, "")
+	lockCtx, cancel := context.WithTimeout(context.Background(), quotaRecordLockWait)
+	defer cancel()
+	unlock, err := a.ledger().LockEvents(lockCtx, job)
+	if err != nil {
+		return time.Time{}, err
+	}
 	evs, err := a.ledgerEvents(job)
+	unlock()
 	if err != nil {
 		return time.Time{}, err
 	}
