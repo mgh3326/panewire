@@ -63,12 +63,14 @@ jobs:
             esac
             ci_run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&event=push" \
               --jq '[.workflow_runs[] | select(.name == "CI" and .head_branch == "main")][0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)
-            case "$ci_run" in
-              "completed cancelled")
-                echo "release gate: latest main CI push run on ${SHA} completed cancelled; stopping early" >&2
+            if [ "$CONTEXT" = "ci-ok" ] && [ "$ci_run" = "completed cancelled" ]; then
+              rescue_runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}" \
+                --jq '[.workflow_runs[] | select(.name == "CI (any ref)" and (.status == "in_progress" or .status == "queued"))] | length' 2>/dev/null || true)
+              if [ "$rescue_runs" = "0" ] || [ -z "$rescue_runs" ]; then
+                echo "release gate: latest main CI push run on ${SHA} completed cancelled and no CI (any ref) rescue run is active; stopping early" >&2
                 exit 1
-                ;;
-            esac
+              fi
+            fi
             if [ "$SECONDS" -ge "$deadline" ]; then
               echo "release gate: ${CONTEXT} did not turn green on ${SHA} within 60m" >&2
               exit 1
