@@ -183,32 +183,20 @@ func paneNotFound(out []byte, err error) bool {
 }
 
 // SessionNotFound reports whether a failed herdr call's error object (on stdout or
-// in the captured stderr of an exec error, or in the error message) proves the
-// target session does not exist (no herdr server is running for that session).
+// in the captured stderr of an exec error, or in the error message) carries
+// session_not_found, the one answer that proves the target session does not
+// exist. server_not_running ("no herdr server is running ... run `herdr session
+// attach <name>` to start or attach it") does not prove absence: the session
+// is stopped, not gone, and attaching it restores its panes (hk 6214).
 func SessionNotFound(out []byte, err error) bool {
-	if isSessionNotFoundCode(errorCode(out)) {
+	if errorCode(out) == "session_not_found" {
 		return true
 	}
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if isSessionNotFoundCode(errorCode(exitErr.Stderr)) {
-			return true
-		}
-		if bytes.Contains(exitErr.Stderr, []byte("no herdr server is running")) {
-			return true
-		}
+	if errors.As(err, &exitErr) && errorCode(exitErr.Stderr) == "session_not_found" {
+		return true
 	}
-	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "server_not_running") || strings.Contains(msg, "session_not_found") || strings.Contains(msg, "no herdr server is running") {
-			return true
-		}
-	}
-	return false
-}
-
-func isSessionNotFoundCode(code string) bool {
-	return code == "server_not_running" || code == "session_not_found"
+	return err != nil && strings.Contains(err.Error(), "session_not_found")
 }
 
 // errorCode returns the code of the error object in a herdr answer, or "".

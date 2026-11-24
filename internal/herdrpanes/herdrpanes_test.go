@@ -251,10 +251,14 @@ func TestSessionNotFoundProvesSessionAbsent(t *testing.T) {
 		err    error
 		wantOK bool
 	}{
-		{"code server_not_running in stderr", nil, exitWithStderr(t, `{"error":{"code":"server_not_running","message":"no herdr server is running at /sessions/x/herdr.sock"}}`), true},
 		{"code session_not_found in stderr", nil, exitWithStderr(t, `{"error":{"code":"session_not_found","message":"no such session"}}`), true},
-		{"no herdr server is running in stderr text", nil, exitWithStderr(t, `no herdr server is running at /sessions/x/herdr.sock`), true},
-		{"code in stdout", []byte(`{"error":{"code":"server_not_running"}}`), errors.New("exit status 1"), true},
+		{"code session_not_found in stdout", []byte(`{"error":{"code":"session_not_found"}}`), errors.New("exit status 1"), true},
+		{"session_not_found in error message", nil, errors.New(`{"error":{"code":"session_not_found"}}`), true},
+		// hk 6214: a stopped session is restorable, so it is unreadable, not absent.
+		{"code server_not_running in stderr", nil, exitWithStderr(t, `{"error":{"code":"server_not_running","message":"no herdr server is running at /sessions/x/herdr.sock"}}`), false},
+		{"no herdr server is running in stderr text", nil, exitWithStderr(t, `no herdr server is running at /sessions/x/herdr.sock`), false},
+		{"code server_not_running in stdout", []byte(`{"error":{"code":"server_not_running"}}`), errors.New("exit status 1"), false},
+		{"server_not_running in error message", nil, errors.New(`{"error":{"code":"server_not_running"}}`), false},
 		{"code internal_error in stderr", nil, exitWithStderr(t, `{"error":{"code":"internal_error"}}`), false},
 		{"generic exit without output", nil, exitWithStderr(t, ``), false},
 		{"plain error", nil, errors.New("connection reset"), false},
