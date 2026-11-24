@@ -47,26 +47,53 @@ jobs:
           CONTEXT: ${{ vars.PANEWIRE_RELEASE_GATE_CONTEXT || 'ci-ok' }}
         shell: bash
         run: |
-          deadline=$((SECONDS + 3600))
-          while :; do
+          # gate_read prints "success ..." or "failure ..." for CONTEXT on SHA,
+          # and nothing while the verdict is pending or the API read failed.
+          # An empty or failed read is never a verdict.
+          gate_read() {
+            local check state
             check=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?check_name=${CONTEXT}" \
               --jq '[.check_runs[]][0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)
             case "$check" in
-              "completed success") echo "release gate: ${CONTEXT} check run success on ${SHA}"; exit 0 ;;
-              "completed "*) echo "release gate: ${CONTEXT} check run ${check} on ${SHA}" >&2; exit 1 ;;
+              "completed success") echo "success check run"; return 0 ;;
+              "completed "*) echo "failure check run ${check#completed }"; return 0 ;;
             esac
             state=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/status" \
               --jq '[.statuses[] | select(.context == env.CONTEXT)][0].state // ""' 2>/dev/null || true)
             case "$state" in
-              success) echo "release gate: ${CONTEXT} commit status success on ${SHA}"; exit 0 ;;
-              failure|error) echo "release gate: ${CONTEXT} commit status ${state} on ${SHA}" >&2; exit 1 ;;
+              success) echo "success commit status"; return 0 ;;
+              failure|error) echo "failure commit status ${state}"; return 0 ;;
+            esac
+            return 0
+          }
+          deadline=$((SECONDS + 3600))
+          while :; do
+            verdict=$(gate_read)
+            case "$verdict" in
+              success*) echo "release gate: ${CONTEXT} ${verdict} on ${SHA}"; exit 0 ;;
+              failure*) echo "release gate: ${CONTEXT} ${verdict} on ${SHA}" >&2; exit 1 ;;
             esac
             ci_run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&event=push" \
-              --jq '[.workflow_runs[] | select(.name == "CI" and .head_branch == "main")][0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)
-            if [ "$CONTEXT" = "ci-ok" ] && [ "$ci_run" = "completed cancelled" ]; then
-              rescue_runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}" \
-                --jq '[.workflow_runs[] | select(.name == "CI (any ref)" and (.status == "in_progress" or .status == "queued"))] | length' 2>/dev/null || true)
-              if [ "$rescue_runs" = "0" ] || [ -z "$rescue_runs" ]; then
+              --jq '[.workflow_runs[] | select(.name == "CI" and .head_branch == "main")][0] | "\(.status) \(.conclusion) \(.created_at)"' 2>/dev/null || true)
+            ci_created=""
+            case "$ci_run" in
+              "completed cancelled "*) ci_created=${ci_run#"completed cancelled "} ;;
+            esac
+            if [ "$CONTEXT" = "ci-ok" ] && [ -n "$ci_created" ]; then
+              # Probe CI (any ref) by workflow, not head_sha: a dispatch's head_sha is
+              # the HEAD of the ref it was dispatched from, not the ref it tests. Any
+              # dispatch created since the cancelled push run and not yet completed may
+              # be the rescue. Only a definite 0 from a successful probe stops early;
+              # an empty or failed probe keeps waiting.
+              rescue_runs=$(SINCE="$ci_created" gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/ci-any-ref.yml/runs?event=workflow_dispatch&per_page=100" \
+                --jq '[.workflow_runs[] | select(.status != "completed" and .created_at >= env.SINCE)] | length' 2>/dev/null || true)
+              if [ "$rescue_runs" = "0" ]; then
+                # Re-read the verdict after the probe: a rescue that went green in between counts.
+                final=$(gate_read)
+                case "$final" in
+                  success*) echo "release gate: ${CONTEXT} ${final} on ${SHA} after re-read"; exit 0 ;;
+                esac
                 echo "release gate: latest main CI push run on ${SHA} completed cancelled and no CI (any ref) rescue run is active; stopping early" >&2
                 exit 1
               fi
