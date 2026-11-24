@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,15 +70,28 @@ func (w landingWait) Err() error {
 	}
 }
 
+// newLandingWait returns a landing wait whose end is registered as a Cleanup,
+// so a test that fails before calling end still closes Done and releases its
+// dispatch goroutine (hk 6088). end is idempotent: calling it again, or
+// calling it before cleanup, is safe.
+func newLandingWait(t *testing.T) (landingWait, func()) {
+	t.Helper()
+	ctx := landingWait{Context: t.Context(), ended: make(chan struct{})}
+	var once sync.Once
+	end := func() { once.Do(func() { close(ctx.ended) }) }
+	t.Cleanup(end)
+	return ctx, end
+}
+
 // dispatchOnce runs one dispatch with the production probe window and returns
 // its outcome on a channel, plus end, which ends the landing wait.
 func (s *notStartedSpawn) dispatchOnce(t *testing.T) (<-chan error, func()) {
 	t.Helper()
 	transport := &directSpawnTransport{h: s.hub, task: s.task, probeWait: 2 * time.Second}
-	ctx := landingWait{Context: t.Context(), ended: make(chan struct{})}
+	ctx, end := newLandingWait(t)
 	done := make(chan error, 1)
 	go func() { _, err := transport.dispatch(ctx, *s.task.Node); done <- err }()
-	return done, func() { close(ctx.ended) }
+	return done, end
 }
 
 func (s *notStartedSpawn) answer(t *testing.T, fields map[string]any) {
