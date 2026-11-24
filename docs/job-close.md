@@ -43,6 +43,13 @@ optional `override`, `source`, `host`, `created_at`, and `epoch`. It has no
 pane or tab ID. The check, sequence choice and no-clobber publication run under
 `.wrk-events.lock`.
 
-The node relays the terminal record to the hub. A role reservation remains
-held while its pane is present; the existing release path can free it after
-the pane is gone. Closing a job does not bypass that check.
+The node relays the terminal record to the hub. The hub releases the job's
+task role once the job is proven over: its hk record is completed, lost or
+escalated, and its node answered a complete pane list without the job's pane
+or agent label. A present or unknown pane (an unreachable node included) keeps
+the role, and a later pass looks again (hk 6282; see
+[hub-spawn-operations.md](hub-spawn-operations.md#eager-role-release)). The
+release on a colliding submission is unchanged: an hk record that is
+completed, lost or escalated frees the role there without a pane probe
+(audit: hk doc `findings/2026-11-25/hk6282-release-path-audit`). Closing a job
+does not bypass either check.
