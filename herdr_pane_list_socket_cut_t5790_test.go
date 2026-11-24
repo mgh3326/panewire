@@ -25,9 +25,13 @@ type socketCutHerdr struct {
 	delay    time.Duration
 	pauseAt  int
 	pause    time.Duration
-	release  chan struct{}
-	mu       sync.Mutex
-	paneList int
+	cutFrom  int
+	holdFor  time.Duration
+	// pauseOnly limits the pause to the first pauseOnly pane.list replies.
+	pauseOnly int
+	release   chan struct{}
+	mu        sync.Mutex
+	paneList  int
 }
 
 // socketCutPaneRow is large enough that its pane.list reply runs past 8192 bytes.
@@ -53,6 +57,12 @@ type socketCutOpts struct {
 	// first pauseAt bytes, as a stalled reply.
 	pauseAt int
 	pause   time.Duration
+	// cutFrom cuts every pane.list reply from the cutFrom-th on (1-based; 0 = none),
+	// in addition to cutCount. holdFor, when no holdOpen, keeps a cut connection
+	// silent for holdFor before it closes: a stalled cut that then ends.
+	cutFrom   int
+	holdFor   time.Duration
+	pauseOnly int
 }
 
 func newSocketCutHerdrWith(t *testing.T, opts socketCutOpts) *socketCutHerdr {
@@ -69,7 +79,7 @@ func newSocketCutHerdrWith(t *testing.T, opts socketCutOpts) *socketCutHerdr {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	server := &socketCutHerdr{path: listener.Addr().String(), cutCount: cutCount, holdOpen: holdOpen, cutAt: opts.cutAt, delay: opts.delay, pauseAt: opts.pauseAt, pause: opts.pause, release: make(chan struct{})}
+	server := &socketCutHerdr{path: listener.Addr().String(), cutCount: cutCount, holdOpen: holdOpen, cutAt: opts.cutAt, delay: opts.delay, pauseAt: opts.pauseAt, pause: opts.pause, cutFrom: opts.cutFrom, holdFor: opts.holdFor, pauseOnly: opts.pauseOnly, release: make(chan struct{})}
 	t.Cleanup(func() { close(server.release) })
 	go func() {
 		for {
@@ -97,7 +107,7 @@ func (s *socketCutHerdr) serve(conn net.Conn) {
 		return
 	}
 	var result any
-	cut := false
+	cut, paused := false, false
 	switch req.Method {
 	case "agent.list":
 		result = map[string]any{"agents": []any{}}
@@ -106,8 +116,10 @@ func (s *socketCutHerdr) serve(conn net.Conn) {
 	case "pane.list":
 		s.mu.Lock()
 		s.paneList++
-		cut = s.paneList <= s.cutCount
+		n := s.paneList
 		s.mu.Unlock()
+		cut = n <= s.cutCount || (s.cutFrom > 0 && n >= s.cutFrom)
+		paused = s.pause > 0 && (s.pauseOnly == 0 || n <= s.pauseOnly)
 		result = map[string]any{"panes": []any{socketCutPaneRow}}
 	default:
 		return
@@ -125,11 +137,14 @@ func (s *socketCutHerdr) serve(conn net.Conn) {
 		_, _ = conn.Write(raw[:s.cutAt])
 		if s.holdOpen {
 			<-s.release
+		} else if s.holdFor > 0 {
+			// Simulated stall: the cut connection stays silent, then closes.
+			time.Sleep(s.holdFor)
 		}
 		return
 	}
 	whole := append(raw, '\n')
-	if req.Method == "pane.list" && s.pause > 0 {
+	if paused {
 		// Simulated stall: the reply pauses after pauseAt bytes, then completes.
 		_, _ = conn.Write(whole[:s.pauseAt])
 		time.Sleep(s.pause)

@@ -270,7 +270,18 @@ func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensus
 	// The socket's pane.list goes through the same cut rules as the CLI list
 	// (herdrpanes); an unreadable one leaves paneListOK false, never "no panes".
 	var listedPanes []map[string]any
+	// herdrpanes.Read calls fetch at most twice. Attempt 1 hedges (primary plus
+	// one retry, see callCutIdle). Attempt 2 is a plain read and does not hedge
+	// again, so one census opens at most three pane.list connections, not four.
+	// A second hedge would only repeat attempt 1 on a reply that already cut
+	// twice, and that stays unknown (herdrpanes.ErrCut). Decision for hk 5823;
+	// the same reasoning is in the PR body.
+	attempt := 0
 	if _, err := herdrpanes.Read(ctx, func(ctx context.Context) ([]byte, error) {
+		attempt++
+		if attempt > 1 {
+			return client.Call(ctx, "pane.list", map[string]any{})
+		}
 		return client.callCutIdle(ctx, "pane.list", map[string]any{}, paneListCutIdle)
 	}, func(raw []byte) error {
 		var paneList struct {
