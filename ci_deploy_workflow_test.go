@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -330,15 +331,12 @@ func TestDeployStageLeavesTheMergeGateAlone(t *testing.T) {
 	}
 }
 
-// TestReleaseWaitsForMainStage pins r2 §7: release.yml must not build or
-// publish before the main-stage gate on the release commit is green. The gate
-// is ci-ok today and deploy-ok after the switch, selected by a repository
-// variable, so the switch is configuration rather than another code change.
-func TestReleaseWaitsForMainStage(t *testing.T) {
-	raw, err := os.ReadFile(".github/workflows/release.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
+// checkReleaseGate verifies that release.yml configures the main-stage gate:
+// it runs on all non-PR events, requires checks, statuses, and actions read permissions,
+// default context ci-ok switchable via PANEWIRE_RELEASE_GATE_CONTEXT, waits for check-runs
+// and commit status, and fails early only when CONTEXT=ci-ok, main CI push run is completed
+// cancelled, and no CI (any ref) rescue run is active.
+func checkReleaseGate(raw []byte) error {
 	var wf struct {
 		Permissions struct {
 			Contents string `yaml:"contents"`
@@ -356,14 +354,17 @@ func TestReleaseWaitsForMainStage(t *testing.T) {
 		} `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal(raw, &wf); err != nil {
-		t.Fatal(err)
+		return err
 	}
-	gate := wf.Jobs["gate"]
+	gate, ok := wf.Jobs["gate"]
+	if !ok {
+		return errors.New("release.yml has no gate job")
+	}
 	if gate.If != "github.event_name != 'pull_request'" {
-		t.Errorf("the release gate must run for every non-PR event: %q", gate.If)
+		return fmt.Errorf("the release gate must run for every non-PR event: %q", gate.If)
 	}
 	if wf.Permissions.Checks != "read" || wf.Permissions.Statuses != "read" || wf.Permissions.Actions != "read" {
-		t.Errorf("the release gate needs checks: read, statuses: read, and actions: read: %+v", wf.Permissions)
+		return fmt.Errorf("the release gate needs checks: read, statuses: read, and actions: read: %+v", wf.Permissions)
 	}
 	var gateRun string
 	var gateEnv map[string]string
@@ -373,57 +374,92 @@ func TestReleaseWaitsForMainStage(t *testing.T) {
 		}
 	}
 	if gateEnv["CONTEXT"] != "${{ vars.PANEWIRE_RELEASE_GATE_CONTEXT || 'ci-ok' }}" {
-		t.Fatalf("the gate context must default to ci-ok and be switchable: %q", gateEnv["CONTEXT"])
+		return fmt.Errorf("the gate context must default to ci-ok and be switchable: %q", gateEnv["CONTEXT"])
 	}
-	for _, want := range []string{"check-runs?check_name=", "commits/${SHA}/status", "actions/runs?head_sha=${SHA}&event=push", "completed cancelled", "SECONDS", "sleep 30"} {
+	for _, want := range []string{
+		"check-runs?check_name=",
+		"commits/${SHA}/status",
+		"actions/runs?head_sha=${SHA}&event=push",
+		`[ "$CONTEXT" = "ci-ok" ]`,
+		`[ "$ci_run" = "completed cancelled" ]`,
+		`select(.name == "CI (any ref)" and (.status == "in_progress" or .status == "queued"))`,
+		`[ "$rescue_runs" = "0" ]`,
+		"SECONDS",
+		"sleep 30",
+	} {
 		if !strings.Contains(gateRun, want) {
-			t.Errorf("the release gate never waits with %q", want)
+			return fmt.Errorf("the release gate is missing required check or loop element %q", want)
 		}
 	}
-	// Build, test and publish all wait for the gate. Build and test must still
-	// run for a pull request, where the gate is skipped.
 	for _, job := range []string{"build", "test", "publish"} {
 		if !slices.Contains(wf.Jobs[job].Needs, "gate") {
-			t.Errorf("release job %s does not wait for the gate", job)
+			return fmt.Errorf("release job %s does not wait for the gate", job)
 		}
 	}
 	for _, job := range []string{"build", "test"} {
 		if !strings.Contains(wf.Jobs[job].If, "needs.gate.result == 'skipped'") {
-			t.Errorf("release job %s must still run when the gate is skipped", job)
+			return fmt.Errorf("release job %s must still run when the gate is skipped", job)
 		}
 	}
+	return nil
 }
 
-// TestReleaseGateCancelledMutantFails proves that the release gate must stop
-// early when the latest main CI push run completed cancelled.
-func TestReleaseGateCancelledMutantFails(t *testing.T) {
+// TestReleaseWaitsForMainStage pins r2 §7: release.yml must not build or
+// publish before the main-stage gate on the release commit is green. The gate
+// is ci-ok today and deploy-ok after the switch, selected by a repository
+// variable, so the switch is configuration rather than another code change.
+func TestReleaseWaitsForMainStage(t *testing.T) {
 	raw, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	mutant := strings.Replace(string(raw), `"completed cancelled"`, `"completed something_else"`, 1)
-	if mutant == string(raw) {
-		t.Fatal("mutant did not apply: release.yml has no completed cancelled check")
-	}
-	var wf struct {
-		Jobs map[string]struct {
-			Steps []struct {
-				Env map[string]string `yaml:"env"`
-				Run string            `yaml:"run"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal([]byte(mutant), &wf); err != nil {
+	if err := checkReleaseGate(raw); err != nil {
 		t.Fatal(err)
 	}
-	var gateRun string
-	for _, step := range wf.Jobs["gate"].Steps {
-		if step.Env["CONTEXT"] != "" {
-			gateRun = step.Run
-		}
+}
+
+// TestReleaseGateCancelledMutantsFail proves through checkReleaseGate that
+// dropping the cancelled early exit, dropping the CONTEXT=ci-ok condition,
+// or dropping the rescue-run check is rejected.
+func TestReleaseGateCancelledMutantsFail(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(gateRun, `"completed cancelled"`) {
-		t.Fatal("mutant still contains completed cancelled")
+	if err := checkReleaseGate(raw); err != nil {
+		t.Fatalf("unmutated release.yml is invalid: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		target string
+		repl   string
+	}{
+		{
+			name:   "drop cancelled early exit",
+			target: `[ "$ci_run" = "completed cancelled" ]`,
+			repl:   `[ "$ci_run" = "completed something_else" ]`,
+		},
+		{
+			name:   "drop CONTEXT=ci-ok condition",
+			target: `[ "$CONTEXT" = "ci-ok" ] && `,
+			repl:   "",
+		},
+		{
+			name:   "drop rescue-run check",
+			target: `select(.name == "CI (any ref)" and (.status == "in_progress" or .status == "queued"))`,
+			repl:   `select(false)`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mutant := strings.Replace(string(raw), tc.target, tc.repl, 1)
+			if mutant == string(raw) {
+				t.Fatalf("mutant %q did not apply", tc.name)
+			}
+			if err := checkReleaseGate([]byte(mutant)); err == nil {
+				t.Fatalf("mutant %q went undetected by checkReleaseGate", tc.name)
+			}
+		})
 	}
 }
 
