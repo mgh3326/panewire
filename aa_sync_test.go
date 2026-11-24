@@ -280,3 +280,32 @@ func TestAASyncRejectsTrailingCatalogDataBeforeFetch(t *testing.T) {
 		t.Fatalf("exit=%d AA requests=%d; want internal error before fetch", code, aaCalls)
 	}
 }
+
+// TestAASyncGPT62SolMapping (hk 6228): codex-sol gpt-6.2-sol xhigh maps to the
+// AA GPT-6.2 Sol (Xhigh) row; other 6.2 efforts have no AA entry yet and stay
+// unmapped. The fixture row's benchmark numbers are fixture values, not AA data.
+func TestAASyncGPT62SolMapping(t *testing.T) {
+	p := aaFixture(t)
+	at := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+	rows := []map[string]any{
+		{"profile": "codex-sol", "model_id": "gpt-6.2-sol", "effort": "xhigh", "grade": "B"},
+		{"profile": "codex-sol", "model_id": "gpt-6.2-sol", "effort": "high", "grade": "B"},
+	}
+	result, n, unmapped, _ := aaAnnotate(rows, p.Data, 5, at)
+	if n != 1 || len(unmapped) != 1 {
+		t.Fatalf("annotated=%d unmapped=%v; want 1 annotated and 1 unmapped", n, unmapped)
+	}
+	if got := result[0]["benchmark_source"]; got == nil {
+		t.Fatal("gpt-6.2-sol xhigh row was not annotated")
+	}
+	var ann aaAnnotation
+	if e := json.Unmarshal([]byte(result[0]["benchmark_annotation"].(string)), &ann); e != nil {
+		t.Fatal(e)
+	}
+	if ann.Name != "GPT-6.2 Sol (Xhigh)" {
+		t.Fatalf("annotated name=%q", ann.Name)
+	}
+	if _, ok := result[1]["benchmark_source"]; ok {
+		t.Fatal("gpt-6.2-sol high row was annotated without an AA entry")
+	}
+}
