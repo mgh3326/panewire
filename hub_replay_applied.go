@@ -157,57 +157,50 @@ func (h *HubServer) settleNodeApplied(ctx context.Context, machine string, appli
 	if h.handoffkeep == nil || len(applied) == 0 {
 		return
 	}
-	lanes := make([]string, 0, len(applied))
-	for lane := range applied {
+	// One fleet-wide walk serves every reported lane: each row is matched to
+	// the report by its OwnerLane, not by a listing per lane.
+	reported := make(map[string]map[int64]bool, len(applied))
+	for lane, ids := range applied {
+		set := make(map[int64]bool, len(ids))
+		for _, id := range ids {
+			set[id] = true
+		}
+		reported[lane] = set
+	}
+	closed := make(map[string]int, len(applied))
+	err := h.walkUndeliveredRows(ctx, func(record handoffkeepRelayEvent) {
+		ids, named := reported[record.OwnerLane]
+		if !named || !ids[record.ID] || record.DeliveredAt != "" || isUnconfirmedMarkRecord(record) {
+			return
+		}
+		if record.Machine != machine {
+			route, _, _ := h.resolveRelayRoute(record.Kind, relayEventFromRecord(record))
+			if route.Sink || route.Machine != machine {
+				h.logger.Warn("applied report names a row routed to another machine", "machine", machine, "lane", record.OwnerLane, "event_id", record.ID, "row_machine", record.Machine, "route_machine", route.Machine)
+				return
+			}
+		}
+		// The ordinary close, as a late ack takes it: it also records the
+		// delivery on the lane inbox item, and the ack window the hub may
+		// still hold for this row is dropped after it, so no
+		// relay.unconfirmed follows a row the report closed.
+		pending := relayPending{machine: machine, pane: relayAppliedReportPane, eventID: record.ID, kind: record.Kind, event: relayEventFromRecord(record)}
+		if !h.markRelayEventDeliveredContext(ctx, pending) {
+			h.logger.Warn("applied report row was not closed", "machine", machine, "lane", record.OwnerLane, "event_id", record.ID)
+			return
+		}
+		h.forgetRelayAckEvent(record.ID, pending.event.JobID)
+		closed[record.OwnerLane]++
+	})
+	if err != nil {
+		h.logger.Warn("applied report could not list undelivered rows", "machine", machine)
+	}
+	lanes := make([]string, 0, len(closed))
+	for lane := range closed {
 		lanes = append(lanes, lane)
 	}
 	sort.Strings(lanes)
 	for _, lane := range lanes {
-		reported := make(map[int64]bool, len(applied[lane]))
-		for _, id := range applied[lane] {
-			reported[id] = true
-		}
-		closed := 0
-		var afterID int64
-		for {
-			pageStart := afterID
-			records, err := h.handoffkeep.listUndelivered(ctx, lane, "", afterID, handoffkeepReplayLimit)
-			if err != nil {
-				h.logger.Warn("applied report could not list undelivered rows", "machine", machine, "lane", lane)
-				break
-			}
-			for _, record := range records {
-				if record.ID > afterID {
-					afterID = record.ID
-				}
-				if !reported[record.ID] || record.DeliveredAt != "" || isUnconfirmedMarkRecord(record) {
-					continue
-				}
-				if record.Machine != machine {
-					route, _, _ := h.resolveRelayRoute(record.Kind, relayEventFromRecord(record))
-					if route.Sink || route.Machine != machine {
-						h.logger.Warn("applied report names a row routed to another machine", "machine", machine, "lane", lane, "event_id", record.ID, "row_machine", record.Machine, "route_machine", route.Machine)
-						continue
-					}
-				}
-				// The ordinary close, as a late ack takes it: it also records the
-				// delivery on the lane inbox item, and the ack window the hub may
-				// still hold for this row is dropped after it, so no
-				// relay.unconfirmed follows a row the report closed.
-				pending := relayPending{machine: machine, pane: relayAppliedReportPane, eventID: record.ID, kind: record.Kind, event: relayEventFromRecord(record)}
-				if !h.markRelayEventDeliveredContext(ctx, pending) {
-					h.logger.Warn("applied report row was not closed", "machine", machine, "lane", lane, "event_id", record.ID)
-					continue
-				}
-				h.forgetRelayAckEvent(record.ID, pending.event.JobID)
-				closed++
-			}
-			if len(records) < handoffkeepReplayLimit || afterID <= pageStart {
-				break
-			}
-		}
-		if closed > 0 {
-			h.logger.Info("rows closed from the node's applied report", "machine", machine, "lane", lane, "rows", closed)
-		}
+		h.logger.Info("rows closed from the node's applied report", "machine", machine, "lane", lane, "rows", closed[lane])
 	}
 }

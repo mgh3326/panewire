@@ -213,24 +213,31 @@ func TestT987LaneStallCloseRacesSweepStream(t *testing.T) {
 	}
 }
 
-// t987HungLaneHK parks lane-scoped GETs until released or the request context
-// ends — the hung fake handoffkeep AC2 measures cancellation against. The
-// unscoped listing the startup replay uses keeps flowing.
+// t987HungLaneHK parks the stall sweep's undelivered walk until released or the
+// request context ends — the hung fake handoffkeep AC2 measures cancellation
+// against. The sweep's walk is fleet-wide (no lane filter, hub_undelivered_walk.go),
+// the same shape as RunMaintenance's startup replay, which runs synchronously
+// before the first sweep. So the first unscoped undelivered listing is the
+// startup replay and flows; the next one is the sweep and parks.
 type t987HungLaneHK struct {
-	fake    *fakeHandoffkeep
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+	fake     *fakeHandoffkeep
+	started  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+	unscoped atomic.Int64
 }
 
 func (h *t987HungLaneHK) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet && r.URL.Query().Get("lane") != "" {
-		h.once.Do(func() { close(h.started) })
-		select {
-		case <-h.release:
-		case <-r.Context().Done():
+	query := r.URL.Query()
+	if r.Method == http.MethodGet && query.Get("undelivered") == "1" && query.Get("lane") == "" && query.Get("kind") == "" {
+		if h.unscoped.Add(1) >= 2 {
+			h.once.Do(func() { close(h.started) })
+			select {
+			case <-h.release:
+			case <-r.Context().Done():
+			}
+			return
 		}
-		return
 	}
 	h.fake.ServeHTTP(w, r)
 }
@@ -373,8 +380,8 @@ func TestT987LaneStallEphemeralLanesLeaveNoEntries(t *testing.T) {
 	t961ActiveNode(hub, "host-a", jobs...)
 
 	t961Sweep(hub)
-	if got := len(fake.queries("/v1/relay/events")); got != 25 {
-		t.Fatalf("undelivered GETs=%d, want 25 (one per lane with work)", got)
+	if got := len(fake.queries("/v1/relay/events")); got != 1 {
+		t.Fatalf("undelivered GETs=%d, want 1 (one fleet-wide walk serves all 25 lanes with work)", got)
 	}
 	if entries := t987LaneStallEntries(hub); len(entries) != 0 {
 		t.Fatalf("%d lane-stall entries survived one healthy sweep: %v", len(entries), entries)

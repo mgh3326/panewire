@@ -114,6 +114,18 @@ func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	var notifications []hubNotification
 	candidates := h.laneStallCandidates(routes)
+	// Only lanes with active work read the durable backlog, and one fleet-wide
+	// walk serves all of them: the rows are split by owner lane.
+	jobsByLane := make(map[string]int, len(candidates))
+	var walkLanes []string
+	for _, lane := range candidates {
+		jobs := h.laneActiveJobCount(lane, routes)
+		jobsByLane[lane] = jobs
+		if jobs > 0 {
+			walkLanes = append(walkLanes, lane)
+		}
+	}
+	walked := h.observeLanesUndelivered(ctx, walkLanes, now)
 	for _, lane := range candidates {
 		if ctx.Err() != nil {
 			// Budget spent: lanes not yet evaluated are unobserved — the same
@@ -121,12 +133,13 @@ func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 			// nor closes an episode.
 			break
 		}
-		jobs := h.laneActiveJobCount(lane, routes)
+		jobs := jobsByLane[lane]
 		// A lane without active work is never stalled — that answer is a
 		// definite observation, not a skipped check, so it can end an episode.
 		obs := laneStallObservation{lane: lane, observed: true, activeJobs: jobs}
 		if jobs > 0 {
-			obs = h.observeLaneUndelivered(ctx, lane, now)
+			// An unobserved lane (failed or missing walk) is the zero value.
+			obs = walked[lane]
 			obs.activeJobs = jobs
 		}
 		if !obs.observed {
@@ -242,36 +255,6 @@ func (h *HubServer) laneActiveJobCount(lane string, routes map[string]reportRela
 		}
 	}
 	return count
-}
-
-// observeLaneUndelivered reads the lane's durable backlog. A read error —
-// including budget exhaustion mid-page — leaves the observation empty and
-// unobserved so a transient failure cannot declare or end an episode.
-func (h *HubServer) observeLaneUndelivered(ctx context.Context, lane string, now time.Time) laneStallObservation {
-	obs := laneStallObservation{lane: lane}
-	var afterID int64
-	for {
-		pageStart := afterID
-		records, err := h.handoffkeep.listUndelivered(ctx, lane, "", afterID, handoffkeepReplayLimit)
-		if err != nil {
-			h.logger.Warn("lane stall check could not read undelivered relay events", "lane", lane)
-			return laneStallObservation{lane: lane}
-		}
-		obs.observed = true
-		for _, record := range records {
-			obs.consider(record, now)
-			if record.ID > afterID {
-				afterID = record.ID
-			}
-		}
-		if len(records) < handoffkeepReplayLimit {
-			return obs
-		}
-		if afterID <= pageStart {
-			h.logger.Warn("lane stall check cursor did not advance", "lane", lane, "after_id", pageStart)
-			return obs
-		}
-	}
 }
 
 // broadcastLaneStalled puts the activated stall on the operator feed once per

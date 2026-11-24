@@ -535,12 +535,12 @@ func TestT1002StallCountsMarkedRowUntilRetired(t *testing.T) {
 	rig.fake.mu.Unlock()
 	rig.unconfirmed(directive, "maybe_in_pane")
 
-	obs := rig.hub.observeLaneUndelivered(context.Background(), t1002Lane, time.Now())
+	obs := rig.hub.observeLanesUndelivered(context.Background(), []string{t1002Lane}, time.Now())[t1002Lane]
 	if !obs.observed || !obs.stalled || obs.oldestEventID != eventID || obs.undelivered != 1 {
 		t.Fatalf("marked row was not counted as backlog: %+v", obs)
 	}
 	rig.restart()
-	obs = rig.hub.observeLaneUndelivered(context.Background(), t1002Lane, time.Now())
+	obs = rig.hub.observeLanesUndelivered(context.Background(), []string{t1002Lane}, time.Now())[t1002Lane]
 	if obs.stalled || obs.undelivered != 0 {
 		t.Fatalf("retired row still counted as backlog: %+v", obs)
 	}
