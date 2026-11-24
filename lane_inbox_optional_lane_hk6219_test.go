@@ -180,13 +180,14 @@ func (s *oldLaneInboxStore) counts(lane string) (map[string]int, error) {
 // (list, ackStates, read, ack, counts) with lane empty and lane given,
 // the refactored Go WHERE building returns exactly what the old (?=” OR lane=?)
 // queries returned across backends.
+//
+// Each case opens fresh storage for both stores, so no case inherits rows that
+// an earlier case read or acked (hk 6221).
 func TestLaneInboxStoreOptionalLaneMatchesOldOracle(t *testing.T) {
 	for _, backend := range laneInboxBackends() {
 		t.Run(backend.name, func(t *testing.T) {
-			openNew := backend.fresh(t)
-			openOld := backend.fresh(t)
-
-			seed := func(s *laneInboxStore) ([]int64, []string) {
+			// seed puts five unread rows in lanes lane-a, lane-b, lane-c, lane-a, lane-b.
+			seed := func(t *testing.T, s *laneInboxStore) ([]int64, []string) {
 				now := time.UnixMilli(1_700_000_000_000).UTC()
 				var ids []int64
 				var eventIDs []string
@@ -211,13 +212,48 @@ func TestLaneInboxStoreOptionalLaneMatchesOldOracle(t *testing.T) {
 				return ids, eventIDs
 			}
 
+			// freshPair opens a new store and an old-oracle store over fresh,
+			// identically seeded storage.
+			freshPair := func(t *testing.T) (sNew *laneInboxStore, oldStore *oldLaneInboxStore, idsNew, idsOld []int64, eventIDs []string) {
+				t.Helper()
+				sNew = backend.fresh(t)()
+				sOld := backend.fresh(t)()
+				idsNew, eventIDs = seed(t, sNew)
+				idsOld, _ = seed(t, sOld)
+				return sNew, &oldLaneInboxStore{laneInboxStore: sOld}, idsNew, idsOld, eventIDs
+			}
+
+			// readAndAck marks row 0 (lane-a) read and row 1 (lane-b) acked, so the
+			// populated lanes hold both read and unread rows and unread=true differs
+			// from unread=false. It only sets up state; both stores get the same setup.
+			readAndAck := func(t *testing.T, s *laneInboxStore, ids []int64) {
+				t.Helper()
+				now := time.UnixMilli(1_700_000_050_000).UTC()
+				if _, err := s.read(ids[0], "", now); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.ack(ids[1], "", false, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+
 			// 1. Test list (lane empty vs lane given, unread true and false)
 			t.Run("list", func(t *testing.T) {
-				sNew := openNew()
-				sOld := openOld()
-				seed(sNew)
-				seed(sOld)
-				oldStore := &oldLaneInboxStore{laneInboxStore: sOld}
+				sNew, oldStore, idsNew, idsOld, _ := freshPair(t)
+				readAndAck(t, sNew, idsNew)
+				readAndAck(t, oldStore.laneInboxStore, idsOld)
+
+				allRows, err := oldStore.list("", false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				unreadRows, err := oldStore.list("", true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(allRows) == len(unreadRows) {
+					t.Fatalf("fixture does not distinguish unread: both return %d rows", len(allRows))
+				}
 
 				for _, lane := range []string{"", "lane-a", "lane-b", "lane-c", "lane-z"} {
 					for _, unread := range []bool{false, true} {
@@ -240,11 +276,7 @@ func TestLaneInboxStoreOptionalLaneMatchesOldOracle(t *testing.T) {
 
 			// 2. Test ackStates (sender empty vs sender given)
 			t.Run("ackStates", func(t *testing.T) {
-				sNew := openNew()
-				sOld := openOld()
-				_, evIDs := seed(sNew)
-				seed(sOld)
-				oldStore := &oldLaneInboxStore{laneInboxStore: sOld}
+				sNew, oldStore, _, _, evIDs := freshPair(t)
 
 				for _, sender := range []string{"", "sender-1", "sender-2", "sender-z"} {
 					got, errGot := sNew.ackStates(evIDs, sender)
@@ -260,11 +292,9 @@ func TestLaneInboxStoreOptionalLaneMatchesOldOracle(t *testing.T) {
 
 			// 3. Test counts (lane empty vs lane given)
 			t.Run("counts", func(t *testing.T) {
-				sNew := openNew()
-				sOld := openOld()
-				seed(sNew)
-				seed(sOld)
-				oldStore := &oldLaneInboxStore{laneInboxStore: sOld}
+				sNew, oldStore, idsNew, idsOld, _ := freshPair(t)
+				readAndAck(t, sNew, idsNew)
+				readAndAck(t, oldStore.laneInboxStore, idsOld)
 
 				for _, lane := range []string{"", "lane-a", "lane-b", "lane-c", "lane-z"} {
 					got, errGot := sNew.counts(lane)
@@ -278,37 +308,37 @@ func TestLaneInboxStoreOptionalLaneMatchesOldOracle(t *testing.T) {
 				}
 			})
 
-			// 4. Test read (lane empty vs correct lane vs wrong lane)
+			// 4. Test read (lane empty vs correct lane vs wrong lane). Each case
+			// reads row 0, which is in lane-a.
 			t.Run("read", func(t *testing.T) {
 				now := time.UnixMilli(1_700_000_100_000).UTC()
 				for _, tc := range []struct {
-					name string
-					lane string
+					name      string
+					lane      string
+					populated bool // the filter selects row 0, so read must change it
 				}{
-					{"empty lane", ""},
-					{"matching lane", "lane-a"},
-					{"mismatched lane", "lane-b"},
-					{"nonexistent lane", "lane-z"},
+					{"empty lane", "", true},
+					{"matching lane", "lane-a", true},
+					{"mismatched lane", "lane-b", false},
+					{"nonexistent lane", "lane-z", false},
 				} {
-					sNew := openNew()
-					sOld := openOld()
-					idsNew, _ := seed(sNew)
-					idsOld, _ := seed(sOld)
-					oldStore := &oldLaneInboxStore{laneInboxStore: sOld}
+					t.Run(tc.name, func(t *testing.T) {
+						sNew, oldStore, idsNew, idsOld, _ := freshPair(t)
 
-					targetIDNew := idsNew[0] // lane-a
-					targetIDOld := idsOld[0]
-
-					got, errGot := sNew.read(targetIDNew, tc.lane, now)
-					want, errWant := oldStore.read(targetIDOld, tc.lane, now)
-					if (errGot != nil) != (errWant != nil) {
-						t.Fatalf("%s: error mismatch: got %v, want %v", tc.name, errGot, errWant)
-					}
-					if errGot == nil {
-						if got.ID != want.ID || got.Lane != want.Lane || got.ReadAt != want.ReadAt {
-							t.Fatalf("%s: read mismatch: got %+v, want %+v", tc.name, got, want)
+						got, errGot := sNew.read(idsNew[0], tc.lane, now)
+						want, errWant := oldStore.read(idsOld[0], tc.lane, now)
+						if (errGot != nil) != (errWant != nil) {
+							t.Fatalf("error mismatch: got %v, want %v", errGot, errWant)
 						}
-					}
+						if errGot == nil {
+							if got.ID != want.ID || got.Lane != want.Lane || got.ReadAt != want.ReadAt {
+								t.Fatalf("read mismatch: got %+v, want %+v", got, want)
+							}
+						}
+						if tc.populated && (errGot != nil || got.ReadAt != now.UnixMilli()) {
+							t.Fatalf("populated lane but read changed nothing: got %+v, err %v", got, errGot)
+						}
+					})
 				}
 			})
 
@@ -317,26 +347,28 @@ func TestLaneInboxStoreOptionalLaneMatchesOldOracle(t *testing.T) {
 				now := time.UnixMilli(1_700_000_200_000).UTC()
 				for _, all := range []bool{false, true} {
 					for _, lane := range []string{"", "lane-a", "lane-b", "lane-z"} {
-						sNew := openNew()
-						sOld := openOld()
-						idsNew, _ := seed(sNew)
-						idsOld, _ := seed(sOld)
-						oldStore := &oldLaneInboxStore{laneInboxStore: sOld}
+						t.Run(fmt.Sprintf("all=%v/lane=%q", all, lane), func(t *testing.T) {
+							sNew, oldStore, idsNew, idsOld, _ := freshPair(t)
 
-						var targetIDNew, targetIDOld int64
-						if !all {
-							targetIDNew = idsNew[0]
-							targetIDOld = idsOld[0]
-						}
+							var targetIDNew, targetIDOld int64
+							if !all {
+								targetIDNew = idsNew[0]
+								targetIDOld = idsOld[0]
+							}
 
-						got, errGot := sNew.ack(targetIDNew, lane, all, now)
-						want, errWant := oldStore.ack(targetIDOld, lane, all, now)
-						if (errGot != nil) != (errWant != nil) {
-							t.Fatalf("all=%v lane=%q: error mismatch: got %v, want %v", all, lane, errGot, errWant)
-						}
-						if got != want {
-							t.Fatalf("all=%v lane=%q targetIDNew=%d targetIDOld=%d: ack count mismatch: got %d, want %d", all, lane, targetIDNew, targetIDOld, got, want)
-						}
+							got, errGot := sNew.ack(targetIDNew, lane, all, now)
+							want, errWant := oldStore.ack(targetIDOld, lane, all, now)
+							if (errGot != nil) != (errWant != nil) {
+								t.Fatalf("error mismatch: got %v, want %v", errGot, errWant)
+							}
+							if got != want {
+								t.Fatalf("targetIDNew=%d targetIDOld=%d: ack count mismatch: got %d, want %d", targetIDNew, targetIDOld, got, want)
+							}
+							// Lanes lane-a and "" select row 0, so these cases must ack something.
+							if (lane == "" || lane == "lane-a") && got == 0 {
+								t.Fatalf("populated lane acked no rows; the table is drained")
+							}
+						})
 					}
 				}
 			})
