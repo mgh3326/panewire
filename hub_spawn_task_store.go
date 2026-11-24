@@ -382,6 +382,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	if err := s.reconcileSpawnQueueWithin(s.life); err != nil {
 		return err
 	}
+	// Succeeded outcomes' notices written before they were inserted recorded
+	// (hk 6283; postgres: 0039, mysql: 0032).
+	if err := s.backfillSucceededSpawnNotices(s.life); err != nil {
+		return err
+	}
 	// The placement-record and notice outboxes (hk 5298; postgres: 0028). They
 	// take the startup deadline from the store's life, not what is left of this
 	// call's ordinary one: the reconcile reads the history's owed rows.
@@ -927,8 +932,10 @@ func queueSpawnNoticeRows(ctx context.Context, s *laneInboxStore, tx *sql.Tx, ta
 			lanes = append(lanes, struct{ id, lane string }{eventID + ":" + lane, lane})
 		}
 	}
+	// Every copy tells the same outcome, so it takes the mark of the bare id.
+	recorded := spawnNoticeRecordedAtInsert(eventID)
 	for _, n := range lanes {
-		if _, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?)`, "")), n.id, task.Request.RequestID, task.Job, n.lane, raw, now.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,telemetry_recorded) VALUES(?,?,?,?,?,?,?)`, "")), n.id, task.Request.RequestID, task.Job, n.lane, raw, now.UnixMilli(), recorded); err != nil {
 			return err
 		}
 		if err := s.enqueueSpawnNotice(ctx, tx, n.id); err != nil {

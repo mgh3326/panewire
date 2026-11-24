@@ -168,9 +168,9 @@ func copyHubStore(ctx context.Context, from, to, selection string, verify, repla
 		return hubDatabaseError("inspect target schema", err)
 	}
 	if dst.dialect == dialectPostgres {
-		err = migrateHubPostgres(ctx, dst.db)
+		_, err = migrateHubPostgres(ctx, dst.db)
 	} else {
-		err = migrateHubMySQL(ctx, dst.db)
+		_, err = migrateHubMySQL(ctx, dst.db)
 	}
 	if err != nil {
 		return hubDatabaseError("migrate target", err)

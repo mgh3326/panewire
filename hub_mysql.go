@@ -20,6 +20,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -401,11 +402,14 @@ func openLaneInboxStoreMySQLConfig(ctx context.Context, config *mysql.Config) (*
 	}
 	ctx, cancel := hubMigrationContext(ctx)
 	defer cancel()
-	if err := migrateHubMySQL(ctx, db); err != nil {
+	marked, err := migrateHubMySQL(ctx, db)
+	if err != nil {
 		db.Close()
 		return nil, hubDatabaseError("migrate", err)
 	}
-	return newLaneInboxStore(db, dialectMySQL), nil
+	store := newLaneInboxStore(db, dialectMySQL)
+	store.succeededNoticesMarked = marked
+	return store, nil
 }
 
 // openHubMySQL connects without touching the schema.
@@ -448,18 +452,19 @@ const hubMySQLLedger = `CREATE TABLE IF NOT EXISTS panewire_schema_migrations (
  PRIMARY KEY (version)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`
 
 // migrateHubMySQL applies the embedded migrations not yet recorded, on one
-// pinned connection holding the migration lock.
-func migrateHubMySQL(ctx context.Context, db *sql.DB) error {
+// pinned connection holding the migration lock. marked is the rows the
+// succeeded-notice backfill updated, when this run applied it.
+func migrateHubMySQL(ctx context.Context, db *sql.DB) (marked *int64, err error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.Close()
 	release, err := dialectMySQL.lockMigration(ctx, conn)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	err = migrateHubMySQLConn(ctx, conn)
+	marked, err = migrateHubMySQLConn(ctx, conn)
 	if releaseErr := release(); releaseErr != nil {
 		// A lock that may still be held must not return to the pool with its
 		// session: closing the session frees it.
@@ -468,50 +473,53 @@ func migrateHubMySQL(ctx context.Context, db *sql.DB) error {
 			err = releaseErr
 		}
 	}
-	return err
+	return marked, err
 }
 
-func migrateHubMySQLConn(ctx context.Context, conn *sql.Conn) error {
+func migrateHubMySQLConn(ctx context.Context, conn *sql.Conn) (marked *int64, err error) {
 	names, err := fs.Glob(hubMySQLMigrations, "hub_mysql_migrations/*.sql")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	sort.Strings(names)
 	if _, err := conn.ExecContext(ctx, hubMySQLLedger); err != nil {
-		return err
+		return nil, err
 	}
 	for _, name := range names {
 		version := strings.TrimSuffix(strings.TrimPrefix(name, "hub_mysql_migrations/"), ".sql")
 		var applied int
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM panewire_schema_migrations WHERE version=?`, version).Scan(&applied); err != nil {
-			return err
+			return nil, err
 		}
 		if applied > 0 {
 			continue
 		}
 		body, err := hubMySQLMigrations.ReadFile(name)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		migration, err := parseHubMySQLMigration(string(body))
 		if err != nil {
-			return fmt.Errorf("migration %s: %w", version, err)
+			return nil, fmt.Errorf("migration %s: %w", version, err)
 		}
 		var done int
 		if err := conn.QueryRowContext(ctx, migration.appliedIf).Scan(&done); err != nil {
-			return err
+			return nil, err
 		}
+		var rows int64
 		if done == 0 {
-			// No arguments: the driver sends the statement as text.
-			if _, err := conn.ExecContext(ctx, migration.statement); err != nil {
-				return err
+			if rows, err = migration.run(ctx, conn); err != nil {
+				return nil, err
 			}
 		}
 		if _, err := conn.ExecContext(ctx, `INSERT INTO panewire_schema_migrations(version) VALUES(?)`, version); err != nil {
-			return err
+			return nil, err
+		}
+		if strings.HasSuffix(version, succeededNoticeMigration) {
+			marked = &rows
 		}
 	}
-	return nil
+	return marked, nil
 }
 
 // hubMySQLMigration is one migration file: a guard and one statement.
@@ -521,9 +529,38 @@ type hubMySQLMigration struct {
 	appliedIf string
 	// statement is the one DDL or data statement.
 	statement string
+	// batchRows, when set, is the LIMIT of a batched UPDATE: the statement
+	// runs until a run matches fewer rows.
+	batchRows int64
 }
 
-const appliedIfPrefix = "-- applied-if:"
+const (
+	appliedIfPrefix = "-- applied-if:"
+	batchRowsPrefix = "-- batch-rows:"
+)
+
+// run executes the file's statement: once, or, for a batched file, again until
+// a run matches fewer rows than a batch. Each run commits on its own, so a
+// start cut off part way keeps the finished batches and the next start does
+// the rest. It returns the rows matched.
+func (m hubMySQLMigration) run(ctx context.Context, x sqlExecer) (int64, error) {
+	var total int64
+	for {
+		// No arguments: the driver sends the statement as text.
+		result, err := x.ExecContext(ctx, m.statement)
+		if err != nil {
+			return total, err
+		}
+		n, err := dialectMySQL.rowsMatched(result)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if m.batchRows == 0 || n < m.batchRows {
+			return total, nil
+		}
+	}
+}
 
 // parseHubMySQLMigration splits a migration file into its guard and its one
 // statement, and refuses a file that is neither: MySQL commits each DDL
@@ -540,6 +577,15 @@ func parseHubMySQLMigration(body string) (hubMySQLMigration, error) {
 				return m, errors.New("more than one applied-if guard")
 			}
 			m.appliedIf = strings.TrimSpace(strings.TrimPrefix(line, appliedIfPrefix))
+		case strings.HasPrefix(line, batchRowsPrefix):
+			if m.batchRows != 0 {
+				return m, errors.New("more than one batch-rows line")
+			}
+			n, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, batchRowsPrefix)), 10, 64)
+			if err != nil || n <= 0 {
+				return m, errors.New("batch-rows is not a positive number")
+			}
+			m.batchRows = n
 		case strings.HasPrefix(line, "--") || line == "":
 		default:
 			code = append(code, line)
@@ -557,6 +603,13 @@ func parseHubMySQLMigration(body string) (hubMySQLMigration, error) {
 		return m, errors.New("more than one statement")
 	}
 	m.statement = statement
+	if m.batchRows != 0 {
+		// A LIMIT below the batch would end the loop with rows left over.
+		words := strings.Fields(strings.ToUpper(statement))
+		if len(words) < 3 || words[0] != "UPDATE" || words[len(words)-2] != "LIMIT" || words[len(words)-1] != strconv.FormatInt(m.batchRows, 10) {
+			return m, errors.New("a batched statement is an UPDATE ending in LIMIT batch-rows")
+		}
+	}
 	switch word, _, _ := strings.Cut(strings.ToUpper(statement), " "); word {
 	case "CREATE", "ALTER", "DROP":
 		if !strings.Contains(strings.ToLower(m.appliedIf), "information_schema") {

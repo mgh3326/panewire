@@ -55,6 +55,10 @@ type laneInboxStore struct {
 	// reads gates the hub's polling loops on writes and due times, one gate
 	// per loop (read_gate.go, hk 5302).
 	reads [readKinds]readGate
+	// succeededNoticesMarked is the rows the one-time backfill of succeeded
+	// spawn notices updated, when this store's start applied it; nil otherwise
+	// (hub_spawn_notice_recorded.go).
+	succeededNoticesMarked *int64
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration

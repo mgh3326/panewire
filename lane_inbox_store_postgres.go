@@ -41,11 +41,14 @@ func openLaneInboxStorePostgresConfig(ctx context.Context, config *pgx.ConnConfi
 	}
 	ctx, cancel := hubMigrationContext(ctx)
 	defer cancel()
-	if err := migrateHubPostgres(ctx, db); err != nil {
+	marked, err := migrateHubPostgres(ctx, db)
+	if err != nil {
 		db.Close()
 		return nil, hubDatabaseError("migrate", err)
 	}
-	return newLaneInboxStore(db, dialectPostgres), nil
+	store := newLaneInboxStore(db, dialectPostgres)
+	store.succeededNoticesMarked = marked
+	return store, nil
 }
 
 // openHubPostgres connects without touching the schema.
@@ -65,54 +68,68 @@ func openHubPostgres(ctx context.Context, config *pgx.ConnConfig) (*sql.DB, erro
 	return db, nil
 }
 
-func migrateHubPostgres(ctx context.Context, db *sql.DB) error {
+// migrateHubPostgres commits the migrations not yet recorded. marked is the
+// rows the succeeded-notice backfill updated, when this run applied it.
+func migrateHubPostgres(ctx context.Context, db *sql.DB) (*int64, error) {
 	tx, err := dialectPostgres.begin(ctx, db)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
-	if err := migrateHubPostgresTx(ctx, tx); err != nil {
-		return err
+	marked, err := migrateHubPostgresTx(ctx, tx)
+	if err != nil {
+		return nil, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return marked, nil
 }
 
 // migrateHubPostgresTx applies the embedded migrations not yet recorded, on
 // the caller's transaction: the hub commits them alone.
-func migrateHubPostgresTx(ctx context.Context, tx *sql.Tx) error {
+func migrateHubPostgresTx(ctx context.Context, tx *sql.Tx) (marked *int64, err error) {
 	names, err := fs.Glob(hubPostgresMigrations, "hub_postgres_migrations/*.sql")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	sort.Strings(names)
 	if _, err := dialectPostgres.lockMigration(ctx, tx); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS panewire_schema_migrations (
  version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
-		return err
+		return nil, err
 	}
 	for _, name := range names {
 		version := strings.TrimSuffix(strings.TrimPrefix(name, "hub_postgres_migrations/"), ".sql")
 		var applied bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM panewire_schema_migrations WHERE version=$1)`, version).Scan(&applied); err != nil {
-			return err
+			return nil, err
 		}
 		if applied {
 			continue
 		}
 		body, err := hubPostgresMigrations.ReadFile(name)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// No arguments: pgx runs this over the simple protocol, which
 		// accepts a multi-statement migration file.
-		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
-			return err
+		result, err := tx.ExecContext(ctx, string(body))
+		if err != nil {
+			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO panewire_schema_migrations(version) VALUES($1)`, version); err != nil {
-			return err
+			return nil, err
+		}
+		if strings.HasSuffix(version, succeededNoticeMigration) {
+			rows, err := dialectPostgres.rowsMatched(result)
+			if err != nil {
+				return nil, err
+			}
+			marked = &rows
 		}
 	}
-	return nil
+	return marked, nil
 }

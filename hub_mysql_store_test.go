@@ -182,7 +182,7 @@ func TestLaneInboxStoreMySQLPoolAndLockLimits(t *testing.T) {
 		t.Errorf("MaxOpenConnections = %d, want %d (at most 24)", got, hubMySQLMaxConns)
 	}
 	start := time.Now()
-	if err := migrateHubMySQL(context.Background(), s.db); err != nil {
+	if _, err := migrateHubMySQL(context.Background(), s.db); err != nil {
 		t.Fatal(err)
 	}
 	if took := time.Since(start); took > 10*time.Second {
