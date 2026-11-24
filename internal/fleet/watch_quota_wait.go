@@ -244,19 +244,28 @@ func (a *App) adoptQuotaWait(ctx context.Context, j Job, view ledgerView, held, 
 	if w.reset != "" {
 		payload["reset_at"] = w.reset
 	}
-	var adopted time.Time
+	// The completion deadline is computed once, here, and the payload and the
+	// return carry the same value. It is clamped to the wait's until: when the
+	// ordinary deadline passed while the lock was waited for, the extension is
+	// measured from that later moment and would otherwise land before until, which
+	// QuotaWaitAckedAt refuses as an ack that does not reach the wait (hk 5821).
+	var next time.Time
 	err := a.eventIf(ctx, j.ID, quotaWaitAdoptedKind, payload, func(v ledgerView) error {
 		if v.Superseded(j.Pane, w.attempt) || v.Ended != "" {
 			return errQuotaStopSuperseded
 		}
-		adopted = a.Now()
+		adopted := a.Now()
 		if !w.until.After(adopted) {
 			// The wait ran out while the lock was waited for: nothing to adopt, and
 			// a negative extension would pull the deadline in.
 			return errQuotaStopSuperseded
 		}
+		next = deadline.Add(w.until.Sub(adopted))
+		if next.Before(w.until) {
+			next = w.until
+		}
 		payload["adopted_at"] = adopted.UTC().Format(time.RFC3339Nano)
-		payload["deadline"] = deadline.Add(w.until.Sub(adopted)).UTC().Format(time.RFC3339Nano)
+		payload["deadline"] = next.UTC().Format(time.RFC3339Nano)
 		return nil
 	})
 	if err != nil {
@@ -265,5 +274,5 @@ func (a *App) adoptQuotaWait(ctx context.Context, j Job, view ledgerView, held, 
 		}
 		return deadline, held
 	}
-	return deadline.Add(w.until.Sub(adopted)), w.until
+	return next, w.until
 }
