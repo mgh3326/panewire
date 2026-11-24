@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,7 +22,8 @@ import (
 func checkDeployMacOSShards(raw []byte) error {
 	var w struct {
 		Jobs map[string]struct {
-			RunsOn   string `yaml:"runs-on"`
+			RunsOn   string    `yaml:"runs-on"`
+			Needs    needsList `yaml:"needs"`
 			Strategy struct {
 				Matrix map[string][]string `yaml:"matrix"`
 			} `yaml:"strategy"`
@@ -78,6 +80,25 @@ func checkDeployMacOSShards(raw []byte) error {
 	if !hasShardRun {
 		return errors.New("macos-shard job does not run scripts/ci-test-shard.sh ${{ matrix.shard }}")
 	}
+
+	deployOk, ok := w.Jobs["deploy-ok"]
+	if !ok {
+		return errors.New("deploy.yml has no deploy-ok job")
+	}
+	if !slices.Contains(deployOk.Needs, "macos-shard") {
+		return errors.New("deploy-ok job does not include macos-shard in needs")
+	}
+	hasShardResult := false
+	for _, step := range deployOk.Steps {
+		if strings.Contains(step.Run, "MACOS_SHARD_RESULT") {
+			hasShardResult = true
+			break
+		}
+	}
+	if !hasShardResult {
+		return errors.New("deploy-ok job does not evaluate MACOS_SHARD_RESULT")
+	}
+
 	return verifyShardSpecsCoverEveryRootTest(specs)
 }
 
@@ -188,5 +209,43 @@ func TestDeployMacOSShardsFixedArgumentMutantFails(t *testing.T) {
 	}
 	if err := checkDeployMacOSShards([]byte(mutant)); err == nil {
 		t.Fatal("hardcoding a fixed shard argument went undetected")
+	}
+}
+
+// TestDeployMacOSShardsDeployOkNeedsMutantFails proves that dropping macos-shard
+// from deploy-ok's needs is rejected.
+func TestDeployMacOSShardsDeployOkNeedsMutantFails(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/deploy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkDeployMacOSShards(raw); err != nil {
+		t.Fatalf("unmutated deploy.yml is invalid: %v", err)
+	}
+	mutant := strings.Replace(string(raw), "macos-shard, ", "", 1)
+	if mutant == string(raw) {
+		t.Fatal("mutant did not apply")
+	}
+	if err := checkDeployMacOSShards([]byte(mutant)); err == nil {
+		t.Fatal("dropping macos-shard from deploy-ok needs went undetected")
+	}
+}
+
+// TestDeployMacOSShardsDeployOkScriptMutantFails proves that dropping MACOS_SHARD_RESULT
+// evaluation from deploy-ok is rejected.
+func TestDeployMacOSShardsDeployOkScriptMutantFails(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/deploy.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkDeployMacOSShards(raw); err != nil {
+		t.Fatalf("unmutated deploy.yml is invalid: %v", err)
+	}
+	mutant := strings.Replace(string(raw), "$MACOS_SHARD_RESULT", "", 1)
+	if mutant == string(raw) {
+		t.Fatal("mutant did not apply")
+	}
+	if err := checkDeployMacOSShards([]byte(mutant)); err == nil {
+		t.Fatal("dropping MACOS_SHARD_RESULT from deploy-ok went undetected")
 	}
 }

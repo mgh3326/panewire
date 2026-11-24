@@ -29,6 +29,7 @@ permissions:
   # The gate below reads the main-stage verdict on the release commit.
   checks: read
   statuses: read
+  actions: read
 
 jobs:
   gate:
@@ -59,6 +60,14 @@ jobs:
             case "$state" in
               success) echo "release gate: ${CONTEXT} commit status success on ${SHA}"; exit 0 ;;
               failure|error) echo "release gate: ${CONTEXT} commit status ${state} on ${SHA}" >&2; exit 1 ;;
+            esac
+            ci_run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&event=push" \
+              --jq '[.workflow_runs[] | select(.name == "CI" and .head_branch == "main")][0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)
+            case "$ci_run" in
+              "completed cancelled")
+                echo "release gate: latest main CI push run on ${SHA} completed cancelled; stopping early" >&2
+                exit 1
+                ;;
             esac
             if [ "$SECONDS" -ge "$deadline" ]; then
               echo "release gate: ${CONTEXT} did not turn green on ${SHA} within 60m" >&2
