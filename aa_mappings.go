@@ -9,6 +9,7 @@ var aaMappings = map[aaRowKey]string{
 	{"codex-sol", "gpt-6.1-sol", "high"}:                     "3b84fee3-b70a-41bc-819e-5fbdef9a0042", // GPT-6.1 Sol (High)
 	{"codex-sol", "gpt-6.1-sol", "xhigh"}:                    "092a3b0e-c5c8-45dc-bf1b-53673c8ff352", // GPT-6.1 Sol (Xhigh)
 	{"codex-sol", "gpt-6.1-sol", "max"}:                      "b25ac058-1e33-4c31-bbc9-a20c3ad0717a", // GPT-6.1 Sol (Max)
+	{"codex-sol", "gpt-6.2-sol", "xhigh"}:                    "27c326a6-ec9b-415f-a29e-b1f4927484dc", // GPT-6.2 Sol (Xhigh)
 	{"omp-sol", "openai/gpt-6.1-sol", "low"}:                 "e76e0fe5-93ca-4272-9359-2eb1740467d1", // GPT-6.1 Sol (Low)
 	{"omp-sol", "openai/gpt-6.1-sol", "medium"}:              "a2e51d62-ea4e-4f15-8be0-be9dc1fb489d", // GPT-6.1 Sol (Medium)
 	{"omp-sol", "openai/gpt-6.1-sol", "high"}:                "3b84fee3-b70a-41bc-819e-5fbdef9a0042", // GPT-6.1 Sol (High)

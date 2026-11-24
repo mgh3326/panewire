@@ -99,6 +99,21 @@
       }
     },
     {
+      "id": "27c326a6-ec9b-415f-a29e-b1f4927484dc",
+      "name": "GPT-6.2 Sol (Xhigh)",
+      "slug": "gpt-6-2-sol-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 53.1
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 70.5
+      }
+    },
+    {
       "id": "f314eade-2232-44bf-a3ab-9b326bc67de6",
       "name": "Claude Opus 5.5 (High, Default Fallback)",
       "slug": "claude-opus-5-5-high",
