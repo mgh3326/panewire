@@ -30,6 +30,16 @@ func TestLadderReleaseNoticeIsDurableUntilRelayed(t *testing.T) {
 	f := newLadderCloseFixture(t, "pw-task-6137-notice", true)
 	stageID := f.stageLiveSuccessorWithClose(t, &fleet.LadderCloseBinding{Protocol: fleet.LadderCloseProtocolMarker}, true)
 	eventID := ladderReleaseEventPrefix + stageID
+	// The spawn coordinator runs the notice gate. Start it after the setup and let
+	// its first pass settle, so the only thing that can wake the gate for the
+	// release is the release's own commit (no earlier pending pass can deliver it).
+	f.hub.startSpawnCoordinator(t.Context())
+	gate := f.hub.inbox.store.readGate(readSpawnNotice)
+	eventually(t, 5*time.Second, "the notice gate to settle its first pass", func() bool {
+		gate.mu.Lock()
+		defer gate.mu.Unlock()
+		return gate.primed && gate.seen == gate.gen.Load()
+	})
 	// The relay is down: the hub stops between the release commit and the relay.
 	f.hub.spawnNoticeRelayFilter = func(id string) bool { return id == eventID }
 	recorder := releaseLadderHTTP(t, f.hub, stageID, t14OperatorToken, "", "relay down at release")
@@ -46,9 +56,12 @@ func TestLadderReleaseNoticeIsDurableUntilRelayed(t *testing.T) {
 		t.Fatalf("the notice reached the owner while the relay was down: %q", seen)
 	}
 	// The relay answers again: the outbox delivers the notice and clears its row.
+	// No manual flush: the release's commit gives the spawn notice gate work. The
+	// held row's retry (spawnNoticeRetry, 2s) and the coordinator's 2s tick put the
+	// relay up to about 4s after the release; the 10s window is well under
+	// readBackstop (1m), and without the wake the row waits for that backstop.
 	f.hub.spawnNoticeRelayFilter = nil
-	f.hub.flushSpawnNotifications(t.Context())
-	eventually(t, 2*time.Second, "the owner notice to be relayed once the relay answers", func() bool {
+	eventually(t, 10*time.Second, "the owner notice to be relayed once the relay answers", func() bool {
 		releasedNotices(f, &seen)
 		return len(seen) == 1
 	})
