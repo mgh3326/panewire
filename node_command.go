@@ -181,6 +181,12 @@ type nodePaneCaptureResult struct {
 // happens either way.
 const hubFeaturePaneCaptureDoc = "pane_capture_doc"
 
+// hubFeatureWorktreeListDetail: a hub before #812 refuses a node.command.result
+// for worktree.list invalid_args that carries detail, so a node sends that
+// detail only on a connection whose hub advertised this. Otherwise the reply
+// is the four-field invalid_args an older hub accepts.
+const hubFeatureWorktreeListDetail = "worktree_list_detail"
+
 type nodeWorktree struct {
 	Path      string `json:"path"`
 	Branch    string `json:"branch"`
@@ -1004,7 +1010,7 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 		}
 	}
 	reply.Error = code
-	if code == "done_failed" || code == "invalid_args" && message.CommandOp == nodeCommandWorktreeList {
+	if code == "done_failed" || (code == "invalid_args" && message.CommandOp == nodeCommandWorktreeList && peer.acceptsWorktreeListDetail.Load()) {
 		reply.Detail, _ = result.(string)
 	}
 	if message.CommandOp == nodeCommandJobResult {

@@ -1169,7 +1169,9 @@ directories. Missing worktrees remain in the list with a status error.
 If `common` does not exist or is not a Git directory (a main checkout with a
 `.git` entry, or a git directory with `HEAD` and `objects`), the node answers
 `invalid_args` with detail `common_dir_missing` and runs no Git. A Git failure
-on an existing repository stays `herdr_failed`.
+on an existing repository stays `herdr_failed`. The node sends that detail only
+to a hub that advertised `worktree_list_detail` in `hub.features`; any other hub
+gets the four-field `invalid_args` reply.
 
 A cursor is valid only for the same repository snapshot and node process. If
 Git's worktree list changes or the node restarts, start again without a cursor.
