@@ -49,6 +49,9 @@ type laneInboxStore struct {
 	// earliest known due time passes, or the safety fallback lapses
 	// (inbox_work_gate.go).
 	workGen atomic.Uint64
+	// inboxChange tells the re-wake pass which lanes' unread sets and which
+	// lane list may have changed (inbox_change_signal.go, hk 6257).
+	inboxChange inboxChangeSignal
 	// reads gates the hub's polling loops on writes and due times, one gate
 	// per loop (read_gate.go, hk 5302).
 	reads [readKinds]readGate
@@ -727,8 +730,10 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 		s.noteBatchesChanged()
 	}
 	if fresh {
-		// A new row can carry a hold, a digest window or a deadline.
+		// A new row can carry a hold, a digest window or a deadline, and it
+		// is a new unread item (or, through a supersede, ends one).
 		s.noteWorkChanged()
+		s.noteInboxChanged(lane)
 	}
 	if fresh && (class == "inbox" || mustAck) {
 		close(s.notify)
@@ -1019,11 +1024,19 @@ func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxIt
 	if err != nil {
 		return laneInboxItem{}, err
 	}
+	item, scanErr := scanLaneInbox(s.db.QueryRowContext(ctx, s.q(selectQ), args...))
 	if n, _ := s.dialect.rowsMatched(updated); n > 0 {
 		s.noteBatchesChanged()
 		s.noteWorkChanged()
+		// The row's lane is the caller's, or the row's own; a row that cannot
+		// be read back leaves the lane unknown.
+		changed := lane
+		if changed == "" && scanErr == nil {
+			changed = item.Lane
+		}
+		s.noteInboxChanged(changed)
 	}
-	return scanLaneInbox(s.db.QueryRowContext(ctx, s.q(selectQ), args...))
+	return item, scanErr
 }
 
 // itemLane is the lane that owns item id; sql.ErrNoRows when there is none.
@@ -1064,6 +1077,9 @@ func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (in
 	if acked > 0 {
 		s.noteBatchesChanged()
 		s.noteWorkChanged()
+		// Without a lane the ack reached an unknown one (all lanes, or an
+		// item named by id alone).
+		s.noteInboxChanged(lane)
 	}
 	return acked, nil
 }

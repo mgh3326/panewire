@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"slices"
 	"time"
 )
 
@@ -157,8 +158,23 @@ func (s *laneInboxStore) fileUnread(now time.Time, where string, args ...any) ([
 	}
 	if len(ids) > 0 {
 		s.noteWorkChanged()
+		// The rows' class and read_at changed: each lane's unread set did.
+		for _, lane := range inboxItemLanes(items) {
+			s.noteInboxChanged(lane)
+		}
 		close(s.notify)
 		s.notify = make(chan struct{})
 	}
 	return items, nil
+}
+
+// inboxItemLanes is the distinct lanes of items, in first-seen order.
+func inboxItemLanes(items []laneInboxItem) []string {
+	var lanes []string
+	for _, i := range items {
+		if !slices.Contains(lanes, i.Lane) {
+			lanes = append(lanes, i.Lane)
+		}
+	}
+	return lanes
 }

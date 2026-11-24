@@ -479,6 +479,64 @@ the window. A hub restart forgets it: after a restart a lane may get up to
 `relay.inbox_rewake_max` more re-wakes, and the startup line above still
 announces what is unread.
 
+#### What the scan reads (hk 6257)
+
+The pass runs every 10 seconds, but a lane's unread set changes only when a row
+of that lane is written: the unread predicate (`laneInboxUnread`) reads stored
+columns and has no time term. So the pass keeps, per lane, whether it has unread
+items and the newest unread id, and reads the store only for what changed:
+
+- **the lane list** (`SELECT DISTINCT lane`) is read on the first scan after a
+  hub start, then only after a write that can add or remove a lane (the first
+  write the store sees for a lane, a write whose lane is unknown, or a delete)
+  or at a healing read;
+- **a lane's unread count and list** are read on the first scan, then only after
+  a write that can change that lane's unread set, or at a healing read.
+
+A healing read (`inboxRewakeHealEvery`, 5 minutes) re-reads the lane list and
+every inbox-only lane regardless of the signal, as the pending batch page has its
+fallback (`inboxBatchPageFallback`). It only heals a writer that missed its
+`noteInboxChanged` call; it is not the cadence, and a correct writer is read at
+the next scan.
+
+Every time rule is still evaluated at each scan on the cached state: the
+interval since the lane's last line, `relay.inbox_rewake_max`, the coalescing
+window and owed line, and whether the pane is idle. A re-wake that falls due by
+time, or that becomes due when the pane turns idle, goes out on the same scan as
+if the scan had read the store. A read that fails is not cached and is retried at
+the next scan. A hub restart starts with an empty cache, so its first scan reads
+everything.
+
+The signal is `noteInboxChanged` (`inbox_change_signal.go`): a per-lane version,
+an all-lanes version for a write that names no lane, and a lane-list version. A
+writer calls it after its commit; the pass takes the version before it reads, so
+a write that races with the read is read again, never missed. The writers that
+call it are:
+
+- `putFrom`: an insert of a new row (this also covers the supersede it runs in
+  the same transaction, and `fileEventUnread`'s new row);
+- `read` and `ack`: the lane the call names, or the row's own lane for `read`;
+  an `ack` that names no lane (all lanes, or an item by id alone) is
+  all-lanes;
+- `fileUnread`: each lane of the rows it turns into unread inbox items;
+- `prune`: all-lanes, when it deletes rows. Pruned rows are never unread, but a
+  lane can lose its last row.
+
+Writers that touch `lane_inbox` without changing a row's presence or a column the
+predicate reads (`superseded_at`, `must_ack`, `acked_at`, `class`, `read_at`) do
+not call it: `makeBatchesDue`, `makeHeldBatches`, `releaseBatchClaims`,
+`recordDelivery`, `recordStage`, `recordStageByRelayID`, `linkRelayID`, and the
+start-up and migration writes (`recoverMustAct`, `prepareInbox`, the backfills),
+which run before the hub serves. `hub store-copy` writes the table too, but only
+with the hub stopped ([cutover](hub-mysql.md#cutover-and-rollback)). A new writer
+must call `noteInboxChanged` or be listed as exempt in
+`TestInboxChangeSignalEveryLaneInboxWriterBumps`; `TestInboxChangeSignalEveryWriterBumps`
+drives each writer and asserts the version moved.
+
+The signal lives in the hub process, so it is sound only while this hub is the
+only writer of `lane_inbox`. No other binary writes the table; `hub store-copy`
+requires every hub process to be stopped ([cutover](hub-mysql.md#cutover-and-rollback)).
+
 ### A design lane with no live pane
 
 When a design lane has no route row, its row has an empty pane, or a connected
