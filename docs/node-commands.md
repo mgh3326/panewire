@@ -1171,7 +1171,11 @@ If `common` does not exist or is not a Git directory (a main checkout with a
 `invalid_args` with detail `common_dir_missing` and runs no Git. A Git failure
 on an existing repository stays `herdr_failed`. The node sends that detail only
 to a hub that advertised `worktree_list_detail` in `hub.features`; any other hub
-gets the four-field `invalid_args` reply.
+gets the four-field `invalid_args` reply. Every hub endpoint a node can reach,
+including failover endpoints, must advertise `worktree_list_detail` before nodes
+are upgraded if callers rely on that distinction, and the same dependency holds
+on rollback: rolling a hub back to a build without the feature causes connected
+nodes to fall back to the generic `invalid_args` reply.
 
 A cursor is valid only for the same repository snapshot and node process. If
 Git's worktree list changes or the node restarts, start again without a cursor.
