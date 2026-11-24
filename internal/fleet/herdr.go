@@ -437,7 +437,7 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 		return e
 	}
 	ready = false
-	for n := 0; n < 20 && a.Now().Before(deadline); n++ {
+	for a.Now().Before(deadline) {
 		r := a.call(ctx, "herdr", "pane", "read", pane, "--source", "visible", "--lines", "40")
 		for _, line := range cleanScreen(r.Out) {
 			if line == token {
