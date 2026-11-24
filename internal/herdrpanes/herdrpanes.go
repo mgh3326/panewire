@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // Runner runs herdr with args and returns its stdout, as exec.Cmd.Output does.
@@ -179,6 +180,35 @@ func paneNotFound(out []byte, err error) bool {
 	}
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr) && errorCode(exitErr.Stderr) == "pane_not_found"
+}
+
+// SessionNotFound reports whether a failed herdr call's error object (on stdout or
+// in the captured stderr of an exec error, or in the error message) proves the
+// target session does not exist (no herdr server is running for that session).
+func SessionNotFound(out []byte, err error) bool {
+	if isSessionNotFoundCode(errorCode(out)) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if isSessionNotFoundCode(errorCode(exitErr.Stderr)) {
+			return true
+		}
+		if bytes.Contains(exitErr.Stderr, []byte("no herdr server is running")) {
+			return true
+		}
+	}
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "server_not_running") || strings.Contains(msg, "session_not_found") || strings.Contains(msg, "no herdr server is running") {
+			return true
+		}
+	}
+	return false
+}
+
+func isSessionNotFoundCode(code string) bool {
+	return code == "server_not_running" || code == "session_not_found"
 }
 
 // errorCode returns the code of the error object in a herdr answer, or "".

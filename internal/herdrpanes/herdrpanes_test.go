@@ -243,3 +243,27 @@ func TestListRetriesCutExitOnce(t *testing.T) {
 		t.Fatalf("err=%v calls=%d, want success after one retry", err, calls)
 	}
 }
+
+func TestSessionNotFoundProvesSessionAbsent(t *testing.T) {
+	cases := []struct {
+		name   string
+		out    []byte
+		err    error
+		wantOK bool
+	}{
+		{"code server_not_running in stderr", nil, exitWithStderr(t, `{"error":{"code":"server_not_running","message":"no herdr server is running at /sessions/x/herdr.sock"}}`), true},
+		{"code session_not_found in stderr", nil, exitWithStderr(t, `{"error":{"code":"session_not_found","message":"no such session"}}`), true},
+		{"no herdr server is running in stderr text", nil, exitWithStderr(t, `no herdr server is running at /sessions/x/herdr.sock`), true},
+		{"code in stdout", []byte(`{"error":{"code":"server_not_running"}}`), errors.New("exit status 1"), true},
+		{"code internal_error in stderr", nil, exitWithStderr(t, `{"error":{"code":"internal_error"}}`), false},
+		{"generic exit without output", nil, exitWithStderr(t, ``), false},
+		{"plain error", nil, errors.New("connection reset"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SessionNotFound(tc.out, tc.err); got != tc.wantOK {
+				t.Fatalf("SessionNotFound() = %v, want %v", got, tc.wantOK)
+			}
+		})
+	}
+}
