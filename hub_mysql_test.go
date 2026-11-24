@@ -220,6 +220,12 @@ func TestHubMySQLConfig(t *testing.T) {
 	if !cfg.ClientFoundRows || !cfg.ParseTime {
 		t.Errorf("clientFoundRows=%v parseTime=%v, want both", cfg.ClientFoundRows, cfg.ParseTime)
 	}
+	if !cfg.InterpolateParams {
+		t.Errorf("interpolateParams=%v, want true (hk 6220)", cfg.InterpolateParams)
+	}
+	if cfg.MultiStatements {
+		t.Errorf("multiStatements=%v, want false", cfg.MultiStatements)
+	}
 	if cfg.Collation != "utf8mb4_bin" {
 		t.Errorf("collation = %q", cfg.Collation)
 	}
