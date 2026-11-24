@@ -88,6 +88,10 @@ type Store struct {
 	DB    string           // path of state.db
 	Inbox string           // jobs root holding <job>/events
 	Now   func() time.Time // clock; nil means time.Now
+	// AfterGuard, when set, runs once an append's guard has passed, under the
+	// events lock and before the event is written. It is a test seam: a test
+	// holds a writer between its check and its INSERT (hk 6172). Nil in production.
+	AfterGuard func()
 }
 
 // testForbiddenHomes lists home directories no Store may open state under.
