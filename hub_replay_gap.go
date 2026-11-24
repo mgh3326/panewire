@@ -90,8 +90,8 @@ func (h *HubServer) summarizeReplayGap(ctx context.Context, lane string, candida
 	}
 	first, last := covered[0].record, covered[len(covered)-1].record
 	eventID := "replay-gap-" + strconv.FormatInt(last.ID, 10)
-	text := fmt.Sprintf("[panewire] gap: %d events for %s were not replayed after the restart (first %s, last %s) | panewire inbox list --lane %s --unread",
-		len(covered), lane, replayGapStamp(first), replayGapStamp(last), lane)
+	text := fmt.Sprintf("[panewire] gap: %d events for %s were not replayed after the restart (first %s, last %s) | %s",
+		len(covered), lane, replayGapStamp(first), replayGapStamp(last), replayGapListCommand(lane))
 	event := hubJobEventPayload{JobID: laneEventTransportID(lane, eventID), Epoch: 1, OwnerLane: lane, EventID: eventID, Text: text, DeliveryClass: "interrupt", DeliverPolicy: "now", noDigest: true}
 	result := h.relayLaneEventContext(ctx, event, nil)
 	if result.PersistFailed || result.RejectedTooLong {
@@ -104,6 +104,13 @@ func (h *HubServer) summarizeReplayGap(ctx context.Context, lane string, candida
 	}
 	h.logger.Info("replay gap summarized", "lane", lane, "rows", len(covered), "first_event_id", first.ID, "last_event_id", last.ID)
 	return rest
+}
+
+// replayGapListCommand is the listing the summary names. It must not carry
+// --unread: the covered rows are interrupt-class rows stored read at insert
+// (putFrom), so the unread listing (laneInboxUnread) omits them (hk 6179).
+func replayGapListCommand(lane string) string {
+	return "panewire inbox list --lane " + lane
 }
 
 func replayGapStamp(record handoffkeepRelayEvent) string {
