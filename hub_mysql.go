@@ -270,6 +270,16 @@ func hubMySQLConfig(raw string) (*mysql.Config, error) {
 	cfg.ParseTime = true
 	cfg.Loc = time.UTC
 	cfg.Collation = "utf8mb4_bin"
+	// Client-side parameter interpolation saves two round trips per statement
+	// (skipping server-side PREPARE + DEALLOCATE, hk 6220 / hk 6058 item c).
+	// Relies on safety conditions:
+	// - charset utf8mb4: the driver refuses interpolation for multi-byte
+	//   charsets where escaping is unsafe (ASCII-incompatible).
+	// - NO_BACKSLASH_ESCAPES: handled by the driver from the server status flag
+	//   (mc.status & statusNoBackslashEscapes).
+	// multiStatements stays false (the default), so interpolated queries cannot
+	// inject multiple statements.
+	cfg.InterpolateParams = true
 	// Only the dial is bounded here: every store call carries its own
 	// deadline (laneInboxOpTimeout, the start-up budget), and a socket
 	// timeout would cut a migration's long statement or a lock wait short.
