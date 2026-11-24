@@ -38,6 +38,9 @@ const (
 	// nodeLoopHKTimeout bounds each message's synchronous handoffkeep work so
 	// the websocket loop resumes and can process later node messages.
 	nodeLoopHKTimeout = 5 * time.Second
+	// hubOwnerForbiddenBackoff spaces owner writes that hk refuses with
+	// job_host_forbidden for one grant, so heartbeats do not repeat them.
+	hubOwnerForbiddenBackoff = 30 * time.Minute
 )
 
 var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)

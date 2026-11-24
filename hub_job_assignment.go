@@ -73,8 +73,9 @@ func (h *HubServer) seedOwnerAssignment(ctx context.Context, assignment hubOwner
 	}
 	to := fleet.JobOwner{Node: assignment.Node, Epoch: assignment.Epoch}
 	supportedWrite, err := h.writeJobOwner(ctx, assignment.Job, fleet.JobOwner{}, to)
+	h.noteOwnerSeedOutcome(assignment, err)
 	if err != nil {
-		h.logger.Warn("handoffkeep owner adoption failed", "job", assignment.Job, "error", err)
+		h.logger.Warn("handoffkeep owner adoption failed", ownerSeedFailureAttrs(assignment.Job, err)...)
 	} else {
 		h.noteJobFenceSupport(supportedWrite)
 	}

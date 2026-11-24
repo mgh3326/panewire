@@ -221,6 +221,15 @@ func (e *BackendError) Error() string {
 	return fmt.Sprintf("handoffkeep HTTP %d (response withheld)", e.Status)
 }
 
+// SafeCode is hk's refusal code when it is a bare identifier fit for a log
+// line, or "" for anything else. Error() never prints it.
+func (e *BackendError) SafeCode() string {
+	if safeHKPattern.MatchString(e.Code) {
+		return e.Code
+	}
+	return ""
+}
+
 // presence reads the host-presence records pacelever publishes. The endpoint
 // is delivered with pacelever v0.3.0's presence contract; the decoder accepts
 // the documented record list under any of the plausible envelope keys.
