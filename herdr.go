@@ -116,8 +116,22 @@ func readResponseKeeping(ctx context.Context, r *bufio.Reader, id string) (json.
 		return msg["result"], pending, nil
 	}
 }
+
+// readOpts shapes one socket read. The zero value is a plain call: it reads
+// until its own deadline, and cancelling its context does not end the read, so
+// a reply herdr has already answered (a delivered prompt) is never discarded.
+type readOpts struct {
+	// cutIdle, when positive, bounds the wait at a cut boundary (cutIdleReader).
+	cutIdle time.Duration
+	// onStall runs once when cutIdle expires on a stalled cut boundary.
+	onStall func()
+	// interruptOnCancel ends the read at once when ctx is cancelled. Only a
+	// hedged read sets it, so the losing attempt returns without finishing.
+	interruptOnCancel bool
+}
+
 func (c *HerdrClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	return c.call(ctx, method, params, 0, nil)
+	return c.call(ctx, method, params, readOpts{})
 }
 
 // callCutIdle is Call for a read whose answer may be cut at a byte boundary and
@@ -139,7 +153,11 @@ func (c *HerdrClient) callCutIdle(ctx context.Context, method string, params any
 	var stallOnce sync.Once
 	primary := make(chan answer, 1)
 	go func() {
-		raw, err := c.call(primaryCtx, method, params, idle, func() { stallOnce.Do(func() { close(stalled) }) })
+		raw, err := c.call(primaryCtx, method, params, readOpts{
+			cutIdle:           idle,
+			onStall:           func() { stallOnce.Do(func() { close(stalled) }) },
+			interruptOnCancel: true,
+		})
 		primary <- answer{raw, err}
 	}()
 	var primaryCh <-chan answer = primary
@@ -162,7 +180,7 @@ func (c *HerdrClient) callCutIdle(ctx context.Context, method string, params any
 			ch := make(chan answer, 1)
 			retryCh = ch
 			go func() {
-				raw, err := c.call(retryCtx, method, params, 0, nil)
+				raw, err := c.call(retryCtx, method, params, readOpts{interruptOnCancel: true})
 				ch <- answer{raw, err}
 			}()
 		case a := <-retryCh:
@@ -175,7 +193,7 @@ func (c *HerdrClient) callCutIdle(ctx context.Context, method string, params any
 	return nil, primaryErr
 }
 
-func (c *HerdrClient) call(ctx context.Context, method string, params any, cutIdle time.Duration, onStall func()) (json.RawMessage, error) {
+func (c *HerdrClient) call(ctx context.Context, method string, params any, opts readOpts) (json.RawMessage, error) {
 	// A call whose deadline has already passed sends nothing and installs no
 	// deadline, so a retry on a spent budget fails as the budget does, not as an
 	// I/O timeout on the socket.
@@ -187,9 +205,12 @@ func (c *HerdrClient) call(ctx context.Context, method string, params any, cutId
 		return nil, err
 	}
 	defer conn.Close()
-	// A cancelled call unblocks its read, so a hedged loser returns at once.
-	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
-	defer stop()
+	// Only a hedged read is cut by cancellation, so its loser returns at once.
+	// Every other call keeps reading to its own deadline (see readOpts).
+	if opts.interruptOnCancel {
+		stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+		defer stop()
+	}
 	var deadline time.Time
 	if d, ok := ctx.Deadline(); ok {
 		deadline = d
@@ -200,8 +221,8 @@ func (c *HerdrClient) call(ctx context.Context, method string, params any, cutId
 		return nil, err
 	}
 	var src io.Reader = conn
-	if cutIdle > 0 {
-		src = &cutIdleReader{ctx: ctx, conn: conn, deadline: deadline, idle: cutIdle, onStall: onStall}
+	if opts.cutIdle > 0 {
+		src = &cutIdleReader{ctx: ctx, conn: conn, deadline: deadline, idle: opts.cutIdle, onStall: opts.onStall}
 	}
 	return readResponse(ctx, bufio.NewReader(src), id)
 }
