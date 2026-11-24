@@ -121,22 +121,32 @@ jobs:
           fi
       - run: go vet ./...
       - run: go build ./...
-      # The root package alone ran 413-600s on this runner, against the 10m
-      # default `go test` timeout (hk 4865), so one `go test ./...` died with
-      # `panic: test timed out`. Its tests run in three shards, as ci.yml's
-      # ubuntu shards do: each step is its own test binary with its own
-      # timeout. deploy_macos_shard_test.go pins that every root test runs once.
+      # The root package's tests run in parallel in macos-shard below (hk 6197).
+      # This runs the other packages, the platform race pins, shell checks,
+      # and macOS-only gitleaks.
       - name: go test, packages other than the root
         run: go list ./... | grep -v -x "$(go list -m)" | xargs go test
-      - run: scripts/ci-test-shard.sh 0/3
-      - run: scripts/ci-test-shard.sh 1/3
-      - run: scripts/ci-test-shard.sh 2/3
       - run: go test -race -count=3 -run 'T1002|T1034' .
       - run: go test -race -run '^TestQuiet' .
       - run: go test -race -run '^(TestAsyncSpawn|TestSpawn|TestNodeSpawn)' .
       - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
       # gitleaks is installed through Homebrew, which only the macOS runner has.
       - run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
+
+  macos-shard:
+    name: macos-shard (${{ matrix.shard }})
+    needs: candidate
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['0/3', '1/3', '2/3']
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+      - uses: ./.github/actions/setup-go-cached
+      - run: scripts/ci-test-shard.sh ${{ matrix.shard }}
 
   release:
     needs: candidate
@@ -253,7 +263,7 @@ jobs:
     # posts: a check run and a status with one name make that name ambiguous
     # to mergewake watch when they disagree (job success, status failure).
     name: post deploy-ok
-    needs: [candidate, race, macos, release, postgres, compat]
+    needs: [candidate, race, macos, macos-shard, release, postgres, compat]
     # The verdict is always posted, including on a failed check, so the head is
     # never left looking green by a missing status. Candidate must have run, or
     # there is no sha to post on.
@@ -271,13 +281,14 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RACE_RESULT: ${{ needs.race.result }}
           MACOS_RESULT: ${{ needs.macos.result }}
+          MACOS_SHARD_RESULT: ${{ needs.macos-shard.result }}
           RELEASE_RESULT: ${{ needs.release.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           COMPAT_RESULT: ${{ needs.compat.result }}
         shell: bash
         run: |
           state=success result=success
-          for r in "$RACE_RESULT" "$MACOS_RESULT" "$RELEASE_RESULT" "$POSTGRES_RESULT" "$COMPAT_RESULT"; do
+          for r in "$RACE_RESULT" "$MACOS_RESULT" "$MACOS_SHARD_RESULT" "$RELEASE_RESULT" "$POSTGRES_RESULT" "$COMPAT_RESULT"; do
             case "$r" in
               success) ;;
               cancelled) [ "$state" = failure ] || state=error ;;
