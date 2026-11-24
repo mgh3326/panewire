@@ -625,7 +625,18 @@ func (s *laneInboxStore) cancelStagedSpawnNoting(parent context.Context, id, pre
 	if err = writeStagedNote(ctx, tx, note); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitStagedNoting(tx, note)
+}
+
+// commitStagedNoting commits a staged release. A release that wrote a note
+// gives the spawn notice loop work, so the notice is relayed on the commit
+// instead of waiting for the backstop (hk 6152). A withdraw without a note
+// gives no work.
+func (s *laneInboxStore) commitStagedNoting(tx *sql.Tx, note stagedNote) error {
+	if note == nil {
+		return tx.Commit()
+	}
+	return s.commitNoting(tx, readSpawnNotice)
 }
 
 // discardStagedSpawn releases a staged role when its predecessor ended for a
@@ -664,7 +675,7 @@ func (s *laneInboxStore) discardStagedSpawnNoting(parent context.Context, id, ro
 	if err = writeStagedNote(ctx, tx, note); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitStagedNoting(tx, note)
 }
 
 // Bind the immutable destination without claiming it was sent. Only the
