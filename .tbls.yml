@@ -39,10 +39,20 @@ desc: |
     supersede -->|"pool actions and landings name operations"| ops
     accounts -->|"refresh waits and placement"| ops
   ```
+
+  In an ER diagram a solid line is a real foreign key in the database. A dashed line is a relation declared in .tbls.yml for a column the code joins on; the database has no foreign key for it. Every relation in this schema is declared, so every line is dashed.
 dsn: ${TBLS_DSN:-my://root@127.0.0.1:53306/panewire}
 docPath: schema-doc
 er:
   format: mermaid
+# Mermaid templates: the tbls v1.97.0 defaults (output/mermaid/templates) with one
+# change, the same as handoffkeep's (PR #574, scripts/schema-usage/templates): a
+# relation declared under relations: is virtual and drawn dashed (..); a real
+# foreign key is drawn solid (--). Re-copy them when the pinned tbls changes.
+templates:
+  mermaid:
+    schema: .tbls/templates/schema.mermaid.tmpl
+    table: .tbls/templates/table.mermaid.tmpl
 # Every table has a comment (requireTableComment) and sits in at least one
 # viewpoint (requireViewpoints). A new table without either fails the post-merge
 # schema-doc run: see the lint step in .github/workflows/schema-doc.yml.
