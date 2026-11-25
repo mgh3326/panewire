@@ -1430,12 +1430,23 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if seat.Kind == "claude" && s.Purpose != "director" {
 		env = append(env, "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")
 	}
+	// The trust grant resolves s.CWD by path and stays after a refusal: check
+	// before it, so a directory already swapped gets no grant, and again after
+	// it, since it resolved whatever was there then (hk 6431).
+	checkLaunchDir := func() error {
+		e := s.launchDir.verify(s.CWD)
+		if e != nil {
+			a.stage("launch", time.Now())
+		}
+		return e
+	}
+	if e = checkLaunchDir(); e != nil {
+		return e
+	}
 	if e = a.workspaceTrust(ctx, s, seat, env); e != nil {
 		return fail(exitConfig, "workspace trust: %v", e)
 	}
-	// The grant above resolved the path as it is now.
-	if e = s.launchDir.verify(s.CWD); e != nil {
-		a.stage("launch", time.Now())
+	if e = checkLaunchDir(); e != nil {
 		return e
 	}
 	// The launch may not spend the brief's submit window (hk 5174): it ends

@@ -2,7 +2,9 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -364,46 +366,138 @@ func TestTargetSwappedBeforeTabCreateRefused_t6367(t *testing.T) {
 	}
 }
 
-// A target already swapped when trust is granted refuses right after the grant,
-// as target_changed even when no launch window is left, and starts no tab.
-func TestTargetSwappedBeforeTrustRefused_t6404(t *testing.T) {
-	l := newLaneFixture(t)
-	lane := filepath.Join(l.w, "live")
-	mkdirs(t, lane)
-	l.s.Workspace = "workers"
-	created := false
-	previous := l.f.Do
-	l.f.Do = func(c Command) Result {
-		switch args := strings.Join(c.Args, " "); {
-		case c.Name != "herdr":
-		case args == "workspace list" && !created:
-			return Result{Out: noWorkspaces}
-		case args == "workspace list":
-			return Result{Out: `{"result":{"workspaces":[{"workspace_id":"w2","label":"workers"}]}}`}
-		case args == "workspace create --label workers":
-			created = true
-			if err := os.Rename(lane, lane+".old"); err != nil {
+// trustFixture is a bound claude spawn without a lane: its trust grant writes
+// store, which lies in the test's own home.
+type trustFixture struct {
+	*laneFixture
+	store  string
+	stages []string
+}
+
+func newTrustFixture(t *testing.T) *trustFixture {
+	t.Helper()
+	a, s, f := claudeSpawnFixture(t)
+	// The developer's own claude config must never receive a fixture grant.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	l := &trustFixture{laneFixture: &laneFixture{a: a, s: s, f: f, w: s.CWD, other: filepath.Join(filepath.Dir(s.CWD), "job-b")}, store: filepath.Join(a.Home, ".claude.json")}
+	mkdirs(t, l.other)
+	a.ObserveStage = func(stage string, _ time.Duration) { l.stages = append(l.stages, stage) }
+	return l
+}
+
+// granted lists the directories the trust store trusts.
+func (l *trustFixture) granted(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile(l.store)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var store struct {
+		Projects map[string]any `json:"projects"`
+	}
+	if err != nil || json.Unmarshal(raw, &store) != nil {
+		t.Fatalf("trust store unreadable: %v", err)
+	}
+	return slices.Sorted(maps.Keys(store.Projects))
+}
+
+// A directory swapped before the trust step refuses as target_changed and gets
+// no grant: nothing is trusted that the node did not bind.
+func TestTargetSwappedBeforeTrustGetsNoGrant_t6431(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// becomes is what is at the bound path after the swap; "" removes it.
+		becomes func(l *trustFixture) string
+	}{
+		{"a link to a sibling job", func(l *trustFixture) string { return l.other }},
+		{"a link to the home directory", func(l *trustFixture) string { return l.a.Home }},
+		{"a dangling link", func(l *trustFixture) string { return l.w + ".missing" }},
+		{"nothing", func(*trustFixture) string { return "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newTrustFixture(t)
+			l.s.Workspace = "workers"
+			created := false
+			previous := l.f.Do
+			l.f.Do = func(c Command) Result {
+				switch args := strings.Join(c.Args, " "); {
+				case c.Name != "herdr":
+				case args == "workspace list" && !created:
+					return Result{Out: noWorkspaces}
+				case args == "workspace list":
+					return Result{Out: `{"result":{"workspaces":[{"workspace_id":"w2","label":"workers"}]}}`}
+				case args == "workspace create --label workers":
+					created = true
+					// After the node bound the directory and the launcher found it.
+					if err := os.Rename(l.w, l.w+".old"); err != nil {
+						t.Error(err)
+					}
+					if target := tc.becomes(l); target != "" {
+						symlink(t, target, l.w)
+					}
+					return Result{Out: `{"result":{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p0"}}}`}
+				}
+				return previous(c)
+			}
+			err := l.launch(t.Context(), l.bind(t))
+			if ErrorCode(err) != exitStateConflict || !strings.Contains(err.Error(), "target_changed:") {
+				t.Fatalf("err=%v, want target_changed", err)
+			}
+			if granted := l.granted(t); len(granted) != 0 {
+				t.Fatalf("trust granted to %q after the swap", granted)
+			}
+			if len(l.tabDirs()) != 0 || !slices.Equal(l.herdrCalls("tab close"), []string{"tab close w2:t1"}) {
+				t.Fatalf("tab creates %q, closed %q", l.tabDirs(), l.herdrCalls("tab close"))
+			}
+			if len(l.stages) == 0 || l.stages[len(l.stages)-1] != "launch" {
+				t.Fatalf("stages %q, want the refusal in the launch stage", l.stages)
+			}
+		})
+	}
+}
+
+// A directory swapped while trust is being granted refuses right after the
+// grant, as target_changed even when no launch window is left, and starts no
+// tab.
+func TestTargetSwappedDuringTrustRefused_t6404(t *testing.T) {
+	l := newTrustFixture(t)
+	// Another writer holds the trust store, so the grant, which has already
+	// resolved the path, waits; the swap happens during that wait.
+	lock, err := secureOpen(l.store+".wrk.lock", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if !tryLock(lock) {
+		t.Fatal("the fixture could not take the trust lock")
+	}
+	swapped := false
+	sleep := l.a.Sleep
+	l.a.Sleep = func(ctx context.Context, d time.Duration) error {
+		if !swapped {
+			swapped = true
+			if err := os.Rename(l.w, l.w+".old"); err != nil {
 				t.Error(err)
 			}
-			mkdirs(t, lane)
-			return Result{Out: `{"result":{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p0"}}}`}
+			mkdirs(t, l.w)
+			if err := lock.Close(); err != nil {
+				t.Error(err)
+			}
 		}
-		return previous(c)
+		return sleep(ctx, d)
 	}
-	var stages []string
-	l.a.ObserveStage = func(stage string, _ time.Duration) { stages = append(stages, stage) }
 	// Less than the brief reserve: the launch-window refusal comes next.
 	ctx, cancel := context.WithTimeout(t.Context(), briefSubmitReserve-time.Second)
 	defer cancel()
-	err := l.launch(ctx, l.bind(t))
+	err = l.launch(ctx, l.bind(t))
 	if ErrorCode(err) != exitStateConflict || !strings.Contains(err.Error(), "target_changed:") {
 		t.Fatalf("err=%v, want target_changed", err)
 	}
-	if len(l.tabDirs()) != 0 || !slices.Equal(l.herdrCalls("tab close"), []string{"tab close w2:t1"}) {
-		t.Fatalf("tab creates %q, closed %q", l.tabDirs(), l.herdrCalls("tab close"))
+	if granted := l.granted(t); !swapped || !slices.Equal(granted, []string{l.w}) {
+		t.Fatalf("swapped=%v granted=%q, want the swap inside the grant of %q", swapped, granted, l.w)
 	}
-	if len(stages) == 0 || stages[len(stages)-1] != "launch" {
-		t.Fatalf("stages %q, want the refusal in the launch stage", stages)
+	if len(l.tabDirs()) != 0 {
+		t.Fatalf("tab creates %q, want none", l.tabDirs())
 	}
 }
 

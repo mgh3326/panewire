@@ -1055,10 +1055,12 @@ field names it):
 | leads outside the worktree, or a link that does not resolve | refused, `checkout_refused:lane_outside_worktree` (exit 81, stage `checkout`) |
 
 The node binds the directory's device and inode, and the launcher joins no lane
-to it. It checks the path again after the workspace trust grant and right before
-each `herdr tab create`; a path that is no longer that directory (a link put
-there counts) refuses with `spawn_failed:target_changed`. Not covered: a change
-between that last check and herdr's own `chdir`, or a later reopen by path.
+to it. It checks the path before and after the workspace trust grant and right
+before each `herdr tab create`; a path that is no longer that directory (a link
+put there counts) refuses with `spawn_failed:target_changed`. A directory already
+swapped at the first check gets no trust grant. Not covered: a change between a
+check and the step it guards (the grant, or herdr's own `chdir`), or a later
+reopen by path.
 
 A spawn without a checkout (`cwd_map` or default repository directory) binds
 nothing: the launcher enters `<cwd>/<lane>` itself, as a local spawn does.
