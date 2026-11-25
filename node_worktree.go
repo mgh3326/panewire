@@ -814,9 +814,14 @@ func (client *HubClient) prepareTarget(ctx context.Context, args nodeWorktreePre
 		workRoot = pin.Configured
 		target.Root = pin
 		if target.admission != nil {
-			target.admission.finishRootPin(pin)
 			workRoot = pin.Real
 		}
+	}
+	if target.recordRoot != nil && target.recordRoot(ctx, pin.Real) != nil {
+		return nil, "journal_unavailable"
+	}
+	if target.admission != nil {
+		target.admission.finishRootPin(pin)
 	}
 	jobDir, outcome := nodeJobDirCheck(filepath.Join(pin.Real, target.Dir))
 	if outcome != "" {

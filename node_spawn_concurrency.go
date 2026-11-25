@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
@@ -56,6 +57,9 @@ func (client *HubClient) nodeSpawnSlots() int {
 	if advertised := client.spawnSlotsAdvertised.Load(); advertised > 0 {
 		return int(advertised)
 	}
+	if client.spawnSlotsAtStart != 0 {
+		return client.spawnSlotsAtStart
+	}
 	return client.configuredSpawnSlots()
 }
 
@@ -80,7 +84,7 @@ func (client *HubClient) helloCapabilities(base []string) []string {
 		return base
 	}
 	slots := client.configuredSpawnSlots()
-	if client.spawnSlotsOverride != 0 {
+	if client.spawnSlotsOverride != 0 || client.spawnSlotsAdvertised.Load() == 0 && client.spawnSlotsAtStart != 0 {
 		slots = client.nodeSpawnSlots()
 	}
 	client.spawnSlotsAdvertised.Store(int32(slots))
@@ -116,12 +120,13 @@ func hubNodeSpawnSlots(capabilities map[string]bool) int {
 // design): the root a prepare pins is the one every path check in that run
 // compares against, instead of a fresh read of spawn.json.
 type spawnTarget struct {
-	Identity  fleet.SpawnIdentity
-	Dir       string
-	Key       string
-	Root      rootPin
-	admission *nodeSpawnAdmission
-	requestID string
+	Identity   fleet.SpawnIdentity
+	Dir        string
+	Key        string
+	Root       rootPin
+	admission  *nodeSpawnAdmission
+	requestID  string
+	recordRoot func(context.Context, string) error
 }
 
 // rootPin is the work root a node prepares under: Configured is the cleaned
@@ -192,11 +197,15 @@ type nodeSpawnAdmission struct {
 	changed          chan struct{}
 	root             rootPin
 	pinning          bool
+	now              func() time.Time
+	seeding          bool
+	seedFailedUntil  time.Time
+	seeded           map[string]seededSpawnHold
 }
 
 func (client *HubClient) nodeAdmission() *nodeSpawnAdmission {
 	client.spawnAdmissionOnce.Do(func() {
-		client.spawnAdmission = &nodeSpawnAdmission{dirs: map[string]string{}, changed: make(chan struct{})}
+		client.spawnAdmission = &nodeSpawnAdmission{dirs: map[string]string{}, changed: make(chan struct{}), now: client.nowUTC}
 	})
 	return client.spawnAdmission
 }
@@ -222,31 +231,37 @@ func (a *nodeSpawnAdmission) wakeLocked() {
 // tryAdmit admits key ("" = alone) under limit, returning an idempotent
 // release; otherwise it returns the channel closed at the next change.
 func (a *nodeSpawnAdmission) tryAdmit(key string, limit int) (func(), <-chan struct{}) {
-	release, changed, _ := a.tryAdmitTarget(key, limit, nil, nil)
+	release, changed, _, _ := a.tryAdmitTarget(key, limit, nil, nil)
 	return release, changed
 }
 
 // tryAdmitTarget compares and binds the root under the same lock as the hold.
 // Until the first prepare pins a root, another checkout cannot claim a slot.
-func (a *nodeSpawnAdmission) tryAdmitTarget(key string, limit int, target *spawnTarget, readRoot func() (string, error)) (func(), <-chan struct{}, bool) {
+func (a *nodeSpawnAdmission) tryAdmitTarget(key string, limit int, target *spawnTarget, readRoot func() (string, error)) (func(), <-chan struct{}, bool, time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if target != nil && limit > 1 && a.root != (rootPin{}) {
+	if a.seeding {
+		return nil, a.changed, false, 0
+	}
+	seedBlocked, recheck := a.seededAdmission(key)
+	var resolvedPin rootPin
+	if target != nil && (limit > 1 && a.root != (rootPin{}) || a.hasSeededRoot()) {
 		// A duplicate of an admitted request must wait for its claim or
 		// result even if the root changes in the meantime.
 		if target.requestID != "" && a.dirs[key] == target.requestID {
-			return nil, a.changed, false
+			return nil, a.changed, false, recheck
 		}
 		configured, err := readRoot()
-		if err != nil || configured != a.root.Configured {
-			return nil, nil, true
+		if err != nil || (a.root != (rootPin{}) && configured != a.root.Configured) {
+			return nil, nil, true, 0
 		}
 		current, code := pinWorkRoot(configured)
-		if code != "" || current != a.root {
-			return nil, nil, true
+		if code != "" || (a.root != (rootPin{}) && current != a.root) || !a.matchesSeededRoot(current.Real) {
+			return nil, nil, true, 0
 		}
+		resolvedPin = current
 	}
-	ok := !a.exclusive && a.running < max(limit, 1)
+	ok := !a.exclusive && !seedBlocked && a.running < max(limit, 1)
 	if key == "" {
 		ok = ok && a.running == 0
 	} else {
@@ -256,9 +271,12 @@ func (a *nodeSpawnAdmission) tryAdmitTarget(key string, limit int, target *spawn
 		}
 	}
 	if !ok || (target != nil && a.pinning) {
-		return nil, a.changed, false
+		return nil, a.changed, false, recheck
 	}
 	if target != nil {
+		if resolvedPin != (rootPin{}) {
+			a.root = resolvedPin
+		}
 		target.Root = a.root
 		if a.root == (rootPin{}) {
 			a.pinning = true
@@ -281,10 +299,7 @@ func (a *nodeSpawnAdmission) tryAdmitTarget(key string, limit int, target *spawn
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			a.running--
-			if a.running == 0 {
-				a.root = rootPin{}
-				a.pinning = false
-			}
+			a.clearIdleRoot()
 			if key == "" {
 				a.exclusive = false
 			} else {
@@ -292,7 +307,17 @@ func (a *nodeSpawnAdmission) tryAdmitTarget(key string, limit int, target *spawn
 			}
 			a.wakeLocked()
 		})
-	}, nil, false
+	}, nil, false, 0
+}
+
+// clearIdleRoot runs under mu after admission releases its last live or
+// seeded root holder. A root verified for a seeded hold stays pinned between
+// otherwise idle spawns until that hold ends.
+func (a *nodeSpawnAdmission) clearIdleRoot() {
+	if a.running == 0 && !a.hasSeededRoot() {
+		a.root = rootPin{}
+		a.pinning = false
+	}
 }
 
 func (a *nodeSpawnAdmission) finishRootPin(pin rootPin) {

@@ -233,7 +233,7 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		client.refuseUngrantedSpawn(ctx, peer, journal, message)
 		return
 	}
-	claimed, known, cached, active, err := client.claimHubSpawn(ctx, journal, message, deadline, waiter)
+	claimed, known, cached, active, err := client.claimHubSpawn(ctx, journal, message, deadline, waiter, target)
 	if err != nil {
 		if ctx.Err() == nil {
 			client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
@@ -259,7 +259,7 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	message.checkoutBranchReply = peer.acceptsCheckoutBranch.Load()
 	// WithSpawnNodeRequestID binds the job.spawned record to this request, so
 	// a restart settle accepts only this attempt's landing (hk 5829).
-	result := client.runClaimedHubSpawn(fleet.WithSpawnNodeRequestID(fleet.WithSpawnLanded(admissionCtx, func() { client.sendSpawnStarted(ctx, peer, message.RequestID) }), message.RequestID), message, target)
+	result := client.runClaimedHubSpawn(fleet.WithSpawnNodeRequestID(fleet.WithSpawnLanded(admissionCtx, func() { client.sendSpawnStarted(ctx, peer, message.RequestID) }), message.RequestID), message, target, journal)
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
 	if ctx.Err() != nil && result.RC != 0 {
@@ -290,7 +290,7 @@ func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, 
 		target = nil
 	}
 	for {
-		release, changed, rootChanged := admission.tryAdmitTarget(key, client.nodeSpawnSlots(), target, client.nodeWorkRoot)
+		release, changed, rootChanged, recheck := admission.tryAdmitTarget(key, client.nodeSpawnSlots(), target, client.nodeWorkRoot)
 		if rootChanged {
 			client.answerUnclaimedSpawn(ctx, peer, journal, message, func() {
 				client.sendSpawnResult(ctx, peer, hubSpawnResult{
@@ -303,8 +303,13 @@ func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, 
 		if release != nil {
 			return release, true
 		}
+		var expiry <-chan time.Time
+		if recheck > 0 {
+			expiry = time.After(recheck)
+		}
 		select {
 		case <-changed:
+		case <-expiry:
 		case <-waiter.claimed:
 			// Another copy claimed this request while this copy was waiting.
 			client.answerAdmissionWait(ctx, peer, journal, message, deadline)
@@ -377,7 +382,17 @@ func (client *HubClient) endSpawnAdmission(requestID string, waiter *nodeSpawnWa
 // claimHubSpawn rechecks ownership and the deadline under the active lock.
 // The journal claim and running mark are atomic with respect to replays and
 // restart settlement; no lock is held while waiting for the gate.
-func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time, waiter *nodeSpawnWaiter) (claimed, known bool, cached *hubSpawnResult, active bool, err error) {
+func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time, waiter *nodeSpawnWaiter, target *spawnTarget) (claimed, known bool, cached *hubSpawnResult, active bool, err error) {
+	hold := spawnJournalHold{DeadlineMS: deadline.UnixMilli()}
+	if target != nil {
+		hold.Key, hold.RootReal = target.Key, target.Root.Real
+		if hold.RootReal == "" {
+			if configured, err := client.nodeWorkRoot(); err == nil {
+				pin, _ := pinWorkRoot(configured)
+				hold.RootReal = pin.Real
+			}
+		}
+	}
 	client.spawnActiveMu.Lock()
 	defer client.spawnActiveMu.Unlock()
 	known, cached, err = journal.lookup(ctx, message)
@@ -387,7 +402,8 @@ func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJo
 	if ctx.Err() != nil || !time.Now().Before(deadline) {
 		return false, false, nil, false, ctx.Err()
 	}
-	claimed, cached, err = journal.claim(ctx, message)
+	hold.CreatedMS = client.nowUTC().UnixMilli()
+	claimed, cached, err = journal.claim(ctx, message, hold)
 	if claimed {
 		if client.spawnActive == nil {
 			client.spawnActive = map[string]bool{}
@@ -619,13 +635,13 @@ func spawnResultWire(result hubSpawnResult, extended bool) any {
 // admission (a fixture, or a direct run); it builds the same target admission
 // would.
 func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) hubSpawnResult {
-	return client.runSpawnTarget(parent, message, client.spawnTargetFor(message))
+	return client.runSpawnTarget(parent, message, client.spawnTargetFor(message), nil)
 }
 
 // runSpawnTarget runs one spawn under the admission target it was admitted
 // with. Everything prepare is allowed to write is decided from target: its Dir
 // names the job dir and its Root pins the work root at the first prepare.
-func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutboundMessage, target *spawnTarget) (result hubSpawnResult) {
+func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutboundMessage, target *spawnTarget, journal *nodeSpawnJournal) (result hubSpawnResult) {
 	// reason and detail refine result.Error in the node_spawn fleet event.
 	var reason, detail string
 	started := client.fleetClock()()
@@ -761,6 +777,11 @@ func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutbo
 		if prepare := client.spawnPrepare; prepare != nil {
 			prepared, code = prepare(stageCtx, prepareArgs)
 		} else {
+			if journal != nil {
+				target.recordRoot = func(ctx context.Context, root string) error {
+					return journal.recordSpawnRoot(ctx, message.RequestID, root)
+				}
+			}
 			prepared, code = client.prepareTarget(stageCtx, prepareArgs, target)
 		}
 		unlock()
@@ -796,6 +817,10 @@ func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutbo
 		launchDir, err = fleet.BindLaunchDir(outcome.Worktree.Path, hubSpawnIdentity(message.Args).ExecutionLane)
 		if err != nil {
 			result.RC, result.Error = 81, "checkout_refused:lane_outside_worktree"
+			return result
+		}
+		if journal != nil && journal.recordSpawnCWD(runContext, message.RequestID, launchDir.Path) != nil {
+			result.RC, result.Error = 75, "journal_unavailable"
 			return result
 		}
 	}
@@ -1217,9 +1242,9 @@ func (client *HubClient) releaseSpawnJournal() {
 // runClaimedHubSpawn runs one spawn this node claimed. target is the admission
 // record the caller built (hk 6402); nil is allowed for a call that never went
 // through admission, and runSpawnTarget builds the same record itself.
-func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage, target *spawnTarget) hubSpawnResult {
+func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage, target *spawnTarget, journal *nodeSpawnJournal) hubSpawnResult {
 	if message.DeadlineMS != 0 && time.Now().UnixMilli() >= message.DeadlineMS {
 		return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnIdentity(message.Args).Job, RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
 	}
-	return client.runSpawnTarget(ctx, message, target)
+	return client.runSpawnTarget(ctx, message, target, journal)
 }

@@ -168,7 +168,7 @@ func TestNodeSpawnJournalRestartDedupAndLostResultReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := hubOutboundMessage{RequestID: "d676220b-e763-4af1-aefd-000000000001", CWDKey: "project", BriefInline: "task", Args: []string{"--job", "test-job"}, WaitSeconds: 600}
-	claimed, cached, err := j.claim(ctx, message)
+	claimed, cached, err := j.claim(ctx, message, spawnJournalHold{})
 	if err != nil || !claimed || cached != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestNodeSpawnJournalRestartDedupAndLostResultReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer j.db.Close()
-	claimed, cached, err = j.claim(ctx, message)
+	claimed, cached, err = j.claim(ctx, message, spawnJournalHold{})
 	if err != nil || claimed || cached != nil {
 		t.Fatalf("restart reran uncertain execution: %v %v %v", claimed, cached, err)
 	}
@@ -186,14 +186,14 @@ func TestNodeSpawnJournalRestartDedupAndLostResultReplay(t *testing.T) {
 	if err = j.complete(ctx, result); err != nil {
 		t.Fatal(err)
 	}
-	claimed, cached, err = j.claim(ctx, message)
+	claimed, cached, err = j.claim(ctx, message, spawnJournalHold{})
 	a, _ := json.Marshal(result)
 	b, _ := json.Marshal(cached)
 	if err != nil || claimed || string(a) != string(b) {
 		t.Fatalf("lost result not replayed: %v %s %v", claimed, b, err)
 	}
 	message.BriefInline = "changed"
-	if _, _, err = j.claim(ctx, message); err == nil {
+	if _, _, err = j.claim(ctx, message, spawnJournalHold{}); err == nil {
 		t.Fatal("changed-payload duplicate accepted")
 	}
 }
