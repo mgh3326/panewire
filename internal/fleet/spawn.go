@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -217,14 +218,13 @@ func parseSpawn(args []string) (Spawn, error) {
 	return parseSpawnIgnoring(args, nil)
 }
 
-// parseSpawnIgnoring parses args exactly as parseSpawn does, with each name in
-// ignored accepted as a flag that takes one value and is then dropped. A
-// stored submission.json is read this way: a spawn flag retired since the
-// receipt was written was legal when it was written, and the receipt names a
-// job and its report paths rather than a spawn (hk 4627). The flag grammar is
-// still the only reader, so a retired flag's name counts as a flag only where
-// the grammar starts one — not where it is another flag's value.
-func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
+// readSpawnFlags is the spawn flag grammar: it reads args into a Spawn that
+// holds the pre-parse defaults and returns it before any value is checked.
+// parseSpawnIgnoring checks the values afterwards and ParseSpawnIdentity reads
+// only the names, so both read one argv the same way. The returned flag set
+// says which flags were passed and what was left over; consultStamp is the raw
+// --consult-stamp value.
+func readSpawnFlags(args, ignored []string) (Spawn, string, *flag.FlagSet, error) {
 	s := Spawn{Role: "implementer", Host: "auto"}
 	var consultStamp string
 	f := flags("spawn")
@@ -257,7 +257,29 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 		}
 	}
 	if e := f.Parse(args); e != nil {
-		return s, fail(exitUsage, "%v", e)
+		return s, consultStamp, f, fail(exitUsage, "%v", e)
+	}
+	return s, consultStamp, f, nil
+}
+
+// defaultJob names the job of a spawn that passed no --job: its -l label.
+func (s *Spawn) defaultJob() {
+	if s.Job == "" {
+		s.Job = s.Label
+	}
+}
+
+// parseSpawnIgnoring parses args exactly as parseSpawn does, with each name in
+// ignored accepted as a flag that takes one value and is then dropped. A
+// stored submission.json is read this way: a spawn flag retired since the
+// receipt was written was legal when it was written, and the receipt names a
+// job and its report paths rather than a spawn (hk 4627). The flag grammar is
+// still the only reader, so a retired flag's name counts as a flag only where
+// the grammar starts one — not where it is another flag's value.
+func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
+	s, consultStamp, f, e := readSpawnFlags(args, ignored)
+	if e != nil {
+		return s, e
 	}
 	s.ownerOmitted = !flagPassed(f, "owner")
 	s.parentJobExplicit = flagPassed(f, "parent-job") && s.ParentJob != ""
@@ -291,9 +313,7 @@ func parseSpawnIgnoring(args, ignored []string) (Spawn, error) {
 			return s, fail(exitUsage, "%v", err)
 		}
 	}
-	if s.Job == "" {
-		s.Job = s.Label
-	}
+	s.defaultJob()
 	// A spec spawn names its worktree instead of holding one; refuse a bad or
 	// half-given spec here, where every caller reads the flag name (hk 4738).
 	if _, _, err := s.checkoutSpec(); err != nil {
