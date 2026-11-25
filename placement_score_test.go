@@ -285,7 +285,7 @@ func TestSuccessfulSpawnWritesNodeSpawnEvent(t *testing.T) {
 		},
 	}
 	requestID := t14RequestID(2869)
-	message := hubOutboundMessage{RequestID: requestID, CWDKey: "repo-a", BriefInline: "the brief text", WaitSeconds: 5, Args: []string{"--job", "job-ok", "--prompt", "argv text"}}
+	message := hubOutboundMessage{RequestID: requestID, CWDKey: "repo-a", BriefInline: "the brief text", WaitSeconds: 5, Args: []string{"--job", "job-ok", "-p", "argv text"}}
 	result := client.runHubSpawn(t.Context(), message)
 	if result.Error != "" || result.RC != 0 {
 		t.Fatalf("result=%+v", result)
