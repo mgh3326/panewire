@@ -698,7 +698,9 @@ When enabled, interrupt batching uses the same transactional outbox: arrivals
 for one receiving lane within the oldest item's window become one turn. A
 single item is also delayed by that window. Must-act tags bypass batching. The flush runs every 100ms and a batch is never sent early;
 the pass sends a batch it creates in that same pass. The pending batch page itself is read
-when a write can change it (or within 1 s), not on every tick (hk 4910).
+when a write can change it (or within 1 s), not on every tick (hk 4910). Sending or retiring
+a row notes its removal, so a backlog advances one 100-row page per 100 ms tick; a page read
+that removes nothing does not reopen the gate.
 
 ### Batch building is gated too (hk 5301)
 

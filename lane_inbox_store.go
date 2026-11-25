@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -367,14 +368,23 @@ func (s *laneInboxStore) loggable(step string, err error) error {
 	return s.dialect.loggable(step, err)
 }
 
-// markBatchSent records that handoffkeep now owns a batch's identity. Only
-// the batch page decides this, so it does not note a change: the page must not
-// invalidate itself and cost a second read (hk 4910).
+// markBatchSent records that handoffkeep now owns a batch's identity. A row
+// removed from the pending page opens the gate for its next page (hk 4910).
 func (s *laneInboxStore) markBatchSent(id string) error {
 	ctx, done := s.op(s.life)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox_batches SET sent=1 WHERE id=?`), id)
-	return err
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox_batches SET sent=1 WHERE id=? AND sent=0`), id)
+	if err != nil {
+		return err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if removed > 0 {
+		s.noteBatchesChanged()
+	}
+	return nil
 }
 
 // noteBatchesChanged marks the pending batch page stale: the flush owes it a
@@ -1289,6 +1299,9 @@ func earliestDue(a, b int64) int64 {
 	return a
 }
 
+// laneInboxBatchPageLimit is how many pending batches one page read returns.
+const laneInboxBatchPageLimit = 100
+
 // laneInboxPendingBatchesQuery is the batch page without its order (SQLite's
 // rowid or Postgres's seq) and LIMIT. Each count is the old OR over the two
 // claim columns split into two disjoint sums: a correlated OR cannot use an
@@ -1315,7 +1328,7 @@ func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
 func (s *laneInboxStore) pendingBatchesForContext(parent context.Context) ([]laneInboxBatch, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, laneInboxPendingBatchesQuery+s.dialect.batchOrder()+` LIMIT 100`)
+	rows, err := s.db.QueryContext(ctx, laneInboxPendingBatchesQuery+s.dialect.batchOrder()+` LIMIT `+strconv.Itoa(laneInboxBatchPageLimit))
 	if err != nil {
 		return nil, err
 	}
