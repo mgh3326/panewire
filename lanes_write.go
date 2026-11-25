@@ -392,7 +392,7 @@ func (h *HubServer) acceptedSpawnRecord(ctx context.Context, job string) (hubSpa
 		return hubSpawnTask{}, false
 	}
 	task, err := h.inbox.store.latestSpawnForJob(ctx, job)
-	if err != nil || task.Job != job || hubSpawnIdentity(task.Request.Args).Job != job || task.Outcome.RC != 0 || task.Outcome.Host == "" || task.Outcome.Pane == "" {
+	if err != nil || task.Job != job || hubStoredSpawnIdentity(task.Request.Args).Job != job || task.Outcome.RC != 0 || task.Outcome.Host == "" || task.Outcome.Pane == "" {
 		return hubSpawnTask{}, false
 	}
 	return task, true
@@ -438,7 +438,7 @@ func (h *HubServer) laneSpawnProof(nodeMachine string, body hubLaneWriteRequest)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	task, err := h.inbox.store.latestSpawnForJob(ctx, body.Job)
-	if err != nil || task.Job != body.Job || task.Node == nil || task.Node.Machine != nodeMachine || hubSpawnIdentity(task.Request.Args).Job != body.Job {
+	if err != nil || task.Job != body.Job || task.Node == nil || task.Node.Machine != nodeMachine || hubStoredSpawnIdentity(task.Request.Args).Job != body.Job {
 		return laneSpawnProof{}
 	}
 	if task.Outcome.RC == 0 && task.Outcome.Pane != "" && (task.Outcome.Host != nodeMachine || task.Outcome.Pane != body.Pane) {

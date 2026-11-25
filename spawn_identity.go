@@ -9,3 +9,10 @@ func hubSpawnIdentity(args []string) fleet.SpawnIdentity {
 	identity, _ := fleet.ParseSpawnIdentity(args)
 	return identity
 }
+
+// hubStoredSpawnIdentity reads durable spawn argv, which can outlive flags
+// retired after the record was written.
+func hubStoredSpawnIdentity(args []string) fleet.SpawnIdentity {
+	identity, _ := fleet.ParseSpawnIdentityIgnoring(args, []string{"builder-family", "routing-role"})
+	return identity
+}
