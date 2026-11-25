@@ -169,11 +169,11 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 	h.loopTick(loopReviewerEnd)
 	ids, err := h.inbox.store.succeededSpawnIDs(ctx, since)
 	if err != nil {
-		h.loopNoteSilentError(loopReviewerEnd, "hub_spawn_reviewer_end.go:succeededSpawns", err)
+		h.loopNoteSilentError(loopReviewerEnd, "hub_spawn_reviewer_end.go:succeededSpawnIDs", err)
 		h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
 		return
 	}
-	h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawns")
+	h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawnIDs")
 	read := reviewerEndRead{Listed: len(ids)}
 	pending := h.reviewerEndUnjudged(ids)
 	for len(pending) > 0 {
@@ -181,10 +181,11 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 		pending = pending[len(page):]
 		tasks, err := h.inbox.store.succeededSpawnsByID(ctx, page)
 		if err != nil {
-			h.loopNoteSilentError(loopReviewerEnd, "hub_spawn_reviewer_end.go:succeededSpawns", err)
+			h.loopNoteSilentError(loopReviewerEnd, "hub_spawn_reviewer_end.go:succeededSpawnsByID", err)
 			h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
 			return
 		}
+		h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawnsByID")
 		read.Full += len(tasks)
 		for _, holder := range tasks {
 			request := holder.Request.RequestID

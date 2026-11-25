@@ -63,6 +63,12 @@ spans; the next failure after a success counts and logs again):
 - `hub_drain_wake.go`: the owed-lines read, and the unreported-host skip
 - `hub_pool_triggers.go`: the catalog read (`Debug` became `Warn`)
 - `hub_inbox.go`: the `persistDisabled` latch, and the batch listing
+- `hub_spawn_reviewer_end.go`: succeeded-operation ID listing and full-row page reads
+
+The reviewer-end ID listing and full-row page read have separate silent-error
+streaks. A successful listing clears only its listing streak; a successful
+full-row page clears only its page-read streak. This keeps a persistent page
+read outage latched even while the ID listing succeeds on every pass.
 
 ## Ticks and store reads (hk 5302)
 

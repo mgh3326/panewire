@@ -301,7 +301,7 @@ func TestNodeReplayAnswersNotStartedOnlyWithoutJournalRow_t4379(t *testing.T) {
 	}
 	executing := missing
 	executing.RequestID = t14RequestID(4381)
-	if claimed, _, err := journal.claim(t.Context(), executing); err != nil || !claimed {
+	if claimed, _, err := journal.claim(t.Context(), executing, spawnJournalHold{}); err != nil || !claimed {
 		t.Fatalf("claim %v %v", claimed, err)
 	}
 	client.releaseSpawnJournal()

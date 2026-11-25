@@ -49,7 +49,7 @@ func newSettleFixture(t *testing.T, herdr relayCommandRunner) *settleFixture {
 	}
 	t.Cleanup(client.releaseSpawnJournal)
 	orphan := hubOutboundMessage{OperatorAuthorized: true, RequestID: t14RequestID(7001), CWDKey: "repo-a", BriefInline: "brief", Args: []string{"-m", "codex-terra", "-l", "label-a", "--job", "job-a"}, WaitSeconds: 60}
-	if claimed, _, err := journal.claim(t.Context(), orphan); err != nil || !claimed {
+	if claimed, _, err := journal.claim(t.Context(), orphan, spawnJournalHold{}); err != nil || !claimed {
 		t.Fatalf("claim %v %v", claimed, err)
 	}
 	return &settleFixture{client: client, journal: journal, orphan: orphan, started: started, jobs: root}

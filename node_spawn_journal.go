@@ -59,41 +59,30 @@ func openNodeSpawnJournal(root string) (*nodeSpawnJournal, error) {
 			return nil, err
 		}
 	}
-	// job_id and label name what an executing row launched, so a restart can
-	// settle it from the pane (hub_spawn_settle.go). Rows written before the
-	// columns existed keep an empty value and settle as lost.
-	for _, column := range []string{"job_id", "label"} {
+	// Job identity supports restart settle and takeover proof (hk 4799).
+	// sparse_hash preserves checkout identity across replay (hk 5104).
+	// The admission columns default old executing rows to legacy holds.
+	for _, column := range []struct{ name, definition string }{
+		{"job_id", "TEXT NOT NULL DEFAULT ''"},
+		{"label", "TEXT NOT NULL DEFAULT ''"},
+		{"strict", "INTEGER NOT NULL DEFAULT 0"},
+		{"sparse_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"overlap_key", "TEXT NOT NULL DEFAULT ''"},
+		{"root_real", "TEXT NOT NULL DEFAULT ''"},
+		{"final_cwd", "TEXT NOT NULL DEFAULT ''"},
+		{"has_checkout", "INTEGER NOT NULL DEFAULT 0"},
+		{"created_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"deadline_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"start_by_ms", "INTEGER NOT NULL DEFAULT 0"},
+	} {
 		var present int
-		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name=?`, column).Scan(&present); err == nil && present == 0 {
-			_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`)
+		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name=?`, column.name).Scan(&present); err == nil && present == 0 {
+			_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN `+column.name+" "+column.definition)
 		}
 		if err != nil {
 			db.Close()
 			return nil, err
 		}
-	}
-	// strict marks a row whose job_id and label were read without taking a
-	// flag's value for a flag. A row an older build wrote is 0: its identity may
-	// name a forged --purpose value, so the takeover proof holds while any such
-	// row is still executing (hk 4799).
-	var strictPresent int
-	if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name='strict'`).Scan(&strictPresent); err == nil && strictPresent == 0 {
-		_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN strict INTEGER NOT NULL DEFAULT 0`)
-	}
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	// sparse_hash preserves the sparse checkout identity durably across
-	// capability filtering, restart and replay (hk 5104 / hk 5211). The
-	// execution mode is not a column: the result JSON carries it (hk 5223).
-	var sparsePresent int
-	if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name='sparse_hash'`).Scan(&sparsePresent); err == nil && sparsePresent == 0 {
-		_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN sparse_hash TEXT NOT NULL DEFAULT ''`)
-	}
-	if err != nil {
-		db.Close()
-		return nil, err
 	}
 	return &nodeSpawnJournal{db}, nil
 }
@@ -133,7 +122,7 @@ func spawnFingerprint(message hubOutboundMessage) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
+func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage, hold spawnJournalHold) (bool, *hubSpawnResult, error) {
 	// The journal's identity columns are read back by the takeover proof, by
 	// restart settlement and by the checkout sweep, so they name what the
 	// launcher will: a flag's value is never read as a flag (--purpose is free
@@ -141,7 +130,7 @@ func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage
 	// absent.
 	identity := hubSpawnIdentity(message.Args)
 	sparseHash := sparseListsHash(message.Checkout)
-	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label,strict,sparse_hash) VALUES(?,?,'executing',?,?,1,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), identity.Job, identity.Label, sparseHash)
+	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label,strict,sparse_hash,overlap_key,root_real,has_checkout,created_ms,deadline_ms,start_by_ms) VALUES(?,?,'executing',?,?,1,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), identity.Job, identity.Label, sparseHash, hold.Key, hold.RootReal, message.Checkout != nil, hold.CreatedMS, hold.DeadlineMS, message.StartByMS)
 	if err != nil {
 		return false, nil, err
 	}
@@ -223,16 +212,34 @@ func (j *nodeSpawnJournal) complete(ctx context.Context, result hubSpawnResult) 
 	return err
 }
 
+// spawnJournalHold is the durable admission metadata of an executing row.
+type spawnJournalHold struct {
+	Key, RootReal, FinalCWD          string
+	HasCheckout                      bool
+	CreatedMS, DeadlineMS, StartByMS int64
+}
+
+func (j *nodeSpawnJournal) recordSpawnRoot(ctx context.Context, requestID, root string) error {
+	_, err := j.db.ExecContext(ctx, `UPDATE spawn_inbox SET root_real=? WHERE request_id=? AND status='executing'`, root, requestID)
+	return err
+}
+
+func (j *nodeSpawnJournal) recordSpawnCWD(ctx context.Context, requestID, cwd string) error {
+	_, err := j.db.ExecContext(ctx, `UPDATE spawn_inbox SET final_cwd=? WHERE request_id=? AND status='executing'`, cwd, requestID)
+	return err
+}
+
 // executingSpawn is a journal row no completion has been written for. Strict
 // is false for a row an older build wrote, whose identity may be a forged
 // --purpose value (hk 4799).
 type executingSpawn struct {
 	RequestID, Job, Label string
 	Strict                bool
+	spawnJournalHold
 }
 
 func (j *nodeSpawnJournal) executing(ctx context.Context) ([]executingSpawn, error) {
-	rows, err := j.db.QueryContext(ctx, `SELECT request_id,job_id,label,strict FROM spawn_inbox WHERE status='executing' ORDER BY rowid`)
+	rows, err := j.db.QueryContext(ctx, `SELECT request_id,job_id,label,strict,overlap_key,root_real,final_cwd,has_checkout,created_ms,deadline_ms,start_by_ms FROM spawn_inbox WHERE status='executing' ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +248,7 @@ func (j *nodeSpawnJournal) executing(ctx context.Context) ([]executingSpawn, err
 	for rows.Next() {
 		var row executingSpawn
 		var strict int
-		if err = rows.Scan(&row.RequestID, &row.Job, &row.Label, &strict); err != nil {
+		if err = rows.Scan(&row.RequestID, &row.Job, &row.Label, &strict, &row.Key, &row.RootReal, &row.FinalCWD, &row.HasCheckout, &row.CreatedMS, &row.DeadlineMS, &row.StartByMS); err != nil {
 			return nil, err
 		}
 		row.Strict = strict != 0

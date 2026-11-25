@@ -120,7 +120,7 @@ func (h *orphanHost) claimed(request, job string) {
 
 func (h *orphanHost) claimedAs(request, job, label string) {
 	h.t.Helper()
-	claimed, _, err := h.client.spawnJournal.claim(context.Background(), hubOutboundMessage{RequestID: request, Args: []string{"--job", job, "-l", label}})
+	claimed, _, err := h.client.spawnJournal.claim(context.Background(), hubOutboundMessage{RequestID: request, Args: []string{"--job", job, "-l", label}}, spawnJournalHold{})
 	if err != nil || !claimed {
 		h.t.Fatalf("claim %s: claimed=%v err=%v", request, claimed, err)
 	}
