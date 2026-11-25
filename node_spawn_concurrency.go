@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -170,29 +169,6 @@ func spawnOverlapConflicts(a, b string) bool {
 		}
 	}
 	return false
-}
-
-func spawnPathIsLink(path string) bool {
-	info, err := os.Lstat(path)
-	return err == nil && info.Mode()&os.ModeSymlink != 0
-}
-
-// spawnLaneEscapes reports a -L lane under a prepared worktree that resolves
-// outside it: the launch would run in another directory than the one held.
-func spawnLaneEscapes(worktree, lane string) bool {
-	if lane == "" {
-		return false
-	}
-	root, err := filepath.EvalSymlinks(worktree)
-	if err != nil {
-		return true
-	}
-	target, err := filepath.EvalSymlinks(filepath.Join(worktree, lane))
-	if err != nil {
-		// Not there yet: the launcher creates it inside the worktree.
-		return spawnPathIsLink(filepath.Join(worktree, lane))
-	}
-	return !nodePathWithin(root, target)
 }
 
 // hubSpawnOverlapKey is the hub's view of the same key.

@@ -43,7 +43,7 @@ func TestCheckoutStageTimingSplitsLockWaitFetchAndWorktreeAdd(t *testing.T) {
 			time.Sleep(addDelay)
 			return realAdd(ctx, record, args...)
 		},
-		spawnEngine: func(_ context.Context, _, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
+		spawnEngine: func(_ context.Context, _ fleet.LaunchDir, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
 			return t14EngineOK()
 		},
 	}

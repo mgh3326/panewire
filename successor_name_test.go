@@ -161,7 +161,7 @@ func TestHandoverSuccessorUsesTheSharedLabelHelper(t *testing.T) {
 func TestNodeSpawnRefusesOverlongAgentNameBeforePane(t *testing.T) {
 	root := t.TempDir()
 	var engineCalls int
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(_ context.Context, _, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(_ context.Context, _ fleet.LaunchDir, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
 		engineCalls++
 		return t14EngineOK()
 	}}

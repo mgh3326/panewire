@@ -55,7 +55,7 @@ func TestWaitSpawnPreservesRefusalAndUnknownOwnership(t *testing.T) {
 
 func TestNodeSpawnWorkspaceOverrideAndExecutingDefault(t *testing.T) {
 	for _, test := range []struct{ requested, want string }{{"", "wDEFAULT"}, {"workers", "workers"}, {"wOTHER", "wOTHER"}} {
-		bound := bindNodeSpawn(Spawn{Workspace: test.requested, Host: "untrusted-host", CWD: "/wrong", Prompt: "/wrong"}, "/work/project", "/work/brief.md", "wDEFAULT")
+		bound := bindNodeSpawn(Spawn{Workspace: test.requested, Host: "untrusted-host", CWD: "/wrong", Prompt: "/wrong"}, LaunchDir{Path: "/work/project"}, "/work/brief.md", "wDEFAULT")
 		if bound.Workspace != test.want || bound.CWD != "/work/project" || bound.Host != "local" || !bound.Delegated {
 			t.Fatalf("node binding %+v", bound)
 		}

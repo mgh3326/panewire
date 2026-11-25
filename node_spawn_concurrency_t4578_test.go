@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -65,7 +66,8 @@ func newConcurrencyRig(t *testing.T, slots int) *concurrencyRig {
 		rig.mu.Unlock()
 		return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: dir, Head: args.Sha}}, ""
 	}
-	client.spawnEngine = func(_ context.Context, cwd, brief, _, _, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(_ context.Context, dir fleet.LaunchDir, brief, _, _, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+		cwd := dir.Path
 		owner, _ := os.ReadFile(filepath.Join(cwd, "owner"))
 		text, _ := os.ReadFile(brief)
 		rig.mu.Lock()
@@ -463,8 +465,14 @@ func TestNodeSpawnKeyIgnoresLinkedTargets_t4578(t *testing.T) {
 			t.Errorf("dir=%s lane=%s key=%q, want %q", tc.dir, tc.lane, got, want)
 		}
 	}
-	if !spawnLaneEscapes(filepath.Join(root, "job-c"), "live") || spawnLaneEscapes(filepath.Join(root, "job-a"), "live") || spawnLaneEscapes(filepath.Join(root, "job-a"), "") {
-		t.Fatal("lane escape check is wrong")
+	for _, tc := range []struct {
+		dir, lane string
+		escapes   bool
+	}{{"job-c", "live", true}, {"job-a", "live", false}, {"job-a", "", false}} {
+		_, err := fleet.BindLaunchDir(filepath.Join(root, tc.dir), tc.lane)
+		if errors.Is(err, fleet.ErrLaneOutsideWorktree) != tc.escapes {
+			t.Fatalf("dir=%s lane=%q err=%v, want escape %v", tc.dir, tc.lane, err, tc.escapes)
+		}
 	}
 }
 
@@ -592,7 +600,8 @@ func TestNodeSpawnLaneReadAsFlag_t4578(t *testing.T) {
 	if got, want := (&HubClient{spawnConfigPath: config}).spawnTargetFor(message).Key, spawnOverlapKey("job-c", message.Args); got != want {
 		t.Fatalf("a lane changed the key to %q, want %q", got, want)
 	}
-	if lane := hubSpawnFlagArg(message.Args, "-L"); lane != "live" || !spawnLaneEscapes(filepath.Join(root, "job-c"), lane) {
-		t.Fatalf("lane=%q", lane)
+	lane := hubSpawnIdentity(message.Args).ExecutionLane
+	if _, err := fleet.BindLaunchDir(filepath.Join(root, "job-c"), lane); lane != "live" || !errors.Is(err, fleet.ErrLaneOutsideWorktree) {
+		t.Fatalf("lane=%q err=%v", lane, err)
 	}
 }

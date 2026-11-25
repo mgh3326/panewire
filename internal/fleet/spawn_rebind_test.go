@@ -515,7 +515,7 @@ func TestRespawnSavedRequestReplayRebindsOnce(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		return fx.a.Spawn(context.Background(), bindNodeSpawn(s, fx.s.CWD, fx.s.Prompt, fx.s.Workspace))
+		return fx.a.Spawn(context.Background(), bindNodeSpawn(s, LaunchDir{Path: fx.s.CWD}, fx.s.Prompt, fx.s.Workspace))
 	}
 	if e := replay(); e != nil {
 		t.Fatal(e)

@@ -244,7 +244,7 @@ func TestConsultIncidentReproForeignWorkspaceDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	boundNodeSpawn := bindNodeSpawn(parsedNodeSpawn, s.CWD, s.Prompt, "workers")
+	boundNodeSpawn := bindNodeSpawn(parsedNodeSpawn, LaunchDir{Path: s.CWD}, s.Prompt, "workers")
 	if boundNodeSpawn.Workspace != "workers" {
 		t.Fatalf("node bound workspace=%q, want workers", boundNodeSpawn.Workspace)
 	}
@@ -254,7 +254,7 @@ func TestConsultIncidentReproForeignWorkspaceDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leakedBound := bindNodeSpawn(leakedSpawn, s.CWD, s.Prompt, "workers")
+	leakedBound := bindNodeSpawn(leakedSpawn, LaunchDir{Path: s.CWD}, s.Prompt, "workers")
 	if leakedBound.Workspace != "w1V" {
 		t.Fatalf("leaked bound workspace=%q, want w1V", leakedBound.Workspace)
 	}

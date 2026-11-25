@@ -2101,11 +2101,23 @@ func (h *HubServer) finishSpawnOutcome(task hubSpawnTask, outcome hubSpawnOutcom
 	}
 }
 
+// spawnReceiptCheckoutPath reports whether cwd is where a spawn of checkout dir
+// under lane runs: the job dir, or with -L live|mock a directory inside it. The
+// lane's directory need not carry the lane's name: the node opens the pane at
+// the target an in-tree lane link resolves to (fleet.BindLaunchDir, hk 6431).
 func spawnReceiptCheckoutPath(cwd, dir, lane string) bool {
 	if filepath.Base(cwd) == dir {
 		return true
 	}
-	return (lane == "live" || lane == "mock") && filepath.Base(cwd) == lane && filepath.Base(filepath.Dir(cwd)) == dir
+	if lane != "live" && lane != "mock" {
+		return false
+	}
+	for parent := filepath.Dir(cwd); parent != filepath.Dir(parent); parent = filepath.Dir(parent) {
+		if filepath.Base(parent) == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // hubSpawnReasonLimit bounds an outcome reason: it is read back through the
