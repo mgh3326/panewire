@@ -209,7 +209,7 @@ func TestInboxOnlyExemptIngressRule(t *testing.T) {
 // inbox-only lane, as the docs promise. The hub forces the class, and the
 // relay.inject it sends must carry deliver=now: the node's busy manager holds
 // an idle-policy inject while the pane is working (busy_relay.go:478-482), and
-// only deliver=now is typed at once (busy_relay.go:457-461). An explicit
+// deliver=now is typed at once (busy_relay.go:457-461). An explicit
 // deliver=idle with delivery_class=interrupt is contradictory input; the
 // interrupt class wins, as the docs state for the immediate branch.
 func TestIngressDeliveryClassInterruptReachesWorkingDesignPaneNow(t *testing.T) {

@@ -338,9 +338,10 @@ One kind of traffic keeps its existing delivery in every lane:
   with the operator token, when the event asks for immediate delivery
   (`deliver=now` or `delivery_class=interrupt`) or carries no `notify_type`.
   This is the explicit operator path into a pane, so it is kept. The hub sends
-  such an event with `deliver=now`, so the node types it at once; an event
-  that asks only with `delivery_class=interrupt` gets `deliver=now` too (hk
-  6553; see the [R24 HTTP ingress](r24-http-ingress.md) contract). A typed
+  with `deliver=now`, so the node types it at once; an event that asks with
+  `delivery_class=interrupt` gets `deliver=now` too (hk 6553; see the [R24
+  HTTP ingress](r24-http-ingress.md) contract). An untyped event with neither
+  keeps the `deliver` it was sent with. A typed
   ingress event that asks for neither is filed like a node-relayed one (hk
   6338). A restart replay of such a row is filed like any other item.
 
