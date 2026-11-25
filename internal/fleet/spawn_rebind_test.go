@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
 )
@@ -789,6 +790,100 @@ func TestTakeoverUnreadableResponseConfirmsByLookup(t *testing.T) {
 				t.Fatalf("event=%v", ev)
 			}
 			fx.assertNotice(t, tc.want == "inherited")
+		})
+	}
+}
+
+func TestTakeoverConflictRetryLostAnswerRereadsBeforeRefusing(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		retryStatus  int
+		retryAnswer  string
+		commit       bool
+		failReread   bool
+		wantStatus   string
+		wantError    string
+		wantBoundJob string
+		wantClaimant string
+	}{
+		{name: "5xx after commit", retryStatus: http.StatusServiceUnavailable, retryAnswer: `{"error":"unavailable"}`, commit: true, wantStatus: "rebound"},
+		{name: "unreadable answer after commit", retryStatus: http.StatusOK, retryAnswer: `{`, commit: true, wantStatus: "rebound"},
+		{name: "retry refused", retryStatus: http.StatusConflict, retryAnswer: `{"error":"conflict","reason":"retry denied"}`, wantStatus: "inherited", wantError: "conflict: retry denied", wantBoundJob: "ancestor-worker", wantClaimant: "ancestor-label"},
+		{name: "reread fails", retryStatus: http.StatusServiceUnavailable, retryAnswer: `{"error":"unavailable"}`, commit: true, failReread: true, wantStatus: "inherited", wantError: "unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const ancestor = "ancestor-worker"
+			fx := newRebindFixture(t, "spawned", rebindParent)
+			fx.s.Inherited = rebindParent
+			fx.store.records[rebindParent]["parent_job"] = ancestor
+			fx.store.records[ancestor] = map[string]any{"job_id": ancestor, "parent_job": rebindParent}
+			calls := 0
+			fx.rebindOverride = func(body map[string]string) (int, string, bool) {
+				calls++
+				if calls == 1 {
+					// Another writer advanced the task within the inherited chain.
+					fx.bound, fx.claimedBy = ancestor, "ancestor-label"
+					return http.StatusConflict, `{"error":"conflict","reason":"task moved"}`, true
+				}
+				if tc.commit {
+					fx.bound, fx.claimedBy = fx.s.Job, fx.s.Label
+				}
+				if tc.failReread {
+					fx.getFail = true
+				}
+				return tc.retryStatus, tc.retryAnswer, true
+			}
+			fx.s.Task = "42"
+			fx.a.Config.Hub = map[string]any{"hub_url": "https://hub.example.invalid"}
+			fx.a.Sleep = func(context.Context, time.Duration) error { return nil }
+			laneCalls := recordLaneAdds(fx, func([]string) Result {
+				return Result{Out: `{"lane":"task-lane","machine":"test-host","pane":"w:p1","parent":"owner"}`}
+			})
+			putEvent(t, fx.a, rebindParent, "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "implementer"})
+			if err := fx.a.event(context.Background(), fx.s.Job, "job.spawned", map[string]any{}); err != nil {
+				t.Fatal(err)
+			}
+			fx.a.finishTaskTakeover(context.Background(), &fx.s,
+				client.Task{Lane: "task-lane", Refs: client.TaskRefs{JobID: rebindParent}},
+				"owner", "task-lane", "w:p1", "test-host")
+
+			ev := fx.taskRebindEvent(t)
+			if ev["status"] != tc.wantStatus {
+				t.Fatalf("event=%v, want status %q", ev, tc.wantStatus)
+			}
+			if tc.wantStatus == "rebound" {
+				if ev["rebound_from"] != ancestor || fx.bound != fx.s.Job || fx.claimedBy != fx.s.Label {
+					t.Fatalf("event=%v binding=%s claimant=%s", ev, fx.bound, fx.claimedBy)
+				}
+				if len(*laneCalls) != 1 || flagValue((*laneCalls)[0].Args, "--takeover") != ancestor {
+					t.Fatalf("lane takeover calls=%v", *laneCalls)
+				}
+				if jobEvent(t, fx, "job.lane_registered")["takeover_job"] != ancestor {
+					t.Fatalf("lane takeover event=%v", jobEvent(t, fx, "job.lane_registered"))
+				}
+				replaced, err := fx.a.ledger().Events(context.Background(), rebindParent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range replaced {
+					if event.Kind == "job.replaced" {
+						return
+					}
+				}
+				t.Fatal("missing parent replacement event")
+			}
+			if !strings.Contains(str(ev, "rebind_error"), tc.wantError) {
+				t.Fatalf("retry error=%q, want it to contain %q", str(ev, "rebind_error"), tc.wantError)
+			}
+			if tc.wantBoundJob != "" && ev["bound_job"] != tc.wantBoundJob {
+				t.Fatalf("latest holder=%v, want %q", ev["bound_job"], tc.wantBoundJob)
+			}
+			if tc.wantClaimant != "" && ev["claimed_by"] != tc.wantClaimant {
+				t.Fatalf("latest claimant=%v, want %q", ev["claimed_by"], tc.wantClaimant)
+			}
+			if len(*laneCalls) != 1 || flagValue((*laneCalls)[0].Args, "--takeover") != "" {
+				t.Fatalf("refused takeover should register own lane: %v", *laneCalls)
+			}
 		})
 	}
 }

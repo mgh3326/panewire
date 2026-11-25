@@ -612,6 +612,26 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 					ev["rebound_from"] = newFrom
 					return "rebound"
 				}
+				confirm, cancelConfirm := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				latest, rereadErr := hkGetTask(confirm, s.Task)
+				cancelConfirm()
+				if rereadErr == nil {
+					if latest.Refs.JobID == s.Job && latest.ClaimedBy == s.Label {
+						ev["rebound_from"] = newFrom
+						return "rebound"
+					}
+					if latest.Refs.JobID != "" && latest.Refs.JobID != s.Job {
+						ev["bound_job"] = latest.Refs.JobID
+					}
+					if latest.ClaimedBy != "" {
+						ev["claimed_by"] = latest.ClaimedBy
+					}
+				}
+				retryWhy := "unconfirmed"
+				if retryErr != nil {
+					retryWhy = hkErrText(retryErr)
+				}
+				return refused("task rebind refused: " + retryWhy)
 			}
 			if current.Refs.JobID != "" && current.Refs.JobID != fromJob {
 				ev["bound_job"] = current.Refs.JobID
