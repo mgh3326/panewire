@@ -360,6 +360,11 @@ func spawnNoticeBackfillApplied(t *testing.T, s *laneInboxStore) bool {
 	if err := s.db.QueryRow(query).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
+	// SQLite has one version for every start-up backfill: a later one raises
+	// it past this one's.
+	if s.dialect.ownsSchema() {
+		return n >= sqliteSucceededNoticeVersion
+	}
 	return n == 1
 }
 

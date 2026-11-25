@@ -100,6 +100,8 @@ func TestHubStoreCopyFromOlderSourceWithoutDeliveryTables_t6486(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = source.close() })
+	// The source's hub has started on this build (hk 6433).
+	recordSpawnBoundBackfill(t, source)
 	delivery := []string{"delivery_obligations", "delivery_incidents", "delivery_notice_slots", "delivery_reconciler_state"}
 	if _, err := source.db.Exec(`DROP TABLE ` + strings.Join(delivery, ", ")); err != nil {
 		t.Fatal(err)

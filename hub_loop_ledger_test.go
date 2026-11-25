@@ -63,16 +63,16 @@ func TestLoopLedgerSpawnScanErrorCountsLogsRowAndNotice(t *testing.T) {
 	ctx := context.Background()
 
 	h.inbox.store.abort()
-	h.spawnCoordinatorScan(ctx, func(hubSpawnTask) bool { return true })
-	h.spawnCoordinatorScan(ctx, func(hubSpawnTask) bool { return true })
+	h.spawnCoordinatorScan(ctx, func(hubSpawnTask, spawnDrainMarks) bool { return true })
+	h.spawnCoordinatorScan(ctx, func(hubSpawnTask, spawnDrainMarks) bool { return true })
 
 	snap := h.loopSnapshot()
-	if snap[loopSpawnCoordinator].Errors != 2 || snap[loopSpawnCoordinator].SilentErrors != 2 {
-		t.Fatalf("spawn coordinator errors=%d silent=%d, want 2 and 2 (one per failing path per streak, not per sweep)",
+	if snap[loopSpawnCoordinator].Errors != 3 || snap[loopSpawnCoordinator].SilentErrors != 3 {
+		t.Fatalf("spawn coordinator errors=%d silent=%d, want 3 and 3 (one per failing path per streak, not per sweep)",
 			snap[loopSpawnCoordinator].Errors, snap[loopSpawnCoordinator].SilentErrors)
 	}
-	if got := loopLedgerCountLines(&logs, "hub loop silent error"); got != 2 {
-		t.Fatalf("silent log lines=%d, want 2 (one per failing path per streak), log:\n%s", got, logs.String())
+	if got := loopLedgerCountLines(&logs, "hub loop silent error"); got != 3 {
+		t.Fatalf("silent log lines=%d, want 3 (one per failing path per streak), log:\n%s", got, logs.String())
 	}
 
 	doc := h.loopsRowDocument(loopDateOf(now), now)
@@ -457,7 +457,7 @@ func TestLoopLedgerSteadyPopulationCountsOnce(t *testing.T) {
 		t.Fatalf("spawn submit=%d, want 202", w.Code)
 	}
 	for range 25 {
-		h.spawnCoordinatorScan(ctx, func(hubSpawnTask) bool { return false })
+		h.spawnCoordinatorScan(ctx, func(hubSpawnTask, spawnDrainMarks) bool { return false })
 	}
 	snap := h.loopSnapshot()[loopSpawnCoordinator]
 	if snap.Made != 1 || snap.Done != 0 {

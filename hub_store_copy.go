@@ -189,6 +189,13 @@ func copyHubStore(ctx context.Context, from, to, selection string, verify, repla
 	if !backfilled {
 		return errStoreCopySourceNotBackfilled
 	}
+	backfilled, err = storeCopySourceSpawnBoundBackfilled(ctx, src)
+	if err != nil {
+		return err
+	}
+	if !backfilled {
+		return errStoreCopySourceSpawnBoundNotBackfilled
+	}
 	var fenceExists bool
 	if dst.dialect == dialectPostgres {
 		err = dst.db.QueryRowContext(ctx, `SELECT to_regclass('supersede_fence') IS NOT NULL`).Scan(&fenceExists)

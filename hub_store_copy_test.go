@@ -75,6 +75,7 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = source.close() })
+	recordSpawnBoundBackfill(t, source)
 	names := copyFixtureTables(t)
 	seedCopyFixture(t, source.db, names)
 	// Prime the server's cached statistics before advancing the sequence.
@@ -111,6 +112,9 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 		t.Fatalf("copied-back replay: id=%d fresh=%v err=%v", again.ID, again.Fresh, err)
 	}
 	assertCopiedObligations(t, pgStore)
+	// The target's ledger is its own: its hub's start records the backfill
+	// before it can be copied back.
+	recordSpawnBoundBackfill(t, pgStore)
 	_ = pgStore.close()
 	report.Reset()
 	if err := copyHubStore(t.Context(), pgURL, mysqlTargetURL, "", false, false, &report); err != nil {
@@ -375,9 +379,10 @@ func makeCopySQLiteFixture(t *testing.T, mysql *sql.DB, path string, names []str
 	if _, err = db.Exec(`CREATE TABLE lane_inbox_id_floor (singleton INTEGER, floor INTEGER); INSERT INTO lane_inbox_id_floor VALUES (1, 50)`); err != nil {
 		t.Fatal(err)
 	}
-	// The rows come from a migrated MySQL source, so its succeeded-notice
-	// backfill has run (hk 6283); the copier refuses a SQLite source without it.
-	if _, err = db.Exec(`PRAGMA user_version=1`); err != nil {
+	// The rows come from a migrated MySQL source, so its start-up backfills
+	// have run (hk 6283, hk 6433); the copier refuses a SQLite source without
+	// them.
+	if _, err = db.Exec(`PRAGMA user_version=2`); err != nil {
 		t.Fatal(err)
 	}
 }

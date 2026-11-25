@@ -1020,6 +1020,16 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		if marked := inbox.store.succeededNoticesMarked; marked != nil {
 			config.Logger.Info("hub backfilled succeeded spawn notifications as telemetry-recorded", "rows", *marked)
 		}
+		if batches := inbox.store.spawnBoundBackfilled; batches != nil {
+			rows := 0
+			for _, read := range batches {
+				rows += read
+			}
+			config.Logger.Info("hub backfilled the drain columns of bound spawn operations", "rows", rows, "batches", len(batches))
+		}
+		if repaired := inbox.store.spawnBoundRepaired; repaired > 0 {
+			config.Logger.Info("hub repaired the drain columns of spawn operations in flight", "rows", repaired)
+		}
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{

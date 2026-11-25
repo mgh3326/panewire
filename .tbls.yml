@@ -246,8 +246,8 @@ comments:
     tableComment: |
       Why: the durable record of one spawn request: job, owner, payload, status, node binding, attempts, parks and terminal result. The other spawn tables name it by request_id, job or node_id.
       Role: source of record.
-      Read: hub_spawn_task_store.go:spawnTask, queryPendingSpawns, pendingSpawnPage, retryableSpawns, latestSpawnForJob, spawnStartReceipt, spawnRoleOwner; hub_spawn_live.go:liveSpawns; hub_spawn_park.go:spawnRollbackBlockingRows.
-      Write: hub_spawn_task_store.go:claimSpawnReplacing (INSERT, and replaced_from), markSpawnStarted, bindSpawnPlaced, unbindSpawn, touchSpawn, writeSpawnOutcome (terminal); hub_spawn_park.go:parkSpawn; hub_spawn_expiry.go:endUnstartedAttempt, releaseEndedSpawn; hub_spawn_start_conditions.go:recordWaitingSpawnResult, giveUpWaitingSpawn; hub_spawn_task_fail.go:markSpawnTaskFailNotice.
+      Read: hub_spawn_task_store.go:spawnTask, queryPendingSpawns, pendingSpawnPage, retryableSpawns, latestSpawnForJob, spawnStartReceipt, spawnRoleOwner; hub_spawn_live.go:liveSpawns; hub_spawn_park.go:spawnRollbackBlockingRows; hub_spawn_drain.go:boundExclusiveSpawns, writeSpawnBoundBatch.
+      Write: hub_spawn_task_store.go:claimSpawnReplacing (INSERT, and replaced_from), markSpawnStarted, bindSpawnPlaced, unbindSpawn, touchSpawn, writeSpawnOutcome (terminal); hub_spawn_park.go:parkSpawn; hub_spawn_expiry.go:endUnstartedAttempt, releaseEndedSpawn; hub_spawn_start_conditions.go:recordWaitingSpawnResult, giveUpWaitingSpawn; hub_spawn_task_fail.go:markSpawnTaskFailNotice; hub_spawn_drain.go:writeSpawnBoundBatch (bound_machine, exclusive: backfilled once, repaired at every start while in flight).
       Retention: hub_store_retention.go:pruneHubStore (spawnOperationsRetirable). Deletes a terminal operation older than 30 days (spawnOperationRetention) that no live row still needs: no undelivered or unrecorded notice, no unrecorded placement snapshot, no unfinished supersede landing, no queued, running or unnotified consult, no pending, guarded or settled pool action for its job, no reservation, and, for failed or refused operations, a posted task-failure comment.
   - table: spawn_queue
     tableComment: |
@@ -383,10 +383,10 @@ comments:
       Relations: none by design. Keyed by machine, kind and need; no table names them.
   - table: panewire_schema_migrations
     tableComment: |
-      Why: the ledger of applied migration files for the MySQL hub store, so each file runs once.
+      Why: the ledger of applied migration files for the MySQL hub store, so each file runs once. It also records the one-time Go backfill of spawn_operations' drain columns.
       Role: ledger.
-      Read: hub_mysql.go:migrateHubMySQLConn (COUNT by version).
-      Write: hub_mysql.go:migrateHubMySQLConn (INSERT version); the table is created by hubMySQLLedger.
+      Read: hub_mysql.go:migrateHubMySQLConn (COUNT by version); hub_spawn_drain.go:spawnBoundBackfillRecorded; hub_store_copy_backfill.go:storeCopySourceRecords.
+      Write: hub_mysql.go:migrateHubMySQLConn (INSERT version); hub_spawn_drain.go:backfillSpawnBoundMachines (INSERT its version); the table is created by hubMySQLLedger.
       Retention: none.
       Relations: none by design. It describes the schema, not the data; nothing references it.
 
