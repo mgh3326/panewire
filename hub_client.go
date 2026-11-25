@@ -190,6 +190,7 @@ type HubClient struct {
 	spawnConfigPath      string
 	spawnJournalDir      string
 	spawnSlotsAdvertised atomic.Int32
+	spawnSlotsAtStart    int // set before the first hello, when restart recovery binds N
 	spawnSlotsOverride   int // fixture seam; 0 reads spawn.json
 	spawnAdmissionOnce   sync.Once
 	spawnAdmission       *nodeSpawnAdmission
@@ -574,6 +575,7 @@ var hubRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,96}$`)
 func validHubRequestID(value string) bool { return hubRequestIDPattern.MatchString(value) }
 
 func (client *HubClient) Run(ctx context.Context) {
+	processStart := client.nowUTC()
 	if err := client.spawnStartupError(); err != nil {
 		client.warn(err.Error())
 		return
@@ -582,7 +584,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	go client.runSpawnSettle(ctx)
+	client.startSpawnRecovery(ctx, processStart)
 	go client.runCreditRejectionRecovery(ctx)
 	go client.runLaneReconcile(ctx)
 	go client.runPoolHolds(ctx)

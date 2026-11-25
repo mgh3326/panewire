@@ -41,7 +41,7 @@ func TestNodeSpawnJournalReplayWithDifferentSparseListsConflicts(t *testing.T) {
 		WaitSeconds: 60,
 	}
 
-	claimed, cached, err := j.claim(ctx, msg1)
+	claimed, cached, err := j.claim(ctx, msg1, spawnJournalHold{})
 	if err != nil || !claimed || cached != nil {
 		t.Fatalf("first claim failed: claimed=%v cached=%v err=%v", claimed, cached, err)
 	}
@@ -69,7 +69,7 @@ func TestNodeSpawnJournalReplayWithDifferentSparseListsConflicts(t *testing.T) {
 	msg2 := msg1
 	msg2.Checkout = checkout2
 
-	claimed2, cached2, err2 := j.claim(ctx, msg2)
+	claimed2, cached2, err2 := j.claim(ctx, msg2, spawnJournalHold{})
 	if err2 == nil {
 		t.Fatalf("different sparse lists replayed under same request ID must conflict: claimed=%v cached=%v", claimed2, cached2)
 	}
@@ -109,7 +109,7 @@ func TestNodeSpawnJournalStrippedReplayOfSparseRowDoesNotReportSparse(t *testing
 		WaitSeconds: 60,
 	}
 
-	claimed, cached, err := j.claim(ctx, msg)
+	claimed, cached, err := j.claim(ctx, msg, spawnJournalHold{})
 	if err != nil || !claimed || cached != nil {
 		t.Fatalf("first claim failed: claimed=%v cached=%v err=%v", claimed, cached, err)
 	}
@@ -131,7 +131,7 @@ func TestNodeSpawnJournalStrippedReplayOfSparseRowDoesNotReportSparse(t *testing
 	strippedMsg := msg
 	strippedMsg.Checkout = &strippedCheckout
 
-	claimed2, cached2, err2 := j.claim(ctx, strippedMsg)
+	claimed2, cached2, err2 := j.claim(ctx, strippedMsg, spawnJournalHold{})
 	if err2 != nil {
 		t.Fatalf("stripped replay should be accepted: %v", err2)
 	}
@@ -172,7 +172,7 @@ func TestNodeSpawnJournalReplayWithListsAfterStrippedFirstSendAccepted(t *testin
 		WaitSeconds: 60,
 	}
 
-	claimed, cached, err := j.claim(ctx, strippedMsg)
+	claimed, cached, err := j.claim(ctx, strippedMsg, spawnJournalHold{})
 	if err != nil || !claimed || cached != nil {
 		t.Fatalf("first claim failed: claimed=%v cached=%v err=%v", claimed, cached, err)
 	}
@@ -194,7 +194,7 @@ func TestNodeSpawnJournalReplayWithListsAfterStrippedFirstSendAccepted(t *testin
 	replayMsg := strippedMsg
 	replayMsg.Checkout = &withLists
 
-	claimed2, cached2, err2 := j.claim(ctx, replayMsg)
+	claimed2, cached2, err2 := j.claim(ctx, replayMsg, spawnJournalHold{})
 	if err2 != nil {
 		t.Fatalf("replay with lists after stripped first send must be accepted: %v", err2)
 	}

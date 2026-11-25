@@ -94,7 +94,7 @@ func TestDeadlineAndEventJobIDsNameEffectiveJob_t6367(t *testing.T) {
 	message.Args = purposeIsJobFlag(t, "-l", "review-a")
 	message.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 
-	if result := client.runClaimedHubSpawn(t.Context(), message, nil); result.Error != "deadline_not_started" || result.JobID != "review-a" {
+	if result := client.runClaimedHubSpawn(t.Context(), message, nil, nil); result.Error != "deadline_not_started" || result.JobID != "review-a" {
 		t.Errorf("expired claim=%+v, want job review-a", result)
 	}
 	client.recordHubSpawnOutcome(message, hubSpawnResult{RequestID: message.RequestID}, "", "", time.Now())
@@ -137,7 +137,7 @@ func TestJournalCompletedRowNamesEffectiveJob_t6367(t *testing.T) {
 	// job's release while it runs.
 	executing := admissionMessage(636732, true)
 	executing.Args = []string{"-l", "review-b"}
-	if claimed, _, err := journal.claim(t.Context(), executing); err != nil || !claimed {
+	if claimed, _, err := journal.claim(t.Context(), executing, spawnJournalHold{}); err != nil || !claimed {
 		t.Fatalf("claimed=%v err=%v", claimed, err)
 	}
 	rows, err := journal.executing(t.Context())

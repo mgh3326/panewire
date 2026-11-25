@@ -407,7 +407,7 @@ func TestNodeSpawnReplayAnswersUnknownAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claimed, _, err := previous.claim(t.Context(), orphan); err != nil || !claimed {
+	if claimed, _, err := previous.claim(t.Context(), orphan, spawnJournalHold{}); err != nil || !claimed {
 		t.Fatalf("claim %v %v", claimed, err)
 	}
 	previous.db.Close()

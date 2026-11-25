@@ -145,7 +145,13 @@ func (client *HubClient) settleExecutingSpawn(ctx context.Context, journal *node
 	}
 	now := client.nowUTC()
 	result.CompletedAt = &now
-	if err := journal.complete(ctx, result); err != nil {
+	client.spawnActiveMu.Lock()
+	err := journal.complete(ctx, result)
+	if err == nil {
+		client.nodeAdmission().releaseSeededSpawn(row.RequestID)
+	}
+	client.spawnActiveMu.Unlock()
+	if err != nil {
 		return nil, false
 	}
 	stored, err := journal.resultOf(ctx, row.RequestID)
