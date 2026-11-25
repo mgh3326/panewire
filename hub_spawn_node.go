@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -823,9 +824,10 @@ func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutbo
 			result.RC, result.Error = 81, "checkout_refused:lane_outside_worktree"
 			return result
 		}
-		if journal != nil && journal.recordSpawnCWD(runContext, message.RequestID, launchDir.Path) != nil {
-			result.RC, result.Error = 75, "journal_unavailable"
-			return result
+		if journal != nil {
+			if err := journal.recordSpawnCWD(runContext, message.RequestID, launchDir.Path); err != nil {
+				slog.Warn("record spawn final cwd failed", "request_id", message.RequestID, "error", err)
+			}
 		}
 	}
 
