@@ -1825,8 +1825,20 @@ design hk:doc `design/2026-11-18/pw-4898-hub-store-mysql` §2-§3).
   `spawn_notifications`; the outbox row does not wait for telemetry. A
   succeeded outcome owes none, so its notice is written with
   `telemetry_recorded=1`, and the older ones were marked once (hk 6283;
-  postgres 0039, mysql 0032, SQLite at start). Hk 5297 prunes the history
-  tables by age.
+  postgres 0039, mysql 0032, SQLite at start).
+- Retention (hk 5297, `hub_store_retention.go` `spawnOperationsRetirable`):
+  the hourly pass deletes a `spawn_operations` row 30 days after its
+  `terminal_ms` only when no `spawn_reservations` row names it and nothing
+  else still needs it (an owed or unrecorded notification, an unrecorded
+  snapshot, an open supersede landing, a live consult, a live pool action of
+  the job, an unposted task-failure comment). Only a request that ended
+  before any node took it (given up, or refused or cancelled while waiting on
+  its start conditions) or went retryable loses its reservation, so an
+  operation that reached a node is kept with its reservation, notifications
+  and snapshots. The pass deletes no notification or snapshot row. Deleting
+  ended operations that still have a reservation was considered and not
+  built (operator decision 499, A; the reader tests skipped with
+  `decision 494 adverse finding` record why).
 - A crash between the work and the delete leaves the row. The next pass redoes
   the work under its idempotency key: the hk placement record is keyed by
   job and attempt, and a lane event by its event id.
