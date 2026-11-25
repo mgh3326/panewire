@@ -77,11 +77,12 @@ still stores the undelivered record and sends
 `relay.unrouted` for observation. A registered route for a lane event is treated
 as unavailable when its bound job is completed. A known route job's completion
 state decides the result; an unknown bound job is not proof that the route has
-ended. For a route without a job ID, the hub infers completion only when its
-machine and pane match at least one completed job in that lane and no matching
-job is live. This drops the event with `job_ended`, while a takeover route bound
-to a live or not-yet-known successor keeps delivering even if the predecessor
-job has completed. A later destination-node registration
+ended, regardless of other jobs sharing its pane. For a route without a job ID,
+the hub infers completion only when its machine and pane match at least one
+completed job in that lane and no matching job is live. This drops the event
+with `job_ended`, while a takeover route bound to a live or not-yet-known
+successor keeps delivering even if the predecessor job has completed. A later
+destination-node registration
 replays undelivered lane events without restarting the hub. That replay asks
 handoffkeep only for `lane.event` rows and advances by durable ID, so older
 undelivered report rows cannot hide a newer direct notification. Once the hub
