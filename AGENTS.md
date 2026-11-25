@@ -87,7 +87,7 @@ leave the old code for a cleanup PR rather than copying its pattern.
 
 ## Before pushing
 
-CI runs these checks. A person may run them all before pushing. A fleet session (a pane spawned by panewire) follows the spawn preamble instead: it runs `gofmt -l .`, `go vet ./...` and `go test` for the packages it changed, on any host, and leaves `go test ./...` and the `-race` runs to CI.
+CI runs these checks. A person may run them all before pushing. A fleet session (a pane spawned by panewire) follows the spawn preamble instead: it runs `gofmt -l .`, `go vet ./...` and `GOMAXPROCS=4 go test -p 2` for the packages it changed, on any host, running mutant or matrix builds one at a time and never in parallel, and leaves `go test ./...` and the `-race` runs to CI.
 
 ```sh
 gofmt -l .        # must print nothing
