@@ -803,18 +803,21 @@ func (client *HubClient) prepareTarget(ctx context.Context, args nodeWorktreePre
 		slog.Warn("node worktree prepare refused a sparse request", "reason", reason)
 		return nil, "invalid_args"
 	}
-	workRoot, err := client.nodeWorkRoot()
-	if err != nil {
-		return nil, "work_root_unset"
+	pin := target.Root
+	workRoot := pin.Real
+	if pin == (rootPin{}) {
+		var code string
+		pin, code = client.prepareWorkRoot()
+		if code != "" {
+			return nil, code
+		}
+		workRoot = pin.Configured
+		target.Root = pin
+		if target.admission != nil {
+			target.admission.finishRootPin(pin)
+			workRoot = pin.Real
+		}
 	}
-	if err := os.MkdirAll(workRoot, 0700); err != nil {
-		return nil, "work_root_unset"
-	}
-	pin, code := pinWorkRoot(workRoot)
-	if code != "" {
-		return nil, code
-	}
-	target.Root = pin
 	jobDir, outcome := nodeJobDirCheck(filepath.Join(pin.Real, target.Dir))
 	if outcome != "" {
 		return nodeWorktreePrepareResult{Outcome: outcome}, ""
@@ -834,14 +837,25 @@ func (client *HubClient) prepareTarget(ctx context.Context, args nodeWorktreePre
 	return tracker.decide(ctx, res)
 }
 
+func (client *HubClient) prepareWorkRoot() (rootPin, string) {
+	workRoot, err := client.nodeWorkRoot()
+	if err != nil {
+		return rootPin{}, "work_root_unset"
+	}
+	if err := os.MkdirAll(workRoot, 0700); err != nil {
+		return rootPin{}, "work_root_unset"
+	}
+	return pinWorkRoot(workRoot)
+}
+
 // pinWorkRoot pins the work root this prepare runs under. Configured is the
 // cleaned path spawn.json named (it may be a link), Real is every link
 // resolved, and Dev/Ino identify the real directory; a root that is not there
 // after MkdirAll, or that cannot be resolved, refuses as work_root_unset.
 //
 // The pin lives on the target, so each prepare run compares its paths against
-// one root from its first write to its last. hk 6403 keeps the pin across
-// spawns and refuses a root that changes while another spawn holds it.
+// one root from its first write to its last. Admission shares it across
+// overlapping spawns (hk 6403).
 func pinWorkRoot(configured string) (rootPin, string) {
 	real, err := filepath.EvalSymlinks(configured)
 	if err != nil {
