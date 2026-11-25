@@ -177,6 +177,8 @@ func (h *HubServer) fleetStatusApp() *fleet.App {
 	if err != nil {
 		return nil
 	}
+	// The plan and the quota rows share the cycle's clock.
+	app.Now = h.now
 	return app
 }
 
