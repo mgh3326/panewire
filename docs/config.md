@@ -2658,7 +2658,9 @@ call, with exit status 70 (configuration) and refusal code
 
 This fails closed on purpose: another local user who creates the path first
 denies that uid's spawns until it is removed. Remove the named path as its owner
-or as root; the next spawn creates it again.
+or as root; the next spawn creates it again. A design owner hears this refusal
+at its first occurrence, not only at the third repeat: the cause is on the
+default `relay.spawn_notice_must_fix` list ([docs/hub-spawn-operations.md](hub-spawn-operations.md#owner-notices-by-cause), hk 6496).
 
 **What the lock cannot cover.** After taking the locks, a spawn sets the lock
 file's, the directory's and the root's access and modification times to now, so

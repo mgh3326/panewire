@@ -47,8 +47,10 @@ const (
 
 // defaultSpawnNoticeMustFix is the built-in must-fix cause list: causes a
 // person has to repair, never silenced for repetition or replay. The policy
-// file's relay.spawn_notice_must_fix replaces it.
-var defaultSpawnNoticeMustFix = []string{"workspace_unresolved", "auth_unavailable", "report_path", "brief_upload", "identity_unproven"}
+// file's relay.spawn_notice_must_fix replaces it. workspace_lock_root_unsafe
+// (hk 6496) is a root another user owns or a link: a replay meets it again, so
+// the owner is told at once like the others.
+var defaultSpawnNoticeMustFix = []string{"workspace_unresolved", "auth_unavailable", "report_path", "brief_upload", "identity_unproven", "workspace_lock_root_unsafe"}
 
 // spawnNoticeCauseShape is a cause key as spawnNoticeCause produces it: a
 // refusal code or a notice's own cause word, optionally with its detail after

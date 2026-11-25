@@ -1635,7 +1635,12 @@ owner hears it only when:
   third occurrence notifies once, and the window starts over;
 - the cause is on `relay.spawn_notice_must_fix` (`delivery-policy.yaml`;
   default `workspace_unresolved`, `auth_unavailable`, `report_path`,
-  `brief_upload`, `identity_unproven`). An explicit empty list has none.
+  `brief_upload`, `identity_unproven`, `workspace_lock_root_unsafe`, hk 6496).
+  An explicit empty list has none. A hub started with `--delivery-policy
+  default` (or none) runs the embedded file, so a new binary is enough. A hub
+  started with a policy file path keeps that file's list: add the cause there
+  too, or the owner hears `workspace_lock_root_unsafe` only at its third
+  repeat in 30 minutes.
 
 Each notice's decision (deliver, file, count, repeat, settle) is made once, from
 its inputs at first routing, and recorded in `owner_notice_decisions` before it
