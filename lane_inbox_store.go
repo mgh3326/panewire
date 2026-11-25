@@ -59,6 +59,9 @@ type laneInboxStore struct {
 	// spawn notices updated, when this store's start applied it; nil otherwise
 	// (hub_spawn_notice_recorded.go).
 	succeededNoticesMarked *int64
+	// spawnBoundBackfilled is the size of each batch of the one-time backfill
+	// of bound_machine and exclusive, when this start ran it.
+	spawnBoundBackfilled []int
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration

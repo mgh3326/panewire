@@ -61,7 +61,7 @@ func newReadGateSteps(t *testing.T, h *HubServer) *readGateSteps {
 }
 
 func (s *readGateSteps) all() {
-	s.h.stepSpawnCoordinator(s.ctx, func(task hubSpawnTask) bool {
+	s.h.stepSpawnCoordinator(s.ctx, func(task hubSpawnTask, _ spawnDrainMarks) bool {
 		s.handed = append(s.handed, task.Request.RequestID)
 		return false // the row stays runnable, as a busy node leaves it
 	})

@@ -981,10 +981,10 @@ node advertises `spawn_slots_v1=N` in hello only when N is above one. The hub
 opens a second dispatch to a node only when it advertised slots and every
 open dispatch and the candidate are checkout spawns into distinct dirs;
 anything else stays queued at the hub. A node without the capability, or an
-older hub, runs one at a time. While a request without a checkout is queued
-behind open dispatches, the hub opens no new dispatch to that node until it
-has run. It commits the result before
-replying. A node drain wakes unclaimed waiters without a reply or journal row
+older hub, runs one at a time. While a request without a checkout waits for a
+node, the hub holds back the checkout spawns queued after it
+([the drain](#drain-for-a-spawn-without-a-checkout)). The node commits the
+result before replying. A node drain wakes unclaimed waiters without a reply or journal row
 for replay after restart; work admitted before the drain is allowed to finish
 within the drain bound. Claimed executions retain the restart-settlement rules. See
 [Stranded requests](#stranded-requests).
@@ -1036,6 +1036,55 @@ and the refused host, profile and reason together, then wakes placement. The
 exclusion survives hub restart within that attempt and is cleared by a
 cleanup-confirmed new attempt. A request that already claimed its handoffkeep
 job must not be moved to another host; that claim is host-bound.
+
+### Drain for a spawn without a checkout
+
+A node admits a spawn without a checkout (an *exclusive*) alone, so newer
+checkout spawns could keep it busy for good. The coordinator holds them back
+(hk 6433):
+
+- The bind writes `bound_machine` (the node request's machine) and `exclusive`
+  (1 when the node request has no checkout dir) on the operation. Every
+  statement that unbinds clears both. A finished operation keeps them; readers
+  filter by status.
+- Once per scan, before the first page, one query returns each machine's oldest
+  `bound` exclusive by (`created_ms`, `request_id`) whose attempt deadline is
+  after the hub's clock. It returns at most one row per machine.
+- That row marks its machine only if it can be sent now: the node is connected
+  with `spawn_ops_v1` and accepting, and the pair has no login need or launch
+  backoff. One that cannot is unbound in the same scan, so it holds nothing
+  back, and a younger exclusive on the machine marks it no earlier than the
+  next scan.
+- A checkout spawn bound to a marked machine is not dispatched while the mark's
+  (`created_ms`, `request_id`) is before its own, whether it is unsent or a
+  replay of a sent one. One queued before the exclusive goes ahead.
+- A mark lasts one scan (2 s, or the next kick). Nothing is kept between scans,
+  so a hub restart loses nothing.
+
+An exclusive that is already sent (`dispatching`, `reconciling`) marks nothing:
+while its dispatch is open the hub sends the node nothing else. If the query
+fails, that scan holds nothing back, the coordinator counts a silent error and
+the pass is repeated.
+
+Rows bound before the columns existed are filled once at the first start of a
+hub that has them, in batches of 500 by request id, before the coordinator
+runs. The start records it (`go_spawn_operations_bound_exclusive_backfill` in
+`panewire_schema_migrations`; on SQLite `PRAGMA user_version` 2), and
+`hub store-copy` refuses a source without that record. A hub rolled back past
+the columns neither writes nor clears them, and a later upgrade does not fill
+them again: an exclusive such a hub bound, still unsent at the upgrade, marks
+nothing until it is sent or unbound.
+
+| Behaviour | Tests |
+|---|---|
+| The mark reaches a checkout on an earlier page | `TestDrainHoldsAcrossPages_t6367` |
+| It ends with the exclusive's deadline on the hub's clock | `TestDrainEndsOnExpiryWithFrozenClock_t6367` |
+| Order is (`created_ms`, `request_id`) | `TestDrainTieBreaksByRequestID_t6367`, `TestNewerExclusiveDoesNotBlockOlderCheckout_t6367` |
+| A grant-required exclusive marks | `TestDrainReadsGrantStatus_t6367` |
+| An exclusive that cannot be sent marks nothing | `TestExclusiveWaitingOnBindingDoesNotStarveMachine_t6404` |
+| Bind writes and unbind clears the columns | `TestBindWritesBoundMachineAndExclusive_t6404` |
+| One row per machine | `TestBoundExclusiveSpawnsReturnsOldestPerMachine_t6433` |
+| The backfill is batched and runs once | `TestBoundMachineBackfillBoundedBatches_t6404` |
 
 ### A job.spawn the node cannot accept
 
@@ -1757,13 +1806,13 @@ queue or outbox only when one of these holds:
   `hub read backstop found work that no kick announced` with `loop=<name>`;
   that line is the evidence that a write path misses its kick.
 
-The loops still tick in memory every 2 s or 5 s (the liveness ledger, drain
-marks, the wake of parked rows): only the store read is gated. `--spawn-rollback-drain`
+The loops still tick in memory every 2 s or 5 s (the liveness ledger, the wake
+of parked rows): only the store read is gated. `--spawn-rollback-drain`
 still counts blocking rows once a minute.
 
 | Gate | Loop | Reads (when open) | Kicked by (after commit) | Due time it keeps |
 |---|---|---|---|---|
-| `spawn_scan` | coordinator scan | start-condition check, parked notices, `pendingSpawnPage`, `pendingSpawns`; then, if nothing was runnable, one read of the queue | `claimSpawn`, `activateStagedSpawn`, `resumeCleanedSpawn`, `returnToWaiting`, `wakeParkedSpawns` (rows woken), every `spawnKick` | 2 s while a row is runnable or in flight; else the earliest parked `next_check_ms`, the next stale probe, the next start-condition poll while a row waits, the next parked-notice sweep while a row is parked |
+| `spawn_scan` | coordinator scan | start-condition check, parked notices, `boundExclusiveSpawns` (each marked row is then read by id), `pendingSpawnPage`, `pendingSpawns`; then, if nothing was runnable, one read of the queue | `claimSpawn`, `activateStagedSpawn`, `resumeCleanedSpawn`, `returnToWaiting`, `wakeParkedSpawns` (rows woken), every `spawnKick` | 2 s while a row is runnable or in flight; else the earliest parked `next_check_ms`, the next stale probe, the next start-condition poll while a row waits, the next parked-notice sweep while a row is parked |
 | `spawn_notice` | `flushSpawnNotifications` | the pending, publishing and held rows of `spawn_notice_outbox` | `completeSpawn`, the waiting give-up and end, `noteUnresolvedSpawn`, `saveSpawnNotice`, `resumeCleanedSpawn` (a replay supersedes a held notice) | 2 s while a row was read (it may be owed; an empty read settles it); a held row's hold end |
 | `spawn_task_fail` | `flushSpawnTaskFailNotices` | `task_fail_notice_outbox` rows due, then the earliest `retry_ms` | `completeSpawn`, the waiting give-up and end | the earliest row's `retry_ms`; 2 s while a due row stays unposted; none when the outbox is empty |
 | `placement_record` | `flushPlacementRecords` | the outbox head, then the snapshots | `saveSpawnPlacementSnapshot`, the deferred trace save, every write that ends an operation, `placementKick` | 2 s while an over attempt's snapshot is unsealed or a deferred trace save waits; none for running attempts |

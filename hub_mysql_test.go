@@ -96,7 +96,9 @@ func TestParseHubMySQLMigrationRefusesAFileThatIsNotOneGuardedStatement(t *testi
 func columnsOf(t *testing.T, sources []string) map[string]map[string]bool {
 	t.Helper()
 	create := regexp.MustCompile(`(?is)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\((.*)\)[^)]*$`)
-	alter := regexp.MustCompile(`(?is)^ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)`)
+	alter := regexp.MustCompile(`(?is)^ALTER\s+TABLE\s+(\w+)\s+(ADD\s+COLUMN\s.*)$`)
+	// One MySQL ALTER may add several columns, so each of its clauses is read.
+	added := regexp.MustCompile(`(?is)^ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)`)
 	drop := regexp.MustCompile(`(?is)^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)`)
 	tables := map[string]map[string]bool{}
 	for _, source := range sources {
@@ -126,7 +128,11 @@ func columnsOf(t *testing.T, sources []string) map[string]map[string]bool {
 				if tables[m[1]] == nil {
 					t.Fatalf("ALTER of %s, which no earlier statement created", m[1])
 				}
-				tables[m[1]][strings.ToLower(m[2])] = true
+				for _, clause := range splitTopLevel(m[2]) {
+					if column := added.FindStringSubmatch(clause); column != nil {
+						tables[m[1]][strings.ToLower(column[1])] = true
+					}
+				}
 			case drop.MatchString(statement):
 				delete(tables, drop.FindStringSubmatch(statement)[1])
 			}

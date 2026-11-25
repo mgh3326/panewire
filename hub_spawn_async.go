@@ -330,10 +330,6 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 // for each node, so a slow landing cannot consume a placement worker.
 const hubSpawnWorkerCount = 8
 
-// hubSpawnDrainMarkTTL bounds a node's drain mark (runSpawnCoordinator) past
-// the last scan that saw its waiting request; scans run every 2s.
-const hubSpawnDrainMarkTTL = 10 * time.Second
-
 func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	if h.inbox == nil {
 		return
@@ -351,12 +347,6 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 	// node admits at once, so a dispatched request never waits on the node
 	// past its start window (hk 4578). A node that advertises none gets one.
 	nodeActive := map[string]map[string]int{}
-	// drainFor marks a node where a request without a checkout is queued
-	// behind open dispatches: no new dispatch opens there until it has run, so
-	// it is not starved by later checkouts. The mark is refreshed by each scan
-	// that still finds the request waiting and lapses when no scan has for
-	// hubSpawnDrainMarkTTL (the request ended some other way).
-	drainFor := map[string]time.Time{}
 	for range hubSpawnWorkerCount {
 		h.spawnWorkers.Add(1)
 		go func() {
@@ -393,7 +383,10 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			}
 		}()
 	}
-	schedule := func(task hubSpawnTask) bool {
+	// drain is the scan's: a checkout it holds is not dispatched, so a spawn
+	// without a checkout that waits on the same machine is not starved by
+	// later checkouts (hub_spawn_drain.go).
+	schedule := func(task hubSpawnTask, drain spawnDrainMarks) bool {
 		if task.Status == "bound" && task.Node != nil && h.handleQueuedBinding(ctx, task) {
 			return true
 		}
@@ -410,26 +403,14 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 		var key string
 		if task.Node != nil {
 			key = hubSpawnOverlapKey(task.Node)
-			machine := task.Node.Machine
-			open := nodeActive[machine]
+			open := nodeActive[task.Node.Machine]
 			if len(open) > 0 {
 				busy = busy || len(open) >= slots || key == "" || open[""] > 0
 				for held := range open {
 					busy = busy || spawnOverlapConflicts(held, key)
 				}
 			}
-			if mark, marked := drainFor[machine]; marked && time.Since(mark) > hubSpawnDrainMarkTTL {
-				delete(drainFor, machine)
-			}
-			switch {
-			case key == "" && busy && !active[task.Request.RequestID]:
-				drainFor[machine] = time.Now()
-			case key == "" && !busy:
-				delete(drainFor, machine)
-			case key != "":
-				_, draining := drainFor[machine]
-				busy = busy || draining
-			}
+			busy = busy || drain.holds(task)
 		}
 		if !busy {
 			active[task.Request.RequestID] = true
@@ -527,7 +508,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 // touches the store only when a write kicked it, its earliest due time passed,
 // or the backstop lapsed (read_gate.go): an idle coordinator sends no query
 // between backstops (hk 5302).
-func (h *HubServer) stepSpawnCoordinator(ctx context.Context, schedule func(hubSpawnTask) bool) {
+func (h *HubServer) stepSpawnCoordinator(ctx context.Context, schedule func(hubSpawnTask, spawnDrainMarks) bool) {
 	if h.drain.admit() {
 		h.loopTick(loopSpawnCoordinator)
 		h.gatedRead(readSpawnScan, "", func() readResult { return h.spawnScanPass(ctx, schedule) })
@@ -546,7 +527,7 @@ const spawnScanRetry = 2 * time.Second
 // notices, and the runnable page. A pass that found nothing to run asks the
 // queue when to look next, so an idle coordinator wakes for a parked request's
 // next_check_ms, a waiting row's poll or a stale probe, and for nothing else.
-func (h *HubServer) spawnScanPass(ctx context.Context, schedule func(hubSpawnTask) bool) readResult {
+func (h *HubServer) spawnScanPass(ctx context.Context, schedule func(hubSpawnTask, spawnDrainMarks) bool) readResult {
 	// Start conditions are checked first so a row released in this pass is
 	// scheduled by the scan below rather than the next one.
 	h.checkWaitingSpawns(ctx)
@@ -592,25 +573,37 @@ func (h *HubServer) spawnScanPass(ctx context.Context, schedule func(hubSpawnTas
 // silent ledger error (one log line per streak) and keeps the pass's other
 // half: a failed page read still tries the ordinary pending read below.
 //
+// Every row is offered with the drain marks read before the first page, so a
+// waiting exclusive holds checkouts back wherever the two rows page.
+//
 // It reports whether it handed any row to schedule, and whether a read failed.
-func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubSpawnTask) bool) (found, failed bool) {
+func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubSpawnTask, spawnDrainMarks) bool) (found, failed bool) {
 	// Work claimed during a scan may move later in the ordering. Do not
 	// schedule the same row twice in one pass, even if it reappears.
 	seen := map[string]bool{}
 	position := spawnScanPosition{}
-	scanFailed := false
+	pageFailed, scanFailed := false, false
+	// A failed read holds nothing back for this pass: it must not stop the
+	// dispatches, and the pass is repeated.
+	drain, err := h.readSpawnDrainMarks(ctx)
+	if err != nil {
+		h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:readSpawnDrainMarks", err)
+		scanFailed = true
+	} else {
+		h.loopClearSilent("hub_spawn_async.go:readSpawnDrainMarks")
+	}
 	for {
 		tasks, next, err := h.inbox.store.pendingSpawnPage(ctx, position, h.now().UTC())
 		if err != nil {
 			h.loopNoteSilentError(loopSpawnCoordinator, "hub_spawn_async.go:pendingSpawnPage", err)
-			scanFailed = true
+			pageFailed, scanFailed = true, true
 			break
 		}
 		for _, task := range tasks {
 			if !seen[task.Request.RequestID] {
 				seen[task.Request.RequestID] = true
 				h.loopNoteMade(loopSpawnCoordinator, task.Request.RequestID)
-				if schedule(task) {
+				if schedule(task, drain) {
 					h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 				}
 			}
@@ -621,7 +614,7 @@ func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubS
 		}
 		position = next
 	}
-	if !scanFailed {
+	if !pageFailed {
 		h.loopClearSilent("hub_spawn_async.go:pendingSpawnPage")
 	}
 	// Deadline-exceeded replays retain their existing bounded backoff.
@@ -640,7 +633,7 @@ func (h *HubServer) spawnCoordinatorScan(ctx context.Context, schedule func(hubS
 			}
 			if task.Status == "deadline_exceeded" {
 				h.loopNoteMade(loopSpawnCoordinator, task.Request.RequestID)
-				if schedule(task) {
+				if schedule(task, drain) {
 					h.loopNoteDone(loopSpawnCoordinator, task.Request.RequestID)
 				}
 			}
@@ -663,13 +656,7 @@ func (h *HubServer) handleQueuedBinding(ctx context.Context, task hubSpawnTask) 
 		h.executeSpawnTask(ctx, task)
 		return true
 	}
-	h.mu.Lock()
-	record := h.nodes[task.Node.Machine]
-	admitted := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"] && h.acceptingEffectiveLocked(task.Node.Machine, record.accepting)
-	h.mu.Unlock()
-	// A bound row whose (host, kind) gained a login need or a launch backoff
-	// since the bind is re-placed now, not when its turn at the slot comes.
-	if admitted && h.boundSpawnReadinessDrop(task, *task.Node) == "" {
+	if h.boundSpawnDispatchable(task) {
 		return false
 	}
 	if _, err := h.inbox.store.unbindUnsentSpawn(ctx, task.Request.RequestID, task.Attempt, task.Node.RequestID); err == nil {
@@ -677,6 +664,19 @@ func (h *HubServer) handleQueuedBinding(ctx context.Context, task hubSpawnTask) 
 		h.kickSpawnPlacement()
 	}
 	return true
+}
+
+// boundSpawnDispatchable reports whether the unsent binding task (task.Node
+// is set) can be sent to its machine now, its deadline aside. One that cannot
+// is re-placed by handleQueuedBinding.
+func (h *HubServer) boundSpawnDispatchable(task hubSpawnTask) bool {
+	h.mu.Lock()
+	record := h.nodes[task.Node.Machine]
+	admitted := record != nil && record.agent != nil && record.state == "connected" && record.capabilities["spawn_ops_v1"] && h.acceptingEffectiveLocked(task.Node.Machine, record.accepting)
+	h.mu.Unlock()
+	// A bound row whose (host, kind) gained a login need or a launch backoff
+	// since the bind is re-placed now, not when its turn at the slot comes.
+	return admitted && h.boundSpawnReadinessDrop(task, *task.Node) == ""
 }
 
 func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) {

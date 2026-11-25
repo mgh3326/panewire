@@ -128,6 +128,7 @@ func TestHubStoreCopyKeepsBackfilledNoticeMarks_t6326(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = source.close() })
+	recordSpawnBoundBackfill(t, source)
 	rows := t6326NoticeRows(1)
 	seedT6326NoticeRows(t, source.db, rows)
 	_, targetURL := hubPostgresTestSchema(t)

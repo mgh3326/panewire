@@ -266,6 +266,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		if err := s.backfillSpawnReplacedFrom(ctx); err != nil {
 			return err
 		}
+		// The columns come from a migration file; the values of rows bound
+		// before them are decoded in Go, once (hk 6433).
+		if err := s.backfillSpawnBoundMachines(s.life); err != nil {
+			return err
+		}
 		if err := s.reconcileSpawnQueue(ctx); err != nil {
 			return err
 		}
@@ -296,8 +301,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// notice columns are hk 4662's (postgres: 0019); the placed seat columns
 	// are hk 5124's (postgres: 0022), task_fail_notice_ms is hk 5137's
 	// (postgres: 0023), task_fail_retry_ms is hk 5137's (postgres: 0024), and
-	// replaced_from is hk 5300's (postgres: 0031), and replaced_reason is hk 5690's (postgres: 0035), and trace_history is hk 6074's (postgres: 0037, mysql: 0030).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`, `replaced_reason TEXT NOT NULL DEFAULT ''`, `start_receipt_ms BIGINT NOT NULL DEFAULT 0`, `trace_history TEXT NOT NULL DEFAULT '[]'`} {
+	// replaced_from is hk 5300's (postgres: 0031), replaced_reason is hk 5690's
+	// (postgres: 0035), trace_history is hk 6074's (postgres: 0037, mysql:
+	// 0030), and bound_machine and exclusive are hk 6433's (postgres: 0041,
+	// mysql: 0037).
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`, `replaced_reason TEXT NOT NULL DEFAULT ''`, `start_receipt_ms BIGINT NOT NULL DEFAULT 0`, `trace_history TEXT NOT NULL DEFAULT '[]'`, `bound_machine TEXT NOT NULL DEFAULT ''`, `exclusive INTEGER NOT NULL DEFAULT 0`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -345,6 +353,7 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		`CREATE INDEX IF NOT EXISTS spawn_operations_succeeded_run ON spawn_operations(last_run_ms) WHERE status='succeeded'`,
 		`CREATE INDEX IF NOT EXISTS spawn_operations_job ON spawn_operations(job)`,
 		`CREATE INDEX IF NOT EXISTS spawn_operations_replaced_from ON spawn_operations(replaced_from)`,
+		spawnBoundExclusiveIndex,
 	} {
 		if _, err := s.db.ExecContext(ctx, index); err != nil {
 			return err
@@ -385,6 +394,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Succeeded outcomes' notices written before they were inserted recorded
 	// (hk 6283; postgres: 0039, mysql: 0032).
 	if err := s.backfillSucceededSpawnNotices(s.life); err != nil {
+		return err
+	}
+	// Rows bound before bound_machine and exclusive existed get them once
+	// (hk 6433), before the coordinator reads them.
+	if err := s.backfillSpawnBoundMachines(s.life); err != nil {
 		return err
 	}
 	// The placement-record and notice outboxes (hk 5298; postgres: 0028). They
@@ -708,7 +722,10 @@ func (s *laneInboxStore) bindSpawnPlaced(parent context.Context, id string, atte
 	if accountKey != "" {
 		placedAttempt = attempt
 	}
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,start_receipt_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, id, attempt, node.Machine)
+	// bound_machine and exclusive let the coordinator find each machine's
+	// oldest waiting exclusive in one query (hk 6433). Every statement that
+	// sets node_id=NULL clears them.
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,start_receipt_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=?,bound_machine=?,exclusive=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, node.Machine, spawnExclusiveMark(&node), id, attempt, node.Machine)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -1095,7 +1112,7 @@ func (s *laneInboxStore) unbindRefusedSpawnParked(parent context.Context, task h
 		return hubSpawnTask{}, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',bound_machine='',exclusive=0,status='accepted',exclusions=?,failed_attempts=failed_attempts+1,park_reason=?,next_check_ms=?,park_priority=CASE WHEN park_since_ms=0 THEN -1 ELSE park_priority END,park_priority_failures=CASE WHEN park_since_ms=0 THEN 0 ELSE park_priority_failures END,park_since_ms=CASE WHEN park_since_ms=0 AND ?<>'' THEN `+s.dialect.castInt("?")+` ELSE park_since_ms END,claimed_host=CASE WHEN ?='' THEN claimed_host ELSE ? END,result=CASE WHEN ?='' THEN result ELSE ? END,claim_result=CASE WHEN claim_result='' THEN ? ELSE claim_result END,placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status=? AND (claimed_host='' OR ?='' OR claimed_host=?)`), string(raw), parkReason, retryAt, parkReason, now.UnixMilli(), claimedHost, claimedHost, claimedResult, claimedResult, claimProof, task.Request.RequestID, task.Attempt, task.Node.RequestID, spawnStoredStatus(task.Status, task.Node), claimedHost, claimedHost)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -1119,7 +1136,7 @@ func (s *laneInboxStore) unbindUnsentSpawn(parent context.Context, id string, at
 func (s *laneInboxStore) unbindSpawn(parent context.Context, id string, attempt int, nodeID, status string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted',placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status IN (?,?)`), id, attempt, nodeID, status, status+spawnGrantStatusSuffix)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',bound_machine='',exclusive=0,status='accepted',placed_account_key='',placed_attempt=0 WHERE request_id=? AND attempt=? AND node_id=? AND status IN (?,?)`), id, attempt, nodeID, status, status+spawnGrantStatusSuffix)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -1412,7 +1429,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	// the placed columns clear in this same write (hk 5124). The outcome
 	// stays the attempt's terminal record.
 	expires := now.Add(fleet.SpawnExpiresFor(spawn.Role, task.Request.ExpiresSeconds))
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',tried='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status='accepted',deadline_ms=?,expires_ms=?,node_id=NULL,node_payload='',bound_machine='',exclusive=0,attempt=attempt+1,trace_recorded=0,last_run_ms=0,exclusions='[]',claimed_host=?,refresh_waits='[]',tried='[]',park_since_ms=0,park_priority=-1,park_priority_failures=0,placed_account_key='',placed_attempt=0 WHERE request_id=? AND status='retryable' AND attempt=?`), spawnAttemptDeadline(now, task.Request.DeadlineSeconds, expires).UnixMilli(), expires.UnixMilli(), spawnPinnedHost(task), task.Request.RequestID, task.Attempt)
 	if err != nil {
 		return task, err
 	}
