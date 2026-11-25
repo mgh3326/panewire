@@ -44,6 +44,16 @@ var storeCopyTables = []storeCopyTable{
 // event_key columns are plain text.
 var storeCopyHubKeyTables = map[string]bool{"lane_inbox": true, "delivery_obligations": true}
 
+// storeCopyOlderSourceTables are tables an older source may lack: a store
+// written before the table's release has no such table, so no rows to copy.
+// The copier reads a missing one as empty. supersede_lane_cause is the MySQL
+// lock-row table that old PostgreSQL and SQLite stores predate; the delivery
+// tables came with hk 6384.
+var storeCopyOlderSourceTables = map[string]bool{
+	"supersede_lane_cause": true, "delivery_obligations": true, "delivery_incidents": true,
+	"delivery_notice_slots": true, "delivery_reconciler_state": true,
+}
+
 // storeCopySequenceColumns names, for each table whose ids the database hands
 // out, that column: it orders as a number, and the target's sequence must pass
 // the copied and the source's high-water ids.
@@ -284,17 +294,26 @@ func storeCopyColumns(ctx context.Context, tx *sql.Tx, table string) ([]string, 
 	return rows.Columns()
 }
 
-// Old PostgreSQL and SQLite stores predate the MySQL lock-row table. Its
-// absence means there are no lock rows to copy, not an incomplete schema.
+// storeCopySourceHasTable reports whether the source holds table.
+func storeCopySourceHasTable(ctx context.Context, tx *sql.Tx, source *storeCopyDB, table string) (bool, error) {
+	var exists bool
+	var err error
+	switch {
+	case source.sqlite:
+		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists)
+	case source.dialect == dialectPostgres:
+		err = tx.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists)
+	default:
+		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?`, table).Scan(&exists)
+	}
+	return exists, err
+}
+
+// Older stores predate some tables (storeCopyOlderSourceTables). A table's
+// absence means there are no rows to copy, not an incomplete schema.
 func storeCopySourceColumns(ctx context.Context, tx *sql.Tx, source *storeCopyDB, table storeCopyTable) ([]string, error) {
-	if table.name == "supersede_lane_cause" && source.dialect != dialectMySQL {
-		var exists bool
-		var err error
-		if source.sqlite {
-			err = tx.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='supersede_lane_cause'`).Scan(&exists)
-		} else {
-			err = tx.QueryRowContext(ctx, `SELECT to_regclass('supersede_lane_cause') IS NOT NULL`).Scan(&exists)
-		}
+	if storeCopyOlderSourceTables[table.name] {
+		exists, err := storeCopySourceHasTable(ctx, tx, source, table.name)
 		if err != nil || !exists {
 			return nil, err
 		}
@@ -330,16 +349,10 @@ type storeCopyResult struct {
 func storeCopyScan(ctx context.Context, tx *sql.Tx, source, target *storeCopyDB, writer *sql.Tx, table storeCopyTable, cols []string, copyRows bool) (storeCopyResult, error) {
 	var result storeCopyResult
 	h := sha256.New()
-	if table.name == "supersede_lane_cause" && source.dialect != dialectMySQL {
-		var exists bool
-		var err error
-		if source.sqlite {
-			err = tx.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='supersede_lane_cause'`).Scan(&exists)
-		} else {
-			err = tx.QueryRowContext(ctx, `SELECT to_regclass('supersede_lane_cause') IS NOT NULL`).Scan(&exists)
-		}
+	if storeCopyOlderSourceTables[table.name] {
+		exists, err := storeCopySourceHasTable(ctx, tx, source, table.name)
 		if err != nil {
-			return result, hubDatabaseError("inspect lock table", err)
+			return result, hubDatabaseError("inspect "+table.name, err)
 		}
 		if !exists {
 			copy(result.sum[:], h.Sum(nil))
@@ -483,6 +496,15 @@ func storeCopyHighWater(ctx context.Context, tx *sql.Tx, source *storeCopyDB, ta
 		col, sequenced := storeCopySequenceColumns[t.name]
 		if !sequenced {
 			continue
+		}
+		if storeCopyOlderSourceTables[t.name] {
+			exists, err := storeCopySourceHasTable(ctx, tx, source, t.name)
+			if err != nil {
+				return nil, hubDatabaseError("inspect "+t.name, err)
+			}
+			if !exists {
+				continue
+			}
 		}
 		var n sql.NullInt64
 		var err error

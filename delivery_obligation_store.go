@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"slices"
 	"strings"
@@ -259,9 +260,37 @@ func (s *laneInboxStore) deferObligation(parent context.Context, id int64, now, 
 func (s *laneInboxStore) obligationInboxSettled(parent context.Context, id int64, deliveredBefore time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
+	var stored any
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT event_key FROM delivery_obligations WHERE id=?`), id).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	forms := storedEventKeyForms(s.dialect, stored)
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(forms)), ",")
 	var n int
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox WHERE event_key=(SELECT event_key FROM delivery_obligations WHERE id=?) AND delivered_at<? AND `+laneInboxSettled), id, deliveredBefore.UnixMilli()).Scan(&n)
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox WHERE event_key IN (`+marks+`) AND delivered_at<? AND `+laneInboxSettled), append(forms, deliveredBefore.UnixMilli())...).Scan(&n)
 	return n > 0, err
+}
+
+// storedEventKeyForms lists the event_key forms an item for the obligation's
+// stored key may hold, each in the type the dialect binds it as. Postgres
+// hex-encodes a key. A row copied back from MySQL keeps the digest of an
+// oversized key, while an obligation created on Postgres stores the raw key, so
+// the item and the obligation can differ. The hex decodes to the raw key, and
+// storedKeys lists both forms of it, as eventKeyPredicate does for other key
+// lookups.
+func storedEventKeyForms(dialect sqlDialect, stored any) []any {
+	if dialect != dialectPostgres {
+		return []any{stored}
+	}
+	raw, err := hex.DecodeString(string(storeCopyBytes(stored)))
+	if err != nil {
+		return []any{stored}
+	}
+	return dialect.storedKeys(string(raw))
 }
 
 // digestBatchReleased reports whether eventID is a digest or escalation batch
