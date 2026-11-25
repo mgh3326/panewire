@@ -579,7 +579,7 @@ func TestSpawnNodeReportsTheStartReceiptFromTheLandingPoint(t *testing.T) {
 		spawnConfigPath: t14SpawnConfig(t, t.TempDir()),
 		spawnJournalDir: t.TempDir(),
 		fleetEvents:     (&fleetEventRecorder{}).write,
-		spawnEngine: func(engineCtx context.Context, _, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
+		spawnEngine: func(engineCtx context.Context, _ fleet.LaunchDir, _, _, _, _ string, _ time.Time, _ []string) (*hubSpawnOutput, fleet.Execution) {
 			if calls.Add(1) == 1 {
 				// The second request never lands: it fails before job.spawned.
 				fleet.NotifySpawnLanded(engineCtx)

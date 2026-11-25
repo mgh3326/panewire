@@ -63,7 +63,7 @@ func TestSpawnIdentityMatchesLauncherParse_t6367(t *testing.T) {
 				t.Fatalf("launcher reads %+v, identity %+v", parsed, got)
 			}
 			// The node's binding replaces the directory and keeps the names.
-			bound := bindNodeSpawn(launched, "/node/cwd", "/node/brief", "workspace")
+			bound := bindNodeSpawn(launched, LaunchDir{Path: "/node/cwd"}, "/node/brief", "workspace")
 			if bound.Job != got.Job || bound.Label != got.Label || bound.ExecutionLane != got.ExecutionLane || bound.CWD != "/node/cwd" {
 				t.Fatalf("node binding names job=%q label=%q lane=%q cwd=%q, identity %+v", bound.Job, bound.Label, bound.ExecutionLane, bound.CWD, got)
 			}

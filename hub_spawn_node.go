@@ -704,6 +704,8 @@ func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutbo
 	}
 	var checkoutMS *int64
 	var checkoutStages *checkoutStageTimer
+	// A mapped directory as it is; a checkout's is bound after prepare.
+	launchDir := fleet.LaunchDir{Path: cwd}
 	if message.Checkout != nil {
 		started := time.Now()
 		result.Stage = "checkout"
@@ -766,12 +768,14 @@ func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutbo
 			result.RC, result.Error = 81, "checkout_refused:"+name
 			return result
 		}
-		cwd = outcome.Worktree.Path
 		// What the node actually put on disk travels with the answer and into
 		// the job record (hk 5098).
 		result.CheckoutMode = outcome.CheckoutMode
-		if spawnLaneEscapes(cwd, hubSpawnIdentity(message.Args).ExecutionLane) {
-			// The held job dir must be where the agent runs (hk 4578).
+		// The one resolution of where this spawn runs: the launcher opens the
+		// pane there and nowhere else (hk 6431). The held job dir must be where
+		// the agent runs (hk 4578).
+		launchDir, err = fleet.BindLaunchDir(outcome.Worktree.Path, hubSpawnIdentity(message.Args).ExecutionLane)
+		if err != nil {
 			result.RC, result.Error = 81, "checkout_refused:lane_outside_worktree"
 			return result
 		}
@@ -804,7 +808,7 @@ func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutbo
 	if message.ExpiresMS > 0 {
 		expiresAt = time.UnixMilli(message.ExpiresMS)
 	}
-	output, execution := engine(runContext, cwd, temporaryName, config.Workspace, config.HERDRSession, result.CheckoutMode, expiresAt, message.Args)
+	output, execution := engine(runContext, launchDir, temporaryName, config.Workspace, config.HERDRSession, result.CheckoutMode, expiresAt, message.Args)
 	result.Receipt = &execution.Receipt
 	result.StdoutTail = output.tailString()
 	result.Pane, result.JobID = output.pane, output.jobID
@@ -1139,14 +1143,14 @@ func hubSpawnEnvironment(environment []string, session string) []string {
 	return append(filtered, "HERDR_SESSION="+session)
 }
 
-type hubSpawnEngine func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution)
+type hubSpawnEngine func(context.Context, fleet.LaunchDir, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution)
 
 // runHubSpawnEngine launches the spawned job with the checkout mode the node
 // prepared, so its job.spawned record says whether paths are absent on purpose
 // (hk 5098).
-func runHubSpawnEngine(ctx context.Context, cwd, brief, workspace, session, checkoutMode string, expiresAt time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
+func runHubSpawnEngine(ctx context.Context, dir fleet.LaunchDir, brief, workspace, session, checkoutMode string, expiresAt time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
 	output := &hubSpawnOutput{}
-	result := fleet.ExecuteNode(ctx, cwd, brief, workspace, session, checkoutMode, expiresAt, args, output, &output.stderr)
+	result := fleet.ExecuteNode(ctx, dir, brief, workspace, session, checkoutMode, expiresAt, args, output, &output.stderr)
 	return output, result
 }
 

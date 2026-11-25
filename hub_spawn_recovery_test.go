@@ -241,7 +241,7 @@ func TestAsyncSpawnOutlivesSubmittingHTTPContext(t *testing.T) {
 func TestNodeSpawnExpiredAbsoluteDeadlineSkipsEngine(t *testing.T) {
 	client := &HubClient{}
 	called := false
-	client.spawnEngine = func(context.Context, string, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
+	client.spawnEngine = func(context.Context, fleet.LaunchDir, string, string, string, string, time.Time, []string) (*hubSpawnOutput, fleet.Execution) {
 		called = true
 		return &hubSpawnOutput{}, fleet.Execution{}
 	}
