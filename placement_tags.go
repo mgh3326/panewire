@@ -72,10 +72,29 @@ func (h *HubServer) makeTaggedPlacement(policy PlacementPolicy, metrics placemen
 		}
 	}
 	sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].Score > eligible[j].Score })
-	result := PlacementResult{Decision: "unavailable", Candidates: eligible, Source: source, Asof: now, Reason: "no_tagged_capacity"}
+	reason := "no_tagged_capacity"
+	if len(eligible) > 0 {
+		reason = ""
+	}
+	// A tagged request takes the highest score instead of a policy-order
+	// winner, but the load ceiling still applies: a host above it is left out
+	// while another tagged host is at or under it (operator decision 515).
+	if k := policy.scoreK(); k.loadCeiling > 0 && loadCeilingApplies(eligible, k.loadCeiling) {
+		best := eligible[0].Machine
+		kept := eligible[:0]
+		for _, candidate := range eligible {
+			if !loadOverCeiling(candidate, k.loadCeiling) {
+				kept = append(kept, candidate)
+			}
+		}
+		if kept[0].Machine != best {
+			reason = "load_over_ceiling"
+		}
+		eligible = kept
+	}
+	result := PlacementResult{Decision: "unavailable", Candidates: eligible, Source: source, Asof: now, Reason: reason}
 	if len(eligible) > 0 {
 		result.Decision = eligible[0].Machine
-		result.Reason = ""
 	}
 	return result
 }

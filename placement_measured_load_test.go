@@ -277,14 +277,18 @@ func TestPlacementRetiredKeysLoadButAreIgnored(t *testing.T) {
 // the ticket; a bad value refuses the file, a missing one keeps its default.
 func TestPlacementScoreConstantsFromPolicy(t *testing.T) {
 	k := (PlacementPolicy{}).scoreK()
-	if k != (placementScoreK{memFloor: .20, memSpan: .20, pageInHalf: 10, swapInHalf: 20, loadKnee: .75, loadCap: 4, jobsHalf: 8, bridgeCost: 10, hysteresis: 1.25, freeFloor: .05}) {
+	if k != (placementScoreK{memFloor: .20, memSpan: .20, pageInHalf: 10, swapInHalf: 20, loadKnee: .75, loadCap: 4, loadCeiling: 2.5, jobsHalf: 8, bridgeCost: 10, hysteresis: 1.25, freeFloor: .05}) {
 		t.Fatalf("defaults=%+v", k)
 	}
 	policy, err := ParsePlacementPolicy([]byte(`{"local_machine":"mac-work","max_active_jobs":5,"score":{"mem_floor":0.3,"pagein_half_mbps":40,"hysteresis":2}}`))
-	if err != nil || policy.scoreK().memFloor != .3 || policy.scoreK().pageInHalf != 40 || policy.scoreK().hysteresis != 2 || policy.scoreK().jobsHalf != 8 {
+	if err != nil || policy.scoreK().memFloor != .3 || policy.scoreK().pageInHalf != 40 || policy.scoreK().hysteresis != 2 || policy.scoreK().jobsHalf != 8 || policy.scoreK().loadCeiling != 2.5 {
 		t.Fatalf("overrides lost: %+v err=%v", policy.scoreK(), err)
 	}
-	for _, bad := range []string{`{"mem_span":0}`, `{"mem_floor":1.5}`, `{"hysteresis":0.5}`, `{"pagein_half_mbps":-1}`, `{"load_knee":5,"load_cap":4}`, `{"load_knee":5}`, `{"load_cap":0.5}`, `{"jobs_half":0}`} {
+	off, err := ParsePlacementPolicy([]byte(`{"local_machine":"mac-work","max_active_jobs":5,"score":{"load_ceiling_per_core":0}}`))
+	if err != nil || off.scoreK().loadCeiling != 0 {
+		t.Fatalf("load_ceiling_per_core 0 is not off: %+v err=%v", off.scoreK(), err)
+	}
+	for _, bad := range []string{`{"mem_span":0}`, `{"mem_floor":1.5}`, `{"hysteresis":0.5}`, `{"pagein_half_mbps":-1}`, `{"load_knee":5,"load_cap":4}`, `{"load_knee":5}`, `{"load_cap":0.5}`, `{"jobs_half":0}`, `{"load_ceiling_per_core":-1}`, `{"load_ceiling_per_core":101}`} {
 		if _, err := ParsePlacementPolicy([]byte(`{"local_machine":"mac-work","max_active_jobs":5,"score":` + bad + `}`)); err == nil {
 			t.Fatalf("score %s accepted", bad)
 		}

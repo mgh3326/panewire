@@ -627,7 +627,13 @@ func (h *HubServer) placementCached(ctx context.Context, useCache bool, class, c
 	h.mu.Lock()
 	h.placementCache = placementCache{key: key, at: now, result: result}
 	h.mu.Unlock()
-	h.logger.Info("placement decision", "machine", result.Decision, "score", placementDecisionScore(result), "reason", placementDecisionReason(result))
+	attrs := []any{"machine", result.Decision, "score", placementDecisionScore(result), "reason", placementDecisionReason(result)}
+	if result.Reason != "" {
+		// The rules that moved the decision (below_free_floor, all_loaded,
+		// challenger, load_over_ceiling); empty when policy order kept it.
+		attrs = append(attrs, "decision_reason", result.Reason)
+	}
+	h.logger.Info("placement decision", attrs...)
 	return result
 }
 
@@ -924,8 +930,10 @@ func placementUsable(candidate PlacementCandidate, policy PlacementPolicy, sourc
 	if source == "prometheus" && !candidate.MetricsKnown {
 		return false
 	}
-	// Load ranks candidates and never filters them; thermal throttling is a
-	// hardware state, not load, and still makes a host unusable.
+	// Load ranks candidates and never makes a host unusable; the load ceiling
+	// (placement_score.go) leaves one out of a decision only while another
+	// usable host is at or under it. Thermal throttling is a hardware state,
+	// not load, and still makes a host unusable.
 	if source == "prometheus" && candidate.Throttled {
 		return false
 	}

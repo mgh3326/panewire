@@ -25,9 +25,10 @@ import (
 )
 
 // HostView is one machine's connectivity and load as reported by the hub's
-// host list. LoadRatio is load5/ncpu; a nil ratio means the hub could not
-// measure it. A wakeable machine absent from the list is treated as asleep;
-// other unlisted machines are treated as awake and proven by the spawn leg.
+// host list. LoadRatio is the hub's five-minute CPU-busy fraction (0..1), not
+// load5 per core; a nil ratio means the hub could not measure it. A wakeable
+// machine absent from the list is treated as asleep; other unlisted machines
+// are treated as awake and proven by the spawn leg.
 type HostView struct {
 	Name      string
 	Connected bool
@@ -40,9 +41,10 @@ type HostView struct {
 	Reason  string
 	Signals PlacementSignals
 	Source  string
-	// Decided marks the host the hub's placement named, after its all_loaded
-	// and hysteresis rules; DecisionReason is why ("" for the policy-order
-	// winner, "challenger", "below_free_floor", "all_loaded"). Ranking prefers it within a bucket,
+	// Decided marks the host the hub's placement named, after its
+	// load-ceiling, all_loaded and hysteresis rules; DecisionReason is why
+	// ("" for the policy-order winner, "challenger", "below_free_floor",
+	// "all_loaded", "load_over_ceiling"). Ranking prefers it within a bucket,
 	// so a rival has to beat the winner by the hub's margin, not by a point.
 	Decided        bool
 	DecisionReason string
@@ -805,6 +807,13 @@ func (np *placePlan) carryTried(old *placePlan, tried map[string]bool) {
 // selection, login evidence, the hub's decision, then score (or load when a
 // candidate has no score). plan sorts with it, and a refusal re-sorts the
 // candidates still to try on fresh hub scores.
+//
+// The hub's load ceiling arrives here as its decision (the decided host is
+// preferred within a bucket), so the engine does not re-apply it: it has no
+// per-core load1 reading of its own, and evaluating the hub's 2.5 ceiling
+// against this node's load5/CPU ratio would be a different measure in the same
+// units. A fallback after a refusal may still land on a host over the ceiling;
+// the ceiling redirects a decision, it never blocks a spawn.
 func sortPlaceCandidates(ordered []*placeCandidate, threshold float64, selHost string) {
 	// One metric for the whole list: mixing score and load per pair would make
 	// the comparator intransitive when only some hosts carry a hub score.
