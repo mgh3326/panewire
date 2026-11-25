@@ -263,7 +263,7 @@ func TestJournalReadErrorRetriesThenOpens_t6404(t *testing.T) {
 }
 
 func TestRestartRootPinFromJournal_t6367(t *testing.T) {
-	fixture, restarted := rootChangeSpawnFixture(t, 2)
+	fixture, restarted, _ := rootChangeSpawnFixture(t, 2)
 	f := newSpawnRestartFixture(t, 2, rootChangeMessage(fixture, 636711, "job-a"))
 	previous := fixture.client()
 	previous.spawnJournalDir = restarted.spawnJournalDir
