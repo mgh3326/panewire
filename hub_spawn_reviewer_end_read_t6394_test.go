@@ -259,3 +259,27 @@ func TestLaneInboxStoreContractSucceededSpawnReads_t6394(t *testing.T) {
 		}
 	})
 }
+
+// A successful id listing must not clear a persistent full-row read failure:
+// the two store reads have separate silent-error streaks.
+func TestReviewerEndByIDReadFailureLogsOncePerStreak_t6547(t *testing.T) {
+	hub, _, _, _ := reviewerEndNode(t, reviewerEndPosted)
+	sink := captureHubLog(hub)
+
+	// The id listing uses request_id/status/created_ms, while the full-row read
+	// needs payload. Removing that column leaves the listing healthy and keeps
+	// each full-row read failing for the rest of this test.
+	if _, err := hub.inbox.store.db.ExecContext(t.Context(), `ALTER TABLE spawn_operations RENAME COLUMN payload TO payload_test_only`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		hub.endPostedReviewerJobs(t.Context())
+	}
+
+	if got := strings.Count(sink.String(), `hub_spawn_reviewer_end.go:succeededSpawnsByID`); got != 1 {
+		t.Fatalf("full-row failure log lines=%d, want 1 across a persistent failure streak; log:\n%s", got, sink.String())
+	}
+	if got := hub.loopSnapshot()[loopReviewerEnd].SilentErrors; got != 1 {
+		t.Fatalf("reviewer_end silent_errors=%d, want 1 for the persistent full-row failure", got)
+	}
+}
