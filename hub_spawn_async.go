@@ -1981,10 +1981,14 @@ func (t *directSpawnTransport) Refresh(ctx context.Context, machine, pool string
 	}
 }
 func (h *HubServer) verifySpawnPane(ctx context.Context, machine string, result hubSpawnResult, args []string) bool {
-	if result.JobID != hubSpawnArg(args, "--job") || result.Pane == "" || result.Receipt == nil || result.Receipt.Job != result.JobID || result.Receipt.Pane != result.Pane || result.Receipt.Label != hubSpawnArg(args, "-l") || result.Receipt.CWD == "" || result.Receipt.Kind == "" {
+	// The pane belongs to the spawn the launcher will run: a flag's value is
+	// never read as a flag (--purpose is free text sent before --job), and a
+	// spawn without --job runs under its -l label (hk 6495).
+	identity := hubSpawnIdentity(args)
+	if result.JobID != identity.Job || result.Pane == "" || result.Receipt == nil || result.Receipt.Job != result.JobID || result.Receipt.Pane != result.Pane || result.Receipt.Label != identity.Label || result.Receipt.CWD == "" || result.Receipt.Kind == "" {
 		return false
 	}
-	raw, _ := json.Marshal(map[string]any{"pane_id": result.Pane, "name": hubSpawnArg(args, "-l"), "tail_lines": 0, "cwd": result.Receipt.CWD, "kind": result.Receipt.Kind})
+	raw, _ := json.Marshal(map[string]any{"pane_id": result.Pane, "name": identity.Label, "tail_lines": 0, "cwd": result.Receipt.CWD, "kind": result.Receipt.Kind})
 	pending, id, _, sent := h.sendNodeCommand(machine, "pane.read", raw)
 	if !sent {
 		return false
@@ -2013,7 +2017,7 @@ func (h *HubServer) verifySpawnPane(ctx context.Context, machine string, result 
 		if err != nil || !found || record["state"] != "completed" || record["host"] != machine || record["pane_id"] != result.Pane || record["label"] != result.Receipt.Label || record["profile"] != result.Receipt.Profile {
 			return false
 		}
-		task := hubSpawnArg(args, "--task")
+		task := identity.Task
 		return task == "" || fmt.Sprint(record["task_id"]) == task
 	case <-ctx.Done():
 		return false

@@ -828,7 +828,7 @@ func (client *HubClient) loginScreenSpawnRefusal(message hubOutboundMessage, res
 	kind := fleet.ProfileKind(hubSpawnArg(message.Args, "-m"))
 	job := result.JobID
 	if job == "" {
-		job = hubSpawnArg(message.Args, "--job")
+		job = hubSpawnIdentity(message.Args).Job
 	}
 	if kind == "" || !client.launchShowedLoginScreen(kind, job) {
 		return result
