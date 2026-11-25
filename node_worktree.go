@@ -784,14 +784,8 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 // is filled here, before any git command that writes, and every path decision
 // of this run is made against that pin instead of a fresh read of spawn.json.
 //
-// Before the first write:
-//  1. the root is pinned (pinWorkRoot);
-//  2. the job dir is Lstat'ed: absent, or a real directory. A link refuses with
-//     job_dir_link at every N.
-//
-// A reuse that fast-forwards the job dir checks the dir again as the same
-// directory first (nodeJobDirStillHeld): a dir swapped after step 2 is not the
-// one admission held, so the merge must not write into it (hk 6402).
+// Before the first git write, prepare takes the clone's git-op lock and
+// records the job directory identity under the pinned root.
 func (client *HubClient) prepareTarget(ctx context.Context, args nodeWorktreePrepareArgs, target *spawnTarget) (any, string) {
 	ownerRepo, ok := nodeOriginRepo(args.Origin)
 	if !ok {
@@ -818,19 +812,11 @@ func (client *HubClient) prepareTarget(ctx context.Context, args nodeWorktreePre
 			workRoot = pin.Real
 		}
 	}
-	jobDir, outcome := nodeJobDirCheck(filepath.Join(pin.Real, target.Dir))
-	if outcome != "" {
-		return nodeWorktreePrepareResult{Outcome: outcome}, ""
-	}
-	if client.nodePrepareJobDirChecked != nil {
-		client.nodePrepareJobDirChecked(filepath.Join(workRoot, target.Dir))
-	}
-
 	tracker := newNodeGitTracker(client.nodeGitRunner())
 	if ctx.Err() != nil {
 		return tracker.decide(ctx, nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed})
 	}
-	res, code := client.nodeWorktreePrepareRun(ctx, tracker, ownerRepo, workRoot, pin, jobDir, args)
+	res, code := client.nodeWorktreePrepareRun(ctx, tracker, ownerRepo, workRoot, pin, args)
 	if code != "" {
 		return nil, code
 	}
@@ -905,11 +891,9 @@ func nodeJobDirCheck(dir string) (nodeJobDirID, string) {
 	return nodeJobDirID{present: true, dev: dev, ino: ino}, ""
 }
 
-// nodeJobDirStillHeld reports whether dir is still the directory prepare
-// recorded, right before a reuse merge that writes into it. A link, a vanished
-// dir, or another device or inode is a different target: the merge refuses
-// with job_dir_link instead of fast-forwarding a directory nobody held
-// (hk 6402). A dir that only appeared after the check is never merged into.
+// nodeJobDirStillHeld checks the identity recorded under the clone lock.
+// Reuse paths use it to refuse a symlink, a vanished directory, or a different
+// directory, including one that appeared after the check.
 func nodeJobDirStillHeld(dir string, id nodeJobDirID) bool {
 	if !id.present {
 		return false
@@ -922,7 +906,7 @@ func nodeJobDirStillHeld(dir string, id nodeJobDirID) bool {
 	return dev == id.dev && ino == id.ino
 }
 
-func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *nodeGitTracker, ownerRepo, workRoot string, pin rootPin, jobDir nodeJobDirID, args nodeWorktreePrepareArgs) (nodeWorktreePrepareResult, string) {
+func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *nodeGitTracker, ownerRepo, workRoot string, pin rootPin, args nodeWorktreePrepareArgs) (nodeWorktreePrepareResult, string) {
 	git := tracker.git
 	if ok, err := nodeGitVersionOK(ctx, git); err != nil {
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
@@ -970,6 +954,16 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 	}
 	defer release()
 
+	// A preceding prepare may have created the job dir under this lock.
+	dir := filepath.Join(workRoot, args.Dir)
+	jobDir, outcome := nodeJobDirCheck(filepath.Join(pin.Real, args.Dir))
+	if outcome != "" {
+		return nodeWorktreePrepareResult{Outcome: outcome}, ""
+	}
+	if client.nodePrepareJobDirChecked != nil {
+		client.nodePrepareJobDirChecked(dir)
+	}
+
 	switch _, err := os.Stat(clone); {
 	case err == nil && !nodePathWithin(pin.Real, clone):
 		// A symlink at <work_root>/<repo> must not lead git outside the root.
@@ -1000,14 +994,12 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 
-	dir := filepath.Join(workRoot, args.Dir)
-	outcome := ""
 	result := nodeWorktreePrepareResult{}
 	switch args.Mode {
 	case "branch":
 		outcome = client.nodePrepareBranch(ctx, tracker, clone, dir, jobDir, args, &result)
 	case "detached":
-		outcome = client.nodePrepareDetached(ctx, tracker, clone, dir, args, &result)
+		outcome = client.nodePrepareDetached(ctx, tracker, clone, dir, jobDir, args, &result)
 	case fleet.HubCheckoutSuccessor:
 		outcome = client.nodePrepareSuccessor(ctx, tracker, clone, dir, jobDir, args, &result)
 	}
@@ -1655,7 +1647,7 @@ func nodeBranchRelationReason(local, expected, relation string) string {
 // reuse says "sparse" only when the files really are. A git older than the
 // sparse floor, a node that never advertised the capability, prepares the full
 // checkout instead and says "full" (hk 5098).
-func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
+func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeGitTracker, clone, dir string, jobDir nodeJobDirID, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
 	git := tracker.git
 	result.CheckoutMode = nodeCheckoutFull
 	if _, err := git(ctx, "-C", clone, "fetch", "origin", args.Fetch); err != nil {
@@ -1712,6 +1704,9 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeG
 		if !clean {
 			return nodeOutcomeDirty
 		}
+		if !nodeJobDirStillHeld(dir, jobDir) {
+			return nodePrepareJobDirLink
+		}
 		if sparse {
 			if err := nodeApplySparseCheckout(ctx, tracker, client.nodeGitStdinRunner(), dir, args); err != nil {
 				return nodeOutcomeGitFailed
@@ -1722,6 +1717,9 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, tracker *nodeG
 			// it is turned off; reusing it as "full" would report paths that
 			// are not on disk.
 			return nodeOutcomeGitFailed
+		}
+		if !nodeJobDirStillHeld(dir, jobDir) {
+			return nodePrepareJobDirLink
 		}
 		return nodePrepareReused
 	}

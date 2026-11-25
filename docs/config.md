@@ -544,8 +544,10 @@ opt-in (hk 4821):
 
 At every N, a job dir that is a symlink is refused before the first git write
 (`checkout_refused:job_dir_link`, rc 81, retryable; `--host auto` moves to the
-next candidate), and a reuse that fast-forwards the job dir re-checks that it
-is the same device and inode it checked before that write. The admission key
+next candidate). Prepare records the job directory's identity under the clone
+Git operation lock before the first Git write. It rechecks the device and inode
+before a reuse fast-forward and before detached reuse applies or disables sparse
+checkout. Detached reuse checks again before reporting success. The admission key
 stays the request's job dir and job id, so a linked dir no longer makes a
 spawn exclusive: two spawns can never share one job dir through a link.
 
