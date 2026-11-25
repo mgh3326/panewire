@@ -8,6 +8,8 @@ package panewire
 // coordinator holds them back. Which machines have such a spawn waiting is
 // read from the store once per scan, from two columns the bind writes
 // (bound_machine, exclusive). Nothing is carried from one scan to the next.
+// A start fills them once for rows older than the columns, and every start
+// repairs them for the attempts in flight.
 
 import (
 	"context"
@@ -107,9 +109,34 @@ func (s *laneInboxStore) boundExclusiveSpawns(parent context.Context, now time.T
 	return found, rows.Err()
 }
 
-// spawnBoundBackfillBatch is the rows one batch of the backfill reads and
-// writes.
-const spawnBoundBackfillBatch = 500
+// spawnBoundBatch is the rows one batch of the backfill or of the repair reads.
+const spawnBoundBatch = 500
+
+// The stored statuses each walk covers: the backfill's, and for the repair
+// every status of an attempt in flight on a node. A finished operation, and an
+// ended attempt waiting for a replay ('retryable'), are in neither.
+const (
+	spawnBoundBackfillStatuses = `'bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant'`
+	spawnBoundInFlightStatuses = `'bound','dispatching','reconciling','deadline_exceeded','bound_grant','dispatching_grant','reconciling_grant','deadline_exceeded_grant'`
+)
+
+// spawnBoundWalk names the rows one walk of the columns covers: query reads the
+// next batch after a request id, and statuses guards each write.
+type spawnBoundWalk struct{ query, statuses string }
+
+var (
+	// The backfill reads the operations that have no columns yet.
+	spawnBoundBackfillWalk = spawnBoundWalk{
+		query:    `SELECT request_id,node_id,node_payload,bound_machine,exclusive FROM spawn_operations WHERE request_id>? AND node_id IS NOT NULL AND bound_machine='' AND status IN (` + spawnBoundBackfillStatuses + `) ORDER BY request_id LIMIT ?`,
+		statuses: spawnBoundBackfillStatuses,
+	}
+	// The repair reads through spawn_queue, which holds the operations still
+	// owed work, so it is as large as that work and not the history.
+	spawnBoundRepairWalk = spawnBoundWalk{
+		query:    `SELECT o.request_id,o.node_id,o.node_payload,o.bound_machine,o.exclusive FROM spawn_queue q JOIN spawn_operations o ON o.request_id=q.request_id WHERE q.request_id>? AND o.node_id IS NOT NULL AND o.status IN (` + spawnBoundInFlightStatuses + `) ORDER BY q.request_id LIMIT ?`,
+		statuses: spawnBoundInFlightStatuses,
+	}
+)
 
 // spawnBoundBackfillVersion is the row the backfill adds to the migration
 // ledger on Postgres and MySQL. No migration file has this name.
@@ -121,9 +148,9 @@ const spawnBoundBackfillVersion = "go_spawn_operations_bound_exclusive_backfill"
 const sqliteSpawnBoundVersion = 2
 
 // backfillSpawnBoundMachines fills bound_machine and exclusive on the bound
-// operations written before those columns, once: batches by request id, each
-// its own transaction, then the completion record. A start cut off part way
-// keeps the finished batches, and the next start does the rest.
+// operations written before those columns, once, then records that it ran. A
+// start cut off part way keeps the finished batches, and the next start does
+// the rest.
 func (s *laneInboxStore) backfillSpawnBoundMachines(parent context.Context) error {
 	ctx, done := s.opWithin(parent, laneInboxStartupTimeout)
 	defer done()
@@ -131,19 +158,9 @@ func (s *laneInboxStore) backfillSpawnBoundMachines(parent context.Context) erro
 	if err != nil || recorded {
 		return err
 	}
-	batches := []int{}
-	for after := ""; ; {
-		read, last, err := s.backfillSpawnBoundBatch(ctx, after)
-		if err != nil {
-			return err
-		}
-		if read > 0 {
-			batches = append(batches, read)
-		}
-		if read < spawnBoundBackfillBatch {
-			break
-		}
-		after = last
+	batches, _, err := s.walkSpawnBoundColumns(ctx, spawnBoundBackfillWalk)
+	if err != nil {
+		return err
 	}
 	record := s.dialect.insertIgnore(`INSERT INTO panewire_schema_migrations(version) VALUES(?)`, "version")
 	args := []any{spawnBoundBackfillVersion}
@@ -169,32 +186,70 @@ func (s *laneInboxStore) spawnBoundBackfillRecorded(ctx context.Context) (bool, 
 	return recorded > 0, err
 }
 
-// backfillSpawnBoundBatch fills the next batch of bound rows after the request
-// id after. It returns how many rows it read and the last one's id.
-func (s *laneInboxStore) backfillSpawnBoundBatch(ctx context.Context, after string) (read int, last string, err error) {
+// repairSpawnBoundMachines rewrites, at every start, the columns of the
+// attempts in flight whose stored values differ from their node request. A hub
+// from before the columns, run again after a rollback, neither writes nor
+// clears them, and the backfill does not run twice. It runs after the queue is
+// reconciled, so the queue names every such attempt. A start that finds nothing
+// to repair writes nothing.
+func (s *laneInboxStore) repairSpawnBoundMachines(parent context.Context) error {
+	ctx, done := s.opWithin(parent, laneInboxStartupTimeout)
+	defer done()
+	batches, written, err := s.walkSpawnBoundColumns(ctx, spawnBoundRepairWalk)
+	s.spawnBoundRepairBatches, s.spawnBoundRepaired = batches, written
+	return err
+}
+
+// walkSpawnBoundColumns reads walk's rows in batches by request id, each batch
+// its own transaction, and writes the columns of each row that differs from its
+// node request. It returns the rows each batch read and the rows written.
+func (s *laneInboxStore) walkSpawnBoundColumns(ctx context.Context, walk spawnBoundWalk) (batches []int, written int, err error) {
+	batches = []int{}
+	for after := ""; ; {
+		read, wrote, last, err := s.writeSpawnBoundBatch(ctx, walk, after)
+		if err != nil {
+			return batches, written, err
+		}
+		written += wrote
+		if read > 0 {
+			batches = append(batches, read)
+		}
+		if read < spawnBoundBatch {
+			return batches, written, nil
+		}
+		after = last
+	}
+}
+
+// writeSpawnBoundBatch handles walk's next batch after the request id after. It
+// returns how many rows it read and wrote, and the last one's id.
+func (s *laneInboxStore) writeSpawnBoundBatch(ctx context.Context, walk spawnBoundWalk, after string) (read, written int, last string, err error) {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
 	defer tx.Rollback()
-	type bound struct{ requestID, nodeID, payload string }
+	type bound struct {
+		requestID, nodeID, payload, machine string
+		exclusive                           int
+	}
 	var batch []bound
 	if err := func() error {
-		rows, err := tx.QueryContext(ctx, s.q(`SELECT request_id,node_id,node_payload FROM spawn_operations WHERE request_id>? AND node_id IS NOT NULL AND bound_machine='' AND status IN ('bound','dispatching','reconciling','bound_grant','dispatching_grant','reconciling_grant') ORDER BY request_id LIMIT ?`), after, spawnBoundBackfillBatch)
+		rows, err := tx.QueryContext(ctx, s.q(walk.query), after, spawnBoundBatch)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var row bound
-			if err := rows.Scan(&row.requestID, &row.nodeID, &row.payload); err != nil {
+			if err := rows.Scan(&row.requestID, &row.nodeID, &row.payload, &row.machine, &row.exclusive); err != nil {
 				return err
 			}
 			batch = append(batch, row)
 		}
 		return rows.Err()
 	}(); err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
 	for _, row := range batch {
 		// A binding with no node request names no machine to mark.
@@ -203,18 +258,29 @@ func (s *laneInboxStore) backfillSpawnBoundBatch(ctx context.Context, after stri
 		}
 		var node hubSpawnRequest
 		if err := json.Unmarshal([]byte(row.payload), &node); err != nil {
-			return 0, "", fmt.Errorf("spawn operation %s: node request: %w", row.requestID, err)
+			return 0, 0, "", fmt.Errorf("spawn operation %s: node request: %w", row.requestID, err)
 		}
-		// node_id guards the write against a row bound again since the read.
-		if _, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET bound_machine=?,exclusive=? WHERE request_id=? AND node_id=?`), node.Machine, spawnExclusiveMark(&node), row.requestID, row.nodeID); err != nil {
-			return 0, "", err
+		exclusive := spawnExclusiveMark(&node)
+		if node.Machine == row.machine && exclusive == row.exclusive {
+			continue
 		}
+		// node_id and the status guard the write against a row bound again, or
+		// finished, since the read.
+		result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET bound_machine=?,exclusive=? WHERE request_id=? AND node_id=? AND status IN (`+walk.statuses+`)`), node.Machine, exclusive, row.requestID, row.nodeID)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		matched, err := s.dialect.rowsMatched(result)
+		if err != nil {
+			return 0, 0, "", err
+		}
+		written += int(matched)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
 	if len(batch) > 0 {
 		last = batch[len(batch)-1].requestID
 	}
-	return len(batch), last, nil
+	return len(batch), written, last, nil
 }

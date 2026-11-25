@@ -274,6 +274,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		if err := s.reconcileSpawnQueue(ctx); err != nil {
 			return err
 		}
+		// And at every start, the columns of the attempts in flight are
+		// repaired (hk 6433), read through the queue reconciled above.
+		if err := s.repairSpawnBoundMachines(s.life); err != nil {
+			return err
+		}
 		return s.reconcileSpawnOutboxes(ctx)
 	}
 	ctx, done := s.op(s.life)
@@ -399,6 +404,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Rows bound before bound_machine and exclusive existed get them once
 	// (hk 6433), before the coordinator reads them.
 	if err := s.backfillSpawnBoundMachines(s.life); err != nil {
+		return err
+	}
+	// And at every start, the columns of the attempts in flight are repaired
+	// (hk 6433), read through the queue reconciled above.
+	if err := s.repairSpawnBoundMachines(s.life); err != nil {
 		return err
 	}
 	// The placement-record and notice outboxes (hk 5298; postgres: 0028). They

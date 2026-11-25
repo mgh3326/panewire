@@ -63,6 +63,11 @@ type laneInboxStore struct {
 	// of bound_machine and exclusive, when this start ran it (empty when it
 	// found no row); nil otherwise.
 	spawnBoundBackfilled []int
+	// spawnBoundRepairBatches is the rows in each batch this start's repair of
+	// in-flight rows read, and spawnBoundRepaired the rows it rewrote
+	// (hub_spawn_drain.go).
+	spawnBoundRepairBatches []int
+	spawnBoundRepaired      int
 	// spawnRetryDelay is the hub's re-placement back-off after a request's
 	// n-th failed attempt (hub_spawn_park.go); nil retries at once.
 	spawnRetryDelay func(failures int) time.Duration

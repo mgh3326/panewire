@@ -315,6 +315,10 @@ func TestLaneInboxStoreSpawnDrain_t6433(t *testing.T) {
 	t.Run("bind", TestBindWritesBoundMachineAndExclusive_t6404)
 	t.Run("oldest per machine", TestBoundExclusiveSpawnsReturnsOldestPerMachine_t6433)
 	t.Run("backfill", TestBoundMachineBackfillBoundedBatches_t6404)
+	t.Run("repair blank", TestSpawnBoundRepairFillsBlankInFlightRow_t6433)
+	t.Run("repair stale", TestSpawnBoundRepairCorrectsStaleInFlightRow_t6433)
+	t.Run("repair leaves finished", TestSpawnBoundRepairLeavesTerminalRow_t6433)
+	t.Run("repair second start", TestSpawnBoundRepairSecondStartWritesNothing_t6433)
 }
 
 // drainColumns reads the two columns of one operation.
@@ -483,7 +487,7 @@ func seedPreColumnRows(t *testing.T, s *laneInboxStore, rows []preColumnRow) {
 type preColumnRow struct{ id, status, machine, dir string }
 
 // 1200 bound rows from before the columns are filled in three batches at one
-// start, and a later start leaves them alone.
+// start, and a later start is a no-op.
 func TestBoundMachineBackfillBoundedBatches_t6404(t *testing.T) {
 	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
 		first := queueTestStore(t, open)
@@ -499,12 +503,16 @@ func TestBoundMachineBackfillBoundedBatches_t6404(t *testing.T) {
 			rows = append(rows, row)
 			want[row.id] = fmt.Sprintf("%q,%d", row.machine, exclusive)
 		}
-		// Not bound, or past the states the drain reads: left as they are.
-		for _, status := range []string{"accepted", "succeeded", "failed", "deadline_exceeded"} {
+		// Not bound or finished: left as they are.
+		for _, status := range []string{"accepted", "succeeded", "failed"} {
 			row := preColumnRow{id: "other-" + status, status: status, machine: "machine-0"}
 			rows = append(rows, row)
 			want[row.id] = `"",0`
 		}
+		// In flight but past the backfill's states: the same start's repair
+		// fills it.
+		rows = append(rows, preColumnRow{id: "other-deadline_exceeded", status: "deadline_exceeded", machine: "machine-0"})
+		want["other-deadline_exceeded"] = `"machine-0",1`
 		seedPreColumnRows(t, first, rows)
 		forgetSpawnBoundBackfill(t, first)
 		if err := first.close(); err != nil {
@@ -514,6 +522,9 @@ func TestBoundMachineBackfillBoundedBatches_t6404(t *testing.T) {
 		second := queueTestStore(t, open)
 		if !slices.Equal(second.spawnBoundBackfilled, []int{500, 500, 200}) {
 			t.Fatalf("backfill batches = %v, want [500 500 200]", second.spawnBoundBackfilled)
+		}
+		if second.spawnBoundRepaired != 1 {
+			t.Fatalf("the repair after the backfill wrote %d rows, want the one past its states", second.spawnBoundRepaired)
 		}
 		wrong := 0
 		for id, columns := range want {
@@ -527,20 +538,18 @@ func TestBoundMachineBackfillBoundedBatches_t6404(t *testing.T) {
 			t.Fatalf("%d rows hold the wrong columns", wrong)
 		}
 
-		// A row without its columns after the record is not decoded again, by a
-		// later start or by a scan: the scan reads the columns alone.
-		late := preColumnRow{id: "after-record", status: "bound", machine: "machine-late"}
-		seedPreColumnRows(t, second, []preColumnRow{late})
+		// A later start is a no-op: the backfill does not run and nothing is
+		// rewritten.
 		if err := second.close(); err != nil {
 			t.Fatal(err)
 		}
 		third := queueTestStore(t, open)
-		if third.spawnBoundBackfilled != nil {
-			t.Fatalf("a second start ran the backfill again: %v", third.spawnBoundBackfilled)
+		if third.spawnBoundBackfilled != nil || third.spawnBoundRepaired != 0 {
+			t.Fatalf("a second start wrote: backfill %v, repaired %d", third.spawnBoundBackfilled, third.spawnBoundRepaired)
 		}
-		if got := drainColumns(t, third, late.id); got != `"",0` {
-			t.Fatalf("a second start changed a row: %s", got)
-		}
+		// A scan reads the columns alone: a row without them is not decoded.
+		late := preColumnRow{id: "after-start", status: "bound", machine: "machine-late"}
+		seedPreColumnRows(t, third, []preColumnRow{late})
 		marks, err := third.boundExclusiveSpawns(t.Context(), time.Now())
 		if err != nil {
 			t.Fatal(err)
