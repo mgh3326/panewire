@@ -203,19 +203,24 @@ func TestT961HubLogFile(t *testing.T) {
 		hub.logger.Warn("t961 fixed warn", "event_id", 42)
 	}
 
+	// Each hub gets its own new inbox store: a database logs its one-time
+	// backfills on first open, so with the shared default path the two runs
+	// differ whenever no earlier test opened it (hk 6384).
 	var stderrPlain bytes.Buffer
-	hub, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv}, slog.New(slog.NewTextHandler(&stderrPlain, &slog.HandlerOptions{ReplaceAttr: dropTime})))
+	hub, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv, "--inbox-store", filepath.Join(dir, "plain.db")}, slog.New(slog.NewTextHandler(&stderrPlain, &slog.HandlerOptions{ReplaceAttr: dropTime})))
 	if err != nil || code != ExitOK {
 		t.Fatalf("plain hub code=%d err=%v", code, err)
 	}
+	t.Cleanup(func() { _ = hub.Close() })
 	sequence(hub)
 
 	var stderrTee bytes.Buffer
 	logPath := filepath.Join(dir, "hub.log")
-	hubTee, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv, "--log-file", logPath}, slog.New(slog.NewTextHandler(&stderrTee, &slog.HandlerOptions{ReplaceAttr: dropTime})))
+	hubTee, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv, "--inbox-store", filepath.Join(dir, "tee.db"), "--log-file", logPath}, slog.New(slog.NewTextHandler(&stderrTee, &slog.HandlerOptions{ReplaceAttr: dropTime})))
 	if err != nil || code != ExitOK {
 		t.Fatalf("log-file hub code=%d err=%v", code, err)
 	}
+	t.Cleanup(func() { _ = hubTee.Close() })
 	sequence(hubTee)
 
 	if stderrTee.String() != stderrPlain.String() {
