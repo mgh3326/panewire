@@ -377,7 +377,7 @@ func (s *laneInboxStore) markBatchSent(id string) error {
 	if err != nil {
 		return err
 	}
-	removed, err := result.RowsAffected()
+	removed, err := s.dialect.rowsMatched(result)
 	if err != nil {
 		return err
 	}
