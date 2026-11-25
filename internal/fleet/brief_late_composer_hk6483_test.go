@@ -143,35 +143,50 @@ func TestBriefLateComposerNoReturnWhenComposerClearsAtSettle(t *testing.T) {
 	}
 }
 
-// The brief stays in the composer while herdr reports working (or blocked) for
-// the whole window: the idle retry never fires, so one late Return rescues it,
-// and the refusal still reports 76 with the composer named. A second Return
-// would hit an agent that is genuinely busy.
-func TestBriefLateComposerOneReturnWhileBusyThenRefused(t *testing.T) {
-	for _, status := range []string{"working", "blocked"} {
-		t.Run(status, func(t *testing.T) {
-			a, f := lateComposerApp(t, "claude", func(f *lateComposerFixture) string {
-				if f.pasted {
-					return claudeScreenBriefInComposer()
-				}
-				return claudeScreenEmpty()
-			}, func(f *lateComposerFixture) string {
-				if !f.pasted {
-					return "idle"
-				}
-				return status
-			})
-			err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief)
-			if code(err) != exitSubmitUnconfirmed || !strings.Contains(err.Error(), "brief still in composer") || !strings.Contains(err.Error(), "late composer") {
-				t.Fatalf("err=%v", err)
-			}
-			if f.returns != 1 {
-				t.Fatalf("returns=%d in a %s window, want exactly one", f.returns, status)
-			}
-			if f.reads < 6 {
-				t.Fatalf("reads=%d: the window ended before the once-only rule was exercised", f.reads)
-			}
-		})
+// The brief stays in the composer while herdr reports working for the whole
+// window: the idle retry never fires, so one late Return rescues it, and the
+// refusal still reports 76 with the composer named. A second Return would hit an
+// agent that is genuinely busy.
+func TestBriefLateComposerOneReturnWhileWorkingThenRefused(t *testing.T) {
+	a, f := lateComposerApp(t, "claude", func(f *lateComposerFixture) string {
+		if f.pasted {
+			return claudeScreenBriefInComposer()
+		}
+		return claudeScreenEmpty()
+	}, workingOnceSent)
+	err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief)
+	if code(err) != exitSubmitUnconfirmed || !strings.Contains(err.Error(), "brief still in composer") || !strings.Contains(err.Error(), "late composer") {
+		t.Fatalf("err=%v", err)
+	}
+	if f.returns != 1 {
+		t.Fatalf("returns=%d in a working window, want exactly one", f.returns)
+	}
+	if f.reads < 6 {
+		t.Fatalf("reads=%d: the window ended before the once-only rule was exercised", f.reads)
+	}
+}
+
+// A blocked pane is waiting on a dialog that owns the keystroke. Return there
+// would confirm the dialog's default (possibly approving an unseen action), so
+// even a composer holding the brief gets none, and the spawn keeps today's 76.
+func TestBriefLateComposerBlockedPaneGetsNoReturn(t *testing.T) {
+	a, f := lateComposerApp(t, "claude", func(f *lateComposerFixture) string {
+		if f.pasted {
+			return claudeScreenBriefInComposer()
+		}
+		return claudeScreenEmpty()
+	}, func(f *lateComposerFixture) string {
+		if !f.pasted {
+			return "idle"
+		}
+		return "blocked"
+	})
+	err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief)
+	if code(err) != exitSubmitUnconfirmed || !strings.Contains(err.Error(), "brief still in composer") {
+		t.Fatalf("err=%v", err)
+	}
+	if f.returns != 0 {
+		t.Fatalf("returns=%d into a blocked pane", f.returns)
 	}
 }
 

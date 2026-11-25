@@ -94,10 +94,9 @@ func TestDeliverWaitTimeoutRetryCadence(t *testing.T) {
 	}
 }
 
-// A blocked pane is never retried on the idle cadence: the only Return it can
-// take is the one late Return, and only while the composer visibly holds the
-// brief (hk 6483).
-func TestDeliverWaitBlockedGetsOnlyTheLateReturn(t *testing.T) {
+// A blocked pane is waiting on a dialog: Return would confirm the dialog's
+// default, so it never gets one, even with the brief in the composer.
+func TestDeliverWaitBlockedDoesNotSpinOrSubmit(t *testing.T) {
 	a, f := waitDeliveryApp(t, func(time.Duration) Result { return waitAnswer("blocked") })
 	f.status = "blocked"
 	// The initial status is idle before prompt.
@@ -109,24 +108,8 @@ func TestDeliverWaitBlockedGetsOnlyTheLateReturn(t *testing.T) {
 		return base(c)
 	}
 	err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief)
-	if code(err) != exitSubmitUnconfirmed || f.waits < 1 || f.waits > 21 || len(f.returns) != 1 {
+	if code(err) != exitSubmitUnconfirmed || f.waits < 1 || f.waits > 21 || len(f.returns) != 0 {
 		t.Fatalf("err=%v waits=%d returns=%v", err, f.waits, f.returns)
-	}
-
-	// A blocked pane whose composer does not hold the brief gets none.
-	a, f = waitDeliveryApp(t, func(time.Duration) Result { return waitAnswer("blocked") })
-	f.status = "blocked"
-	f.screen = claudeBanner() + claudeTestRule + "\n❯ something else\n" + claudeTestRule + "\n"
-	base = a.Runner.(*fakeRunner).Do
-	a.Runner.(*fakeRunner).Do = func(c Command) Result {
-		if !f.submitted && len(c.Args) > 1 && c.Args[1] == "list" {
-			return Result{Out: `{"agents":[{"pane_id":"w:p1","agent_status":"idle"}]}`}
-		}
-		return base(c)
-	}
-	err = a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief)
-	if code(err) != exitSubmitUnconfirmed || len(f.returns) != 0 {
-		t.Fatalf("err=%v returns=%v", err, f.returns)
 	}
 }
 
@@ -157,13 +140,13 @@ func TestDeliverWaitWorkingWithComposerIsNotProof(t *testing.T) {
 }
 
 // A wait timeout is not an idle pane: the status is read again before any
-// Return, and a blocked pane holding the brief gets only the one late Return.
+// Return, and a blocked pane gets none (its dialog would take the keystroke).
 func TestDeliverWaitTimeoutChecksStatusBeforeReturn(t *testing.T) {
 	var f *deliveryWaitFake
 	a, fake := waitDeliveryApp(t, func(d time.Duration) Result { f.now = f.now.Add(d); f.status = "blocked"; return waitTimeout() })
 	f = fake
 	err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief)
-	if code(err) != exitSubmitUnconfirmed || f.lists == 0 || len(f.returns) != 1 {
+	if code(err) != exitSubmitUnconfirmed || f.lists == 0 || len(f.returns) != 0 {
 		t.Fatalf("err=%v lists=%d returns=%v", err, f.lists, f.returns)
 	}
 }

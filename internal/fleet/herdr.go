@@ -699,7 +699,7 @@ func (a *App) sendBrief(ctx context.Context, kind, pane, brief string) (string, 
 // the late-composer case can be counted.
 type briefConfirm struct {
 	LateComposer bool // the brief was still in the composer after the landing proof
-	LateReturn   bool // the one late Return was sent to a working or blocked pane
+	LateReturn   bool // the one late Return was sent to a working pane
 }
 
 // confirmBrief waits, within the submit window, for the sent brief to start a
@@ -793,11 +793,14 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 			}
 		}
 		// hk 6483: the brief in a readable composer while the agent reports
-		// working or blocked never gets the idle retry, and the pane is left
-		// holding it at rc 76. One Return submits it. The once-per-spawn limit
-		// keeps a genuinely busy agent from repeated Returns, and the gate needs
-		// the whole brief so a still-drawing paste is never submitted truncated.
-		if residue && !lateReturned && (status == "working" || status == "blocked") && briefReadyToReturn(kind, visible, brief) {
+		// working never gets the idle retry, and the pane is left holding it at
+		// rc 76. One Return submits it. A blocked pane keeps today's refusal: it
+		// is waiting on a dialog, and Return there would confirm the dialog's
+		// default instead of submitting the brief (submitKeyAllowed). The
+		// once-per-spawn limit keeps a genuinely busy agent from repeated
+		// Returns, and the gate needs the whole brief so a still-drawing paste
+		// is never submitted truncated.
+		if residue && !lateReturned && status == "working" && briefReadyToReturn(kind, visible, brief) {
 			lateReturned = true
 			confirmed.LateComposer = true
 			confirmed.LateReturn = true
