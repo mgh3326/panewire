@@ -108,6 +108,45 @@ func TestIngressOrderToDesignLaneIsFiledAndWakes(t *testing.T) {
 	}
 }
 
+// t6338SetPaneStatus sets the status of one pane in the node's session
+// snapshot, the view receiverInboxState reads.
+func t6338SetPaneStatus(t *testing.T, r *t3602Rig, pane, status string) {
+	t.Helper()
+	r.h.mu.Lock()
+	defer r.h.mu.Unlock()
+	snap := r.h.nodes["host-a"].sessionSnapshot
+	for i := range snap.sessions {
+		if snap.sessions[i].PaneID == pane {
+			snap.sessions[i].Status = status
+		}
+	}
+}
+
+// Review (hk 6338, high): an ingress event that asks for immediate delivery is
+// typed on an inbox-only lane whatever its class. A working pane never promotes
+// an info, a desk lane never promotes at all, and a quiet design lane files a
+// ready unless the request forces it. Each of these must reach the pane.
+func TestIngressImmediateTypedOnBusyAndQuietLanes(t *testing.T) {
+	for _, tc := range []struct {
+		name, lane, pane, status string
+		extra                    map[string]any
+	}{
+		{"info-deliver-now-working-design", t3602Design, "w1:design", "working", map[string]any{"notify_type": "info", "deliver": "now"}},
+		{"info-deliver-now-desk", "operator-desk", "w1:desk", "idle", map[string]any{"notify_type": "info", "deliver": "now"}},
+		{"ready-delivery-class-interrupt-design", t3602Design, "w1:design", "idle", map[string]any{"notify_type": "ready", "delivery_class": "interrupt"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newT3602Rig(t, "default")
+			if tc.status != "idle" {
+				t6338SetPaneStatus(t, r, tc.pane, tc.status)
+			}
+			text := "hk 6338 immediate " + tc.name
+			t6338Post(t, r, t6338Ingress(tc.lane, "t6338-"+tc.name, text, tc.extra))
+			t6338AwaitTyped(t, r, tc.pane, text)
+		})
+	}
+}
+
 // (e) A lane that is not inbox-only receives a typed ingress info as it does
 // today: typed into its pane.
 func TestIngressWorkerLaneKeepsTypedDelivery(t *testing.T) {

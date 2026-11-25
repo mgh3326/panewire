@@ -116,7 +116,14 @@ func inboxOnlyExempt(e hubJobEventPayload) bool {
 	if !e.operatorIngress {
 		return false
 	}
-	return e.NotifyType == "" || e.DeliverPolicy == "now" || e.DeliveryClass == "interrupt"
+	return e.NotifyType == "" || inboxOnlyImmediate(e)
+}
+
+// inboxOnlyImmediate reports whether an operator ingress event asks for
+// immediate delivery (deliver=now or delivery_class=interrupt). Such an event
+// is typed on an inbox-only lane whatever its class (hub_inbox.go, hk 6338).
+func inboxOnlyImmediate(e hubJobEventPayload) bool {
+	return e.operatorIngress && (e.DeliverPolicy == "now" || e.DeliveryClass == "interrupt")
 }
 
 // inboxWakeText is the wake line. N comes from a successful count read only.

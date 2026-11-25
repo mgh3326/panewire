@@ -282,6 +282,15 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		wake = inboxWakeWorthy(class, quiet, kind, *event)
 		class, directive, holdClass = "inbox", false, false
 		deadline, window = 0, 0
+	} else if inboxOnly != "" && inboxOnlyImmediate(*event) {
+		// hk 6338: an ingress event that asks for immediate delivery is typed
+		// whatever its class. A working or summary-bearing lane never promotes
+		// an info to interrupt, and a quiet design lane files a ready, so the
+		// class is forced here; an interrupt is not claimed by receiveInbox and
+		// takes the normal persist-and-inject path.
+		class, holdClass = "interrupt", false
+		deadline, window = 0, 0
+		inboxOnly = ""
 	} else {
 		inboxOnly = ""
 	}
