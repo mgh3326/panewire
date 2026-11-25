@@ -11,8 +11,10 @@ import (
 // hk 6486: the delivery tables joined the copier without the tolerance
 // supersede_lane_cause has. A source written before hk 6384 has none of them,
 // and the copy must read each as empty rather than fail after the target was
-// written. Killed by: removing a storeCopyOlderSourceTables check from one of
-// the three reads of the source (columns, scan, high-water).
+// written. Killed by: removing a storeCopyOlderSourceTables check from
+// storeCopySourceColumns or storeCopyScan. The high-water read's check is
+// pinned instead by TestHubStoreCopyHighWaterSkipsMissingOlderSourceTables_t6507
+// (hk 6507, MySQL in CI): a SQLite source skips that read's query.
 func TestHubStoreCopyOlderSourceReadsMissingTablesAsEmpty_t6486(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
