@@ -20,6 +20,31 @@ func relayOwes(owed bool, err error) func(context.Context, string) (bool, error)
 	return func(context.Context, string) (bool, error) { return owed, err }
 }
 
+// The at-end attempt follows the config loaded for each sweep pass. Unsetting
+// the TTL holds a queued dir without dropping it; setting it resumes deletion.
+func TestJobDirEndQueueRequiresConfiguredTTL(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	r.a.Config.Reap = nil
+	s := &TaskPaneSweeper{RelayOwed: relayOwes(false, nil)}
+	s.queueEndedJobDir("j1", r.now)
+
+	if err := s.Pass(context.Background(), r.a); err != nil {
+		t.Fatal(err)
+	}
+	if !r.exists("j1") || len(s.endedDirs) != 1 {
+		t.Fatalf("unset TTL: j1 exists=%t queued=%d, want kept and queued", r.exists("j1"), len(s.endedDirs))
+	}
+
+	r.a.Config.Reap = map[string]any{"job_dir_ttl": "72h"}
+	if err := s.Pass(context.Background(), r.a); err != nil {
+		t.Fatal(err)
+	}
+	if r.exists("j1") || len(s.endedDirs) != 0 {
+		t.Fatalf("configured TTL: j1 exists=%t queued=%d, want deleted and dropped", r.exists("j1"), len(s.endedDirs))
+	}
+}
+
 // unreap removes the job.reaped event seedJob wrote, so the job has ended
 // without its reap on record.
 func (r *ttlRig) unreap(id string) {
@@ -148,6 +173,7 @@ func TestJobDirEndKeepsWithoutJobReaped(t *testing.T) {
 func TestJobDirEndQueueRetriesUntilTheRelaySettles(t *testing.T) {
 	r := newTTLRig(t)
 	r.seedJob("j1")
+	r.a.Config.Reap = map[string]any{"job_dir_ttl": "72h"}
 	owed := true
 	s := &TaskPaneSweeper{RelayOwed: func(context.Context, string) (bool, error) { return owed, nil }}
 	s.queueEndedJobDir("j1", r.now)

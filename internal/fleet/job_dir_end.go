@@ -68,6 +68,9 @@ func (s *TaskPaneSweeper) expireEndedJobDirs(ctx context.Context, a *App) {
 			delete(s.endedDirs, id)
 			continue
 		}
+		if _, ok := ConfiguredJobDirTTL(a.Config); !ok {
+			continue
+		}
 		expiry := &JobDirTTL{RelayOwed: s.RelayOwed, Exclusive: s.Exclusive}
 		if expiry.ExpireEnded(ctx, a, id) == "confirmed" {
 			delete(s.endedDirs, id)

@@ -810,7 +810,7 @@ and TTL loops stop.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `job_dir_ttl` | unset | The node's opt-in to deleting job directories: when set (`"72h"`, `"3d"`; at least `24h`), the node runs the job dir TTL with this age on its own hourly loop — whether or not the pane sweep runs — and deletes each directory its gate lets go. Unset, the node deletes nothing. `panewire reap --expire-job-dirs` uses it as its TTL, else 72 h. A value under 24 h or one that does not parse is a config error. |
+| `job_dir_ttl` | unset | The node's opt-in to deleting job directories: when set (`"72h"`, `"3d"`; at least `24h`), the node runs the job dir TTL with this age on its own hourly loop — whether or not the pane sweep runs — and deletes each directory its gate lets go. The at-end delete uses the same opt-in. Unset, the node deletes nothing. `panewire reap --expire-job-dirs` uses it as its TTL, else 72 h. A value under 24 h or one that does not parse is a config error. |
 
 ## handoffkeep service credential
 

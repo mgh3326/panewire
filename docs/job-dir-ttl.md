@@ -212,6 +212,12 @@ is dropped after `MinJobDirTTL` (24 h, the relay hold ceiling); from then the
 TTL pass owns it. A queue lost to a restart leaves the dir to the TTL pass.
 A sweeper with no relay reader queues nothing.
 
+Both the at-end attempt and the hourly TTL pass require `[reap] job_dir_ttl`
+to be set in the config loaded for that pass. If it is unset, the at-end
+queue keeps eligible dirs for a later pass; setting the key resumes attempts
+without restarting the node. The 24 h queue ceiling still applies while the
+key is unset, after which the hourly TTL pass owns the dir.
+
 The at-end delete runs on the node's sweeper only. `panewire reap` on the CLI
 has no node outbox, so it never queues one and its dirs wait for the TTL.
 
