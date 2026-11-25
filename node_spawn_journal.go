@@ -72,10 +72,10 @@ func openNodeSpawnJournal(root string) (*nodeSpawnJournal, error) {
 			return nil, err
 		}
 	}
-	// strict marks a row whose job_id and label came from the strict
-	// flag/value pairs. A row an older build wrote is 0: its identity may name
-	// a forged --purpose value, so the takeover proof holds while any such row
-	// is still executing (hk 4799).
+	// strict marks a row whose job_id and label were read without taking a
+	// flag's value for a flag. A row an older build wrote is 0: its identity may
+	// name a forged --purpose value, so the takeover proof holds while any such
+	// row is still executing (hk 4799).
 	var strictPresent int
 	if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('spawn_inbox') WHERE name='strict'`).Scan(&strictPresent); err == nil && strictPresent == 0 {
 		_, err = db.ExecContext(ctx, `ALTER TABLE spawn_inbox ADD COLUMN strict INTEGER NOT NULL DEFAULT 0`)
@@ -134,13 +134,14 @@ func spawnFingerprint(message hubOutboundMessage) string {
 }
 
 func (j *nodeSpawnJournal) claim(ctx context.Context, message hubOutboundMessage) (bool, *hubSpawnResult, error) {
-	// The journal's identity columns are read back by the takeover proof and
-	// by restart settlement, so they take the strict flag/value pairs: a
-	// --purpose value is free text sent before --job, and the lax scan would
-	// record its value as this row's job (hk 4799).
-	job, label := hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l")
+	// The journal's identity columns are read back by the takeover proof, by
+	// restart settlement and by the checkout sweep, so they name what the
+	// launcher will: a flag's value is never read as a flag (--purpose is free
+	// text sent before --job, hk 4799), and the job is the label when --job is
+	// absent.
+	identity := hubSpawnIdentity(message.Args)
 	sparseHash := sparseListsHash(message.Checkout)
-	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label,strict,sparse_hash) VALUES(?,?,'executing',?,?,1,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), job, label, sparseHash)
+	result, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,job_id,label,strict,sparse_hash) VALUES(?,?,'executing',?,?,1,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), identity.Job, identity.Label, sparseHash)
 	if err != nil {
 		return false, nil, err
 	}
@@ -159,8 +160,8 @@ func (j *nodeSpawnJournal) refuseUnstarted(ctx context.Context, message hubOutbo
 	if err != nil {
 		return false, err
 	}
-	sparseHash := sparseListsHash(message.Checkout)
-	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label,strict,sparse_hash) VALUES(?,?,'completed',?,?,?,1,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), hubSpawnFlagArg(message.Args, "--job"), hubSpawnFlagArg(message.Args, "-l"), sparseHash)
+	identity, sparseHash := hubSpawnIdentity(message.Args), sparseListsHash(message.Checkout)
+	inserted, err := j.db.ExecContext(ctx, `INSERT INTO spawn_inbox(request_id,fingerprint,status,result,job_id,label,strict,sparse_hash) VALUES(?,?,'completed',?,?,?,1,?) ON CONFLICT DO NOTHING`, message.RequestID, spawnFingerprint(message), string(raw), identity.Job, identity.Label, sparseHash)
 	if err != nil {
 		return false, err
 	}

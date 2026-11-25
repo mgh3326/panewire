@@ -198,7 +198,7 @@ func (h *HubServer) answerSpawnClaim(ctx context.Context, machine string, agent 
 // spawnFencedResult is the node answer a won fence stands for: the attempt
 // was never started, exactly as a node's own deadline_not_started.
 func spawnFencedResult(node hubSpawnRequest, now time.Time) hubSpawnResult {
-	return hubSpawnResult{RequestID: node.RequestID, Machine: node.Machine, JobID: hubSpawnArg(node.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true, CompletedAt: &now}
+	return hubSpawnResult{RequestID: node.RequestID, Machine: node.Machine, JobID: hubSpawnIdentity(node.Args).Job, RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true, CompletedAt: &now}
 }
 
 // spawnGrantRowCount counts the rows a hub older than the start proof could

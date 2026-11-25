@@ -1033,6 +1033,18 @@ exclusion survives hub restart within that attempt and is cleared by a
 cleanup-confirmed new attempt. A request that already claimed its handoffkeep
 job must not be moved to another host; that claim is host-bound.
 
+### Spawn identity
+
+A hub spawn's argv names its job in one way, the launcher's
+(`fleet.ParseSpawnIdentity`): the job is `--job`, else the `-l` label; a flag's
+value is never read as a flag; a repeated flag keeps its last value. The
+overlap key (node and hub), the node journal's `job_id` and `label`, the
+node's never-started, expired and timeout answers, its `node_spawn` fleet
+events and the hub's fenced-attempt answer all name the job this way (hk 6401).
+So a restart settles a spawn sent without `--job` from the job record under its
+label, instead of completing it `lost` as `journal_row_without_job`. A row an
+older build journaled for such a spawn keeps its empty `job_id`.
+
 ### A job.spawn the node cannot accept
 
 The node applies one argument rule (`internal/spawnargs`) to every `job.spawn`.
