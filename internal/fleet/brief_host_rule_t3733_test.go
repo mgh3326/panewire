@@ -51,6 +51,51 @@ func TestSpawnBriefPreambleStatesTestHostRuleT3733(t *testing.T) {
 	}
 }
 
+// Every host caps run width the same way (operator decision 515, hk 6484):
+// narrow go test runs and mutant or matrix builds one at a time, never in
+// parallel. No line of the block may forbid go test on a host.
+func TestSpawnBriefPreambleCapsTestWidthT6484(t *testing.T) {
+	a, s, _, _ := cmdFixture(t)
+	if e := a.Spawn(context.Background(), s); e != nil {
+		t.Fatal(e)
+	}
+	b, e := os.ReadFile(filepath.Join(a.Jobs, s.Job, "brief-delivered.md"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	brief := string(b)
+	start := strings.Index(brief, "Host safety (fleet-v1):\n")
+	end := strings.Index(brief, "\nLaunch identity:")
+	if start < 0 || end < start {
+		t.Fatalf("delivered brief has no fleet-v1 block: %q", brief)
+	}
+	block := brief[start:end]
+	if strings.Contains(block, "never run `go test`") || strings.Contains(block, "remote-gotest") {
+		t.Fatalf("fleet-v1 block still forbids go test on a host: %q", block)
+	}
+	var bullet string
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, "- Test host:") {
+			bullet = line
+		}
+	}
+	if bullet == "" {
+		t.Fatalf("fleet-v1 block has no test-host bullet: %q", block)
+	}
+	for _, want := range []string{
+		"-p 2",
+		"GOMAXPROCS",
+		"GOMAXPROCS=4 go test -p 2",
+		"mutant",
+		"one at a time",
+		"never in parallel",
+	} {
+		if !strings.Contains(bullet, want) {
+			t.Errorf("test-host bullet lacks width rule %q: %q", want, bullet)
+		}
+	}
+}
+
 func TestSpawnBriefPreambleFleetV1RulesT3809(t *testing.T) {
 	a, s, _, _ := cmdFixture(t)
 	if e := a.Spawn(context.Background(), s); e != nil {
