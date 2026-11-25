@@ -23,6 +23,7 @@ type lateComposerFixture struct {
 	returns       int
 	lastScreen    string
 	settling      bool
+	failStatus    bool
 	returnResidue []bool
 	returnReads   []int
 	sleeps        []time.Duration
@@ -48,6 +49,9 @@ func lateComposerApp(t *testing.T, kind string, screen func(*lateComposerFixture
 		args := c.Args
 		switch {
 		case len(args) >= 2 && args[0] == "agent" && args[1] == "list":
+			if f.failStatus {
+				return Result{Code: 1, Err: "agent list unavailable"}
+			}
 			return Result{Out: fmt.Sprintf(`{"agents":[{"pane_id":"w:p1","agent_status":%q}]}`, f.status(f))}
 		case len(args) >= 2 && args[0] == "pane" && args[1] == "read":
 			f.reads++
@@ -218,6 +222,27 @@ func TestBriefLateComposerRefreshesBlockedStatusAfterSettle(t *testing.T) {
 	}
 	if f.returns != 0 {
 		t.Fatalf("returns=%d into a pane that became blocked during settle", f.returns)
+	}
+}
+
+// Once the settle re-check shows that the composer is clear, status is no
+// longer needed to confirm the landing. A failed status read must not turn
+// that successful submission into a spawn failure.
+func TestBriefLateComposerLandsWhenStatusReadFailsAfterClear(t *testing.T) {
+	a, f := lateComposerApp(t, "claude", func(f *lateComposerFixture) string {
+		if f.reads > 2 {
+			f.failStatus = true
+		}
+		return claudeScreenEmpty()
+	}, workingOnceSent)
+	if err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief); err != nil {
+		t.Fatalf("landed brief refused after status read failed: %v", err)
+	}
+	if got := settles(f); got != 1 {
+		t.Fatalf("settle sleeps=%d (%v), want exactly one %v", got, f.sleeps, briefSubmitSettle)
+	}
+	if f.returns != 0 {
+		t.Fatalf("returns=%d after composer cleared", f.returns)
 	}
 }
 

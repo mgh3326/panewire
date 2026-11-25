@@ -783,13 +783,13 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 				if e != nil {
 					return confirmed, e
 				}
-				status, e = a.status(ctx, pane)
-				if e != nil {
-					return confirmed, e
-				}
 				residue = briefInComposer(kind, visible, brief)
 				if !residue {
 					return confirmed, nil
+				}
+				status, e = a.status(ctx, pane)
+				if e != nil {
+					return confirmed, e
 				}
 				confirmed.LateComposer = true
 			} else {
