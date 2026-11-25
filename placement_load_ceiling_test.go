@@ -57,7 +57,7 @@ func TestPlacementLoadCeilingLeavesOutHostAboveIt(t *testing.T) {
 func TestPlacementLoadCeilingRedirectSkipsUnknownLoad(t *testing.T) {
 	t.Run("policy order", func(t *testing.T) {
 		k := loadCeilingPolicy(t, `{"load_ceiling_per_core":2.5}`).scoreK()
-		unknown := loadCeilingCandidate("unknown", 0, 80)
+		unknown := loadCeilingCandidate("unknown", 0, 5)
 		unknown.Signals.Load1PerCore = nil
 		usable := []PlacementCandidate{
 			loadCeilingCandidate("over", 3.2, 90),
@@ -83,6 +83,32 @@ func TestPlacementLoadCeilingRedirectSkipsUnknownLoad(t *testing.T) {
 		result := hub.makeTaggedPlacement(policy, placementMetrics{load1: map[string]float64{"over": 3.2, "under": 0.6}}, "hub-only", time.Time{}, []string{"gpu"})
 		if result.Decision != "under" || result.Reason != "load_over_ceiling" {
 			t.Fatalf("tagged decision=%q reason=%q, want under load_over_ceiling", result.Decision, result.Reason)
+		}
+	})
+}
+
+// A ceiling must not remove an unknown-load host from the free-floor rules.
+func TestPlacementLoadCeilingPreservesFreeFloorForUnknownLoad(t *testing.T) {
+	k := loadCeilingPolicy(t, `{"load_ceiling_per_core":2.5}`).scoreK()
+	unknown := loadCeilingCandidate("unknown", 0, 80)
+	unknown.Signals.Load1PerCore = nil
+	usable := []PlacementCandidate{
+		unknown,
+		loadCeilingCandidate("over", 3.2, 40),
+		loadCeilingCandidate("under", 0.6, 10),
+	}
+	lowFree := PlacementTerms{CPU: 0.04, Mem: 0.5, IO: 1, Load: 0.5, Jobs: 1}
+	usable[2].Signals.Terms = &lowFree
+	usable[2].Signals.Free = lowFree.Free()
+
+	t.Run("unknown healthy winner stays selected", func(t *testing.T) {
+		if got, reason := k.decide(usable, 0); got != 0 || reason != "" {
+			t.Fatalf("decide=%d %q, want unknown healthy winner without a reason", got, reason)
+		}
+	})
+	t.Run("unknown host prevents all_loaded", func(t *testing.T) {
+		if got, reason := k.decide(usable, 2); got != 0 || reason != "below_free_floor" {
+			t.Fatalf("decide=%d %q, want unknown host via below_free_floor", got, reason)
 		}
 	})
 }

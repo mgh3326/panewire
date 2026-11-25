@@ -599,10 +599,11 @@ unknown `free`, never a low one: the floor does not apply to it.
    `load_over_ceiling`. Every host over the ceiling is then left out of the
    rules below, so one cannot take the decision as a challenger either. A host
    at exactly the ceiling is not over it. A host whose load is unknown is
-   neither over nor under and cannot lift the ceiling. When the ceiling applies,
-   only hosts known at or under it are considered for the decision; unknown-load
-   hosts remain in the candidate trace but cannot take that redirected choice
-   (the `load_unknown` rule is unchanged). When every
+   neither over nor under and cannot lift the ceiling. If the policy-order
+   winner is over the ceiling, only a host known at or under it can take the
+   redirected choice. Unknown-load hosts remain in the rules below, including
+   the free-floor rule, and remain in the candidate trace (`load_unknown` is
+   unchanged). When every
    usable host is over the ceiling, none is left out and the rules below rank
    them exactly as they did before. The ceiling only redirects a decision to
    another usable host: it never makes a spawn wait or refuse. 0 disables it.
