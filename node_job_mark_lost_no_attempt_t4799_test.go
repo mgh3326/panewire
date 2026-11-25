@@ -21,7 +21,7 @@ func claimJournalSpawnArgs(t *testing.T, client *HubClient, requestID string, ar
 		t.Fatal(err)
 	}
 	defer client.releaseSpawnJournal()
-	claimed, _, err := journal.claim(t.Context(), hubOutboundMessage{RequestID: requestID, Args: args})
+	claimed, _, err := journal.claim(t.Context(), hubOutboundMessage{RequestID: requestID, Args: args}, spawnJournalHold{})
 	if err != nil || !claimed {
 		t.Fatalf("journal claim=%v err=%v", claimed, err)
 	}

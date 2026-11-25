@@ -544,8 +544,10 @@ opt-in (hk 4821):
 
 At every N, a job dir that is a symlink is refused before the first git write
 (`checkout_refused:job_dir_link`, rc 81, retryable; `--host auto` moves to the
-next candidate), and a reuse that fast-forwards the job dir re-checks that it
-is the same device and inode it checked before that write. The admission key
+next candidate). Prepare records the job directory's identity under the clone
+Git operation lock before the first Git write. It rechecks the device and inode
+before a reuse fast-forward and before detached reuse applies or disables sparse
+checkout. Detached reuse checks again before reporting success. The admission key
 stays the request's job dir and job id, so a linked dir no longer makes a
 spawn exclusive: two spawns can never share one job dir through a link.
 
@@ -570,7 +572,7 @@ Failures never fall back to ssh (design D4):
 | 503 `node_unavailable` | Node asleep or not accepting: treated like an unreachable host, so a wakeable host is woken (and waited for through the hub connection, never ssh). |
 | 401 / 403 / 400 | Host refused, reasons `hub_auth` / `hub_invalid_request` (exit 70 semantics). |
 | `checkout_refused:<outcome>` (rc 81) | `dirty`, `sha-missing`, `branch-elsewhere`, `branch_in_use` or `job_dir_link` with verified cleanup (`retryable`) moves `--host auto` to the next candidate; if all candidates refuse, the operation ends as `admission_refused` with the tried hosts (exit 80 when local spawning is disabled). Without `NextHost`, a checkout refusal exits 81 naming the outcome. Pinned hosts and unverified cleanup keep the refusal as the answer. `busy` is retried once on the same host. |
-| `checkout_refused:work_root_changed` (rc 81) | The configured work root changed while another checkout spawn held the previous root. The node refuses before claiming the request, so `--host auto` can try the next candidate and a replay checks the root again. This refusal applies to concurrent prepares. At `spawn_concurrency=1`, the node takes the new root on its next idle admission. |
+| `checkout_refused:work_root_changed` (rc 81) | The configured work root changed while another checkout spawn held the previous root. The node refuses before claiming the request, adds a `Fix:` hint to wait for that checkout to finish and retry or restore `work_root`, and records a refused `node_spawn` event. `--host auto` can try the next candidate and a replay checks the root again. This refusal applies to concurrent prepares. At `spawn_concurrency=1`, the node takes the new root on its next idle admission. |
 | 504 pending, `lost`, node `timeout` | Exit 75: the node may still run the job, so nothing is spawned elsewhere. |
 | Node spawn rc 0 | The `OK pane=… job=…` receipt is printed with `host=NAME`. Other rc values follow the ssh rules (2, 70, 74, 75, 76, 79 and 82 stop the round; others refuse the host). |
 
@@ -2479,7 +2481,7 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 70 | Configuration or trust refusal, including `POLICY_UNAVAILABLE`. |
 | 74 | Active job duplicate, including an hk `job_id_taken` claim refusal. |
 | 75 | Unreadable duplicate state (the ledger's record of a duplicate job has no state or an unreadable `job.spawned` receipt; a released job has no receipt and is reclaimed), changed artifact, or a `--parent-job` that resolves neither locally nor in hk within the bound. Also a hub request in `deadline_exceeded`: its ownership is unresolved. |
-| 76 | `BRIEF_SUBMISSION_UNCONFIRMED`: no working transition or submitted brief turn on the launch session and pane. Codex retries a submit key once only for composer residue; other harnesses retain one submit-key retry when submission remains unconfirmed. The pane may still run: before it waits, the node records `job.brief_sent` (the pane and the digest of `jobs/<job>/brief-delivered.md`), and once the failed spawn has finished its cleanup (a spawn holds the job's operation lock, the one `done` takes, from before its claim until it is published or its failure cleanup has recorded the attempt's end, so a fast `done` waits for the spawn's own `job.spawned`; (`job.spawn_retryable` or `job.cleanup_pending` is in the ledger, read in ledger order), a `panewire done` from that pane adopts it as the job's spawn receipt (a local `job.spawned`, so the completion, usage read and pane sweep see the pane) and repairs the claimed hk record, instead of refusing with `no_spawn_evidence`. |
+| 76 | `BRIEF_SUBMISSION_UNCONFIRMED`: no working transition or submitted brief turn on the launch session and pane. A late Return for readable composer residue refreshes pane status after the settle re-check; if the pane became blocked during that settle, neither the late Return nor the idle retry presses Return into its dialog. Codex retries a submit key once only for composer residue; other harnesses retain one submit-key retry when submission remains unconfirmed. The pane may still run: before it waits, the node records `job.brief_sent` (the pane and the digest of `jobs/<job>/brief-delivered.md`), and once the failed spawn has finished its cleanup (a spawn holds the job's operation lock, the one `done` takes, from before its claim until it is published or its failure cleanup has recorded the attempt's end, so a fast `done` waits for the spawn's own `job.spawned`; (`job.spawn_retryable` or `job.cleanup_pending` is in the ledger, read in ledger order), a `panewire done` from that pane adopts it as the job's spawn receipt (a local `job.spawned`, so the completion, usage read and pane sweep see the pane) and repairs the claimed hk record, instead of refusing with `no_spawn_evidence`. |
 | 77 | `NO_ROLE_CANDIDATE` or seat, grade, family, or E6 refusal; quota gate exit 5 is remapped here. `role_restricted:` preserves the gate reason and names the rule that refused. 역할 제한 이유가 표시되면 그 사유가 가리키는 역할 또는 프로필을 선택하세요. |
 | 78 | `preflight`: at least one checked remote host failed a check; the reasons are on stdout and in the error. |
 | 79 | Mock isolation refusal. |

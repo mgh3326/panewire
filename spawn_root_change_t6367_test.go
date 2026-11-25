@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,15 +23,16 @@ func writeSpawnRoot(t *testing.T, config, root string) {
 	}
 }
 
-func rootChangeSpawnFixture(t *testing.T, slots int) (*nodeWorktreeFixture, *HubClient) {
+func rootChangeSpawnFixture(t *testing.T, slots int) (*nodeWorktreeFixture, *HubClient, *fleetEventRecorder) {
 	t.Helper()
 	fixture := newNodeWorktreeFixture(t)
 	client := fixture.client()
 	client.spawnSlotsOverride = slots
 	client.spawnJournalDir = t.TempDir()
-	client.fleetEvents = (&fleetEventRecorder{}).write
+	events := &fleetEventRecorder{}
+	client.fleetEvents = events.write
 	writeSpawnRoot(t, fixture.config, fixture.workRoot)
-	return fixture, client
+	return fixture, client, events
 }
 
 func rootChangeMessage(fixture *nodeWorktreeFixture, id int, job string) hubOutboundMessage {
@@ -50,7 +52,7 @@ func TestWorkRootChangeReplayEvaluatesAfresh_t6367(t *testing.T) {
 
 func testWorkRootChangeWhileHeld(t *testing.T, replay bool) {
 	t.Helper()
-	fixture, client := rootChangeSpawnFixture(t, 2)
+	fixture, client, events := rootChangeSpawnFixture(t, 2)
 	jobARoot := filepath.Join(fixture.workRoot, "job-a")
 	started, release := make(chan string, 2), make(chan struct{}, 1)
 	client.spawnEngine = func(ctx context.Context, cwd fleet.LaunchDir, _, _, _, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
@@ -82,6 +84,13 @@ func testWorkRootChangeWhileHeld(t *testing.T, replay bool) {
 	if got.RequestID != b.RequestID || got.Error != "checkout_refused:work_root_changed" || got.Stage != "checkout" || got.RC != 81 || !got.Retryable {
 		t.Fatalf("job-b result = %+v", got)
 	}
+	if !strings.Contains(got.StdoutTail, "Fix:") || !strings.Contains(got.StdoutTail, "retry") || !strings.Contains(got.StdoutTail, "work_root") {
+		t.Errorf("work_root_changed refusal tail = %q, want actionable Fix hint", got.StdoutTail)
+	}
+	gotEvents := events.all()
+	if len(gotEvents) != 1 || gotEvents[0].Kind != "node_spawn" || gotEvents[0].Outcome != "refused" || gotEvents[0].Reason != "work_root_changed" || gotEvents[0].RequestID != b.RequestID {
+		t.Errorf("work_root_changed refusal events = %+v, want one refused node_spawn event", gotEvents)
+	}
 	if claims.Load() != 0 {
 		t.Fatal("job-b requested a hub grant before refusing")
 	}
@@ -111,7 +120,7 @@ func testWorkRootChangeWhileHeld(t *testing.T, replay bool) {
 }
 
 func TestWorkRootChangeAppliesWhenIdle_t6367(t *testing.T) {
-	fixture, client := rootChangeSpawnFixture(t, 2)
+	fixture, client, _ := rootChangeSpawnFixture(t, 2)
 	peer, results := admissionPeer(t)
 	root := fixture.workRoot
 	client.spawnEngine = func(_ context.Context, cwd fleet.LaunchDir, _, _, _, _ string, _ time.Time, args []string) (*hubSpawnOutput, fleet.Execution) {
@@ -133,7 +142,7 @@ func TestWorkRootChangeAppliesWhenIdle_t6367(t *testing.T) {
 }
 
 func TestMissingWorkRootBootstraps_t6367(t *testing.T) {
-	fixture, client := rootChangeSpawnFixture(t, 2)
+	fixture, client, _ := rootChangeSpawnFixture(t, 2)
 	root := filepath.Join(fixture.root, "missing")
 	writeSpawnRoot(t, fixture.config, root)
 	client.helloCapabilities([]string{"spawn"})

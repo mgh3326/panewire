@@ -28,7 +28,13 @@ type SpawnIdentity struct {
 // An argv the grammar cannot read names nothing: the launcher refuses it
 // before it claims or launches anything.
 func ParseSpawnIdentity(args []string) (SpawnIdentity, error) {
-	s, _, f, err := readSpawnFlags(args, nil)
+	return ParseSpawnIdentityIgnoring(args, nil)
+}
+
+// ParseSpawnIdentityIgnoring reads identity from stored argv while accepting
+// named retired flags as one-value no-ops. Unknown flags remain errors.
+func ParseSpawnIdentityIgnoring(args, ignored []string) (SpawnIdentity, error) {
+	s, _, f, err := readSpawnFlags(args, ignored)
 	if err != nil {
 		return SpawnIdentity{}, err
 	}
