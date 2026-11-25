@@ -75,6 +75,7 @@ type reportRelayRoute struct {
 	Protected     bool                `json:"protected,omitempty"`
 	Standby       *reportRelayStandby `json:"standby,omitempty"`
 	jobRecord     bool
+	jobEnded      bool
 }
 
 var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")
@@ -425,7 +426,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		// are acknowledged without re-POSTing.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
-		if h.laneJobEnded(event.OwnerLane) {
+		if route.jobEnded || (route.Machine == "" && h.laneJobEnded(event.OwnerLane)) {
 			// No pane will ever take this text, so the sender's row says
 			// undeliverable now instead of queued (hk 4534).
 			h.recordInboxStage(key, laneInboxStageDropped, relayDroppedJobEnded, "", "")
@@ -737,6 +738,13 @@ func (h *HubServer) resolveRelayRouteLocked(kind string, event hubJobEventPayloa
 			route = parent
 		}
 	}
+	if exists && kind == "lane.event" && !route.Sink && h.relayRouteJobEndedLocked(route, event.OwnerLane) {
+		// A registered route can outlive its completed job until reap. Check
+		// the job currently bound to the route so a takeover keeps delivering
+		// through its live successor (hk 4534; hk 6588).
+		route.jobEnded = true
+		return route, nil, false
+	}
 	if exists && route.Sink && kind == "lane.event" {
 		return route, nil, true
 	}
@@ -770,6 +778,34 @@ func (h *HubServer) resolveRelayRouteLocked(kind string, event hubJobEventPayloa
 func (h *HubServer) laneJobEnded(lane string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.laneJobEndedLocked(lane)
+}
+
+// relayRouteJobEndedLocked checks the route's job first, preserving takeover
+// routes whose lane label still names a completed predecessor. A jobless route
+// is matched to a completed lane job only when both still name the same pane.
+func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string) bool {
+	if route.Job != "" {
+		if job := h.jobs[route.Job]; job != nil {
+			return job.Completed
+		}
+		return false
+	}
+	ended := false
+	for _, job := range h.jobs {
+		if job.AgentLabel != lane || job.Node != route.Machine || job.Pane != route.Pane {
+			continue
+		}
+		if !job.Completed {
+			return false
+		}
+		ended = true
+	}
+	return ended
+}
+
+// laneJobEndedLocked is laneJobEnded for a caller that holds h.mu.
+func (h *HubServer) laneJobEndedLocked(lane string) bool {
 	known := false
 	for _, job := range h.jobs {
 		if job.AgentLabel != lane {

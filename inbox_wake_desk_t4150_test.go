@@ -91,6 +91,24 @@ func TestInboxWakeDesignWithoutRowFallsBackToDesk(t *testing.T) {
 	}
 }
 
+func TestInboxWakeDesignWithEndedJobRouteFallsBackToDesk(t *testing.T) {
+	r := newT3602Rig(t, "default")
+	routes := t4150BaseRoutes()
+	routes[t3602Design] = reportRelayRoute{Machine: "host-a", Pane: "w1:design", Job: "ended-design-job"}
+	t4150Routes(t, r, routes)
+	t4150Snapshot(t, r, "w1:design", "w1:desk")
+	r.h.mu.Lock()
+	r.h.jobs["ended-design-job"] = &hubJobRecord{
+		HubActiveJob: HubActiveJob{JobID: "ended-design-job", AgentLabel: t3602Design, Pane: "w1:design"},
+		Node:         "host-a",
+		Completed:    true,
+	}
+	r.h.mu.Unlock()
+	got := t4150Event(t, r, t3602Design)
+	t3602OneWake(t, got, "w1:desk", t4150DeskWake(t3602Design, 1, "order"))
+	t4150DeskEvent(t, r, t3602Design, false)
+}
+
 func TestInboxWakeDesignWithoutRowKeepsUnroutableLiveJobOwed(t *testing.T) {
 	r := newT3602Rig(t, "default")
 	routes := t4150BaseRoutes()
