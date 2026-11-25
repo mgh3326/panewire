@@ -737,6 +737,12 @@ func (h *HubServer) resolveRelayRouteLocked(kind string, event hubJobEventPayloa
 			route = parent
 		}
 	}
+	if exists && kind == "lane.event" && !route.Sink && h.relayRouteJobEndedLocked(route, event.OwnerLane) {
+		// A registered route can outlive its completed job until reap. Check
+		// the job currently bound to the route so a takeover keeps delivering
+		// through its live successor (hk 4534; hk 6588).
+		exists = false
+	}
 	if exists && route.Sink && kind == "lane.event" {
 		return route, nil, true
 	}
@@ -770,6 +776,23 @@ func (h *HubServer) resolveRelayRouteLocked(kind string, event hubJobEventPayloa
 func (h *HubServer) laneJobEnded(lane string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.laneJobEndedLocked(lane)
+}
+
+// relayRouteJobEndedLocked checks the route's job first, preserving takeover
+// routes whose lane label still names a completed predecessor. Older routes
+// without a job binding fall back to the lane-wide completion check.
+func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string) bool {
+	if route.Job != "" {
+		if job := h.jobs[route.Job]; job != nil {
+			return job.Completed
+		}
+	}
+	return h.laneJobEndedLocked(lane)
+}
+
+// laneJobEndedLocked is laneJobEnded for a caller that holds h.mu.
+func (h *HubServer) laneJobEndedLocked(lane string) bool {
 	known := false
 	for _, job := range h.jobs {
 		if job.AgentLabel != lane {

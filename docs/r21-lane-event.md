@@ -74,7 +74,12 @@ Zero or multiple live matches remain unrouted.
 If no route is available or the queue cannot accept an injection, the hub
 still stores the undelivered record and sends
 `relay.persisted` to the producer node so its outbox can retire. It also emits
-`relay.unrouted` for observation. A later destination-node registration
+`relay.unrouted` for observation. A registered route for a lane event is treated
+as unavailable when its bound job is completed. Routes with a job ID use that
+job's completion state; routes without a matching job record fall back to the
+lane-wide check. This drops the event with `job_ended`, while a takeover route
+bound to a live successor keeps delivering even if the predecessor job has
+completed. A later destination-node registration
 replays undelivered lane events without restarting the hub. That replay asks
 handoffkeep only for `lane.event` rows and advances by durable ID, so older
 undelivered report rows cannot hide a newer direct notification. Once the hub
