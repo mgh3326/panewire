@@ -284,7 +284,7 @@ func (j *nodeSpawnJournal) checkoutOwners(ctx context.Context) (map[string]strin
 
 // checkoutJob folds every journal row of job for the checkout sweep's orphan
 // judgement (hk 6291): whether a spawn of it is still executing, whether every
-// finished one failed without a pane, and the newest label and pane they name.
+// finished one failed without a pane, and every label and pane the rows name.
 // A result that cannot be decoded proves no failure.
 func (j *nodeSpawnJournal) checkoutJob(ctx context.Context, job string) (fleet.CheckoutOrphan, error) {
 	rows, err := j.db.QueryContext(ctx, `SELECT status,label,result FROM spawn_inbox WHERE job_id=? ORDER BY rowid`, job)
@@ -298,7 +298,7 @@ func (j *nodeSpawnJournal) checkoutJob(ctx context.Context, job string) (fleet.C
 		if err := rows.Scan(&status, &label, &stored); err != nil {
 			return fleet.CheckoutOrphan{}, err
 		}
-		orphan.Label = cmp.Or(label, orphan.Label)
+		orphan.Labels = append(orphan.Labels, label)
 		if status != "completed" {
 			orphan.InFlight, orphan.NeverLaunched = true, false
 			continue
@@ -310,10 +310,11 @@ func (j *nodeSpawnJournal) checkoutJob(ctx context.Context, job string) (fleet.C
 		}
 		pane := result.Pane
 		if result.Receipt != nil {
-			pane = cmp.Or(result.Receipt.Pane, pane)
-			orphan.Label = cmp.Or(result.Receipt.Label, orphan.Label)
+			orphan.Panes = append(orphan.Panes, result.Receipt.Pane)
+			orphan.Labels = append(orphan.Labels, result.Receipt.Label)
+			pane = cmp.Or(pane, result.Receipt.Pane)
 		}
-		orphan.Pane = cmp.Or(pane, orphan.Pane)
+		orphan.Panes = append(orphan.Panes, result.Pane)
 		if result.RC == 0 || pane != "" {
 			orphan.NeverLaunched = false
 		}

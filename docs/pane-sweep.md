@@ -401,7 +401,7 @@ when all of this holds (hk 6291):
 | hk holds the job as `completed`, `lost`, `failed` or `refused`; any other state is a live job | `job_live` |
 | Or hk holds no record and every spawn of the job failed without a pane. An unreadable hk, a record naming another job, or a launched job hk does not hold proves nothing | `job_unconfirmed` |
 | `herdr pane list` and `herdr agent list` can both be read | `agents_unreadable` |
-| Neither list has a pane with the job's pane id or label (from the journal or the hk record), or one whose directory or foreground directory is the checkout or inside it | `pane_open` |
+| Neither list has a pane with a pane id or label that any of the job's spawns or its hk record names, or one whose directory or foreground directory is the checkout or inside it | `pane_open` |
 
 The node reads hk with its own credential (`handoffkeep_env` in `spawn.json`).
 Right before the removal it takes the clone's git operation lock, the one a

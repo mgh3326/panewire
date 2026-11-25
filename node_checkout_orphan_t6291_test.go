@@ -93,12 +93,17 @@ func (h *orphanHost) worktree(name string) string {
 // failure before any pane when pane is empty.
 func (h *orphanHost) spawned(request, job, dir, pane string) {
 	h.t.Helper()
-	h.claimed(request, job)
+	h.spawnedAs(request, job, dir, pane, "label-"+job)
+}
+
+func (h *orphanHost) spawnedAs(request, job, dir, pane, label string) {
+	h.t.Helper()
+	h.claimedAs(request, job, label)
 	result := hubSpawnResult{RequestID: request, JobID: job, Pane: pane}
 	if pane == "" {
 		result.RC, result.Error = 70, "spawn_failed"
 	}
-	receipt := `{"receipt":{"job":"` + job + `","cwd":"` + dir + `","pane":"` + pane + `","label":"label-` + job + `"}}`
+	receipt := `{"receipt":{"job":"` + job + `","cwd":"` + dir + `","pane":"` + pane + `","label":"` + label + `"}}`
 	if err := json.Unmarshal([]byte(receipt), &result); err != nil {
 		h.t.Fatal(err)
 	}
@@ -110,7 +115,12 @@ func (h *orphanHost) spawned(request, job, dir, pane string) {
 // claimed journals a spawn of job the node has not finished.
 func (h *orphanHost) claimed(request, job string) {
 	h.t.Helper()
-	claimed, _, err := h.client.spawnJournal.claim(context.Background(), hubOutboundMessage{RequestID: request, Args: []string{"--job", job, "-l", "label-" + job}})
+	h.claimedAs(request, job, "label-"+job)
+}
+
+func (h *orphanHost) claimedAs(request, job, label string) {
+	h.t.Helper()
+	claimed, _, err := h.client.spawnJournal.claim(context.Background(), hubOutboundMessage{RequestID: request, Args: []string{"--job", job, "-l", label}})
 	if err != nil || !claimed {
 		h.t.Fatalf("claim %s: claimed=%v err=%v", request, claimed, err)
 	}
@@ -256,6 +266,40 @@ func TestCheckoutOrphanSweepKeeps_t6291(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Errorf("rows = %v", got)
+	}
+}
+
+// A job spawned more than once keeps its checkout while any of those spawns'
+// panes is open, not only the newest one's: by pane id or by label, whether the
+// later spawn landed elsewhere or failed before a pane.
+func TestCheckoutOrphanKeepsEverySpawnsPane_t6291(t *testing.T) {
+	h := newOrphanHost(t)
+	twice := func(job, secondPane string) {
+		dir := h.worktree(job + "-checkout")
+		h.spawnedAs("first-"+job, job, dir, "w5:old-"+job, "old-"+job)
+		h.spawnedAs("second-"+job, job, dir, secondPane, "new-"+job)
+		h.hk.records[job] = map[string]any{"state": "completed"}
+	}
+	twice("job-oldpane", "w5:new-job-oldpane")
+	twice("job-oldlabel", "w5:new-job-oldlabel")
+	twice("job-failedretry", "")
+	twice("job-allgone", "w5:new-job-allgone")
+	// None of these panes works inside a checkout.
+	h.setPanes(
+		map[string]string{"pane_id": "w5:old-job-oldpane", "cwd": h.root},
+		map[string]string{"pane_id": "w5:moved", "label": "old-job-oldlabel", "cwd": h.root},
+		map[string]string{"pane_id": "w5:old-job-failedretry", "cwd": h.root},
+	)
+	got := h.rows()
+	for name, verdict := range map[string]string{
+		"job-oldpane-checkout":     "kept pane_open",
+		"job-oldlabel-checkout":    "kept pane_open",
+		"job-failedretry-checkout": "kept pane_open",
+		"job-allgone-checkout":     "removed ",
+	} {
+		if got[name] != verdict {
+			t.Errorf("%s: got %q, want %q", name, got[name], verdict)
+		}
 	}
 }
 

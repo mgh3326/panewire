@@ -64,8 +64,9 @@ func CheckoutSweepLiveKeep(reason string) bool {
 // nothing.
 type CheckoutOrphan struct {
 	Job string
-	// Pane and Label are what a spawn of the job reported, empty when none did.
-	Pane, Label string
+	// Panes and Labels are every pane id and label the job's spawns named: an
+	// earlier spawn's pane may still be open after a later one.
+	Panes, Labels []string
 	// InFlight reports a spawn of the job the node has not finished.
 	InFlight bool
 	// NeverLaunched reports that every spawn of the job finished as a failure
@@ -329,7 +330,7 @@ func (s *CheckoutSweep) orphanEnded(ctx context.Context, orphan CheckoutOrphan) 
 }
 
 // orphanPaneKeep keeps an orphan while herdr lists a pane that is its job's —
-// by the pane id or label its spawns or its hk record name — or a pane working
+// by any pane id or label its spawns or its hk record name — or a pane working
 // inside the directory. It reads both lists afresh: a plain shell is only in
 // the pane list. A list that cannot be read keeps the checkout.
 func (s *CheckoutSweep) orphanPaneKeep(ctx context.Context, a *App, orphan CheckoutOrphan, record map[string]any, dir string) string {
@@ -341,17 +342,14 @@ func (s *CheckoutSweep) orphanPaneKeep(ctx context.Context, a *App, orphan Check
 	if err != nil {
 		return sweepCheckoutAgentsUnknown
 	}
-	named := func(value string, wanted ...string) bool {
+	ids := append([]string{str(record, "pane_id")}, orphan.Panes...)
+	labels := append([]string{str(record, "label")}, orphan.Labels...)
+	named := func(value string, wanted []string) bool {
 		return value != "" && slices.Contains(wanted, value)
 	}
 	uses := func(pane string, names []string, cwds ...string) bool {
-		if named(pane, orphan.Pane, str(record, "pane_id")) {
+		if named(pane, ids) || slices.ContainsFunc(names, func(name string) bool { return named(name, labels) }) {
 			return true
-		}
-		for _, name := range names {
-			if named(name, orphan.Label, str(record, "label")) {
-				return true
-			}
 		}
 		return slices.ContainsFunc(cwds, func(cwd string) bool {
 			return cwd != "" && (sweepSamePath(cwd, dir) || sweepWithin(dir, cwd))

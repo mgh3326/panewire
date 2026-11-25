@@ -183,7 +183,7 @@ func TestCheckoutSweepRemovesOnlyNonLiveJobCheckouts(t *testing.T) {
 func orphanSweep(t *testing.T) (*paneSweepFixture, *sweepGitFake, *CheckoutSweep, *CheckoutOrphan) {
 	t.Helper()
 	f, g, sweep := checkoutSweepFixture(t)
-	orphan := &CheckoutOrphan{Job: "consult-gone", Pane: "p-gone", Label: "consult-gone"}
+	orphan := &CheckoutOrphan{Job: "consult-gone", Panes: []string{"p-gone"}, Labels: []string{"consult-gone"}}
 	dir := g.worktree(t, "consult-gone-checkout")
 	if err := os.MkdirAll(f.a.Jobs, 0700); err != nil {
 		t.Fatal(err)
