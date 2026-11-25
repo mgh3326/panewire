@@ -1831,14 +1831,19 @@ design hk:doc `design/2026-11-18/pw-4898-hub-store-mysql` §2-§3).
   `terminal_ms` only when no `spawn_reservations` row names it and nothing
   else still needs it (an owed or unrecorded notification, an unrecorded
   snapshot, an open supersede landing, a live consult, a live pool action of
-  the job, an unposted task-failure comment). Only two writes delete a
+  the job, an unposted task-failure comment). Only these writes delete a
   reservation row: `releaseEndedSpawn`, which ends a request that never
   started (given up at its expiry, including a node-bound attempt that
   ended without starting, or refused or cancelled while waiting on its
-  start conditions), and the retryable branch of `writeSpawnOutcome` for an
-  outcome that stays `retryable` (never pruned: retryable is not terminal).
-  An unstarted attempt before the expiry goes back to `accepted` under the
-  same reservation (`endUnstartedAttempt`). Every other end keeps the row, at most clearing
+  start conditions); the retryable branch of `writeSpawnOutcome` for an
+  outcome that stays `retryable` (never pruned: retryable is not terminal);
+  and the release of a staged escalate-author or quota-ladder step before it
+  is activated (`cancelStagedSpawnNoting`, which gives the role back to the
+  previous holder, and `discardStagedSpawnNoting`), which deletes the staged
+  operation row in the same transaction, so nothing of that request is left
+  to prune. An unstarted attempt before the expiry goes back to `accepted`
+  under the same reservation (`endUnstartedAttempt`). For every operation
+  that remains, every other end keeps the row, at most clearing
   `task_role`: succeeded, failed, a withdrawal (`cancelled` through
   `completeSpawn`) and a role release. So only a request that ended without
   starting can be pruned, once nothing above holds it; every other
