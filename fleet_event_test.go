@@ -93,6 +93,10 @@ func TestMain(m *testing.M) {
 			"PANEWIRE_SOCKET", "PANEWIRE_INBOX_ROOT", "PANEWIRE_INBOX_WATCH", "PANEWIRE_LANE",
 			"ARBITER_INBOX_ROOT", "ARBITER_JOB", "HK_TASK_ID",
 			"PANEWIRE_HUB_URL", "PANEWIRE_HUB_TOKEN_ENV", "PANEWIRE_HUB_CF_ENV",
+			// A CLI hub opens this store instead of --inbox-store, and its
+			// open-time writes would reach it (hk 6486). A test that wants a
+			// database sets it with t.Setenv.
+			hubDatabaseURLEnv,
 			"PANEWIRE_NODE_ENV", "PANEWIRE_CONFIG", "PACELEVER_CONFIG",
 			"FLEET_HOSTS_CONFIG", "WRK_HOSTS_CONFIG",
 			"PANEWIRE_POLICY", "PANEWIRE_POOL_POLICY", "PANEWIRE_BRIEF_POLICY", "PANEWIRE_DELIVERY_POLICY",

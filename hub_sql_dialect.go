@@ -96,6 +96,10 @@ type sqlDialect interface {
 	// storedKeys lists lookup forms, including legacy PostgreSQL keys.
 	storedKeys(key string) []any
 
+	// storedKeyForms lists the event_key forms an item for an obligation's
+	// stored key may hold, given that stored value as the column returned it.
+	storedKeyForms(stored any) []any
+
 	// ownsSchema is true when the store builds its own schema at open (SQLite)
 	// and false when numbered migration files do.
 	ownsSchema() bool
@@ -201,6 +205,9 @@ func (sqliteDialect) storedKey(key string) any { return key }
 
 func (d sqliteDialect) storedKeys(key string) []any { return []any{d.storedKey(key)} }
 
+// storedKeyForms: SQLite holds one form, so the stored value is its only form.
+func (sqliteDialect) storedKeyForms(stored any) []any { return []any{stored} }
+
 func (sqliteDialect) ownsSchema() bool { return true }
 
 // batchOrder is SQLite's implicit rowid.
@@ -267,6 +274,18 @@ func (d postgresDialect) storedKeys(key string) []any {
 		return []any{original, hex.EncodeToString(dialectMySQL.storedKey(key).([]byte))}
 	}
 	return []any{original}
+}
+
+// storedKeyForms decodes the hex the column holds to the raw key, whose
+// storedKeys cover both forms: the raw hex that an obligation created here
+// stores, and the digest hex a row copied back from MySQL keeps. A value that
+// is not hex is returned as it is.
+func (d postgresDialect) storedKeyForms(stored any) []any {
+	raw, err := hex.DecodeString(string(storeCopyBytes(stored)))
+	if err != nil {
+		return []any{stored}
+	}
+	return d.storedKeys(string(raw))
 }
 
 func (postgresDialect) ownsSchema() bool { return false }

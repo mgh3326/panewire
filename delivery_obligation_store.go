@@ -259,8 +259,18 @@ func (s *laneInboxStore) deferObligation(parent context.Context, id int64, now, 
 func (s *laneInboxStore) obligationInboxSettled(parent context.Context, id int64, deliveredBefore time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
+	var stored any
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT event_key FROM delivery_obligations WHERE id=?`), id).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	forms := s.dialect.storedKeyForms(stored)
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(forms)), ",")
 	var n int
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox WHERE event_key=(SELECT event_key FROM delivery_obligations WHERE id=?) AND delivered_at<? AND `+laneInboxSettled), id, deliveredBefore.UnixMilli()).Scan(&n)
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox WHERE event_key IN (`+marks+`) AND delivered_at<? AND `+laneInboxSettled), append(forms, deliveredBefore.UnixMilli())...).Scan(&n)
 	return n > 0, err
 }
 
