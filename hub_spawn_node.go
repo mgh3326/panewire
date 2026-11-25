@@ -219,7 +219,7 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	if target != nil {
 		key = target.Key
 	}
-	release, admitted := client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, key, peer, journal, message, deadline)
+	release, admitted := client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, key, target, peer, journal, message, deadline)
 	if !admitted {
 		return
 	}
@@ -279,14 +279,27 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 
 // awaitSpawnAdmission admits this copy under key, or answers the copy whose
 // wait ended first; false means this copy must return without claiming.
-func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, stop <-chan struct{}, waiter *nodeSpawnWaiter, key string, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time) (func(), bool) {
+func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, stop <-chan struct{}, waiter *nodeSpawnWaiter, key string, target *spawnTarget, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time) (func(), bool) {
 	admission := client.nodeAdmission()
 	if key == "" {
 		admission.waitExclusive(1)
 		defer admission.waitExclusive(-1)
 	}
+	// A fixture-provided prepare owns its own checkout paths.
+	if client.spawnPrepare != nil {
+		target = nil
+	}
 	for {
-		release, changed := admission.tryAdmit(key, client.nodeSpawnSlots())
+		release, changed, rootChanged := admission.tryAdmitTarget(key, client.nodeSpawnSlots(), target, client.nodeWorkRoot)
+		if rootChanged {
+			client.answerUnclaimedSpawn(ctx, peer, journal, message, func() {
+				client.sendSpawnResult(ctx, peer, hubSpawnResult{
+					RequestID: message.RequestID, JobID: target.Identity.Job,
+					RC: 81, Stage: "checkout", Error: "checkout_refused:work_root_changed", Retryable: true,
+				}, message.OperatorAuthorized)
+			})
+			return nil, false
+		}
 		if release != nil {
 			return release, true
 		}
@@ -420,6 +433,12 @@ func (client *HubClient) refuseUngrantedSpawn(ctx context.Context, peer *hubClie
 // answerAdmissionWait rechecks the journal before attesting a timeout: a
 // duplicate can have claimed or completed while this copy waited.
 func (client *HubClient) answerAdmissionWait(ctx context.Context, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, deadline time.Time) {
+	client.answerUnclaimedSpawn(ctx, peer, journal, message, func() {
+		client.sendAdmissionTimeout(ctx, peer, message, deadline)
+	})
+}
+
+func (client *HubClient) answerUnclaimedSpawn(ctx context.Context, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage, answer func()) {
 	client.spawnActiveMu.Lock()
 	known, cached, err := journal.lookup(ctx, message)
 	active := client.spawnActive[message.RequestID]
@@ -429,7 +448,7 @@ func (client *HubClient) answerAdmissionWait(ctx context.Context, peer *hubClien
 	} else if known {
 		client.answerKnownSpawn(ctx, peer, journal, message, cached, active)
 	} else {
-		client.sendAdmissionTimeout(ctx, peer, message, deadline)
+		answer()
 	}
 }
 

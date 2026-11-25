@@ -167,7 +167,7 @@ func TestOverlapKeyConflictsOnEitherPart_t6367(t *testing.T) {
 		if got := spawnOverlapConflicts(held, key); got != tc.want {
 			t.Errorf("%s: conflict=%v, want %v", tc.name, got, tc.want)
 		}
-		admission := &nodeSpawnAdmission{dirs: map[string]bool{}, changed: make(chan struct{})}
+		admission := &nodeSpawnAdmission{dirs: map[string]string{}, changed: make(chan struct{})}
 		if release, _ := admission.tryAdmit(held, 2); release == nil {
 			t.Fatalf("%s: the holder was not admitted", tc.name)
 		}

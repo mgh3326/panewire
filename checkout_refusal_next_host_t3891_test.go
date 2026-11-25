@@ -14,16 +14,27 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
+type checkoutHostRefusal struct {
+	name, code string
+	retryable  bool
+}
+
+func TestWorkRootChangedMovesToNextHost_t6367(t *testing.T) {
+	testCheckoutRefusalsMoveToNextHost(t, []checkoutHostRefusal{{"work_root_changed", "work_root_changed", true}})
+}
+
 func TestCheckoutRefusalMovesToNextHost(t *testing.T) {
-	for _, test := range []struct {
-		name, code string
-		retryable  bool
-	}{
+	testCheckoutRefusalsMoveToNextHost(t, []checkoutHostRefusal{
 		{"dirty", "dirty", true},
 		{"sha-missing", "sha-missing", true},
 		{"branch-elsewhere", "branch-elsewhere", true},
 		{"dirty without verified cleanup", "dirty", false},
-	} {
+	})
+}
+
+func testCheckoutRefusalsMoveToNextHost(t *testing.T, tests []checkoutHostRefusal) {
+	t.Helper()
+	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
 			if err != nil {

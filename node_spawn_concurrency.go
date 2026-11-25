@@ -116,16 +116,18 @@ func hubNodeSpawnSlots(capabilities map[string]bool) int {
 // design): the root a prepare pins is the one every path check in that run
 // compares against, instead of a fresh read of spawn.json.
 type spawnTarget struct {
-	Identity fleet.SpawnIdentity
-	Dir      string
-	Key      string
-	Root     rootPin
+	Identity  fleet.SpawnIdentity
+	Dir       string
+	Key       string
+	Root      rootPin
+	admission *nodeSpawnAdmission
+	requestID string
 }
 
 // rootPin is the work root a node prepares under: Configured is the cleaned
 // `work_root` spawn.json named (it may be a link), Real is that path with every
 // link resolved, and Dev/Ino identify the real directory. A pin is replaced
-// only when spawn.json names another root; the hold-aware refusal is hk 6403.
+// when the admission gate is idle (hk 6403).
 type rootPin struct {
 	Configured string
 	Real       string
@@ -143,9 +145,10 @@ func (client *HubClient) spawnTargetFor(message hubOutboundMessage) *spawnTarget
 		return nil
 	}
 	return &spawnTarget{
-		Identity: hubSpawnIdentity(message.Args),
-		Dir:      message.Checkout.Dir,
-		Key:      spawnOverlapKey(message.Checkout.Dir, message.Args),
+		Identity:  hubSpawnIdentity(message.Args),
+		requestID: message.RequestID,
+		Dir:       message.Checkout.Dir,
+		Key:       spawnOverlapKey(message.Checkout.Dir, message.Args),
 	}
 }
 
@@ -185,13 +188,15 @@ type nodeSpawnAdmission struct {
 	running          int
 	exclusive        bool
 	exclusiveWaiting int
-	dirs             map[string]bool
+	dirs             map[string]string
 	changed          chan struct{}
+	root             rootPin
+	pinning          bool
 }
 
 func (client *HubClient) nodeAdmission() *nodeSpawnAdmission {
 	client.spawnAdmissionOnce.Do(func() {
-		client.spawnAdmission = &nodeSpawnAdmission{dirs: map[string]bool{}, changed: make(chan struct{})}
+		client.spawnAdmission = &nodeSpawnAdmission{dirs: map[string]string{}, changed: make(chan struct{})}
 	})
 	return client.spawnAdmission
 }
@@ -217,8 +222,30 @@ func (a *nodeSpawnAdmission) wakeLocked() {
 // tryAdmit admits key ("" = alone) under limit, returning an idempotent
 // release; otherwise it returns the channel closed at the next change.
 func (a *nodeSpawnAdmission) tryAdmit(key string, limit int) (func(), <-chan struct{}) {
+	release, changed, _ := a.tryAdmitTarget(key, limit, nil, nil)
+	return release, changed
+}
+
+// tryAdmitTarget compares and binds the root under the same lock as the hold.
+// Until the first prepare pins a root, another checkout cannot claim a slot.
+func (a *nodeSpawnAdmission) tryAdmitTarget(key string, limit int, target *spawnTarget, readRoot func() (string, error)) (func(), <-chan struct{}, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if target != nil && limit > 1 && a.root != (rootPin{}) {
+		// A duplicate of an admitted request must wait for its claim or
+		// result even if the root changes in the meantime.
+		if target.requestID != "" && a.dirs[key] == target.requestID {
+			return nil, a.changed, false
+		}
+		configured, err := readRoot()
+		if err != nil || configured != a.root.Configured {
+			return nil, nil, true
+		}
+		current, code := pinWorkRoot(configured)
+		if code != "" || current != a.root {
+			return nil, nil, true
+		}
+	}
 	ok := !a.exclusive && a.running < max(limit, 1)
 	if key == "" {
 		ok = ok && a.running == 0
@@ -228,14 +255,25 @@ func (a *nodeSpawnAdmission) tryAdmit(key string, limit int) (func(), <-chan str
 			ok = ok && !spawnOverlapConflicts(held, key)
 		}
 	}
-	if !ok {
-		return nil, a.changed
+	if !ok || (target != nil && a.pinning) {
+		return nil, a.changed, false
+	}
+	if target != nil {
+		target.Root = a.root
+		if a.root == (rootPin{}) {
+			a.pinning = true
+			target.admission = a
+		}
 	}
 	a.running++
 	if key == "" {
 		a.exclusive = true
 	} else {
-		a.dirs[key] = true
+		requestID := ""
+		if target != nil {
+			requestID = target.requestID
+		}
+		a.dirs[key] = requestID
 	}
 	var once sync.Once
 	return func() {
@@ -243,6 +281,10 @@ func (a *nodeSpawnAdmission) tryAdmit(key string, limit int) (func(), <-chan str
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			a.running--
+			if a.running == 0 {
+				a.root = rootPin{}
+				a.pinning = false
+			}
 			if key == "" {
 				a.exclusive = false
 			} else {
@@ -250,7 +292,15 @@ func (a *nodeSpawnAdmission) tryAdmit(key string, limit int) (func(), <-chan str
 			}
 			a.wakeLocked()
 		})
-	}, nil
+	}, nil, false
+}
+
+func (a *nodeSpawnAdmission) finishRootPin(pin rootPin) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.root = pin
+	a.pinning = false
+	a.wakeLocked()
 }
 
 // spawnPrepareKey names the clone a checkout prepares in.
