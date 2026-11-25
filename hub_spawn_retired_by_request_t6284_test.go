@@ -187,6 +187,56 @@ func TestRetiredOpOlderRetryableOperationCannotRespawnTheJob_t6284(t *testing.T)
 	}
 }
 
+// Readers hub_spawn_role_eager.go:60 (hk 6282's eager release lists held roles
+// by joining each reservation to its operation) and :120 (it then reads that
+// operation by the reservation's request id). A retired job holds no role and is
+// not looked at. A role left on a retired operation, a state change 3 must never
+// make, is not looked at either and stays held. With the operation present the
+// same record and pane release the role.
+// Mutant: the list LEFT JOINs the operation and the release clears the role when
+// the read finds no row.
+func TestRetiredOpEagerRoleReleaseLeavesARetiredJobAlone_t6284(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		retire   func(t *testing.T, store *laneInboxStore, holder hubSpawnTask)
+		released bool
+	}{
+		{"operation present", func(*testing.T, *laneInboxStore, hubSpawnTask) {}, true},
+		{"retired job", func(t *testing.T, store *laneInboxStore, holder hubSpawnTask) {
+			retireEndedJob(t, store, holder.Job)
+		}, false},
+		{"role left on a retired operation", func(t *testing.T, store *laneInboxStore, holder hubSpawnTask) {
+			deleteOperationOnly(t, store, holder.Request.RequestID)
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newQuotaReplaceFixture(t, "implementer", "pw-6284-eager")
+			node := serveRetiredNode(t, f)
+			// The pane is gone and the record ended: the job is proven over.
+			node.mu.Lock()
+			node.closed = true
+			node.mu.Unlock()
+			store := f.hub.inbox.store
+			setJobRecord(f.jobs, f.job, "completed", "")
+			tc.retire(t, store, f.holder)
+			before := reservationRows(t, store)
+
+			if next := f.hub.releaseProvenOverRoles(t.Context(), ""); next != "" {
+				t.Fatalf("cursor %q, want the list exhausted", next)
+			}
+			if tc.released {
+				if role := reservationTaskRole(t, f.hub, f.holder.Request.RequestID); role.Valid {
+					t.Fatalf("setup: the pass did not release %+v", role)
+				}
+				return
+			}
+			if got := reservationRows(t, store); !slices.Equal(got, before) || len(node.sent()) != 0 {
+				t.Fatalf("reservations %v -> %v; node commands %v", before, got, node.sent())
+			}
+		})
+	}
+}
+
 // settledHandover drives an implementer hand-over to the point where the old
 // pane is closed and the stored successor is next to be claimed.
 func settledHandover(t *testing.T, job string) (*quotaReplaceFixture, *retiredNode, poolAction) {
