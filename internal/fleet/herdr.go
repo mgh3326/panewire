@@ -635,6 +635,12 @@ const (
 	defaultBriefSubmitTimeoutMS = 120000
 	defaultBriefSubmitRetryMS   = 15000
 	briefSubmitWaitSlice        = 5 * time.Second
+	// briefSubmitSettle is the pause between a landing proof and the single
+	// composer re-read that follows it (hk 6483). A loaded host reports working
+	// before its TUI draws the typed text; three seconds is a few draw frames,
+	// shorter than one wait slice, and leaves the retry cadence and the rest of
+	// every valid window intact.
+	briefSubmitSettle = 3 * time.Second
 	// briefSubmitReserve leaves the node time to capture the pane and finish
 	// cleanup (10s bound plus the 2s settle) inside its spawn budget.
 	briefSubmitReserve = 20 * time.Second
@@ -649,7 +655,8 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 	if e != nil {
 		return e
 	}
-	return a.confirmBrief(ctx, kind, pane, brief, initial)
+	_, e = a.confirmBrief(ctx, kind, pane, brief, initial)
+	return e
 }
 
 // sendBrief puts the brief into the pane and returns the screen it saw first.
@@ -686,10 +693,20 @@ func (a *App) sendBrief(ctx context.Context, kind, pane, brief string) (string, 
 	return initial, nil
 }
 
+// briefConfirm is what confirmBrief observed on the way to a landing proof
+// (hk 6483): a brief the TUI drew only after herdr reported working, or a
+// readable composer that needed the one late Return. The spawn records it, so
+// the late-composer case can be counted.
+type briefConfirm struct {
+	LateComposer bool // the brief was still in the composer after the landing proof
+	LateReturn   bool // the one late Return was sent to a working or blocked pane
+}
+
 // confirmBrief waits, within the submit window, for the sent brief to start a
 // turn on the pane. initial is the screen sendBrief saw before sending.
-func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial string) error {
+func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial string) (briefConfirm, error) {
 	var e error
+	var confirmed briefConfirm
 	timeout, retry := a.briefSubmitWindow()
 	clamped := false
 	// A node runs the spawn under its hub_wait budget. Refuse with 76 and the
@@ -712,6 +729,8 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 	polls := int(timeout / time.Second)
 	nextReturn := a.Now().Add(retry)
 	residue := false
+	settled := false
+	lateReturned := false
 	useWait := kind != "cmd"
 	for n := 1; n <= polls && a.Now().Before(deadline); n++ {
 		status := ""
@@ -731,41 +750,73 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 		if status == "" {
 			status, e = a.status(ctx, pane)
 			if e != nil {
-				return e
+				return confirmed, e
 			}
 		}
 		visible, e := a.visible(ctx, pane)
 		if e != nil {
-			return e
+			return confirmed, e
 		}
 		// A harness at its login screen never takes the brief, and Return would
 		// only answer its prompt. Refuse on this poll, so no Return is sent to it.
 		// The node saves this capture on the way out (captureFailure), and the
 		// hub reads it as a login need (hub_spawn_node.go loginScreenSpawnRefusal).
 		if loginscreen.Matches(kind, visible) {
-			return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; harness shows its login screen", a.herdrSession(), pane)
+			return confirmed, fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; harness shows its login screen", a.herdrSession(), pane)
 		}
 		// A pasted chip or the brief in the composer is not proof. Require the
 		// cold idle pane to start working, corroborated by no unsubmitted chip.
 		residue = briefInComposer(kind, visible, brief)
 		if !residue && (status == "working" || submittedBrief(kind, visible, brief) && !submittedBrief(kind, initial, brief)) {
-			return nil
+			// hk 6483: a loaded host can report working before its TUI draws the
+			// typed text, so this read can miss a brief still in the composer.
+			// Settle once, inside the window, and read the composer again before
+			// landing. Nothing lands while that read still holds the brief.
+			if !settled && composerReadable(kind) {
+				settled = true
+				if settle := min(briefSubmitSettle, deadline.Sub(a.Now())); settle > 0 {
+					if e = a.Sleep(ctx, settle); e != nil {
+						return confirmed, e
+					}
+				}
+				visible, e = a.visible(ctx, pane)
+				if e != nil {
+					return confirmed, e
+				}
+				residue = briefInComposer(kind, visible, brief)
+				if !residue {
+					return confirmed, nil
+				}
+				confirmed.LateComposer = true
+			} else {
+				return confirmed, nil
+			}
+		}
+		// hk 6483: the brief in a readable composer while the agent reports
+		// working or blocked never gets the idle retry, and the pane is left
+		// holding it at rc 76. One Return submits it. The once-per-spawn limit
+		// keeps a genuinely busy agent from repeated Returns, and the gate needs
+		// the whole brief so a still-drawing paste is never submitted truncated.
+		if residue && !lateReturned && (status == "working" || status == "blocked") && briefReadyToReturn(kind, visible, brief) {
+			lateReturned = true
+			confirmed.LateComposer = true
+			confirmed.LateReturn = true
+			if e = a.pressReturn(ctx, kind, pane); e != nil {
+				return confirmed, e
+			}
+			nextReturn = a.Now().Add(retry)
 		}
 		if !useWait || wake != "timeout" {
 			if e = a.Sleep(ctx, time.Second); e != nil {
-				return e
+				return confirmed, e
 			}
 		}
 		// Retry the submit key, never paste a second copy of an ambiguous payload.
 		// The cadence is wall-clock: one poll can take seconds on a loaded host.
 		if !a.Now().Before(nextReturn) && n < polls && a.Now().Before(deadline) && submitKeyAllowed(kind, status, residue) {
 			nextReturn = a.Now().Add(retry)
-			scope := "agent"
-			if kind == "cmd" {
-				scope = "pane"
-			}
-			if e = a.must(ctx, "herdr", scope, "send-keys", pane, "return"); e != nil {
-				return e
+			if e = a.pressReturn(ctx, kind, pane); e != nil {
+				return confirmed, e
 			}
 		}
 	}
@@ -773,13 +824,25 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 	if residue {
 		note = "; brief still in composer"
 	}
+	if confirmed.LateComposer {
+		note += "; late composer: brief was still in the composer after the landing proof"
+	}
 	if clamped {
 		note += fmt.Sprintf("; window cut to %ds by the node budget, raise hub_wait for this host", int(timeout/time.Second))
 	}
 	if note != "" {
-		return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn%s", a.herdrSession(), pane, note)
+		return confirmed, fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn%s", a.herdrSession(), pane, note)
 	}
-	return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn", a.herdrSession(), pane)
+	return confirmed, fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn", a.herdrSession(), pane)
+}
+
+// pressReturn presses Return in the scope the kind's submit key lives in.
+func (a *App) pressReturn(ctx context.Context, kind, pane string) error {
+	scope := "agent"
+	if kind == "cmd" {
+		scope = "pane"
+	}
+	return a.must(ctx, "herdr", scope, "send-keys", pane, "return")
 }
 
 // briefWaitOutcome accepts only the lifecycle responses understood by deliver.
@@ -879,6 +942,44 @@ func briefInComposer(kind, screen, brief string) bool {
 	return false
 }
 
+// composerReadable reports whether briefInComposer can see kind's composer, so
+// a late-drawn brief is detectable there and nowhere else (hk 6483).
+func composerReadable(kind string) bool {
+	return kind == "claude" || kind == "codex"
+}
+
+// briefReadyToReturn reports whether the screen shows the whole brief in a
+// readable composer, so one Return submits the payload rather than a partial
+// draw. A pasted chip counts: the pane buffered the whole paste. An empty
+// composer never qualifies, and neither does a prefix still being drawn
+// (hk 6483).
+func briefReadyToReturn(kind, screen, brief string) bool {
+	if !composerReadable(kind) || brief == "" {
+		return false
+	}
+	needle := compact(brief)
+	if kind == "claude" {
+		lines := cleanScreen(screen)
+		if strings.Contains(claudeComposerBody(lines), "[Pasted text") {
+			return true
+		}
+		text := claudeComposerText(lines)
+		return text != "" && text == needle
+	}
+	lines := cleanScreen(screen)
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !strings.HasPrefix(strings.TrimSpace(lines[i]), "› ") {
+			continue
+		}
+		tail := strings.Join(lines[i:], "\n")
+		if strings.Contains(tail, "[Pasted text") {
+			return true
+		}
+		return strings.Contains(compact(tail), needle) && !submittedBrief(kind, tail, brief)
+	}
+	return false
+}
+
 // claudePromptLines lists the rows carrying Claude Code's prompt marker; the
 // last one is the composer and any earlier one is a submitted turn.
 func claudePromptLines(lines []string) []int {
@@ -896,12 +997,12 @@ func claudeRule(line string) bool {
 	return line != "" && strings.Trim(line, "─") == ""
 }
 
-// claudeBriefInComposer also accepts a prefix: a loaded pane draws the typed
-// text a piece at a time, and part of the brief is still unsubmitted text.
-func claudeBriefInComposer(lines []string, brief string) bool {
+// claudeComposerBody is the last prompt row's composer as drawn, before any
+// compaction, so a pasted-text chip is still readable there.
+func claudeComposerBody(lines []string) string {
 	rows := claudePromptLines(lines)
 	if len(rows) == 0 {
-		return false
+		return ""
 	}
 	var body []string
 	for _, line := range lines[rows[len(rows)-1]:] {
@@ -910,7 +1011,24 @@ func claudeBriefInComposer(lines []string, brief string) bool {
 		}
 		body = append(body, line)
 	}
-	text := compact(strings.TrimPrefix(compact(strings.Join(body, "")), "❯"))
+	return strings.Join(body, "")
+}
+
+// claudeComposerText is that composer, marker stripped and compacted.
+func claudeComposerText(lines []string) string {
+	if len(claudePromptLines(lines)) == 0 {
+		return ""
+	}
+	return compact(strings.TrimPrefix(compact(claudeComposerBody(lines)), "❯"))
+}
+
+// claudeBriefInComposer also accepts a prefix: a loaded pane draws the typed
+// text a piece at a time, and part of the brief is still unsubmitted text.
+func claudeBriefInComposer(lines []string, brief string) bool {
+	if len(claudePromptLines(lines)) == 0 {
+		return false
+	}
+	text := claudeComposerText(lines)
 	return text != "" && strings.HasPrefix(compact(brief), text)
 }
 
