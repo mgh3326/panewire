@@ -977,7 +977,8 @@ dir that is a symlink is no longer admitted alone: the key is the request's,
 and prepare refuses the link before its first git write
 (`checkout_refused:job_dir_link`, at every N; a reuse merge re-checks the dir
 is the same device and inode). A `-L` lane that resolves outside its worktree
-after prepare is refused (`checkout_refused:lane_outside_worktree`). Workspace lookup and creation for
+after prepare is refused (`checkout_refused:lane_outside_worktree`, see
+[Launch directory](#launch-directory-of-a-checkout-spawn-hk-6431)). Workspace lookup and creation for
 one herdr session and label holds a file lock in the panewire state dir. The
 node advertises `spawn_slots_v1=N` in hello only when N is above one. The hub
 opens a second dispatch to a node only when it advertised slots and every
@@ -1038,6 +1039,37 @@ and the refused host, profile and reason together, then wakes placement. The
 exclusion survives hub restart within that attempt and is cleared by a
 cleanup-confirmed new attempt. A request that already claimed its handoffkeep
 job must not be moved to another host; that claim is host-bound.
+
+### Launch directory of a checkout spawn (hk 6431)
+
+The node resolves where a checkout spawn runs once, after prepare returns the
+worktree, and hands the launcher that directory in process (no flag or wire
+field names it):
+
+| `-L` lane under the worktree | The pane opens in |
+|---|---|
+| no `-L`, nothing there, or neither a directory nor a link | the worktree |
+| a directory | that directory |
+| a link to a directory inside the worktree | the link's resolved target |
+| a link to a file inside the worktree | the worktree |
+| leads outside the worktree, or a link that does not resolve | refused, `checkout_refused:lane_outside_worktree` (exit 81, stage `checkout`) |
+
+The node binds the directory's device and inode, and the launcher joins no lane
+to it. It checks the path before and after the workspace trust grant and right
+before each `herdr tab create`; a path that is no longer that directory (a link
+put there counts) refuses with `spawn_failed:target_changed`. A directory already
+swapped at the first check gets no trust grant. Not covered: a change between a
+check and the step it guards (the grant, or herdr's own `chdir`), or a later
+reopen by path.
+
+A spawn without a checkout (`cwd_map` or default repository directory) binds
+nothing: the launcher enters `<cwd>/<lane>` itself, as a local spawn does.
+
+The receipt's `cwd` is where the pane runs, so for an in-tree lane link it is the
+target, which may not be named `live` or `mock`. The hub accepts any directory
+inside the job dir for a lane spawn. A hub older than this rule reports such a
+landed spawn as `unknown` (nothing is launched again), so upgrade the hub before
+or with its nodes.
 
 ### Spawn identity
 
@@ -1708,6 +1740,7 @@ Sentry event for it.
 | `quota_unconfirmed:<cause>` | Admission could not confirm the target's quota. `<cause>` is the shared-observation reason, such as `no_usable_presence` or `stale`. Without one, the code is `quota_unconfirmed`. |
 | `admission_refused` | Any other refusal before a node was bound. The text says why. |
 | `spawn_failed:<code>` | The node's fleet App refused or failed, and the hub classified it. `<code>` comes from the closed table in `internal/fleet/refusal.go` (`spawnRefusals`), which also holds each refusal's fix. The text is the node's error, read from the result's stderr section. |
+| `spawn_failed:target_changed` | A checkout spawn's launch directory is no longer the directory the node bound after prepare (hk 6431, [Launch directory](#launch-directory-of-a-checkout-spawn-hk-6431)). Exit 75, stage `launch`, after the job claim: no pane is created, a tab the spawn made with a new workspace is closed, `--host auto` does not move to another host, and a replay of the same node request gets the journaled result. |
 | `spawn_failed` | As above, but no row in that table matches the text or exit status. |
 
 The hub derives `<code>` from the refusal text and exit status it already has, so

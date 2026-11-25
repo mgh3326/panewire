@@ -136,6 +136,8 @@ var spawnRefusals = []spawnRefusal{
 	// hk 6434: the refusal names a path and the word "workspace", which the
 	// broader rows below would claim.
 	{match: workspaceLockRootUnsafe, code: workspaceLockRootUnsafe, hint: "Remove the directory the refusal names, as its owner or root, on the executing host (docs/config.md, Host aliases and workspaces), then repeat the same command."},
+	// hk 6431: the refusal names a path, which the broader rows below could claim.
+	{match: "target_changed:", code: "target_changed", hint: "The job's launch directory changed on the executing host between prepare and pane creation. Find what replaced or moved the directory the refusal names, restore the worktree, then replay the saved request."},
 	// Admission refused before a host was bound: the cause the hub reports in
 	// Sentry's admission_refused class (docs/observability.md).
 	{match: "missing seat policy", code: "seat_policy_missing", hint: "Run panewire resolve --role ROLE --t Tn to select a rung with an admitted seat policy, or repair the policy that omits this profile, then retry."},

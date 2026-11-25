@@ -58,6 +58,10 @@ type Spawn struct {
 	// carries it; it
 	// never parses out of the args, since the node's own prepare decided it.
 	checkoutMode string
+	// launchDir is the directory a node hands the launcher (bindNodeSpawn). Zero
+	// for a local spawn. It never parses out of the args: a bound one is the
+	// node's own resolution after prepare (hk 6431).
+	launchDir LaunchDir
 	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
 	// names the pass in the operation and in RoleKey; a reviewer holds no
 	// reservation (hk 4737), so it widens no slot. panewire never parses it out
@@ -1100,17 +1104,24 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if !s.DryRun && !boolean(a.Config.Local, "spawn", true) {
 		return fail(exitLocalDisabled, "local spawns disabled")
 	}
-	cwd, e := filepath.Abs(expand(s.CWD))
-	if e != nil {
-		return e
+	// A bound launch directory is final: the node already resolved the -L lane,
+	// and joining it here would follow whatever is at that path now (hk 6431).
+	if !s.launchDir.bound {
+		cwd, e := filepath.Abs(expand(s.CWD))
+		if e != nil {
+			return e
+		}
+		s.CWD = cwd
 	}
-	s.CWD = cwd
 	if s.ExecutionLane != "" {
 		if s.ExecutionLane != "live" && s.ExecutionLane != "mock" {
 			return fail(exitUsage, "-L must be live or mock")
 		}
-		if info, e := os.Stat(filepath.Join(cwd, s.ExecutionLane)); e == nil && info.IsDir() {
-			s.CWD = filepath.Join(cwd, s.ExecutionLane)
+		if !s.launchDir.bound {
+			lane := filepath.Join(s.CWD, s.ExecutionLane)
+			if info, e := os.Stat(lane); e == nil && info.IsDir() {
+				s.CWD = lane
+			}
 		}
 	}
 	if info, e := os.Stat(s.CWD); e != nil || !info.IsDir() {
@@ -1419,8 +1430,24 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if seat.Kind == "claude" && s.Purpose != "director" {
 		env = append(env, "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")
 	}
+	// The trust grant resolves s.CWD by path and stays after a refusal: check
+	// before it, so a directory already swapped gets no grant, and again after
+	// it, since it resolved whatever was there then (hk 6431).
+	checkLaunchDir := func() error {
+		e := s.launchDir.verify(s.CWD)
+		if e != nil {
+			a.stage("launch", time.Now())
+		}
+		return e
+	}
+	if e = checkLaunchDir(); e != nil {
+		return e
+	}
 	if e = a.workspaceTrust(ctx, s, seat, env); e != nil {
 		return fail(exitConfig, "workspace trust: %v", e)
+	}
+	if e = checkLaunchDir(); e != nil {
+		return e
 	}
 	// The launch may not spend the brief's submit window (hk 5174): it ends
 	// where the window begins, or the spawn refuses before any pane exists.
@@ -1436,7 +1463,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			a.stage("launch", startedLaunch)
 		}
 	}()
-	createTab := func(workspace string) Result {
+	createTab := func(workspace string) (Result, error) {
+		// herdr resolves --cwd by path, so each create checks right before it
+		// that the path still names the bound directory (hk 6431).
+		if e := s.launchDir.verify(s.CWD); e != nil {
+			return Result{}, e
+		}
+		s.placement.started = true
 		args := []string{"tab", "create", "--workspace", workspace, "--cwd", s.CWD, "--label", s.Label, "--no-focus"}
 		for _, v := range env {
 			args = append(args, "--env", v)
@@ -1445,7 +1478,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// deadline killed may have committed, and its pane_id would never be
 		// parsed. A create that returns late is cleaned up with its pane, and
 		// start refuses on the expired launch context.
-		return a.call(ctx, "herdr", args...)
+		return a.call(ctx, "herdr", args...), nil
 	}
 	// A create the node cannot account for (it timed out, or answered with
 	// something unusable) may have made a tab: keep the claim and record cleanup
@@ -1458,8 +1491,10 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.launchCutoff(launchCtx, ctx, "before tab create"); e != nil {
 		return e
 	}
-	s.placement.started = true
-	r := createTab(s.Workspace)
+	r, e := createTab(s.Workspace)
+	if e != nil {
+		return e
+	}
 	if e = check(r, "herdr tab create"); e != nil {
 		createOutcomeUnknown(Result{Code: 1})
 		// Another spawn's failed cleanup may close a workspace this spawn
@@ -1478,7 +1513,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		if e = a.launchCutoff(launchCtx, ctx, "before the second tab create"); e != nil {
 			return e
 		}
-		r = createTab(s.Workspace)
+		if r, e = createTab(s.Workspace); e != nil {
+			return e
+		}
 		if e = check(r, "herdr tab create"); e != nil {
 			createOutcomeUnknown(Result{Code: 1})
 			return e

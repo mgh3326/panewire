@@ -36,7 +36,8 @@ func ErrorCode(err error) int {
 // checkoutMode is what the node prepared for the spawn's checkout spec (hk
 // 5098); the job record carries it so a reader knows the absent paths are
 // absent on purpose. Empty when the spawn names no spec.
-func ExecuteNode(ctx context.Context, cwd, brief, workspace, session, checkoutMode string, expiresAt time.Time, args []string, out, errout io.Writer) Execution {
+// dir is where the pane opens (LaunchDir).
+func ExecuteNode(ctx context.Context, dir LaunchDir, brief, workspace, session, checkoutMode string, expiresAt time.Time, args []string, out, errout io.Writer) Execution {
 	result := Execution{Stage: "placement", StageMS: map[string]int64{}, Retryable: true}
 	a, err := New(out, errout)
 	if err != nil {
@@ -56,7 +57,7 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session, checkoutMo
 		fmt.Fprintln(errout, err)
 		return result
 	}
-	s = bindNodeSpawn(s, cwd, brief, workspace)
+	s = bindNodeSpawn(s, dir, brief, workspace)
 	s.checkoutMode = checkoutMode
 	if !expiresAt.IsZero() {
 		s.hubExpiresAt = expiresAt
@@ -179,8 +180,9 @@ func (a *App) CheckTrust() error {
 	return nil
 }
 
-func bindNodeSpawn(s Spawn, cwd, brief, workspace string) Spawn {
-	s.CWD, s.Prompt, s.Host, s.Delegated = cwd, brief, "local", true
+func bindNodeSpawn(s Spawn, dir LaunchDir, brief, workspace string) Spawn {
+	s.CWD, s.Prompt, s.Host, s.Delegated = dir.Path, brief, "local", true
+	s.launchDir = dir
 	// A node-delivered spawn's marker is the --e6-arm the hub sent; the node
 	// process environment never fills an empty one (hk 3518).
 	s.e6ArmLocked = true
