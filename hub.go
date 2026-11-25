@@ -763,6 +763,9 @@ type HubServer struct {
 	laneStallMu      sync.Mutex
 	laneStallClosing bool
 	laneStallSweeps  sync.WaitGroup
+	// obligations keeps at most one delivery-obligation pass running
+	// (delivery_obligation_reconcile.go).
+	obligations obligationSweep
 	// drainWake is each design lane's drain-wake state (hub_drain_wake.go),
 	// owned by the lane-stall sweep goroutine under laneStallMu.
 	drainWake map[string]*drainWakeLane
@@ -1128,6 +1131,8 @@ func (h *HubServer) Close() error {
 	h.laneStallClosing = true
 	h.laneStallMu.Unlock()
 	h.laneStallSweeps.Wait()
+	// An obligation pass is waited out before the store it writes closes.
+	h.obligations.close()
 	h.spawnWorkers.Wait()
 	h.flushSpawnTrace()
 	if h.inbox != nil {
@@ -2827,6 +2832,7 @@ func (h *HubServer) Sweep() {
 	h.logRouteHits(now)
 	h.sweepOrphanedJobs(now)
 	h.startLaneStallSweep(now)
+	h.startObligationReconcile()
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)
 	}

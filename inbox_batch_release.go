@@ -24,6 +24,13 @@ func (s *laneInboxStore) isDigestBatch(lane, id string) (bool, error) {
 	return n > 0, nil
 }
 
+// batchDigestClaim and batchEscalationClaim match the items a batch still
+// claims in a state releaseBatchClaims returns to the pool.
+const (
+	batchDigestClaim     = `digest_batch=? AND acked_at=0 AND superseded_at=0`
+	batchEscalationClaim = `escalation_batch=? AND read_at=0 AND acked_at=0 AND superseded_at=0`
+)
+
 // releaseBatchClaims returns the items a sent batch still claims to the
 // unclaimed pool, so the next makeBatches escalates them again with the count
 // that is true then. Items the receiver has since read, acked or had
@@ -40,8 +47,8 @@ func (s *laneInboxStore) releaseBatchClaims(id string) error {
 	}
 	defer tx.Rollback()
 	for _, release := range []string{
-		`UPDATE lane_inbox SET digest_batch='' WHERE digest_batch=? AND acked_at=0 AND superseded_at=0`,
-		`UPDATE lane_inbox SET escalation_batch='' WHERE escalation_batch=? AND read_at=0 AND acked_at=0 AND superseded_at=0`,
+		`UPDATE lane_inbox SET digest_batch='' WHERE ` + batchDigestClaim,
+		`UPDATE lane_inbox SET escalation_batch='' WHERE ` + batchEscalationClaim,
 	} {
 		if _, err := tx.ExecContext(ctx, s.q(release), id); err != nil {
 			return err

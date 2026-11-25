@@ -110,6 +110,7 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 	if err != nil || again.Fresh || again.ID != 2 {
 		t.Fatalf("copied-back replay: id=%d fresh=%v err=%v", again.ID, again.Fresh, err)
 	}
+	assertCopiedObligations(t, pgStore)
 	_ = pgStore.close()
 	report.Reset()
 	if err := copyHubStore(t.Context(), pgURL, mysqlTargetURL, "", false, false, &report); err != nil {
@@ -166,6 +167,33 @@ func TestHubStoreCopyRoundTrips(t *testing.T) {
 	}
 }
 
+// assertCopiedObligations checks the MySQL-to-Postgres copy of the delivery
+// tables (hk 6384): the copied event keys still dedupe their events, and the
+// next ids pass the copied ones. It leaves the copied rows as they were.
+func assertCopiedObligations(t *testing.T, s *laneInboxStore) {
+	t.Helper()
+	for _, table := range []string{"delivery_obligations", "delivery_incidents"} {
+		var next int64
+		if err := s.db.QueryRow(`SELECT nextval(pg_get_serial_sequence('` + table + `','id'))`).Scan(&next); err != nil || next <= 2 {
+			t.Fatalf("postgres %s sequence: %d, %v", table, next, err)
+		}
+	}
+	for _, key := range []string{"key-one", "long" + strings.Repeat("x", mysqlEventKeyMax)} {
+		if err := s.createObligation(t.Context(), newDeliveryObligation{key: key, relayID: 9, kind: "lane.event", lane: "lane"}, time.Now(), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT count(*) FROM delivery_obligations`).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("copied event keys did not dedupe: %d obligations, %v", rows, err)
+	}
+}
+
+// copySingleRow is true for a table that holds one row by constraint.
+func copySingleRow(name string) bool {
+	return name == "supersede_fence" || name == "delivery_reconciler_state"
+}
+
 func copyFixtureTables(t *testing.T) []string {
 	t.Helper()
 	paths, err := fs.Glob(hubMySQLMigrations, "hub_mysql_migrations/*.sql")
@@ -209,7 +237,7 @@ func assertCopyReport(t *testing.T, report string, names []string) {
 	t.Helper()
 	for _, name := range names {
 		count := "source=2 "
-		if name == "supersede_fence" {
+		if copySingleRow(name) {
 			count = "source=1 "
 		}
 		if !strings.Contains(report, name+" "+count) {
@@ -242,13 +270,13 @@ func seedCopyFixture(t *testing.T, db *sql.DB, names []string) {
 			t.Fatal(err)
 		}
 		rows.Close()
-		if name == "supersede_fence" {
-			if _, err := db.ExecContext(ctx, "DELETE FROM supersede_fence"); err != nil {
+		if copySingleRow(name) {
+			if _, err := db.ExecContext(ctx, "DELETE FROM "+name); err != nil {
 				t.Fatal(err)
 			}
 		}
 		count := 2
-		if name == "supersede_fence" {
+		if copySingleRow(name) {
 			count = 1
 		}
 		for n := 1; n <= count; n++ {
@@ -265,14 +293,14 @@ func seedCopyFixture(t *testing.T, db *sql.DB, names []string) {
 					vals[i] = "pending"
 				case col == "state" && name == "supersede_landings":
 					vals[i] = "armed"
-				case col == "event_key" && name == "lane_inbox":
+				case col == "event_key" && storeCopyHubKeyTables[name]:
 					if n == 2 {
 						vals[i] = dialectMySQL.storedKey("long" + strings.Repeat("x", mysqlEventKeyMax))
 					} else {
 						vals[i] = []byte("key-one")
 					}
-				case col == "cause" && name == "lane_inbox" && n == 1:
-					// The one real SQL NULL: cause is the nullable column.
+				case n == 1 && (col == "cause" && name == "lane_inbox" || col == "result_id" || col == "open_slot"):
+					// The real SQL NULLs: the nullable columns.
 					vals[i] = nil
 				case emptyOK[i] && n == 2:
 					vals[i] = ""

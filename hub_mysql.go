@@ -409,6 +409,10 @@ func openLaneInboxStoreMySQLConfig(ctx context.Context, config *mysql.Config) (*
 	}
 	store := newLaneInboxStore(db, dialectMySQL)
 	store.succeededNoticesMarked = marked
+	if err := store.seedDeliveryReconcilerState(ctx); err != nil {
+		store.close()
+		return nil, hubDatabaseError("seed", err)
+	}
 	return store, nil
 }
 

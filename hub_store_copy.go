@@ -35,7 +35,20 @@ var storeCopyTables = []storeCopyTable{
 	{"one_time_action_notices", "machine,kind,need"}, {"placement_record_outbox", "request_id,attempt"},
 	{"spawn_notice_outbox", "event_id"}, {"spawn_queue", "request_id"},
 	{"task_fail_notice_outbox", "request_id"}, {"owner_notice_decisions", "event_key"},
-	{"supersede_lane_cause", "lock_key"},
+	{"supersede_lane_cause", "lock_key"}, {"delivery_obligations", "id"}, {"delivery_incidents", "id"},
+	{"delivery_notice_slots", "design_lane,machine,fault"}, {"delivery_reconciler_state", "singleton"},
+}
+
+// storeCopyHubKeyTables hold a hub key in event_key, which each backend stores
+// in its own form (sqlDialect.storedKey), so a copy converts it. Other tables'
+// event_key columns are plain text.
+var storeCopyHubKeyTables = map[string]bool{"lane_inbox": true, "delivery_obligations": true}
+
+// storeCopySequenceColumns names, for each table whose ids the database hands
+// out, that column: it orders as a number, and the target's sequence must pass
+// the copied and the source's high-water ids.
+var storeCopySequenceColumns = map[string]string{
+	"lane_inbox": "id", "lane_inbox_batches": "seq", "delivery_obligations": "id", "delivery_incidents": "id",
 }
 
 const storeCopyBatchSize = 256
@@ -343,7 +356,7 @@ func storeCopyScan(ctx context.Context, tx *sql.Tx, source, target *storeCopyDB,
 	}
 	parts := strings.Split(table.key, ",")
 	for i, p := range parts {
-		numeric := p == "attempt" || p == "singleton" || (table.name == "lane_inbox" && p == "id")
+		numeric := p == "attempt" || p == "singleton" || storeCopySequenceColumns[table.name] == p
 		if !numeric && source.dialect == dialectPostgres {
 			parts[i] = p + ` COLLATE "C"`
 		} else if !numeric && source.dialect == dialectMySQL {
@@ -385,7 +398,7 @@ func storeCopyScan(ctx context.Context, tx *sql.Tx, source, target *storeCopyDB,
 		}
 		for _, vals := range batch {
 			for i, col := range cols {
-				if table.name == "lane_inbox" && col == "event_key" {
+				if storeCopyHubKeyTables[table.name] && col == "event_key" {
 					raw := storeCopyBytes(vals[i])
 					if source.dialect == dialectPostgres {
 						raw, err = hex.DecodeString(string(raw))
@@ -455,7 +468,7 @@ func storeCopyHashRow(h hash.Hash, vals []any, table storeCopyTable, cols []stri
 		}
 		h.Write([]byte{1})
 		b := storeCopyBytes(v)
-		if table.name == "lane_inbox" && cols[i] == "event_key" && dialect.dialect == dialectPostgres {
+		if storeCopyHubKeyTables[table.name] && cols[i] == "event_key" && dialect.dialect == dialectPostgres {
 			b, _ = hex.DecodeString(string(b))
 		}
 		var size [8]byte
@@ -467,12 +480,9 @@ func storeCopyHashRow(h hash.Hash, vals []any, table storeCopyTable, cols []stri
 func storeCopyHighWater(ctx context.Context, tx *sql.Tx, source *storeCopyDB, tables []storeCopyTable) (map[string]int64, error) {
 	result := make(map[string]int64)
 	for _, t := range tables {
-		if t.name != "lane_inbox" && t.name != "lane_inbox_batches" {
+		col, sequenced := storeCopySequenceColumns[t.name]
+		if !sequenced {
 			continue
-		}
-		col := "id"
-		if t.name == "lane_inbox_batches" {
-			col = "seq"
 		}
 		var n sql.NullInt64
 		var err error
@@ -480,6 +490,7 @@ func storeCopyHighWater(ctx context.Context, tx *sql.Tx, source *storeCopyDB, ta
 		case source.sqlite && t.name == "lane_inbox":
 			err = tx.QueryRowContext(ctx, `SELECT floor FROM lane_inbox_id_floor WHERE singleton=1`).Scan(&n)
 		case source.sqlite:
+			// Only lane_inbox keeps an id floor: the target passes the copied ids.
 			continue
 		case source.dialect == dialectPostgres:
 			err = tx.QueryRowContext(ctx, `SELECT pg_sequence_last_value(pg_get_serial_sequence($1,$2)::regclass)`, t.name, col).Scan(&n)
@@ -498,12 +509,9 @@ func storeCopyHighWater(ctx context.Context, tx *sql.Tx, source *storeCopyDB, ta
 
 func resetStoreCopySequences(ctx context.Context, dst *storeCopyDB, tables []storeCopyTable, highWater map[string]int64) error {
 	for _, t := range tables {
-		if t.name != "lane_inbox" && t.name != "lane_inbox_batches" {
+		col, sequenced := storeCopySequenceColumns[t.name]
+		if !sequenced {
 			continue
-		}
-		col := "id"
-		if t.name == "lane_inbox_batches" {
-			col = "seq"
 		}
 		if dst.dialect == dialectPostgres {
 			q := "SELECT setval(pg_get_serial_sequence('" + t.name + "','" + col + "'), GREATEST(COALESCE(MAX(" + col + "),0)," + strconv.FormatInt(highWater[t.name], 10) + ",1), GREATEST(COALESCE(MAX(" + col + "),0)," + strconv.FormatInt(highWater[t.name], 10) + ")>0) FROM " + t.name

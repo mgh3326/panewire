@@ -286,6 +286,87 @@ answers 200 with `attempts + 1`, the row itself is unchanged (first-writer-wins,
 below), and `delivered_at` is not touched by that path. The contract is
 unchanged; this is the counter it already had.
 
+## Delivery obligations
+
+An obligation is the hub's own record that one relay row is still owed a
+delivery (hk 4289, step T1: hk 6384). It lives in the hub store, beside
+`lane_inbox`, and shares the inbox item's `event_key` and `relay_id`. The
+handoffkeep row stays the record of the event and of its delivery.
+
+**In this step an obligation only records.** Nothing retries from it, nobody is
+notified, the hub writes nothing to handoffkeep for it, and the replay rules
+above are unchanged.
+
+Four tables, with the same columns on SQLite, Postgres (migration 0040) and
+MySQL (migrations 0033-0036):
+
+| Table | Holds |
+|---|---|
+| `delivery_obligations` | one row per tracked event: state, destination, settlement reason, next read |
+| `delivery_reconciler_state` | the one row with the adopt cursor, seeded when the store opens |
+| `delivery_incidents`, `delivery_notice_slots` | nothing yet; later steps of hk 4289 write them |
+
+`panewire hub store-copy` carries all four. Nothing prunes or deletes their
+rows.
+
+### Which events have one
+
+- The relay path creates one after handoffkeep answers 201 or 200 for a
+  `lane.event` or a `job.*` event. A failed insert is logged with the row's
+  `event_id` and does not hold the relay back.
+- An event the delivery policy files in an inbox never reaches handoffkeep, so
+  it has none: its inbox item is the record.
+- A hub without an inbox store (`--delivery-policy off`, or no store) keeps
+  none.
+
+### The pass
+
+Each maintenance sweep starts one pass in the background, unless one is still
+running. A pass has 30 seconds and does two things.
+
+**Adopt** creates missing obligations. It reads at most 3 pages of 200 rows of
+the undelivered listing, resumes at the stored cursor, and returns to the start
+after a short page. It skips delivered and retired rows, marker rows, rows with
+no lane or job, and kinds the hub does not relay. It covers a failed insert, a
+handoffkeep or store outage, and rows stored before this step. An adopted row
+starts with `spent` equal to handoffkeep's `attempts` and no destination.
+
+**Classify** reads the rows of at most 50 due obligations. The first rule that
+holds applies:
+
+| Evidence | Obligation becomes |
+|---|---|
+| `delivered_at` set and a real `delivered_to`, `<machine>/applied-report` included | `confirmed` |
+| `hub/replay-retired:<reason>`, except `unconfirmed` | `settled`, reason `<reason>` |
+| `hub/filtered:<reason>` | `settled`, `filtered` |
+| `hub/inbox`, `hub/chat-terminal` | `settled`, `inbox` or `chat-terminal` |
+| `sink/sink:<lane>` | `settled`, `sink` |
+| `hub/replay-retired:unconfirmed`, or a `hub/` destination this build does not know | `exhausted`, fault `unconfirmed` |
+| the event's inbox item is superseded, acked, delivered or read by the receiver | `settled`, `inbox-delivered` |
+| a digest or escalation batch that no unread item is still claimed by | `settled`, `digest-not-replayed` |
+| none of these | unchanged |
+
+- `delivered_at` alone never confirms: every `hub/` and `sink` settlement sets
+  it too.
+- An inbox delivery record counts only once it is a minute old, because the hub
+  writes it just before the handoffkeep write that confirms the row.
+- The pass only observes a digest release. Releasing the claims stays with the
+  replay.
+- handoffkeep folds a job's later round into the first round's row when the
+  idempotency key matches. That row then says nothing about the later event, so
+  only the inbox rule can close the later obligation.
+- A row handoffkeep no longer lists, and a read that fails, change no state.
+- `confirmed` and `settled` are final. `exhausted` stays open.
+
+A new obligation is first read after 30 seconds. An owed one is read again after
+a tenth of its age, at least a minute and at most an hour; an exhausted or
+missing one after 4 hours. A failed read ends the pass and is retried after a
+minute.
+
+Two limits of this step: the replay retires a marked row before it queues the
+labelled copy, so that obligation reads `exhausted` even if the copy is then
+confirmed; and a row retired before the hub had obligations gets none.
+
 ## The relay kind set
 
 `emitRelayKinds` in `emit.go` is the single location of the closed set: the
