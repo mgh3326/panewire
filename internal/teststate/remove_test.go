@@ -34,10 +34,40 @@ func TestRemoveAllHandlesReadOnlyTree(t *testing.T) {
 }
 
 // TestRemoveAllMissingPathIsNotAnError keeps the cleanup idempotent: two runs
-// racing on the same leftover dir both succeed.
+// racing on the same leftover dir both succeed. The tolerance has to hold at
+// every level, so removeDir must not report a directory that vanished between
+// its own stat and its listing.
 func TestRemoveAllMissingPathIsNotAnError(t *testing.T) {
-	if err := RemoveAll(filepath.Join(t.TempDir(), "gone")); err != nil {
-		t.Fatalf("RemoveAll on a missing path: %v", err)
+	missing := filepath.Join(t.TempDir(), "gone")
+	for name, remove := range map[string]func(string) error{"RemoveAll": RemoveAll, "removeDir": removeDir} {
+		if err := remove(missing); err != nil {
+			t.Fatalf("%s on a missing path: %v", name, err)
+		}
+	}
+}
+
+// TestRemoveDirRemovesASymlinkWithoutItsTarget hands removeDir an entry the walk
+// classified as a directory but which is now a link: the link goes, the tree it
+// names stays. Reading or chmod-ing through the link would delete that tree.
+func TestRemoveDirRemovesASymlinkWithoutItsTarget(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "keep")
+	if err := os.WriteFile(outsideFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDir(link); err != nil {
+		t.Fatalf("removeDir: %v", err)
+	}
+	if _, err := os.Stat(outsideFile); err != nil {
+		t.Fatalf("removeDir followed a symlink: %v", err)
+	}
+	if _, err := os.Lstat(link); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the link must be removed: %v", err)
 	}
 }
 
