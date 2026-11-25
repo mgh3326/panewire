@@ -429,10 +429,11 @@ func TestNodeSpawnHubKeepsNonOverlappingWorkQueued_t4578(t *testing.T) {
 	}
 }
 
-// A symlinked job dir or lane may name another job's worktree: such a spawn
-// is admitted alone, and a lane that leaves its worktree after prepare is
-// refused before launch.
-func TestNodeSpawnSymlinkedTargetsAreNotOverlapped_t4578(t *testing.T) {
+// A symlinked job dir or lane names no admission class of its own (hk 6402):
+// the key is a pure function of the request, so a linked dir holds the same key
+// as a real one — prepare refuses the link at every N — and a lane that leaves
+// its worktree after prepare is still refused before launch.
+func TestNodeSpawnKeyIgnoresLinkedTargets_t4578(t *testing.T) {
 	root := t.TempDir()
 	config := filepath.Join(t.TempDir(), "spawn.json")
 	if err := os.WriteFile(config, []byte(`{"work_root":"`+root+`","workspace":"w","herdr_session":"w","enabled":true}`), 0o600); err != nil {
@@ -452,16 +453,13 @@ func TestNodeSpawnSymlinkedTargetsAreNotOverlapped_t4578(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		dir, lane, want string
-	}{{"job-a", "", "job-a"}, {"job-b", "", ""}, {"job-c", "", "job-c"}, {"job-c", "live", ""}, {"job-a", "live", "job-a"}} {
+	}{{"job-a", "", "job-a"}, {"job-b", "", "job-b"}, {"job-c", "", "job-c"}, {"job-c", "live", "job-c"}, {"job-a", "live", "job-a"}} {
 		message := concurrencyMessage(1, tc.dir)
 		if tc.lane != "" {
 			message.Args = append(message.Args, "-L", tc.lane)
 		}
-		want := tc.want
-		if want != "" {
-			want = spawnOverlapKey(want, message.Args)
-		}
-		if got := client.spawnAdmissionKey(message); got != want {
+		want := spawnOverlapKey(tc.want, message.Args)
+		if got := client.spawnTargetFor(message).Key; got != want {
 			t.Errorf("dir=%s lane=%s key=%q, want %q", tc.dir, tc.lane, got, want)
 		}
 	}
@@ -591,8 +589,8 @@ func TestNodeSpawnLaneReadAsFlag_t4578(t *testing.T) {
 	}
 	message := concurrencyMessage(1, "job-c")
 	message.Args = []string{"--job", "job-c", "--purpose", "-L", "-m", "sonnet", "-L", "live"}
-	if got := (&HubClient{spawnConfigPath: config}).spawnAdmissionKey(message); got != "" {
-		t.Fatalf("a lane hidden behind a flag value was not seen: key %q", got)
+	if got, want := (&HubClient{spawnConfigPath: config}).spawnTargetFor(message).Key, spawnOverlapKey("job-c", message.Args); got != want {
+		t.Fatalf("a lane changed the key to %q, want %q", got, want)
 	}
 	if lane := hubSpawnFlagArg(message.Args, "-L"); lane != "live" || !spawnLaneEscapes(filepath.Join(root, "job-c"), lane) {
 		t.Fatalf("lane=%q", lane)

@@ -50,6 +50,8 @@ func nodeSpawnRefusalFix(code, rule string) string {
 			return "Origin moved past the commit this request names; start the successor at the branch's current tip with the commit listed in the refusal."
 		case "branch_in_use":
 			return "Another worktree of this node's clone holds the branch; end that job or place the successor on another host."
+		case "job_dir_link":
+			return "Remove the link at the job dir under this node's work root so the node prepares its own worktree, or place the spawn on another host."
 		case "sha-missing":
 			return "Push the requested commit to the specified origin ref, then replay the saved request."
 		case "git_too_old":
