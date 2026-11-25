@@ -264,14 +264,18 @@ func (k placementScoreK) decide(usable []PlacementCandidate, winner int) (int, s
 	reason := ""
 	if k.loadCeiling > 0 && loadCeilingApplies(usable, k.loadCeiling) {
 		kept := make([]int, 0, len(usable))
+		redirect := -1
 		for i, c := range usable {
 			if !loadOverCeiling(c, k.loadCeiling) {
 				kept = append(kept, i)
 			}
+			if redirect < 0 && loadAtOrUnderCeiling(c, k.loadCeiling) {
+				redirect = i
+			}
 		}
 		considered = kept
 		if loadOverCeiling(usable[winner], k.loadCeiling) {
-			winner, reason = kept[0], "load_over_ceiling"
+			winner, reason = redirect, "load_over_ceiling"
 		}
 	}
 	below := func(i int) bool {
