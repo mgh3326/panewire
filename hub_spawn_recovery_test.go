@@ -246,7 +246,7 @@ func TestNodeSpawnExpiredAbsoluteDeadlineSkipsEngine(t *testing.T) {
 		return &hubSpawnOutput{}, fleet.Execution{}
 	}
 	message := hubOutboundMessage{RequestID: t14RequestID(999), DeadlineMS: time.Now().Add(-time.Second).UnixMilli(), WaitSeconds: 600, Args: []string{"--job", "test-job"}}
-	result := client.runClaimedHubSpawn(t.Context(), message)
+	result := client.runClaimedHubSpawn(t.Context(), message, nil)
 	if called || result.Error != "deadline_not_started" || !result.Retryable || result.RC != 124 {
 		t.Fatalf("expired dispatch launched: %v %+v", called, result)
 	}

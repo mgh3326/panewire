@@ -197,9 +197,13 @@ type HubClient struct {
 	spawnLocks           map[string]chan struct{}
 	spawnEngine          hubSpawnEngine
 	spawnPrepare         func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnJournalMu       sync.Mutex
-	spawnJournal         *nodeSpawnJournal
-	spawnJournalUsers    int
+	// nodePrepareJobDirChecked runs after prepare checked the job dir, before
+	// its first git write; a fixture swaps the dir under a prepare to prove the
+	// merge guard (hk 6402).
+	nodePrepareJobDirChecked func(dir string)
+	spawnJournalMu           sync.Mutex
+	spawnJournal             *nodeSpawnJournal
+	spawnJournalUsers        int
 	// spawnActive holds the journal requests this process is executing; an
 	// executing entry missing from it was left by a restart.
 	spawnActiveMu sync.Mutex // also guards spawnWaiting

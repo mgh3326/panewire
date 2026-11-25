@@ -973,9 +973,11 @@ runs up to N spawns at once, but only checkout spawns overlap, each holding
 its own job dir (`<work_root>/<checkout dir>`, case-folded; `-L live|mock`
 stays inside it). A spawn without a checkout is admitted alone, and a waiting
 one blocks new admissions. Preparation of one clone runs one at a time. A job
-dir or `-L` lane that is a symlink is admitted alone, and a lane that resolves
-outside its worktree after prepare is refused
-(`checkout_refused:lane_outside_worktree`). Workspace lookup and creation for
+dir that is a symlink is no longer admitted alone: the key is the request's,
+and prepare refuses the link before its first git write
+(`checkout_refused:job_dir_link`, at every N; a reuse merge re-checks the dir
+is the same device and inode). A `-L` lane that resolves outside its worktree
+after prepare is refused (`checkout_refused:lane_outside_worktree`). Workspace lookup and creation for
 one herdr session and label holds a file lock in the panewire state dir. The
 node advertises `spawn_slots_v1=N` in hello only when N is above one. The hub
 opens a second dispatch to a node only when it advertised slots and every

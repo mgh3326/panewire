@@ -212,8 +212,14 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	// One admission covers the slot and the directory: a checkout spawn
 	// holds its own job dir, a spawn without one holds the whole node, from
 	// before the executing claim through launch, brief delivery and landing
-	// proof (hk 4578, node_spawn_concurrency.go).
-	release, admitted := client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, client.spawnAdmissionKey(message), peer, journal, message, deadline)
+	// proof (hk 4578, node_spawn_concurrency.go). The target, built here, is
+	// what prepare checks and pins before its first git write (hk 6402).
+	target := client.spawnTargetFor(message)
+	key := ""
+	if target != nil {
+		key = target.Key
+	}
+	release, admitted := client.awaitSpawnAdmission(ctx, admissionCtx, stop, waiter, key, peer, journal, message, deadline)
 	if !admitted {
 		return
 	}
@@ -253,7 +259,7 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	message.checkoutBranchReply = peer.acceptsCheckoutBranch.Load()
 	// WithSpawnNodeRequestID binds the job.spawned record to this request, so
 	// a restart settle accepts only this attempt's landing (hk 5829).
-	result := client.runClaimedHubSpawn(fleet.WithSpawnNodeRequestID(fleet.WithSpawnLanded(admissionCtx, func() { client.sendSpawnStarted(ctx, peer, message.RequestID) }), message.RequestID), message)
+	result := client.runClaimedHubSpawn(fleet.WithSpawnNodeRequestID(fleet.WithSpawnLanded(admissionCtx, func() { client.sendSpawnStarted(ctx, peer, message.RequestID) }), message.RequestID), message, target)
 	// Disconnect is not cancellation of this daemon-owned execution. Its result
 	// remains available to the next authenticated replay even if this socket died.
 	if ctx.Err() != nil && result.RC != 0 {
@@ -590,7 +596,17 @@ func spawnResultWire(result hubSpawnResult, extended bool) any {
 	}{result.Receipt, "job.spawn.result", result.RequestID, result.RC, result.JobID, result.Pane, result.StdoutTail, result.Error, result.StageMS, result.Stage, result.Retryable, result.CheckoutMode}
 }
 
-func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
+// runHubSpawn is the spawn path for a caller that did not come through
+// admission (a fixture, or a direct run); it builds the same target admission
+// would.
+func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) hubSpawnResult {
+	return client.runSpawnTarget(parent, message, client.spawnTargetFor(message))
+}
+
+// runSpawnTarget runs one spawn under the admission target it was admitted
+// with. Everything prepare is allowed to write is decided from target: its Dir
+// names the job dir and its Root pins the work root at the first prepare.
+func (client *HubClient) runSpawnTarget(parent context.Context, message hubOutboundMessage, target *spawnTarget) (result hubSpawnResult) {
 	// reason and detail refine result.Error in the node_spawn fleet event.
 	var reason, detail string
 	started := client.fleetClock()()
@@ -703,9 +719,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 				}
 			}
 		}()
-		prepare := client.spawnPrepare
-		if prepare == nil {
-			prepare = client.nodeWorktreePrepare
+		if target == nil || target.Dir != message.Checkout.Dir {
+			target = client.spawnTargetFor(message)
+		}
+		if target == nil {
+			target = &spawnTarget{Dir: message.Checkout.Dir}
 		}
 		stageCtx, stages := withCheckoutStageTimer(runContext)
 		lockStarted := time.Now()
@@ -716,7 +734,14 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			result.RC, result.Error = 81, "checkout_refused:"+nodeOutcomeBusy
 			return result
 		}
-		prepared, code := prepare(stageCtx, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir, VerifyReuse: message.Checkout.VerifyReuse, Exclude: message.Checkout.Exclude, Include: message.Checkout.Include})
+		prepareArgs := nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir, VerifyReuse: message.Checkout.VerifyReuse, Exclude: message.Checkout.Exclude, Include: message.Checkout.Include}
+		var prepared any
+		var code string
+		if prepare := client.spawnPrepare; prepare != nil {
+			prepared, code = prepare(stageCtx, prepareArgs)
+		} else {
+			prepared, code = client.prepareTarget(stageCtx, prepareArgs, target)
+		}
 		unlock()
 		ms := time.Since(started).Milliseconds()
 		checkoutMS = &ms
@@ -1166,9 +1191,12 @@ func (client *HubClient) releaseSpawnJournal() {
 	}
 }
 
-func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage) hubSpawnResult {
+// runClaimedHubSpawn runs one spawn this node claimed. target is the admission
+// record the caller built (hk 6402); nil is allowed for a call that never went
+// through admission, and runSpawnTarget builds the same record itself.
+func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage, target *spawnTarget) hubSpawnResult {
 	if message.DeadlineMS != 0 && time.Now().UnixMilli() >= message.DeadlineMS {
 		return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnIdentity(message.Args).Job, RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
 	}
-	return client.runHubSpawn(ctx, message)
+	return client.runSpawnTarget(ctx, message, target)
 }

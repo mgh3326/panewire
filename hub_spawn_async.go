@@ -1354,11 +1354,15 @@ var nextHostRefusals = map[string]bool{
 	// A successor spec whose branch another worktree of this host's clone
 	// holds refuses here, and another host prepares the same branch (hk 5118).
 	"checkout_refused:branch_in_use": true,
-	"spawn_failed:hooks_review":      true,
-	"spawn_failed:trust_prompt":      true,
-	"spawn_failed:omp_setup_wizard":  true,
-	"spawn_failed:auth_unavailable":  true,
-	"launch_proof_failed":            true,
+	// The job dir under this host's work root is a link, or stopped being the
+	// directory prepare checked; another host with its own work root prepares
+	// it (hk 6402).
+	"checkout_refused:job_dir_link": true,
+	"spawn_failed:hooks_review":     true,
+	"spawn_failed:trust_prompt":     true,
+	"spawn_failed:omp_setup_wizard": true,
+	"spawn_failed:auth_unavailable": true,
+	"launch_proof_failed":           true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement

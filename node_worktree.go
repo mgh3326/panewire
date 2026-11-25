@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
@@ -50,6 +51,10 @@ const (
 	// another worktree of the clone already holds the branch.
 	nodePrepareSuccessorStale = "successor_stale"
 	nodePrepareBranchInUse    = "branch_in_use"
+	// nodePrepareJobDirLink refuses a job dir that is a link, or no longer the
+	// directory prepare checked, before a git command that writes (hk 6402).
+	// At every N: one refused spawn instead of two sharing a directory.
+	nodePrepareJobDirLink = "job_dir_link"
 )
 
 // worktree.remove outcomes mirror the receipt reasons mergewake
@@ -767,7 +772,27 @@ func nodeBranchReleased(ctx context.Context, git relayCommandRunner, main, branc
 	return err == nil && strings.TrimSpace(strings.SplitN(string(out), "\t", 2)[0]) == "0"
 }
 
+// nodeWorktreePrepare is the wire entry (node.command worktree.prepare). It is
+// handed only nodeWorktreePrepareArgs and builds its own target, so no caller
+// JSON names a root: the root comes from this node's spawn.json (hk 6402).
 func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorktreePrepareArgs) (any, string) {
+	return client.prepareTarget(ctx, args, &spawnTarget{Dir: args.Dir})
+}
+
+// prepareTarget readies one checkout. target is the admission record of an
+// in-process spawn (spawnTargetFor) or a bare Dir for the wire entry; its Root
+// is filled here, before any git command that writes, and every path decision
+// of this run is made against that pin instead of a fresh read of spawn.json.
+//
+// Before the first write:
+//  1. the root is pinned (pinWorkRoot);
+//  2. the job dir is Lstat'ed: absent, or a real directory. A link refuses with
+//     job_dir_link at every N.
+//
+// A reuse that fast-forwards the job dir checks the dir again as the same
+// directory first (nodeJobDirStillHeld): a dir swapped after step 2 is not the
+// one admission held, so the merge must not write into it (hk 6402).
+func (client *HubClient) prepareTarget(ctx context.Context, args nodeWorktreePrepareArgs, target *spawnTarget) (any, string) {
 	ownerRepo, ok := nodeOriginRepo(args.Origin)
 	if !ok {
 		return nil, "invalid_args"
@@ -785,19 +810,105 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	if err := os.MkdirAll(workRoot, 0700); err != nil {
 		return nil, "work_root_unset"
 	}
+	pin, code := pinWorkRoot(workRoot)
+	if code != "" {
+		return nil, code
+	}
+	target.Root = pin
+	jobDir, outcome := nodeJobDirCheck(filepath.Join(pin.Real, target.Dir))
+	if outcome != "" {
+		return nodeWorktreePrepareResult{Outcome: outcome}, ""
+	}
+	if client.nodePrepareJobDirChecked != nil {
+		client.nodePrepareJobDirChecked(filepath.Join(workRoot, target.Dir))
+	}
 
 	tracker := newNodeGitTracker(client.nodeGitRunner())
 	if ctx.Err() != nil {
 		return tracker.decide(ctx, nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed})
 	}
-	res, code := client.nodeWorktreePrepareRun(ctx, tracker, ownerRepo, workRoot, args)
+	res, code := client.nodeWorktreePrepareRun(ctx, tracker, ownerRepo, workRoot, pin, jobDir, args)
 	if code != "" {
 		return nil, code
 	}
 	return tracker.decide(ctx, res)
 }
 
-func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *nodeGitTracker, ownerRepo, workRoot string, args nodeWorktreePrepareArgs) (nodeWorktreePrepareResult, string) {
+// pinWorkRoot pins the work root this prepare runs under. Configured is the
+// cleaned path spawn.json named (it may be a link), Real is every link
+// resolved, and Dev/Ino identify the real directory; a root that is not there
+// after MkdirAll, or that cannot be resolved, refuses as work_root_unset.
+//
+// The pin lives on the target, so each prepare run compares its paths against
+// one root from its first write to its last. hk 6403 keeps the pin across
+// spawns and refuses a root that changes while another spawn holds it.
+func pinWorkRoot(configured string) (rootPin, string) {
+	real, err := filepath.EvalSymlinks(configured)
+	if err != nil {
+		return rootPin{}, "work_root_unset"
+	}
+	info, err := os.Stat(real)
+	if err != nil || !info.IsDir() {
+		return rootPin{}, "work_root_unset"
+	}
+	pin := rootPin{Configured: configured, Real: filepath.Clean(real)}
+	pin.Dev, pin.Ino = nodeFileIdentity(info)
+	return pin, ""
+}
+
+// nodeFileIdentity is the device and inode of a stat result; linux and macOS
+// both name them Dev and Ino.
+func nodeFileIdentity(info os.FileInfo) (dev, ino uint64) {
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return uint64(stat.Dev), uint64(stat.Ino)
+	}
+	return 0, 0
+}
+
+// nodeJobDirID is what prepare recorded about the job dir before its first git
+// write: absent, or the device and inode of a real directory.
+type nodeJobDirID struct {
+	present  bool
+	dev, ino uint64
+}
+
+// nodeJobDirCheck Lstats the job dir before any git command that writes. An
+// absent dir is fine (worktree add creates it) and a real directory is
+// recorded; a link refuses with job_dir_link, because the git commands that
+// follow would follow it into another job's worktree (hk 6402).
+func nodeJobDirCheck(dir string) (nodeJobDirID, string) {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nodeJobDirID{}, ""
+	}
+	if err != nil {
+		return nodeJobDirID{}, nodeOutcomeGitFailed
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nodeJobDirID{}, nodePrepareJobDirLink
+	}
+	dev, ino := nodeFileIdentity(info)
+	return nodeJobDirID{present: true, dev: dev, ino: ino}, ""
+}
+
+// nodeJobDirStillHeld reports whether dir is still the directory prepare
+// recorded, right before a reuse merge that writes into it. A link, a vanished
+// dir, or another device or inode is a different target: the merge refuses
+// with job_dir_link instead of fast-forwarding a directory nobody held
+// (hk 6402). A dir that only appeared after the check is never merged into.
+func nodeJobDirStillHeld(dir string, id nodeJobDirID) bool {
+	if !id.present {
+		return false
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	dev, ino := nodeFileIdentity(info)
+	return dev == id.dev && ino == id.ino
+}
+
+func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *nodeGitTracker, ownerRepo, workRoot string, pin rootPin, jobDir nodeJobDirID, args nodeWorktreePrepareArgs) (nodeWorktreePrepareResult, string) {
 	git := tracker.git
 	if ok, err := nodeGitVersionOK(ctx, git); err != nil {
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
@@ -815,7 +926,7 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 		// The job worktree may never be the clone's own main worktree.
 		return nodeWorktreePrepareResult{}, "invalid_args"
 	}
-	if _, err := os.Stat(clone); err == nil && !nodePathWithin(workRoot, clone) {
+	if _, err := os.Stat(clone); err == nil && !nodePathWithin(pin.Real, clone) {
 		// Refuse before the lock path resolves beside a target outside the root.
 		return nodeWorktreePrepareResult{Outcome: nodePrepareOriginMismatch}, ""
 	}
@@ -846,7 +957,7 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 	defer release()
 
 	switch _, err := os.Stat(clone); {
-	case err == nil && !nodePathWithin(workRoot, clone):
+	case err == nil && !nodePathWithin(pin.Real, clone):
 		// A symlink at <work_root>/<repo> must not lead git outside the root.
 		return nodeWorktreePrepareResult{Outcome: nodePrepareOriginMismatch}, ""
 	case err == nil:
@@ -880,11 +991,11 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 	result := nodeWorktreePrepareResult{}
 	switch args.Mode {
 	case "branch":
-		outcome = client.nodePrepareBranch(ctx, tracker, clone, dir, args, &result)
+		outcome = client.nodePrepareBranch(ctx, tracker, clone, dir, jobDir, args, &result)
 	case "detached":
 		outcome = client.nodePrepareDetached(ctx, tracker, clone, dir, args, &result)
 	case fleet.HubCheckoutSuccessor:
-		outcome = client.nodePrepareSuccessor(ctx, tracker, clone, dir, args, &result)
+		outcome = client.nodePrepareSuccessor(ctx, tracker, clone, dir, jobDir, args, &result)
 	}
 	result.Outcome = outcome
 	if outcome == nodePreparePrepared || outcome == nodePrepareReused {
@@ -1089,7 +1200,7 @@ func nodeGitSubcommand(args []string) string {
 	return "git"
 }
 
-func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
+func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGitTracker, clone, dir string, jobDir nodeJobDirID, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
 	git := tracker.git
 	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		return nodeOutcomeGitFailed
@@ -1177,6 +1288,11 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGit
 			if collision {
 				return nodeOutcomeDirty
 			}
+			// The dir must still be the one checked before the first write: a
+			// swap for a link would fast-forward another job's worktree.
+			if !nodeJobDirStillHeld(dir, jobDir) {
+				return nodePrepareJobDirLink
+			}
 			if _, err := git(ctx, "-C", dir, "merge", "--ff-only", "--no-overwrite-ignore", expected); err != nil {
 				return nodeOutcomeGitFailed
 			}
@@ -1243,7 +1359,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, tracker *nodeGit
 // hk 5870). A worktree at dir is reused only on that
 // branch, clean, at the commit; a local branch behind it is fast-forwarded
 // and one ahead or diverged is someone else's work.
-func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *nodeGitTracker, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
+func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *nodeGitTracker, clone, dir string, jobDir nodeJobDirID, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
 	git := tracker.git
 	result.CheckoutMode = nodeCheckoutBranch
 	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
@@ -1367,6 +1483,10 @@ func (client *HubClient) nodePrepareSuccessor(ctx context.Context, tracker *node
 			}
 			if collision {
 				return nodeOutcomeDirty
+			}
+			// The same dir check as the branch reuse merge (hk 6402).
+			if !nodeJobDirStillHeld(dir, jobDir) {
+				return nodePrepareJobDirLink
 			}
 			if _, err := git(ctx, "-C", dir, "merge", "--ff-only", "--no-overwrite-ignore", want); err != nil {
 				return nodeOutcomeGitFailed

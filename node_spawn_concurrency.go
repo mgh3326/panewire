@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // Per-node spawn concurrency (hk 4578). A node runs up to N spawns at once.
@@ -106,26 +108,46 @@ func hubNodeSpawnSlots(capabilities map[string]bool) int {
 	return slots
 }
 
-// spawnAdmissionKey is the job dir a checkout spawn holds, or "" for a spawn
-// the node admits alone. A job dir or lane that is a symlink may name another
-// job's worktree, so such a spawn is admitted alone too; a lane that becomes
-// a link only after prepare is refused before launch (spawnLaneEscapes).
-func (client *HubClient) spawnAdmissionKey(message hubOutboundMessage) string {
+// spawnTarget is the checkout this node admitted, and everything prepare checks
+// before its first git write (hk 6402). It is built at admission and handed to
+// prepare in process; no wire message carries it, so no caller can name a root,
+// a directory or a key (nodeWorktreePrepareArgs is the wire shape).
+//
+// Root is filled at the target's first prepare (pinWorkRoot, §3.5 of the
+// design): the root a prepare pins is the one every path check in that run
+// compares against, instead of a fresh read of spawn.json.
+type spawnTarget struct {
+	Identity fleet.SpawnIdentity
+	Dir      string
+	Key      string
+	Root     rootPin
+}
+
+// rootPin is the work root a node prepares under: Configured is the cleaned
+// `work_root` spawn.json named (it may be a link), Real is that path with every
+// link resolved, and Dev/Ino identify the real directory. A pin is replaced
+// only when spawn.json names another root; the hold-aware refusal is hk 6403.
+type rootPin struct {
+	Configured string
+	Real       string
+	Dev        uint64
+	Ino        uint64
+}
+
+// spawnTargetFor is the admission target of a spawn: nil when the spawn runs in
+// a cwd_map or default repo directory (and so is admitted alone), the request's
+// job dir and overlap key otherwise. The key is a pure function of the request
+// — the same at hub and node — so a link at the job dir or the lane no longer
+// changes admission (hk 6402); prepare refuses the link instead, at every N.
+func (client *HubClient) spawnTargetFor(message hubOutboundMessage) *spawnTarget {
 	if message.Checkout == nil || message.Checkout.Dir == "" {
-		return ""
+		return nil
 	}
-	root, err := client.nodeWorkRoot()
-	if err != nil {
-		return ""
+	return &spawnTarget{
+		Identity: hubSpawnIdentity(message.Args),
+		Dir:      message.Checkout.Dir,
+		Key:      spawnOverlapKey(message.Checkout.Dir, message.Args),
 	}
-	dir := filepath.Join(root, message.Checkout.Dir)
-	if spawnPathIsLink(dir) {
-		return ""
-	}
-	if lane := hubSpawnIdentity(message.Args).ExecutionLane; lane != "" && spawnPathIsLink(filepath.Join(dir, lane)) {
-		return ""
-	}
-	return spawnOverlapKey(message.Checkout.Dir, message.Args)
 }
 
 // spawnOverlapKey holds the case-folded job dir and job id: two job ids that
