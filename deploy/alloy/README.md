@@ -57,7 +57,7 @@ root-owned systemd EnvironmentFile.
 
 | Host | Package / privilege | Invocation |
 | --- | --- | --- |
-| NCP | RPM, root | `ALLOY_LOKI_ENV=/secure/loki.env ./install-linux.sh ncp-id` |
+| NCP (history: host returned 2026-11-24) | RPM, root | none |
 | OCI | RPM, sudo, no Docker | `sudo ALLOY_LOKI_ENV=/secure/loki.env ./install-linux.sh oci-id` |
 | RPi | APT, sudo | `sudo ALLOY_LOKI_ENV=/secure/loki.env ./install-linux.sh rpi-id` |
 | macOS personal | Homebrew, user launchd | Copy the plist example outside the repo, replace placeholders, then `launchctl bootstrap gui/$(id -u) /path/to/dev.alloy.fleet.plist`. |
@@ -218,7 +218,7 @@ events` and `// END fleet events`, with platform-specific file paths:
 - `loki.process "fleet_events"` turns `host`, `tool`, `kind` and `outcome` into
   labels and sets the timestamp from `ts`. It drops the `filename` label and
   rate-limits each host to 0.5 lines/s with a burst of 200.
-- The `host` label is the host's `MACHINE_ID` (`mac-dev`, `oci`, `ncp`, ...),
+- The `host` label is the host's `MACHINE_ID` (`mac-dev`, `oci`, `rpi`, ...),
   the fleet machine id that hk, Sentry, placement and panewire use, so fleet
   events join those sources on `host`. The line's own `host` field, the OS
   hostname, becomes the `os_host` label. If `MACHINE_ID` is unset or empty,
@@ -340,7 +340,7 @@ Deploy it to every host that runs Alloy:
 1. **macOS hosts:** install the updated `config.mac.alloy` at the plist's
    config path and restart the agent:
    `launchctl kickstart -k gui/$(id -u)/<label>`.
-2. **Linux hosts** (NCP, OCI and RPi in the Install table): stage
+2. **Linux hosts** (OCI and RPi in the Install table): stage
    `config.linux.alloy`, `install-linux.sh` and a mode-0600 `loki.env` as in
    Install, then rerun the installer with the host's existing machine id, for
    example `sudo ALLOY_LOKI_ENV=/secure/loki.env ./install-linux.sh oci-id`.

@@ -169,7 +169,8 @@ in Go, Postgres's is in `hub_postgres_migrations/` and MySQL's in
    ticket.
 ## Live state
 
-The live hub runs on Postgres. Host check on ncp, 2026-11-13 about 12:00 KST:
+History, 2026-11-13 on the former hub host ncp (since returned): the hub ran on
+Postgres. Host check on ncp, 2026-11-13 about 12:00 KST:
 
 - The hub unit loads `EnvironmentFile=/etc/panewire/hub-db.env`, which sets
   `PANEWIRE_HUB_DATABASE_URL`. The hub process holds established connections to

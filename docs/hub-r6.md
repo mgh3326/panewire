@@ -2,7 +2,7 @@
 
 ## Scope and durability boundary
 
-The hub is an NCP-resident, always-on (by the operating assumption) relay for
+The hub runs on host `oci` as an always-on (by the operating assumption) relay for
 live node presence and small operator-facing events. It is not a source of
 record and deliberately has no persistence layer.
 
@@ -120,8 +120,8 @@ than kept world-readable — and an unwritable path rejects hub startup.
 Stderr (the journald stream under systemd) is unchanged byte-for-byte, and
 the logger never prints token values, so the file carries none either. The
 flag exists for hosts where the journal is root-only and a non-root
-operator still needs the hub's own words; the two desk-side access options
-are in [docs/runbooks/hub-log-access.md](runbooks/hub-log-access.md).
+operator still needs the hub's own words; reading hub logs on oci is covered
+in [docs/runbooks/hub-log-access.md](runbooks/hub-log-access.md).
 
 ## Protocol
 
@@ -319,23 +319,20 @@ matching `up` re-arms it. The event never chooses a target, a MAC, a UDP
 destination, an argument, or a command; this path has no shell-out or remote
 execution facility.
 
-## NCP deployment checklist
+## Deployment checklist (host oci)
 
-1. On the NCP host, install the reviewed `panewire` binary and create
-   `/etc/panewire/hub-auth.env` as mode `0600` owned by the dedicated
-   `panewire` service account (keep the containing directory root-controlled).
-   Do not put its values in a systemd unit or command line.
-2. Install a `panewire-hub.service` unit whose `ExecStart` is equivalent to
-   `panewire hub --listen 127.0.0.1:9377 --hub-auth /etc/panewire/hub-auth.env
-   --hub-grace 2m --alert-nodes machine-a,machine-b`. A unit that still passes
+The hub runs on host `oci`. History: the hub ran on the former host ncp until
+it moved off that host (hk 4893), and ncp was returned on 2026-11-24.
+
+1. On `oci` the hub runs as the systemd unit `panewire-hub.service` under user
+   `opc`. A wrapper loads its secrets from Infisical at start. Keep secret
+   values out of the unit file and the command line. A unit that still passes
    `--hub-tg-env` refuses to start: drop that flag before deploy (hk 4442).
-   Run it as a dedicated unprivileged service account with `Restart=always`
-   and `TimeoutStopSec=45` or more, so the SIGTERM drain can finish
-   ([hub-drain.md](hub-drain.md)).
-   Verify locally with `curl http://127.0.0.1:9377/healthz`.
-3. Configure `cloudflared` on that same NCP host to map the hostname
-   `hub.example.invalid` to `http://127.0.0.1:9377`. The hub itself remains
-   loopback-only; do not open an NCP firewall listener for port 9377.
+2. The hub listens on loopback `127.0.0.1:9377`. Verify locally with
+   `curl http://127.0.0.1:9377/healthz`.
+3. Configure `cloudflared` on `oci` to map the hostname `hub.example.invalid`
+   to `http://127.0.0.1:9377`. The hub itself remains loopback-only; do not
+   open a firewall listener for port 9377.
 4. Create a Cloudflare Access application for `hub.example.invalid` before
    distributing node flags. Restrict it to the approved machines/service
    identities. The hub's static bearer authentication remains required behind
@@ -348,6 +345,6 @@ execution facility.
    the daemon. Verify with the operator
    `hub-status` command and an Access-authenticated `/v1/events` client.
 
-The deployment assumes the NCP host is the intentionally always-on hub for
+The deployment assumes `oci` is the intentionally always-on hub for
 this R7 scope. It is still not a durable data authority: recovery is simply
 restart the service/tunnel, while Supabase retains offline files.
