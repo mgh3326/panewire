@@ -791,12 +791,17 @@ func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string
 		}
 		return false
 	}
+	ended := false
 	for _, job := range h.jobs {
-		if job.Completed && job.AgentLabel == lane && job.Node == route.Machine && job.Pane == route.Pane {
-			return true
+		if job.AgentLabel != lane || job.Node != route.Machine || job.Pane != route.Pane {
+			continue
 		}
+		if !job.Completed {
+			return false
+		}
+		ended = true
 	}
-	return false
+	return ended
 }
 
 // laneJobEndedLocked is laneJobEnded for a caller that holds h.mu.

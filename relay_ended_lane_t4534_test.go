@@ -176,6 +176,23 @@ func TestLaneEventToUnboundRouteOnCompletedJobPaneIsNotInjected(t *testing.T) {
 	}
 }
 
+func TestLaneEventToUnboundRouteWithLiveJobOnSamePaneDelivers(t *testing.T) {
+	h, _, agent := relayRegisteredRouteHub(t,
+		`{"lanes":{"lane-a":{"machine":"node-a","pane":"shared-pane"}}}`,
+		map[string]*hubJobRecord{
+			"old-job": {HubActiveJob: HubActiveJob{JobID: "old-job", AgentLabel: "lane-a", Pane: "shared-pane"}, Node: "node-a", Completed: true},
+			"new-job": {HubActiveJob: HubActiveJob{JobID: "new-job", AgentLabel: "lane-a", Pane: "shared-pane"}, Node: "node-a"},
+		})
+	event := hubJobEventPayload{JobID: laneEventTransportID("lane-a", "ev-live-same-pane"), Epoch: 1, OwnerLane: "lane-a", EventID: "ev-live-same-pane", Text: "approval requested"}
+	result := h.relayLaneEvent(event, agent)
+	if result.ID == 0 || result.PersistFailed || !result.Routed {
+		t.Fatalf("relay to unbound route with a live job on the pane: %+v", result)
+	}
+	if len(agent.relays) != 1 || (<-agent.relays).Pane != "shared-pane" {
+		t.Fatalf("live route did not receive the event: queued=%d", len(agent.relays))
+	}
+}
+
 func relayRegisteredRouteHub(t *testing.T, lanes string, jobs map[string]*hubJobRecord) (*HubServer, *httptest.Server, *hubAgent) {
 	t.Helper()
 	h, server, _ := deliveryStageHub(t)

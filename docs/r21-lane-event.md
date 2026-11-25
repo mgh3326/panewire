@@ -78,9 +78,10 @@ still stores the undelivered record and sends
 as unavailable when its bound job is completed. A known route job's completion
 state decides the result; an unknown bound job is not proof that the route has
 ended. For a route without a job ID, the hub infers completion only when its
-machine and pane still match a completed job in that lane. This drops the event
-with `job_ended`, while a takeover route bound to a live or not-yet-known
-successor keeps delivering even if the predecessor job has completed. A later destination-node registration
+machine and pane match at least one completed job in that lane and no matching
+job is live. This drops the event with `job_ended`, while a takeover route bound
+to a live or not-yet-known successor keeps delivering even if the predecessor
+job has completed. A later destination-node registration
 replays undelivered lane events without restarting the hub. That replay asks
 handoffkeep only for `lane.event` rows and advances by durable ID, so older
 undelivered report rows cannot hide a newer direct notification. Once the hub

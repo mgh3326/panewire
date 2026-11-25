@@ -327,6 +327,39 @@ func TestT989LateAckAfterRepointIsRecorded(t *testing.T) {
 	rig.assertNoReplay(rig.restart(), "late ack after repoint")
 }
 
+func TestT989LateAckAfterBoundJobCompletionKeepsRouteMachine(t *testing.T) {
+	rig := t989Start(t, "w1:pA")
+	lanes, err := json.Marshal(reportRelayRoutes{Lanes: map[string]reportRelayRoute{
+		t989Lane: {Machine: "host-a", Pane: "w1:pA", Job: "ended-job"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rig.lanePath, lanes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rig.hub.mu.Lock()
+	rig.hub.jobs["ended-job"] = &hubJobRecord{
+		HubActiveJob: HubActiveJob{JobID: "ended-job", AgentLabel: t989Lane, Pane: "w1:pA"},
+		Node:         "host-a",
+		Completed:    true,
+	}
+	rig.hub.mu.Unlock()
+
+	row := handoffkeepRelayEvent{
+		ID: 9001, Kind: "lane.event", JobID: laneEventTransportID(t989Lane, "late-ack-after-end"),
+		OwnerLane: t989Lane, EventID: "late-ack-after-end", Machine: "host-b", Text: "already shown before completion",
+	}
+	rig.fake.seedUndelivered(row)
+	ack := relayAckPayload{JobID: row.JobID, Pane: "w1:pA", OriginalEventID: row.ID}
+	if !rig.hub.recordLateRelayDelivery("host-a", ack) {
+		t.Fatal("late acknowledgement from the registered destination was rejected after job completion")
+	}
+	if got := rig.fake.deliveredToFor(row.ID); got == "" {
+		t.Fatal("late acknowledgement did not mark the durable row delivered")
+	}
+}
+
 // The batched variant the b953 rows showed: a re-pointed lane's replay lands
 // three rows on the working pane, they hold and release as one batch, and
 // every member's ack must close its durable row even though the stored pane
