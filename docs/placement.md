@@ -1033,11 +1033,12 @@ still follows policy order among usable machines, adjusted by the
 [decision rules](#the-decision); power shapes `score` and therefore the order
 of `candidates`.
 
-## Draft NCP policy file (not deployed)
+## Draft policy file (not deployed)
 
-The production hub (`panewire-hub.service` on NCP) currently runs with no
-policy file, so it uses the compiled default (`local_machine` `mac-work`,
-which matches no real machine). The operator-approved draft for the real
+History: while the hub still ran on the former host ncp (returned 2026-11-24),
+it ran with no policy file, so it used the compiled default (`local_machine`
+`mac-work`, which matches no real machine). This page does not record whether
+the hub on oci runs with a policy file. The operator-approved draft for the real
 fleet — 3/3/2 task slots per `decision/2026-09-23/task-slots-per-machine` —
 is:
 
