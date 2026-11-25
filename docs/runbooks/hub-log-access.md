@@ -13,7 +13,9 @@ no entries for the unit. This page does not record how those rights are
 granted on oci; ask the operator for them.
 
 The hub's `--log-file` flag, which writes a group-readable copy of the log,
-is described in [docs/hub-r6.md](../hub-r6.md).
+is described in [docs/hub-r6.md](../hub-r6.md); its `--log-file` paragraph
+carries the operating constraints (the hub service user must own the file,
+and log rotation must use `copytruncate` or a unit restart).
 
 History: this page used to describe reading the hub's logs on the former
 hub host ncp, which was returned on 2026-11-24. Those NCP-specific steps are

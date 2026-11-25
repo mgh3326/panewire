@@ -117,10 +117,16 @@ twice. A heartbeat without the field changes nothing.
 appended to that file. The hub opens it `O_APPEND|O_CREATE` and forces mode
 `0640` at every startup — a pre-existing permissive file is tightened rather
 than kept world-readable — and an unwritable path rejects hub startup.
-Stderr (the journald stream under systemd) is unchanged byte-for-byte, and
-the logger never prints token values, so the file carries none either. The
-flag exists for hosts where the journal is root-only and a non-root
-operator still needs the hub's own words; reading hub logs on oci is covered
+The hub service user must own the file: the hub opens it `O_WRONLY` and then
+re-applies `0640` with `chmod`, so a file owned by another user (even a
+group-writable one) fails the chmod and rejects startup, which crash-loops
+under `Restart=always`. The hub holds the descriptor open and never reopens
+it, so rename-based logrotate leaves it writing to the rotated inode; use
+`copytruncate` or restart the unit. Stderr (the journald stream under
+systemd) is unchanged byte-for-byte, and the logger never prints token
+values, so the file carries none either. The flag exists for hosts where the
+journal is root-only and a non-root operator still needs the hub's own
+words; reading hub logs on oci is covered
 in [docs/runbooks/hub-log-access.md](runbooks/hub-log-access.md).
 
 ## Protocol
@@ -325,7 +331,10 @@ The hub runs on host `oci`. History: the hub ran on the former host ncp until
 it moved off that host (hk 4893), and ncp was returned on 2026-11-24.
 
 1. On `oci` the hub runs as the systemd unit `panewire-hub.service` under user
-   `opc`. A wrapper loads its secrets from Infisical at start. Keep secret
+   `opc`, with `Restart=always` and `TimeoutStopSec` of 45 s or more so the
+   SIGTERM drain can finish (see [hub-drain.md](hub-drain.md)). A wrapper loads
+   its secrets from Infisical at start, and its final command must pass
+   `--listen 127.0.0.1:9377` and `--hub-auth <0600 regular file>`. Keep secret
    values out of the unit file and the command line. A unit that still passes
    `--hub-tg-env` refuses to start: drop that flag before deploy (hk 4442).
 2. The hub listens on loopback `127.0.0.1:9377`. Verify locally with
