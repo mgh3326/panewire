@@ -28,8 +28,8 @@ classes or types from old emitters/daemons are classified at the upgraded hub. A
 hub does not understand explicit classes or types: upgrade the hub first, then nodes and
 emitters. An old daemon drops the explicit overrides, so only hub policy applies
 until that node upgrades. On the operator ingress path to an inbox-only lane,
-`delivery_class=interrupt` also sends `deliver=now`
-([Inbox-only lanes](#inbox-only-lanes), hk 6553).
+`delivery_class=interrupt` sends `deliver=directive` unless `deliver=now` is
+also given ([Inbox-only lanes](#inbox-only-lanes), hk 6553).
 
 ## Policy
 
@@ -338,10 +338,10 @@ One kind of traffic keeps its existing delivery in every lane:
   with the operator token, when the event asks for immediate delivery
   (`deliver=now` or `delivery_class=interrupt`) or carries no `notify_type`.
   This is the explicit operator path into a pane, so it is kept. The hub sends
-  with `deliver=now`, so the node types it at once; an event that asks with
-  `delivery_class=interrupt` gets `deliver=now` too (hk 6553; see the [R24
-  HTTP ingress](r24-http-ingress.md) contract). An untyped event with neither
-  keeps the `deliver` it was sent with. A typed
+  `deliver=now` as `deliver=now`; one that asks only with
+  `delivery_class=interrupt` gets `deliver=directive`, held while its pane is
+  blocked (hk 6553; see the [R24 HTTP ingress](r24-http-ingress.md) contract).
+  An untyped event with neither keeps the `deliver` it was sent with. A typed
   ingress event that asks for neither is filed like a node-relayed one (hk
   6338). A restart replay of such a row is filed like any other item.
 
