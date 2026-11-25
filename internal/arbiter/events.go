@@ -143,6 +143,9 @@ func (s *Store) recordEvent(ctx context.Context, c *conn, job, kind string, payl
 // recordEventGuarded is recordEvent with AppendEventIf's guard, run once under
 // the events lock before the event is numbered.
 func (s *Store) recordEventGuarded(ctx context.Context, c *conn, job, kind string, payload map[string]any, seq *int, guard func() error) (int, error) {
+	if s.Inbox == "" {
+		return 0, errf(ExitStorage, "cannot record event: inbox path is empty")
+	}
 	dir := s.eventsDir(job)
 	if e := os.MkdirAll(dir, 0o755); e != nil {
 		return 0, errf(ExitStorage, "cannot create the events directory: %v", e)
@@ -210,6 +213,9 @@ func (s *Store) eventsLockPath(job string) string {
 func (s *Store) LockEvents(ctx context.Context, job string) (func(), error) {
 	if e := validJobID(job); e != nil {
 		return nil, e
+	}
+	if s.Inbox == "" {
+		return nil, errf(ExitStorage, "cannot lock events: inbox path is empty")
 	}
 	lock, e := os.OpenFile(s.eventsLockPath(job), os.O_WRONLY|os.O_CREATE, 0o644)
 	if e != nil {
