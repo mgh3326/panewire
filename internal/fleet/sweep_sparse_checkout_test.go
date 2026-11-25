@@ -178,7 +178,7 @@ func TestCheckoutSweepRemovesASparseJobCheckout(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	f.withGit(g)
 	realGitRunner(f)
-	sweep := &CheckoutSweep{WorkRoot: g.workRoot, OrphanOwner: func(string) string { return "" }, Info: f.sweeper.Info}
+	sweep := &CheckoutSweep{WorkRoot: g.workRoot, OrphanOwner: func(string) CheckoutOrphan { return CheckoutOrphan{} }, Info: f.sweeper.Info}
 	id := "consult-9-sweep1"
 	cwd := sparseSweepCheckout(t, g.workRoot, id)
 	pane := f.job(id, "consult", "", map[string]any{"cwd": cwd})
