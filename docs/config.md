@@ -1161,6 +1161,10 @@ and `refs.job_id` from the parent to the new job through `handoffkeep tasks
 rebind`, regardless of the parent's state. When the task is still bound to an
 earlier job in the parent's `--parent-job` chain, the successor follows the
 chain and rebinds from that ancestor holder; unrelated holders are refused.
+If the rebind conflicts, the successor rereads the task: a binding already
+moved to the successor is confirmed as success, and a binding moved to another
+valid holder in that same chain is retried from the current holder. A conflict
+whose current holder is outside the chain remains a refusal.
 Only implementer spawns take over; reviewer and consult children do not.
 Spawns with `--task`, or neither flag and
 no `ARBITER_JOB`, claim as before.
