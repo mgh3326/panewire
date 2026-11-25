@@ -131,8 +131,11 @@ carries no `notify_type`:
 
 - `deliver=now` or `delivery_class=interrupt`: exempt, and typed into the pane
   as an interrupt whatever its type or class. A working pane, a desk lane or a
-  quiet design lane does not hold it back. Its handoffkeep row is written as for
-  any other ingress event, and the response `id` is that row's id.
+  quiet design lane does not hold it back. The hub sends its `relay.inject`
+  with `deliver=now`, so the node types it at once; an explicit `deliver=idle`
+  or `max_wait=...` sent with `delivery_class=interrupt` is overridden to `now`
+  (hk 6553). Its handoffkeep row is written as for any other ingress event, and
+  the response `id` is that row's id.
 - no `notify_type` (the operator's own words): exempt. Its class is decided as
   for any lane (type map, rules, idle promotion), so it is typed only when that
   class is interrupt.
