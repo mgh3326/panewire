@@ -90,7 +90,7 @@ func TestHubStoreCopyOlderSourceReadsPresentTable_t6486(t *testing.T) {
 // written before hk 6384 has none of the delivery tables. The copy completes,
 // and each of those tables is reported as an empty copy. Before the tolerance
 // covered the high-water read, this copy failed after the target was written.
-func TestHubStoreCopyFromOlderMySQLSourceWithoutDeliveryTables_t6486(t *testing.T) {
+func TestHubStoreCopyFromOlderSourceWithoutDeliveryTables_t6486(t *testing.T) {
 	mysqlConfig, mysqlURL := hubMySQLTestDatabase(t)
 	_, pgURL := hubPostgresTestSchema(t)
 	source, err := openLaneInboxStoreMySQLConfig(t.Context(), mysqlConfig)

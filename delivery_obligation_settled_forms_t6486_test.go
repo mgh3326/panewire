@@ -52,7 +52,7 @@ func TestStoredEventKeyFormsPostgres_t6486(t *testing.T) {
 // keeps the digest form of an oversized key on the lane_inbox item, while an
 // obligation created afterwards stores the raw key. The item delivered to the
 // receiver must still settle the obligation. Killed by: an exact-form join.
-func TestObligationInboxSettledMatchesDigestItem_t6486(t *testing.T) {
+func TestObligationStoreContractSettlesDigestItem_t6486(t *testing.T) {
 	config, _ := hubPostgresTestSchema(t)
 	s, err := openLaneInboxStorePostgresConfig(t.Context(), config.Copy())
 	if err != nil {
