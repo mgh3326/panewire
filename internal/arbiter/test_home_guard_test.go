@@ -43,3 +43,21 @@ func TestForbidHomeForTestsPanicsOnStoreUnderHome(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEmptyInboxRefusesEventWriteUnderForbiddenHome(t *testing.T) {
+	home := t.TempDir()
+	t.Chdir(home)
+	ForbidHomeForTests(home)
+	s := &Store{DB: StatePath(filepath.Join(t.TempDir(), "data")), Inbox: ""}
+
+	if _, err := s.AppendEvent(t.Context(), "job-1", "job.note", nil, nil); err == nil {
+		t.Fatal("AppendEvent with empty inbox unexpectedly succeeded")
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("empty inbox created files under forbidden home: %v", entries)
+	}
+}
