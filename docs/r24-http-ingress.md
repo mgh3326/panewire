@@ -118,5 +118,31 @@ node path. The hub records that durable ID for future local duplicates, does
 not inject on this `200` path, and releases the active relay claim so ordinary
 undelivered replay can inject the row later.
 
-`reason='http_ingress:<label>'` is the durable source mapping for all HTTP
-ingress rows.
+`reason='http_ingress:<label>'` is the durable source mapping for every HTTP
+ingress row that reaches handoffkeep (see the inbox-only section for the one
+exception).
+
+## Inbox-only lanes (hk 6338)
+
+A design, desk or worker-trial lane is inbox-only
+([quiet-delivery.md](quiet-delivery.md#inbox-only-lanes)). An ingress event to
+one of them is exempt from that rule only when it asks for immediate delivery or
+carries no `notify_type`:
+
+- `deliver=now` or `delivery_class=interrupt`: exempt, and typed into the pane
+  as an interrupt whatever its type or class. A working pane, a desk lane or a
+  quiet design lane does not hold it back. Its handoffkeep row is written as for
+  any other ingress event, and the response `id` is that row's id.
+- no `notify_type` (the operator's own words): exempt. Its class is decided as
+  for any lane (type map, rules, idle promotion), so it is typed only when that
+  class is interrupt.
+- any other typed event, such as `notify_type=info` or `order`: filed unread in
+  the lane's inbox and never typed. A wake-worthy one (an order, for example)
+  gets the lane's one-line wake; a pure info item wakes nothing. Its `deliver`
+  values `idle`, `directive` and `max_wait=N` do not make it immediate.
+
+A filed event writes no handoffkeep row, so no `reason='http_ingress:<label>'`
+row exists for it. Its response `id`, and the `id` of a later `409`, is the
+lane's inbox item id, with `routed: true` and `machine: "inbox"`.
+
+A lane that is not inbox-only receives every ingress event exactly as before.

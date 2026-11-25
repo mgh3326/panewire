@@ -333,8 +333,11 @@ list turns a class off.
 One kind of traffic keeps its existing delivery in every lane:
 
 - events the operator posts through the [R24 HTTP ingress](r24-http-ingress.md)
-  with the operator token. This is the explicit operator path into a pane, so it
-  is kept. A restart replay of such a row is filed like any other item.
+  with the operator token, when the event asks for immediate delivery
+  (`deliver=now` or `delivery_class=interrupt`) or carries no `notify_type`.
+  This is the explicit operator path into a pane, so it is kept. A typed
+  ingress event that asks for neither is filed like a node-relayed one (hk
+  6338). A restart replay of such a row is filed like any other item.
 
 The hub's digest and hold batches are not typed into an inbox-only lane
 either. A batch built for one (an item stored before the lane became

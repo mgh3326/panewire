@@ -391,7 +391,8 @@ type hubJobEventPayload struct {
 	// refuses them unless the lane resolves to a sink route.
 	sinkOnly bool
 	// operatorIngress marks an event the operator posted through the R24
-	// HTTP ingress; the inbox-only rule leaves it as before (hk 3602).
+	// HTTP ingress; the inbox-only rule leaves an immediate or untyped one as
+	// before, and files a typed one that asks for neither (inboxOnlyExempt, hk 6338).
 	operatorIngress bool
 }
 
