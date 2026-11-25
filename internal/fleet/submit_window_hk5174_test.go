@@ -230,7 +230,7 @@ func TestConfirmBriefEndsBeforeNodeDeadlineWhenSendSpentTheFloor(t *testing.T) {
 	remaining := briefCaptureNeed + 2*time.Second
 	ctx, cancel := context.WithTimeout(t.Context(), remaining)
 	defer cancel()
-	err := a.confirmBrief(ctx, "claude", "w:p1", claudeTestBrief, claudeScreenEmpty())
+	_, err := a.confirmBrief(ctx, "claude", "w:p1", claudeTestBrief, claudeScreenEmpty())
 	m := windowCutRE.FindStringSubmatch(errText(err))
 	if code(err) != exitSubmitUnconfirmed || !strings.Contains(errText(err), "BRIEF_SUBMISSION_UNCONFIRMED") || m == nil {
 		t.Fatalf("err=%v", err)
