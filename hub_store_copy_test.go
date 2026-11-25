@@ -347,6 +347,11 @@ func makeCopySQLiteFixture(t *testing.T, mysql *sql.DB, path string, names []str
 	if _, err = db.Exec(`CREATE TABLE lane_inbox_id_floor (singleton INTEGER, floor INTEGER); INSERT INTO lane_inbox_id_floor VALUES (1, 50)`); err != nil {
 		t.Fatal(err)
 	}
+	// The rows come from a migrated MySQL source, so its succeeded-notice
+	// backfill has run (hk 6283); the copier refuses a SQLite source without it.
+	if _, err = db.Exec(`PRAGMA user_version=1`); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestHubStoreCopySQLiteReadOnly(t *testing.T) {
