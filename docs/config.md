@@ -529,9 +529,10 @@ node's next registration (reconnect or restart). The admission rules are in
 Two steps are **not proven safe** for N>1, and they are the boundary of this
 opt-in (hk 4821):
 
-- herdr workspace create/resolve across processes and versions: an older
-  launcher, or one with a different state home, does not share the
-  workspace lock, so a missing workspace label can be created twice;
+- herdr workspace create/resolve across processes and versions: a hand-run
+  herdr write, or an older launcher with a different state home, does not
+  share the workspace lock, so a missing workspace label can be created twice
+  ([the host lock](#workspace-create-and-the-host-lock-hk-4821));
 - worktree identity between admission and prepare: the admission key is the
   job-dir name (and the case-folded job id), while `work_root` and symlinks
   are read again later, so two distinct keys can reach one directory.
@@ -2573,16 +2574,87 @@ Omitting `-w` uses the executing host's `local.workspace`. Remote delegation
 uses the target host's configured workspace, not the caller's label. Name a
 workspace by label (`workers`), not by id: herdr deletes a workspace when its
 last pane closes, so spawn recreates a label that matches zero workspaces with
-`herdr workspace create --label` and uses the new id. Two spawns may race; the
-re-list keeps the oldest match and closes nothing. A label with more than one
-match still refuses and tells the caller to pass the exact workspace id. An
-explicit workspace id is used only while that host/session's `herdr workspace
-list` still contains it; a vanished id refuses and names the label fix.
+`herdr workspace create --label` and uses the new id. A label with more than one
+match refuses and tells the caller to pass the exact workspace id; spawn never
+picks one. An explicit workspace id is used only while that host/session's
+`herdr workspace list` still contains it; a vanished id refuses and names the
+label fix.
 
 A spawn that created a workspace closes only its own tab there when the launch
 fails, never the workspace, so a workspace another spawn adopted keeps that
 spawn's tab and live session. Herdr closes the workspace with its last tab, so
 an unused created workspace still disappears.
+
+### Workspace create and the host lock (hk 4821)
+
+Herdr itself does not keep a label unique, so panewire serializes its own
+writers. The guarantee covers panewire binaries from hk 6434 on that run as the
+same uid on the herdr host:
+
+- at most one of them at a time creates a workspace for an absent label in a
+  herdr session. This also excludes an older binary that shares their state
+  directory (`HOME`, `XDG_STATE_HOME`);
+- one that finds the label on more than one workspace after its own create
+  closes the tab it created, lists once more, and uses the label's workspace
+  only when exactly one is left; otherwise it refuses with the "matched N
+  entries" message and picks none;
+- none closes a tab it did not create. A spawn adopts a workspace by label and
+  opens its own tab there.
+
+It does not promise exactly one workspace against every writer:
+
+| Writer | Resolves through panewire | Shares the lock |
+|---|---|---|
+| hub spawn on a node (any `spawn_concurrency`) | yes | yes |
+| local `panewire spawn`, or one delegated over SSH, from hk 6434 on | yes | yes, whatever its `HOME` or state directory |
+| older panewire binary with the same state directory | yes | yes, through the state-directory lock, during the rollout |
+| older panewire binary with another state directory | yes | no |
+| any panewire binary under another uid | yes | no |
+| hand-run `herdr workspace create` or `rename` | no | never |
+| herdr itself (deleting an empty workspace) | no | never |
+
+A writer that does not share the lock can still leave two workspaces with one
+label, and so can a create whose response is lost and then retried. A spawn from
+hk 6434 on that sees both refuses; an older binary still takes the oldest after
+its own create. The node's pane sweep
+[reports a duplicated label](pane-sweep.md#duplicate-workspaces); close or
+rename all but one by hand.
+
+**Locks.** A spawn holds two file locks, always in this order, across the
+list-then-create decision, and waits for each until the spawn's own deadline:
+
+1. the host lock, `/tmp/panewire-<uid>/herdr-locks/<hash>.lock`, where the hash
+   names the herdr session and label. The path comes from the numeric uid alone:
+   `HOME`, `XDG_STATE_HOME` and `TMPDIR` do not move it;
+2. the state-directory lock, `<state dir>/workspace-locks/<hash>.lock`, which
+   older binaries take. It stays until no older launcher remains; removing it is
+   a later change.
+
+**One `/tmp`.** The host lock excludes only writers that see the same `/tmp`.
+A service with `PrivateTmp=yes`, or a container, has its own and shares only the
+state-directory lock; the shipped `deploy/panewired.service` sets no private
+`/tmp`.
+
+**Unsafe lock root.** `/tmp/panewire-<uid>` and its `herdr-locks` directory are
+created mode 0700, and each must be a real directory (not a link) owned by that
+uid with no group or other write. Otherwise the spawn refuses before any herdr
+call, with exit status 70 (configuration) and refusal code
+`workspace_lock_root_unsafe`:
+
+    workspace_lock_root_unsafe: workspace lock root PATH is not a private directory of uid UID (owner N, mode M, link BOOL); remove it as its owner or root, then retry
+
+This fails closed on purpose: another local user who creates the path first
+denies that uid's spawns until it is removed. Remove the named path as its owner
+or as root; the next spawn creates it again.
+
+**What the lock cannot cover.** After taking the locks, a spawn sets the lock
+file's, the directory's and the root's access and modification times to now, so
+an age-based `/tmp` cleaner (macOS `clean-tmps`, `systemd-tmpfiles`) does not
+select a held lock. A lock file replaced between its open and its lock is opened
+again. Two spawns can still hold the lock at once when someone deletes the lock
+file or its directory by hand while it is held, or a cleaner removes files
+younger than one spawn call. At worst a duplicate workspace results, which
+refuses. Do not delete under `/tmp/panewire-<uid>` while spawns run.
 
 ## Failed spawn retries
 
