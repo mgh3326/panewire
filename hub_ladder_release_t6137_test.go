@@ -68,9 +68,19 @@ func TestLadderReleaseNoticeIsDurableUntilRelayed(t *testing.T) {
 	if !strings.Contains(seen[0], "Reason: relay down at release") {
 		t.Fatalf("relayed notice %q does not carry the release's reason", seen[0])
 	}
-	if err := f.hub.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notice_outbox WHERE event_id=?`, eventID).Scan(&owed); err != nil || owed != 0 {
-		t.Fatalf("outbox rows after delivery=%d err=%v; want 0", owed, err)
+	// The owner's lane takes the notice inside the relay call, but the hub clears
+	// the outbox row only after that call returns (routeLadderReleaseNotice). Wait
+	// for the row to clear, the outcome asserted here.
+	outboxRows := func() int {
+		var n int
+		if err := f.hub.inbox.store.db.QueryRow(`SELECT count(*) FROM spawn_notice_outbox WHERE event_id=?`, eventID).Scan(&n); err != nil {
+			t.Errorf("counting outbox rows: %v", err)
+		}
+		return n
 	}
+	eventually(t, 10*time.Second, "the delivered notice's outbox row to clear", func() bool {
+		return outboxRows() == 0
+	})
 	// A repeat answers the same release and, the notice being delivered, files
 	// nothing more.
 	again := releaseLadderHTTP(t, f.hub, stageID, t14OperatorToken, "", "a different reason")
