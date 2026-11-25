@@ -162,8 +162,9 @@ func validHandoffkeepBaseURL(raw string) bool {
 	return host == "localhost" || (ip != nil && (ip.IsLoopback() || isTailnetIPv4(ip)))
 }
 
-// handoffkeepRelayClient is the hub's only durable dependency. The hub keeps no
-// relay state of its own; this is the canonical record.
+// handoffkeepRelayClient is the hub's canonical relay record: a relay event and
+// its delivery live in handoffkeep. The hub's delivery obligations only track
+// those rows (delivery_obligation_reconcile.go).
 type handoffkeepRelayClient struct {
 	baseURL *url.URL
 	env     hubHandoffkeepEnv

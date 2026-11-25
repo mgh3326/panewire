@@ -48,6 +48,10 @@ func openLaneInboxStorePostgresConfig(ctx context.Context, config *pgx.ConnConfi
 	}
 	store := newLaneInboxStore(db, dialectPostgres)
 	store.succeededNoticesMarked = marked
+	if err := store.seedDeliveryReconcilerState(ctx); err != nil {
+		store.close()
+		return nil, hubDatabaseError("seed", err)
+	}
 	return store, nil
 }
 

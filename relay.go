@@ -367,6 +367,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.broadcastRelayUnpersisted("lane.event", event)
 		return relayLaneEventResult{PersistFailed: true, PersistStatus: status}
 	}
+	h.recordObligation(key, "lane.event", event, route, stored)
 	// #725: the durable text now names this identity for the rest of the
 	// process, so every future resend can be compared against it — including
 	// the resends that never reach a second POST.
@@ -408,7 +409,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		return relayLaneEventResult{ID: stored.ID, AlreadyDelivered: true}
 	}
 	if route.Sink {
-		if err := h.handoffkeep.markDelivered(ctx, stored.ID, "sink", "sink:"+event.OwnerLane); err != nil {
+		if err := h.handoffkeep.markDelivered(ctx, stored.ID, relaySinkMachine, "sink:"+event.OwnerLane); err != nil {
 			h.logger.Warn("sink relay delivery was not recorded", "event_id", stored.ID, "lane", event.OwnerLane)
 			// The durable row remains undelivered for operator observation, but a
 			// sink never falls back to a pane injection.
@@ -501,6 +502,7 @@ func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine,
 	}
 	h.rememberRelayEvent(key, stored.ID)
 	h.linkInboxRelayID(key, stored.ID)
+	h.recordObligation(key, kind, event, route, stored)
 	if relayEventAlreadyDelivered(status, stored, event) {
 		// handoffkeep already holds this record as delivered, so the note is in
 		// the pane. The node still owes its outbox row an answer: acknowledge,

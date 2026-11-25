@@ -269,7 +269,18 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
-	return newLaneInboxStore(db, dialectSQLite), nil
+	for _, q := range deliveryObligationSchema {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	store := newLaneInboxStore(db, dialectSQLite)
+	if err := store.seedDeliveryReconcilerState(ctx); err != nil {
+		store.close()
+		return nil, err
+	}
+	return store, nil
 }
 
 // laneInboxOpTimeout bounds every store call, including one makeBatches

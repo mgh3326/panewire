@@ -179,7 +179,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|inbox_|hub_inbox|hub_postgres|hub_mysql|hub_database|hub_sql|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_(postgres|mysql)_migrations/'; then
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|delivery_obligation|inbox_|hub_inbox|hub_postgres|hub_mysql|hub_database|hub_sql|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_(postgres|mysql)_migrations/'; then
             echo "store=true" >> "$GITHUB_OUTPUT"
           else
             echo "store=false" >> "$GITHUB_OUTPUT"
@@ -218,7 +218,7 @@ jobs:
         # A skip here would mean the Postgres half silently did not run.
         run: |
           set -o pipefail
-          go test -race -count=2 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensPostgresInbox|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-test.log"
+          go test -race -count=2 -v -run 'LaneInboxStore|ObligationStoreContract|MustAck|IdleWakeKeepsRead|HubServerOpensPostgresInbox|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-test.log"
           # The MySQL half of a shared test skips here (no MySQL service in this job).
           if grep -- '--- SKIP' "$RUNNER_TEMP/postgres-test.log" | grep -qiv mysql; then
             echo "a Postgres test skipped"; exit 1
@@ -232,7 +232,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -count=1 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead' . 2>&1 | tee "$RUNNER_TEMP/postgres-store.log"
+          go test -count=1 -v -run 'LaneInboxStore|ObligationStoreContract|MustAck|IdleWakeKeepsRead' . 2>&1 | tee "$RUNNER_TEMP/postgres-store.log"
           if grep -- '--- SKIP' "$RUNNER_TEMP/postgres-store.log" | grep -qiv mysql; then
             echo "a Postgres test skipped"; exit 1
           fi
@@ -308,7 +308,7 @@ jobs:
         # the postgres job.
         run: |
           set -o pipefail
-          go test -race -count=2 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensMySQLInbox|HubDatabaseURL|MySQL' . 2>&1 | tee "$RUNNER_TEMP/mysql-test.log"
+          go test -race -count=2 -v -run 'LaneInboxStore|ObligationStoreContract|MustAck|IdleWakeKeepsRead|HubServerOpensMySQLInbox|HubDatabaseURL|MySQL' . 2>&1 | tee "$RUNNER_TEMP/mysql-test.log"
           if grep -- '--- SKIP' "$RUNNER_TEMP/mysql-test.log" | grep -qiE 'mysql'; then
             echo "a MySQL test skipped"; exit 1
           fi
@@ -321,7 +321,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -count=1 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensMySQLInbox|HubDatabaseURL|MySQL' . 2>&1 | tee "$RUNNER_TEMP/mysql-store.log"
+          go test -count=1 -v -run 'LaneInboxStore|ObligationStoreContract|MustAck|IdleWakeKeepsRead|HubServerOpensMySQLInbox|HubDatabaseURL|MySQL' . 2>&1 | tee "$RUNNER_TEMP/mysql-store.log"
           if grep -- '--- SKIP' "$RUNNER_TEMP/mysql-store.log" | grep -qiE 'mysql'; then
             echo "a MySQL test skipped"; exit 1
           fi
