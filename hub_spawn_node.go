@@ -293,10 +293,14 @@ func (client *HubClient) awaitSpawnAdmission(ctx, admissionCtx context.Context, 
 		release, changed, rootChanged := admission.tryAdmitTarget(key, client.nodeSpawnSlots(), target, client.nodeWorkRoot)
 		if rootChanged {
 			client.answerUnclaimedSpawn(ctx, peer, journal, message, func() {
-				client.sendSpawnResult(ctx, peer, hubSpawnResult{
+				result := hubSpawnResult{
 					RequestID: message.RequestID, JobID: target.Identity.Job,
-					RC: 81, Stage: "checkout", Error: "checkout_refused:work_root_changed", Retryable: true,
-				}, message.OperatorAuthorized)
+					RC: 81, Stage: "checkout", Error: "checkout_refused:work_root_changed",
+					StdoutTail: "Fix: wait for the running checkout to finish and retry, or restore work_root.",
+					Retryable:  true,
+				}
+				client.recordHubSpawnOutcome(message, result, "work_root_changed", "rc=81", client.fleetClock()())
+				client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
 			})
 			return nil, false
 		}
