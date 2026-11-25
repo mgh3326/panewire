@@ -253,7 +253,7 @@ func New(out, errout io.Writer) (*App, error) {
 	a.LoadRatio = a.loadRatio
 	a.Version = BuildVersion
 	a.EnforceTrust = true
-	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
+	if v := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(v) {
 		a.StateDir = filepath.Join(v, "panewire")
 	}
 	return a, nil
