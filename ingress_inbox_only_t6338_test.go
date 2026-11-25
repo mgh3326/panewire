@@ -45,6 +45,25 @@ func t6338AwaitTyped(t *testing.T, r *t3602Rig, pane, text string) {
 	})
 }
 
+// t6338AwaitInjected waits for the relay.inject that carries the body text to
+// pane and returns it, so a test can assert the deliver policy it carries.
+func t6338AwaitInjected(t *testing.T, r *t3602Rig, pane, text string) hubRelayInjectEvent {
+	t.Helper()
+	var got []hubRelayInjectEvent
+	var found hubRelayInjectEvent
+	eventually(t, 5*time.Second, "the body injected into "+pane, func() bool {
+		got = append(got, t3426Injected(r.agent)...)
+		for _, injected := range got {
+			if injected.Pane == pane && strings.Contains(injected.Text, text) {
+				found = injected
+				return true
+			}
+		}
+		return false
+	})
+	return found
+}
+
 // (a) A typed ingress info to an idle design lane is filed unread, not typed,
 // and -- being pure info -- wakes nothing.
 func TestIngressInfoToDesignLaneIsFiledNotTyped(t *testing.T) {
@@ -180,6 +199,40 @@ func TestInboxOnlyExemptIngressRule(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := inboxOnlyExempt(tc.e); got != tc.want {
 				t.Fatalf("inboxOnlyExempt(%+v) = %t, want %t", tc.e, got, tc.want)
+			}
+		})
+	}
+}
+
+// PR #874 review (hk 6553, hub_inbox.go:291): an ingress event with
+// delivery_class=interrupt and no deliver=now is forced to the interrupt class
+// on an inbox-only lane. Its relay.inject must carry the deliver policy the
+// node acts on: an idle-policy inject is held while the pane is working
+// (busy_relay.go:478-482), so the forced class sets directive, typed at once on
+// a working pane and held while blocked. PR #899 review (hk 6553,
+// hub_inbox.go:294): deliver=now types into a blocked pane's approval prompt
+// (busy_relay.go:457-461), so it is kept only when the sender asked for it. An
+// explicit deliver=idle with delivery_class=interrupt is contradictory input;
+// the interrupt class wins, as the docs state for the immediate branch.
+func TestIngressDeliveryClassInterruptPolicyByPaneState(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		extra        map[string]any
+		want         string
+	}{
+		{"interrupt-working", "working", map[string]any{"notify_type": "order", "delivery_class": "interrupt"}, relayDeliverDirective},
+		{"interrupt-explicit-idle-working", "working", map[string]any{"notify_type": "order", "delivery_class": "interrupt", "deliver": "idle"}, relayDeliverDirective},
+		{"interrupt-blocked", "blocked", map[string]any{"notify_type": "order", "delivery_class": "interrupt"}, relayDeliverDirective},
+		{"deliver-now-blocked", "blocked", map[string]any{"notify_type": "order", "delivery_class": "interrupt", "deliver": "now"}, "now"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newT3602Rig(t, "default")
+			t6338SetPaneStatus(t, r, "w1:design", tc.status)
+			text := "hk 6553 interrupt " + tc.name
+			t6338Post(t, r, t6338Ingress(t3602Design, "t6553-"+tc.name, text, tc.extra))
+			injected := t6338AwaitInjected(t, r, "w1:design", text)
+			if injected.Deliver != tc.want {
+				t.Fatalf("relay.inject deliver=%q on a %s pane, want %q", injected.Deliver, tc.status, tc.want)
 			}
 		})
 	}

@@ -129,17 +129,26 @@ A design, desk or worker-trial lane is inbox-only
 one of them is exempt from that rule only when it asks for immediate delivery or
 carries no `notify_type`:
 
-- `deliver=now` or `delivery_class=interrupt`: exempt, and typed into the pane
-  as an interrupt whatever its type or class. A working pane, a desk lane or a
-  quiet design lane does not hold it back. Its handoffkeep row is written as for
-  any other ingress event, and the response `id` is that row's id.
+- `deliver=now`: exempt, and typed into the pane as an interrupt whatever its
+  type or class. The hub sends its `relay.inject` with `deliver=now`, so the
+  node types it at once, a blocked pane's approval prompt included.
+- `delivery_class=interrupt` without `deliver=now`: exempt, and typed as an
+  interrupt whatever its type. The hub sends its `relay.inject` with
+  `deliver=directive` (hk 6553): typed at once while the pane is idle or
+  working, and held while it is `blocked` (a harness that cannot prove typing
+  into a working pane holds it while working, as for any directive). An
+  explicit `deliver=idle` or `max_wait=...` sent with it is overridden to
+  `directive`. A desk lane or a quiet design lane is not held back by its
+  class alone. Its handoffkeep row is written as for any other ingress event,
+  and the response `id` is that row's id.
 - no `notify_type` (the operator's own words): exempt. Its class is decided as
   for any lane (type map, rules, idle promotion), so it is typed only when that
   class is interrupt.
 - any other typed event, such as `notify_type=info` or `order`: filed unread in
   the lane's inbox and never typed. A wake-worthy one (an order, for example)
-  gets the lane's one-line wake; a pure info item wakes nothing. Its `deliver`
-  values `idle`, `directive` and `max_wait=N` do not make it immediate.
+  gets the lane's one-line wake; a pure info item wakes nothing. Only `deliver=now`
+  or `delivery_class=interrupt` makes it immediate; the `deliver` values `idle`,
+  `directive` and `max_wait=N` do not, on their own.
 
 A filed event writes no handoffkeep row, so no `reason='http_ingress:<label>'`
 row exists for it. Its response `id`, and the `id` of a later `409`, is the

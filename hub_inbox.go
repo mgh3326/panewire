@@ -287,8 +287,16 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		// whatever its class. A working or summary-bearing lane never promotes
 		// an info to interrupt, and a quiet design lane files a ready, so the
 		// class is forced here; an interrupt is not claimed by receiveInbox and
-		// takes the normal persist-and-inject path.
+		// takes the normal persist-and-inject path. The node holds an idle-policy
+		// relay.inject while the pane is working, so the forced immediacy is also
+		// set as the deliver policy (hk 6553). Only an explicit deliver=now keeps
+		// now: it types into a blocked pane's approval prompt, so an interrupt
+		// class gets directive, typed at once on a working pane and held while
+		// blocked (busy_relay.go relayDeliverDirective, hk 3276).
 		class, holdClass = "interrupt", false
+		if event.DeliverPolicy != "now" {
+			event.DeliverPolicy = relayDeliverDirective
+		}
 		deadline, window = 0, 0
 		inboxOnly = ""
 	} else {

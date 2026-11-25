@@ -121,7 +121,8 @@ func inboxOnlyExempt(e hubJobEventPayload) bool {
 
 // inboxOnlyImmediate reports whether an operator ingress event asks for
 // immediate delivery (deliver=now or delivery_class=interrupt). Such an event
-// is typed on an inbox-only lane whatever its class (hub_inbox.go, hk 6338).
+// is typed on an inbox-only lane whatever its class (hub_inbox.go, hk 6338),
+// with the deliver policy now, or directive for an interrupt class (hk 6553).
 func inboxOnlyImmediate(e hubJobEventPayload) bool {
 	return e.operatorIngress && (e.DeliverPolicy == "now" || e.DeliveryClass == "interrupt")
 }
