@@ -223,7 +223,9 @@ for non-secret local URLs.
 The copier uses a single read-only snapshot and one connection per database.
 Stop all writers, including other hub processes, before using `--replace` or
 verifying. A failed copy must be investigated before changing the URL. The
-copier migrates the target and commits that before it checks the source, and the
-migration seeds `supersede_fence`, so the target is no longer empty after any
-failure past that point (a source on an older schema included): rerun with
+copier first checks that the source has run the succeeded-notice backfill (hk
+6283); a source that has not is refused with nothing written, and starting the
+source hub once on this build runs it. After that check the copier migrates the
+target and commits that, and the migration seeds `supersede_fence`, so the
+target is no longer empty after any failure past that point: rerun with
 `--replace`.

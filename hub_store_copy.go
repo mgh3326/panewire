@@ -158,6 +158,14 @@ func copyHubStore(ctx context.Context, from, to, selection string, verify, repla
 	if src.dialect == dialectPostgres && dst.dialect == dialectPostgres || src.dialect == dialectMySQL && dst.dialect == dialectMySQL {
 		return errors.New("source and target must use different backends")
 	}
+	// Before the target is migrated or written: a refusal leaves it untouched.
+	backfilled, err := storeCopySourceBackfilled(ctx, src)
+	if err != nil {
+		return err
+	}
+	if !backfilled {
+		return errStoreCopySourceNotBackfilled
+	}
 	var fenceExists bool
 	if dst.dialect == dialectPostgres {
 		err = dst.db.QueryRowContext(ctx, `SELECT to_regclass('supersede_fence') IS NOT NULL`).Scan(&fenceExists)
