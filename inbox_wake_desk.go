@@ -27,6 +27,9 @@ func (h *HubServer) inboxWakeDestination(routes map[string]reportRelayRoute, lan
 }
 
 func (h *HubServer) inboxWakeDesignRoute(routes map[string]reportRelayRoute, lane string, route reportRelayRoute, routed bool) (paneless bool, jobRoute reportRelayRoute, jobAgent *hubAgent, jobRouted bool, useJobRoute bool) {
+	if route.jobEnded {
+		return true, reportRelayRoute{}, nil, false, false
+	}
 	row, hasRow := routes[lane]
 	if !hasRow {
 		if route.jobRecord && routed {
