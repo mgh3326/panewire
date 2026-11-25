@@ -664,7 +664,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		case nodeOutcomeBusy:
 			valid = result.RetryAfterS > 0 && result.Worktree == nil
 		case nodePrepareBranchElsewhere, nodePrepareShaMissing, nodePrepareOriginMismatch,
-			nodePrepareSuccessorStale, nodePrepareBranchInUse,
+			nodePrepareSuccessorStale, nodePrepareBranchInUse, nodePrepareJobDirLink,
 			nodeOutcomeDirty, nodeRemoveLocked, nodeOutcomeGitFailed, nodeOutcomeGitTooOld,
 			nodeOutcomeCancelled:
 			valid = result.Worktree == nil && result.RetryAfterS == 0

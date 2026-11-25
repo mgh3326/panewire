@@ -356,7 +356,8 @@ the long-park owner notice are separate keys (`spawn_backoff_seconds`,
 
 A refusal that moves an `--host auto` request to the next host (the codes
 `cwd_unmapped`, `checkout_refused:dirty`, `checkout_refused:sha-missing`,
-`checkout_refused:branch-elsewhere`, `checkout_refused:branch_in_use`, the
+`checkout_refused:branch-elsewhere`, `checkout_refused:branch_in_use`,
+`checkout_refused:job_dir_link`, the
 first-run `spawn_failed:hooks_review`, `spawn_failed:trust_prompt`,
 `spawn_failed:omp_setup_wizard` and `spawn_failed:auth_unavailable`, and
 `launch_proof_failed`) rules its host out only for the launch backoff above

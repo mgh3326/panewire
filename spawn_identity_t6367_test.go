@@ -94,7 +94,7 @@ func TestDeadlineAndEventJobIDsNameEffectiveJob_t6367(t *testing.T) {
 	message.Args = purposeIsJobFlag(t, "-l", "review-a")
 	message.DeadlineMS = time.Now().Add(-time.Second).UnixMilli()
 
-	if result := client.runClaimedHubSpawn(t.Context(), message); result.Error != "deadline_not_started" || result.JobID != "review-a" {
+	if result := client.runClaimedHubSpawn(t.Context(), message, nil); result.Error != "deadline_not_started" || result.JobID != "review-a" {
 		t.Errorf("expired claim=%+v, want job review-a", result)
 	}
 	client.recordHubSpawnOutcome(message, hubSpawnResult{RequestID: message.RequestID}, "", "", time.Now())
@@ -205,13 +205,14 @@ func TestOverlapKeyReadsLauncherIdentity_t6367(t *testing.T) {
 		message := concurrencyMessage(1, "job-dir")
 		message.Args = tc.args
 		want := "dir:job-dir\x00job:" + tc.job
-		if node, hub := client.spawnAdmissionKey(message), hubSpawnOverlapKey(&hubSpawnRequest{Checkout: message.Checkout, Args: tc.args}); node != want || hub != want {
+		if node, hub := client.spawnTargetFor(message).Key, hubSpawnOverlapKey(&hubSpawnRequest{Checkout: message.Checkout, Args: tc.args}); node != want || hub != want {
 			t.Errorf("%q: node key %q, hub key %q, want %q", tc.args, node, hub, want)
 		}
 	}
 
-	// The last -L is the lane: the launcher enters it, so admission and the
-	// check after prepare must look at it.
+	// The last -L is the lane: the launcher enters it, so the check after
+	// prepare must look at it. The admission key stays the request's (hk 6402):
+	// a linked lane is refused after prepare, not admitted alone.
 	dir := filepath.Join(root, "job-lane")
 	if err := os.MkdirAll(filepath.Join(dir, "mock"), 0o700); err != nil {
 		t.Fatal(err)
@@ -225,8 +226,8 @@ func TestOverlapKeyReadsLauncherIdentity_t6367(t *testing.T) {
 	}
 	message := concurrencyMessage(2, "job-lane")
 	message.Args = []string{"--job", "job-lane", "-L", "mock", "-L", "live"}
-	if key := client.spawnAdmissionKey(message); key != "" {
-		t.Errorf("a linked last lane kept the key %q, want an exclusive admission", key)
+	if key, want := client.spawnTargetFor(message).Key, spawnOverlapKey("job-lane", message.Args); key != want {
+		t.Errorf("a linked last lane changed the key to %q, want %q", key, want)
 	}
 	if result := node.runHubSpawn(t.Context(), message); result.Error != "checkout_refused:lane_outside_worktree" || runs.Load() != 0 {
 		t.Errorf("runs=%d result=%+v, want lane_outside_worktree", runs.Load(), result)
