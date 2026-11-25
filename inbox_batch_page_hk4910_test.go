@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,6 +15,30 @@ import (
 // know about.
 func TestQuietBatchPageReadsOnChange(t *testing.T) {
 	const batchText = "1 interrupt events | lane lane-a | panewire inbox list --lane lane-a --unread"
+
+	t.Run("a full unchanged page does not reopen the gate", func(t *testing.T) {
+		now := time.Now().UTC()
+		_, hk, closeServer := newFakeHandoffkeep(t)
+		defer closeServer()
+		h, _ := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+		h.flushInbox()
+		for i := range laneInboxBatchPageLimit {
+			if _, err := h.inbox.store.db.Exec(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,'lane-a',?)`, fmt.Sprintf("unchanged-%03d", i), batchText); err != nil {
+				t.Fatal(err)
+			}
+		}
+		h.inbox.store.noteBatchesChanged()
+		if !h.inbox.batchPageDue(now) {
+			t.Fatal("noted batch write did not open the page gate")
+		}
+		batches, err := h.inbox.store.pendingBatchesForContext(h.closeCtx)
+		if err != nil || len(batches) != laneInboxBatchPageLimit {
+			t.Fatalf("full unchanged page: got %d batches, err=%v", len(batches), err)
+		}
+		if h.inbox.batchPageDue(now) {
+			t.Fatal("reading a full page with no removals reopened the gate")
+		}
+	})
 
 	t.Run("unchanged page is not re-read before the fallback", func(t *testing.T) {
 		now := time.Now().UTC()
@@ -42,6 +67,32 @@ func TestQuietBatchPageReadsOnChange(t *testing.T) {
 		batches, err := h.inbox.store.pendingBatches()
 		if err != nil || len(batches) != 0 {
 			t.Fatalf("pending batches after fallback read: %v err=%v", batches, err)
+		}
+	})
+
+	t.Run("a full page drains without waiting for the fallback", func(t *testing.T) {
+		const send = laneInboxBatchPageLimit + 50
+		now := time.Now().UTC()
+		fake, hk, closeServer := newFakeHandoffkeep(t)
+		defer closeServer()
+		h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+		// A backlog past one page, for a lane no route names: the flush persists
+		// each batch and marks it sent, so the page shrinks by what it took.
+		for i := range send {
+			if _, err := h.inbox.store.db.Exec(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,'lane-noroute','1 interrupt events | lane lane-noroute | panewire inbox list --lane lane-noroute')`, fmt.Sprintf("backlog-%03d", i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Two passes on a frozen clock: a full first page must reopen the gate
+		// on its own, or the backlog waits for the 1 s fallback (hk 4910).
+		h.flushInbox()
+		h.flushInbox()
+		fake.mu.Lock()
+		persisted := len(fake.stored)
+		fake.mu.Unlock()
+		batches, err := h.inbox.store.pendingBatches()
+		if err != nil || persisted != send || len(batches) != 0 || len(agent.relays) != 0 {
+			t.Fatalf("drained persisted=%d/%d pending=%d relays=%d err=%v", persisted, send, len(batches), len(agent.relays), err)
 		}
 	})
 
