@@ -273,8 +273,9 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	// inbox-only. Whatever the class above, the event is filed unread and never
 	// typed into the pane, digested or held; what would have been typed asks
 	// for the lane's coalesced one-line wake instead. Only an operator chat
-	// turn and an operator HTTP ingress event are exempt (inboxOnlyExempt);
-	// refuseInboxOnlyBody holds the same rule where a body would be typed.
+	// turn and an immediate or untyped operator HTTP ingress event are exempt
+	// (inboxOnlyExempt); refuseInboxOnlyBody holds the same rule where a body
+	// would be typed.
 	inboxOnly := h.inbox.policy.inboxOnlyClass(lane, h.now())
 	wake := false
 	if inboxOnly != "" && !inboxOnlyExempt(*event) {

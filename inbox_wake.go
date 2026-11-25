@@ -105,11 +105,18 @@ func inboxWakeRank(kind string) int {
 // inboxOnlyExempt names the only traffic the inbox-only rule never touches:
 // an operator chat turn the hub's own chat created (not a lane notification)
 // and an operator HTTP ingress event (R24, the operator's own path into a
-// pane). Both are private flags the hub sets where it creates the event; an
-// event id that merely looks like chat-N earns nothing. The hub's digest and
-// hold batches are not exempt: flushInbox files them (fileInboxOnlyBatch).
+// pane) that either asks for immediate delivery (deliver=now or
+// delivery_class=interrupt) or is untyped (no notify_type, the operator's own
+// words). A typed ingress event that asks for neither is filed like a
+// node-relayed one (hk 6338; docs/r24-http-ingress.md). Both are private flags
+// the hub sets where it creates the event; an event id that merely looks like
+// chat-N earns nothing. The hub's digest and hold batches are not exempt:
+// flushInbox files them (fileInboxOnlyBatch).
 func inboxOnlyExempt(e hubJobEventPayload) bool {
-	return e.operatorIngress
+	if !e.operatorIngress {
+		return false
+	}
+	return e.NotifyType == "" || e.DeliverPolicy == "now" || e.DeliveryClass == "interrupt"
 }
 
 // inboxWakeText is the wake line. N comes from a successful count read only.

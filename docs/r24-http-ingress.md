@@ -120,3 +120,19 @@ undelivered replay can inject the row later.
 
 `reason='http_ingress:<label>'` is the durable source mapping for all HTTP
 ingress rows.
+
+## Inbox-only lanes (hk 6338)
+
+A design, desk or worker-trial lane is inbox-only
+([quiet-delivery.md](quiet-delivery.md#inbox-only-lanes)). An ingress event to
+one of them keeps its pane delivery only when it asks for immediate delivery or
+carries no `notify_type`:
+
+- `deliver=now` or `delivery_class=interrupt`: typed into the pane, as before.
+- no `notify_type` (the operator's own words): typed, as before.
+- any other typed event, such as `notify_type=info` or `order`: filed unread in
+  the lane's inbox, never typed. A wake-worthy one (an order, for example) gets
+  the lane's one-line wake; a pure info item wakes nothing. Its `deliver` values
+  `idle`, `directive` and `max_wait=N` do not make it immediate.
+
+A lane that is not inbox-only receives every ingress event exactly as before.
