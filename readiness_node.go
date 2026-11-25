@@ -277,7 +277,7 @@ func (client *HubClient) noteLaunchResult(message hubOutboundMessage, result hub
 	if result.RC == fleet.ExitSubmitUnconfirmed && kind != "" {
 		job := result.JobID
 		if job == "" {
-			job = hubSpawnArg(message.Args, "--job")
+			job = hubSpawnIdentity(message.Args).Job
 		}
 		loginScreen = client.launchShowedLoginScreen(kind, job)
 	}
