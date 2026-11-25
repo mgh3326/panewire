@@ -806,13 +806,17 @@ record and a lane row. The node's ended-job pane sweep needs a terminal record
 neither takes it, and the node's 64-row lane cap fills (hk 4658). Every five
 minutes the hub writes the end of each such job. The rule:
 
-- **Which jobs.** The pass pages through every persisted `succeeded` operation
-  created in the last 14 days (500 rows a page, by creation time and
-  request id, so no newer row displaces an older orphan), not the nodes'
+- **Which jobs.** The pass lists every persisted `succeeded` operation
+  created in the last 14 days by request id alone (one read, no payload, so no
+  newer row displaces an older orphan), not the nodes'
   active-job heartbeat: that view drops a pane idle for 30 minutes, caps each node at 32
   jobs and forgets a spawn two minutes after it started, so it would miss
-  exactly the long-orphaned jobs. A job whose node is not connected waits for
-  the next pass; a job found ended (a terminal hk record) is not read again.
+  exactly the long-orphaned jobs. It reads the full row (payload included, 500
+  by 500) only for an operation it has not judged: a spawn that is not a reviewer
+  and a reviewer job found ended (a terminal hk record) are remembered by request
+  id while they stay in the window and are not read again (hk 6394; a restart
+  judges them once more). A job whose node is not connected waits for the next
+  pass and is read in full again then.
 - **A posted result is the proof, and it must have settled.** The node's
   `job.result` answers a findings object that is not JSON `null` (a
   `findings.json` holding `null`, or not matching the schema, is absent) or a
