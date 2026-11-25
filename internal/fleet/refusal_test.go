@@ -71,6 +71,9 @@ var spawnRefusalCauses = []struct {
 	// broad "brief" row must not claim it.
 	{"brief upload to briefs/job-a.md failed: handoffkeep: secret_like_content:private_key", exitPlacement, "hk_guard_refused"},
 	{"handoffkeep: secret_like_content", exitUsage, "hk_guard_refused"},
+	// hk 6434: not the broad "workspace" row, even under a path another row
+	// would match.
+	{"workspace_lock_root_unsafe: workspace lock root /tmp/brief-trust is not a private directory of uid 501 (owner 502, mode 700, link false); remove it as its owner or root, then retry", exitConfig, "workspace_lock_root_unsafe"},
 }
 
 func TestSpawnRefusalCodeNamesEachObservedCause(t *testing.T) {

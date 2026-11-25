@@ -180,6 +180,13 @@ type App struct {
 	// StateDir holds panewire's local state (the routing policy cache); empty
 	// means ~/.local/state/panewire under Home.
 	StateDir string
+	// workspaceLockRoot overrides the host-fixed herdr workspace lock
+	// directory; empty means defaultWorkspaceLockRoot of this uid. Only tests
+	// set it.
+	workspaceLockRoot string
+	// workspaceLockOpened, when set by a test, runs between the open and the
+	// flock of a host-fixed workspace lock file.
+	workspaceLockOpened func(path string)
 }
 
 func Main(ctx context.Context, args []string, out, errout io.Writer) int {

@@ -133,6 +133,9 @@ var spawnRefusals = []spawnRefusal{
 	// NO_ELIGIBLE_HOST with every candidate dropped for an unmapped repo: the
 	// repair is the node's cwd_map or work root, not the quota account.
 	{match: "no node maps repo", code: "placement", hint: "Add the repository to that node's spawn.json.cwd_map, or give the node a work root so it can clone the checkout, then retry."},
+	// hk 6434: the refusal names a path and the word "workspace", which the
+	// broader rows below would claim.
+	{match: workspaceLockRootUnsafe, code: workspaceLockRootUnsafe, hint: "Remove the directory the refusal names, as its owner or root, on the executing host (docs/config.md, Host aliases and workspaces), then repeat the same command."},
 	// Admission refused before a host was bound: the cause the hub reports in
 	// Sentry's admission_refused class (docs/observability.md).
 	{match: "missing seat policy", code: "seat_policy_missing", hint: "Run panewire resolve --role ROLE --t Tn to select a rung with an admitted seat policy, or repair the policy that omits this profile, then retry."},

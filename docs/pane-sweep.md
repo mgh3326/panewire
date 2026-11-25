@@ -373,6 +373,19 @@ keeps its commits on that branch: the branch is deleted only when its tip is
 already on origin. A `-c` worktree keeps its requester's own directory name and
 stays under the rules above.
 
+## Duplicate workspaces
+
+Every pass, local or hub-ordered, also lists the workspaces of the node's herdr
+session, before it judges any pane and whether or not one is due. For each label
+that more than one workspace carries it logs one line,
+`workspace label duplicated`, with `reason=workspace_duplicate`, the label and
+the workspace ids. A spawn that names such a label refuses
+([config.md](config.md#workspace-create-and-the-host-lock-hk-4821)). The sweep
+only reports: it closes and renames nothing, so a person removes the extra
+workspaces. The line repeats on each pass while the duplicate lasts; a pass that
+cannot list workspaces reports none. It is not counted among the ended-job
+panes.
+
 ## Checkout sweep
 
 `panewire node sweep-checkouts --host <machine> --hub-url <url>
