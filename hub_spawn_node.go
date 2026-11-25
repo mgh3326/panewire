@@ -384,7 +384,7 @@ func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJo
 // start it, and answers the hub with that result. A copy that claimed the row
 // first keeps its own answer.
 func (client *HubClient) refuseUngrantedSpawn(ctx context.Context, peer *hubClientConnection, journal *nodeSpawnJournal, message hubOutboundMessage) {
-	result := hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
+	result := hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnIdentity(message.Args).Job, RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
 	// The tombstone is written even when the admission wait was what ended.
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -453,7 +453,7 @@ func (client *HubClient) answerKnownSpawn(ctx context.Context, peer *hubClientCo
 }
 
 func (client *HubClient) sendAdmissionTimeout(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage, deadline time.Time) {
-	result := hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "timeout"}
+	result := hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnIdentity(message.Args).Job, RC: 124, Stage: "claim", Error: "timeout"}
 	// A shorter local budget cannot prove that another copy did not start,
 	// even if this reply is delayed until after the absolute deadline.
 	absoluteDeadline := time.UnixMilli(message.DeadlineMS)
@@ -745,7 +745,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		// What the node actually put on disk travels with the answer and into
 		// the job record (hk 5098).
 		result.CheckoutMode = outcome.CheckoutMode
-		if spawnLaneEscapes(cwd, hubSpawnFlagArg(message.Args, "-L")) {
+		if spawnLaneEscapes(cwd, hubSpawnIdentity(message.Args).ExecutionLane) {
 			// The held job dir must be where the agent runs (hk 4578).
 			result.RC, result.Error = 81, "checkout_refused:lane_outside_worktree"
 			return result
@@ -875,7 +875,7 @@ func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, resul
 		if result.RC != 0 {
 			return
 		}
-		event := fleetEvent{Kind: "node_spawn", Job: hubSpawnArg(message.Args, "--job"), RequestID: message.RequestID, Outcome: "ok", Reason: "spawned"}
+		event := fleetEvent{Kind: "node_spawn", Job: hubSpawnIdentity(message.Args).Job, RequestID: message.RequestID, Outcome: "ok", Reason: "spawned"}
 		if result.Receipt != nil {
 			event.Profile = result.Receipt.Profile
 		}
@@ -897,7 +897,7 @@ func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, resul
 	if detail == "" {
 		detail = fmt.Sprintf("rc=%d", result.RC)
 	}
-	write(now(), fleetEvent{Kind: "node_spawn", Job: hubSpawnArg(message.Args, "--job"), RequestID: message.RequestID, Outcome: outcome, Reason: reason, Detail: result.Error + " " + detail})
+	write(now(), fleetEvent{Kind: "node_spawn", Job: hubSpawnIdentity(message.Args).Job, RequestID: message.RequestID, Outcome: outcome, Reason: reason, Detail: result.Error + " " + detail})
 }
 
 // hubSpawnArg returns the value of flag in a hub spawn's argv, or "".
@@ -1168,7 +1168,7 @@ func (client *HubClient) releaseSpawnJournal() {
 
 func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage) hubSpawnResult {
 	if message.DeadlineMS != 0 && time.Now().UnixMilli() >= message.DeadlineMS {
-		return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
+		return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnIdentity(message.Args).Job, RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
 	}
 	return client.runHubSpawn(ctx, message)
 }

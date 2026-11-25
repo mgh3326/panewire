@@ -74,40 +74,6 @@ func TestResolveWorkspaceRefusesAmbiguousLabel(t *testing.T) {
 	}
 }
 
-// Two spawns can race: both see no match, both create. The re-list picks the
-// oldest and closes nothing.
-func TestResolveWorkspaceUsesOldestAfterCreateRace(t *testing.T) {
-	a := testApp(t)
-	lists := 0
-	a.Runner = &fakeRunner{Do: func(c Command) Result {
-		switch strings.Join(c.Args, " ") {
-		case "workspace list":
-			lists++
-			if lists == 1 {
-				return Result{Out: noWorkspaces}
-			}
-			return Result{Out: `{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"},{"workspace_id":"w2","label":"workers"}]}}`}
-		case "workspace create --label workers":
-			return Result{Out: `{"result":{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p0"}}}`}
-		}
-		t.Fatalf("unexpected herdr call: %v", c.Args)
-		return Result{}
-	}}
-	got, created, err := a.resolveWorkspace(context.Background(), "workers")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "w1" {
-		t.Fatalf("workspace=%q, want the oldest", got)
-	}
-	if created == nil || created.workspace != "w2" || created.tab != "w2:t1" {
-		t.Fatalf("created=%+v, want this call's own workspace", created)
-	}
-	if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "workspace_created label=workers workspace=w1 duplicates=1") {
-		t.Fatalf("log=%q", out)
-	}
-}
-
 func TestResolveWorkspaceRefusesVanishedID(t *testing.T) {
 	a := testApp(t)
 	a.Runner = &fakeRunner{Do: func(c Command) Result {
@@ -139,8 +105,7 @@ func TestResolveWorkspaceUsesListedID(t *testing.T) {
 	}
 }
 
-// A failed spawn removes only the tab it created. A workspace another spawn
-// adopted keeps that spawn's tab and live session, even when the list is
+// A failed spawn removes only the tab it created, even when the list is
 // unavailable after the create.
 func TestSpawnWorkspaceCleanupOnFailure(t *testing.T) {
 	for _, test := range []struct {
@@ -148,8 +113,7 @@ func TestSpawnWorkspaceCleanupOnFailure(t *testing.T) {
 		workspaces string
 		listError  bool
 	}{
-		{"oldest", `[{"workspace_id":"w2","label":"workers"}]`, false},
-		{"duplicate", `[{"workspace_id":"w1","label":"workers"},{"workspace_id":"w2","label":"workers"}]`, false},
+		{"sole match", `[{"workspace_id":"w2","label":"workers"}]`, false},
 		{"listing unavailable", "", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -270,9 +234,9 @@ func (h *fakeHerdr) list() string {
 }
 
 // The high finding on #306: cleanup must not delete a workspace another spawn
-// adopted. This call created w2 but adopted the older w1 that another spawn
-// created meanwhile, and a concurrent spawn owns tab w2:t2 in w2. Removing only
-// this spawn's own tab keeps that live session.
+// adopted. This call created w2, and a concurrent spawn that adopted it by
+// label owns tab w2:t2 there. Removing only this spawn's own tab keeps that
+// live session.
 func TestSpawnCleanupKeepsWorkspaceAnotherSpawnAdopted(t *testing.T) {
 	a, s, f, _ := cmdFixture(t)
 	s.Workspace = "workers"
@@ -292,9 +256,8 @@ func TestSpawnCleanupKeepsWorkspaceAnotherSpawnAdopted(t *testing.T) {
 			return Result{Out: herdr.list()}
 		case "workspace create --label workers":
 			created = true
-			// Concurrently, another spawn created w1 (older) and added its tab
-			// w2:t2 in the workspace this call just made.
-			herdr.add("w1", "w1:t1")
+			// Concurrently, another spawn added its tab w2:t2 in the workspace
+			// this call just made.
 			herdr.add("w2", "w2:t1", "w2:t2")
 			return Result{Out: `{"result":{"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:t1-pane"}}}`}
 		}
@@ -326,9 +289,6 @@ func TestSpawnCleanupKeepsWorkspaceAnotherSpawnAdopted(t *testing.T) {
 	}
 	if got := herdr.tabs["w2"]; len(got) != 1 || got[0] != "w2:t2" {
 		t.Fatalf("workspace w2 tabs=%v, want the concurrent spawn's w2:t2 kept; cleanup calls=%v", got, touched)
-	}
-	if got := herdr.tabs["w1"]; len(got) != 1 {
-		t.Fatalf("adopted workspace w1 tabs=%v, want w1 kept; cleanup calls=%v", got, touched)
 	}
 }
 

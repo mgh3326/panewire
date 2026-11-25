@@ -78,6 +78,7 @@ func TestResolveWorkspaceWaitEndsWithContext_t4578(t *testing.T) {
 	<-entered
 	waiter := testApp(t)
 	waiter.HerdrSession, waiter.StateDir, waiter.Home = "worker", holder.stateDir(), holder.Home
+	waiter.workspaceLockRoot = holder.workspaceLockRoot
 	waiter.Runner = &fakeRunner{Do: func(c Command) Result {
 		t.Errorf("waiter ran herdr %v while the label was held", c.Args)
 		return Result{}

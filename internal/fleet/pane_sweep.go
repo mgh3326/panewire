@@ -385,8 +385,9 @@ type TaskPaneSweeper struct {
 	// whose job directory is gone (sweep_checkout.go). Empty, the patch goes
 	// only into the job directory.
 	orphanPatches string
-	// Info receives one line per closed pane and one per kept candidate. It
-	// gets ids and states only, never screen text.
+	// Info receives one line per closed pane, one per kept candidate and one per
+	// duplicated workspace label. It gets ids, labels and states only, never
+	// screen text.
 	Info func(message string, attrs ...any)
 	// Exclusive, when set, is called before each close and the function it
 	// returns after it, so a close never interleaves with another acting node
@@ -538,6 +539,9 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 // ownerAge ago close whatever they show; an idle ended pane whose grace ran
 // closes early. It returns the panes it closed.
 func (s *TaskPaneSweeper) pass(ctx context.Context, a *App, ownerAge time.Duration) ([]SweptPane, error) {
+	// Before any early return: a duplicate label refuses spawns whether or not
+	// a pane is due.
+	s.reportWorkspaceDuplicates(ctx, a)
 	s.retryDeferredFailures(ctx, a)
 	s.expireEndedJobDirs(ctx, a)
 	entries, err := os.ReadDir(a.Jobs)

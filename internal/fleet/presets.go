@@ -2,8 +2,6 @@ package fleet
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -167,32 +165,17 @@ type createdWorkspace struct {
 	rootPane  string
 }
 
-// resolveWorkspace holds a per-(herdr session, label) file lock across the
-// list-then-create decision, so neither concurrent node spawns (hk 4578, one
-// process) nor a node spawn and a local or SSH launch (separate processes)
-// can each find the label absent and each create a workspace. The wait ends
-// with the spawn's own context.
+// resolveWorkspace holds the (herdr session, label) workspace locks
+// (lockWorkspace) across the list-then-create decision, so neither concurrent
+// node spawns (hk 4578, one process) nor a node spawn and a local or SSH
+// launch (separate processes) can each find the label absent and each create a
+// workspace. The wait ends with the spawn's own context.
 func (a *App) resolveWorkspace(ctx context.Context, value string) (string, *createdWorkspace, error) {
-	dir := filepath.Join(a.stateDir(), "workspace-locks")
-	if e := os.MkdirAll(dir, 0o700); e != nil {
-		return "", nil, e
+	release, err := a.lockWorkspace(ctx, value)
+	if err != nil {
+		return "", nil, err
 	}
-	sum := sha256.Sum256([]byte(a.HerdrSession + "\x00" + value))
-	lock, e := secureOpen(filepath.Join(dir, hex.EncodeToString(sum[:8])+".lock"), true, a.warn)
-	if e != nil {
-		return "", nil, e
-	}
-	defer lock.Close()
-	// The poll stays on the wall clock: it is a wait, not a recorded time.
-	for !tryLock(lock) {
-		timer := time.NewTimer(50 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return "", nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
+	defer release()
 	return a.resolveWorkspaceLocked(ctx, value)
 }
 
@@ -225,13 +208,31 @@ func (a *App) resolveWorkspaceLocked(ctx context.Context, value string) (string,
 		fmt.Fprintf(a.Out, "workspace_label=%s workspace=%s\n", value, matches[0])
 		return matches[0], nil, nil
 	}
-	return "", nil, fail(exitUsage, "workspace %q matched %d entries; run herdr workspace list on the executing host and pass -w WORKSPACE_ID", value, len(matches))
+	return "", nil, ambiguousWorkspace(value, len(matches))
+}
+
+// ambiguousWorkspace refuses a label that does not name exactly one workspace
+// panewire can use: it never picks one.
+func ambiguousWorkspace(label string, matches int) error {
+	return fail(exitUsage, "workspace %q matched %d entries; run herdr workspace list on the executing host and pass -w WORKSPACE_ID", label, matches)
+}
+
+// labelledWorkspaces is the ids of the rows that carry label, in herdr's order.
+func labelledWorkspaces(rows []map[string]any, label string) []string {
+	var ids []string
+	for _, row := range rows {
+		if id := str(row, "workspace_id"); str(row, "label") == label && id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // createWorkspace recreates a workspace whose label matched none. Herdr deletes
 // a workspace when its last pane closes, and the spawn path is the only place
-// that sees every such case. Two spawns may race; the re-list picks the oldest
-// match and closes nothing.
+// that sees every such case. The workspace locks serialize panewire's own
+// writers, but a hand-run herdr or an older binary under another HOME can still
+// create the label meanwhile (settleDuplicateWorkspace).
 func (a *App) createWorkspace(ctx context.Context, label string) (string, *createdWorkspace, error) {
 	r := a.call(ctx, "herdr", "workspace", "create", "--label", label)
 	var created struct {
@@ -250,24 +251,45 @@ func (a *App) createWorkspace(ctx context.Context, label string) (string, *creat
 	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &created) != nil || created.Result.Workspace.WorkspaceID == "" {
 		return "", nil, fail(exitConfig, "cannot create workspace %q; run herdr workspace create --label %s on the executing host", label, label)
 	}
-	workspace, duplicates := created.Result.Workspace.WorkspaceID, 0
+	own := &createdWorkspace{workspace: created.Result.Workspace.WorkspaceID, tab: created.Result.Tab.TabID, rootPane: created.Result.RootPane.PaneID}
+	workspace := own.workspace
 	if rows, err := a.workspaceRows(ctx, label); err == nil {
-		var matches []string
-		for _, row := range rows {
-			if id := str(row, "workspace_id"); str(row, "label") == label && id != "" {
-				matches = append(matches, id)
-			}
-		}
-		if len(matches) > 0 {
-			workspace, duplicates = matches[0], len(matches)-1
+		switch matches := labelledWorkspaces(rows, label); {
+		case len(matches) > 1:
+			return a.settleDuplicateWorkspace(ctx, label, own)
+		case len(matches) == 1:
+			workspace = matches[0]
 		}
 	}
-	fmt.Fprintf(a.Out, "workspace_created label=%s workspace=%s", label, workspace)
-	if duplicates > 0 {
-		fmt.Fprintf(a.Out, " duplicates=%d", duplicates)
+	fmt.Fprintf(a.Out, "workspace_created label=%s workspace=%s\n", label, workspace)
+	return workspace, own, nil
+}
+
+// settleDuplicateWorkspace answers a create whose label more than one workspace
+// now carries. It removes only the tab this call created, lists once more, and
+// adopts the label's workspace when exactly one remains; otherwise it refuses.
+// The created tab is reported to the caller only while it may still exist: when
+// its close failed and the spawn goes on, a later failure closes it again.
+func (a *App) settleDuplicateWorkspace(ctx context.Context, label string, own *createdWorkspace) (string, *createdWorkspace, error) {
+	// A spawn whose context just ended still removes the tab it made.
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	left := own
+	if err := a.closeCreatedWorkspace(cleanup, own); err != nil {
+		a.warn("created workspace cleanup failed; close tab %s (workspace %s) on the executing host: %v", own.tab, own.workspace, err)
+	} else {
+		left = nil
 	}
-	fmt.Fprintln(a.Out)
-	return workspace, &createdWorkspace{workspace: created.Result.Workspace.WorkspaceID, tab: created.Result.Tab.TabID, rootPane: created.Result.RootPane.PaneID}, nil
+	rows, err := a.workspaceRows(ctx, label)
+	if err != nil {
+		return "", nil, err
+	}
+	matches := labelledWorkspaces(rows, label)
+	if len(matches) != 1 {
+		return "", nil, ambiguousWorkspace(label, len(matches))
+	}
+	fmt.Fprintf(a.Out, "workspace_label=%s workspace=%s after_duplicate_create=%s\n", label, matches[0], own.workspace)
+	return matches[0], left, nil
 }
 
 // closeCreatedWorkspace removes the tab this spawn created and never the
