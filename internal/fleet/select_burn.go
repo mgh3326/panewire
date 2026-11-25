@@ -257,17 +257,24 @@ func (a *App) measureBurn(ctx context.Context, pool string, keys []string, now t
 }
 
 // burnCachePath is the state directory's measured burn file.
-func (a *App) burnCachePath() string { return filepath.Join(a.stateDir(), "burn-history.json") }
+func (a *App) burnCachePath() string {
+	if dir := a.stateDir(); dir != "" {
+		return filepath.Join(dir, "burn-history.json")
+	}
+	return ""
+}
 
 // readBurnCache reads the state directory's copy. An absent or unreadable file
 // is an empty cache: a stale measurement is never trusted over a fresh read.
 func (a *App) readBurnCache() burnCache {
 	var c burnCache
-	if b, err := os.ReadFile(a.burnCachePath()); err == nil && json.Unmarshal(b, &c) == nil && c.Version == burnCacheVersion {
-		if c.Pools == nil {
-			c.Pools = map[string]burnRates{}
+	if path := a.burnCachePath(); path != "" {
+		if b, err := os.ReadFile(path); err == nil && json.Unmarshal(b, &c) == nil && c.Version == burnCacheVersion {
+			if c.Pools == nil {
+				c.Pools = map[string]burnRates{}
+			}
+			return c
 		}
-		return c
 	}
 	return burnCache{Version: burnCacheVersion, Pools: map[string]burnRates{}}
 }
@@ -275,13 +282,17 @@ func (a *App) readBurnCache() burnCache {
 // writeBurnCache replaces the state directory's copy atomically. A failed
 // write costs a later history read, never selection.
 func (a *App) writeBurnCache(c burnCache) error {
+	path := a.burnCachePath()
+	if path == "" {
+		return nil // Burn history is an optional optimization.
+	}
 	c.Version = burnCacheVersion
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(a.burnCachePath()), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	return durable.ReplaceFileAtomically(a.burnCachePath(), ".burn-history-*.json", append(b, '\n'), 0600)
+	return durable.ReplaceFileAtomically(path, ".burn-history-*.json", append(b, '\n'), 0600)
 }

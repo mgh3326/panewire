@@ -247,14 +247,26 @@ func parseRoutingJSON(b []byte) (RoutingPolicy, error) {
 }
 
 // stateDir is panewire's local state directory ($XDG_STATE_HOME/panewire, else
-// ~/.local/state/panewire); New sets StateDir from the environment.
+// ~/.local/state/panewire). An unset or relative location disables local
+// state; callers that require persistence must report that explicitly.
 func (a *App) stateDir() string {
 	if a.StateDir != "" {
-		return a.StateDir
+		if filepath.IsAbs(a.StateDir) {
+			return a.StateDir
+		}
+		return ""
+	}
+	if !filepath.IsAbs(a.Home) {
+		return ""
 	}
 	return filepath.Join(a.Home, ".local", "state", "panewire")
 }
-func (a *App) routingCachePath() string { return filepath.Join(a.stateDir(), "model-routing.json") }
+func (a *App) routingCachePath() string {
+	if dir := a.stateDir(); dir != "" {
+		return filepath.Join(dir, "model-routing.json")
+	}
+	return ""
+}
 
 // routingCache is the on-disk last good copy of the policy.
 type routingCache struct {
@@ -281,11 +293,14 @@ func (a *App) readRoutingCache() (RoutingPolicy, error) {
 
 // writeRoutingCache replaces the cache atomically when the policy changed.
 func (a *App) writeRoutingCache(p RoutingPolicy) error {
+	path := a.routingCachePath()
+	if path == "" {
+		return nil // The cache is optional; routing still uses the live policy.
+	}
 	policy, e := json.Marshal(p)
 	if e != nil {
 		return e
 	}
-	path := a.routingCachePath()
 	if old, e := os.ReadFile(path); e == nil {
 		var c routingCache
 		if json.Unmarshal(old, &c) == nil && c.Version == p.Version && bytes.Equal(c.Policy, policy) {

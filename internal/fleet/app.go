@@ -177,8 +177,8 @@ type App struct {
 	// Version is the build line `panewire --version` prints, compared with the
 	// remote hosts' by the preflight.
 	Version string
-	// StateDir holds panewire's local state (the routing policy cache); empty
-	// means ~/.local/state/panewire under Home.
+	// StateDir holds panewire's local state; it must be absolute. When empty,
+	// stateDir derives ~/.local/state/panewire only from an absolute Home.
 	StateDir string
 	// workspaceLockRoot overrides the host-fixed herdr workspace lock
 	// directory; empty means defaultWorkspaceLockRoot of this uid. Only tests

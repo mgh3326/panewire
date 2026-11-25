@@ -516,13 +516,17 @@ type PlacementDelivery struct {
 // answers a reposted job+attempt with 409, which deliverPlacements treats as
 // delivered.
 func (a *App) EnqueuePlacementRecord(ctx context.Context, r PlacementRecord) (PlacementDelivery, error) {
+	stateDir := a.stateDir()
+	if stateDir == "" {
+		return PlacementDelivery{}, fmt.Errorf("placement spool requires an absolute StateDir or Home")
+	}
 	// A placed record that arrived without execution metadata resolves the
 	// shared job record before its first post, as spoolPlacement does.
 	b, err := json.Marshal(pendingPlacement{Record: r, ResolveJob: r.Outcome == "placed" && r.Family == ""})
 	if err != nil {
 		return PlacementDelivery{}, err
 	}
-	dir := filepath.Join(a.stateDir(), "placements")
+	dir := filepath.Join(stateDir, "placements")
 	if e := noSymlinks(dir); e != nil {
 		return PlacementDelivery{}, e
 	}
@@ -556,7 +560,11 @@ func (a *App) deliverOnePlacement(ctx context.Context, job string, attempt int) 
 // Only a confirmed absence proves that — a permission or I/O error leaves
 // the record pending so a later flush retries it.
 func (a *App) PlacementSpooled(job string, attempt int) bool {
-	_, err := os.Stat(filepath.Join(a.stateDir(), "placements", job+"."+strconv.Itoa(attempt)+".json"))
+	stateDir := a.stateDir()
+	if stateDir == "" {
+		return true // Without a state path, absence cannot be confirmed.
+	}
+	_, err := os.Stat(filepath.Join(stateDir, "placements", job+"."+strconv.Itoa(attempt)+".json"))
 	return !os.IsNotExist(err)
 }
 
@@ -645,7 +653,11 @@ func (a *App) placementRepoCheckout(ctx context.Context, cwd string) (string, bo
 // Attempt markers survive successful delivery. O_EXCL allocates without a
 // shared lock, so concurrent invocations cannot overwrite one another's key.
 func (a *App) spoolPlacement(p *pendingPlacement) error {
-	dir := filepath.Join(a.stateDir(), "placement-attempts", p.Record.JobID)
+	stateDir := a.stateDir()
+	if stateDir == "" {
+		return fmt.Errorf("placement spool requires an absolute StateDir or Home")
+	}
+	dir := filepath.Join(stateDir, "placement-attempts", p.Record.JobID)
 	if e := noSymlinks(dir); e != nil {
 		return e
 	}
@@ -668,7 +680,7 @@ func (a *App) spoolPlacement(p *pendingPlacement) error {
 		if e != nil {
 			return e
 		}
-		return atomicFile(filepath.Join(a.stateDir(), "placements", p.Record.JobID+"."+strconv.Itoa(n)+".json"), b, 0600)
+		return atomicFile(filepath.Join(stateDir, "placements", p.Record.JobID+"."+strconv.Itoa(n)+".json"), b, 0600)
 	}
 }
 
@@ -713,7 +725,12 @@ func placementStallReason(be *BackendError) string {
 // entry the result says what became of it; a spool-wide pass returns only the
 // failures that stop every entry.
 func (a *App) deliverPlacementFile(ctx context.Context, only string) (result PlacementDelivery) {
-	dir := filepath.Join(a.stateDir(), "placements")
+	stateDir := a.stateDir()
+	if stateDir == "" {
+		result.Reason = "state_dir_unavailable"
+		return result
+	}
+	dir := filepath.Join(stateDir, "placements")
 	if noSymlinks(dir) != nil {
 		result.Reason = "spool_path_refused"
 		return result
@@ -732,7 +749,7 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) (result Pla
 		result.Reason = "hk_credential_unavailable: " + backendReason(e.Error())
 		return result
 	}
-	cursorPath := filepath.Join(a.stateDir(), "placement-cursor")
+	cursorPath := filepath.Join(stateDir, "placement-cursor")
 	cursor, _ := os.ReadFile(cursorPath)
 	start := sort.Search(len(entries), func(i int) bool { return entries[i].Name() > string(cursor) })
 	lastAttempted := ""
@@ -867,7 +884,11 @@ func (a *App) deliverPlacementFile(ctx context.Context, only string) (result Pla
 }
 
 func (a *App) capRejectedPlacements() {
-	dir := filepath.Join(a.stateDir(), "placements-rejected")
+	stateDir := a.stateDir()
+	if stateDir == "" {
+		return
+	}
+	dir := filepath.Join(stateDir, "placements-rejected")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		a.warn("placement quarantine could not be read")
