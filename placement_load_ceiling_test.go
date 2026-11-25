@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 // loadCeilingPolicy builds a policy from JSON, so these tests also compile
@@ -48,6 +49,62 @@ func TestPlacementLoadCeilingLeavesOutHostAboveIt(t *testing.T) {
 	usable[0].Score = 1000
 	if got, reason := k.decide(usable, 1); got != 1 || reason != "" {
 		t.Fatalf("decide=%d %q, want the under-ceiling winner kept", got, reason)
+	}
+}
+
+// A ceiling redirect chooses a host whose load is known to be at or under it;
+// an unknown reading cannot take the decision ahead of a measured host.
+func TestPlacementLoadCeilingRedirectSkipsUnknownLoad(t *testing.T) {
+	t.Run("policy order", func(t *testing.T) {
+		k := loadCeilingPolicy(t, `{"load_ceiling_per_core":2.5}`).scoreK()
+		unknown := loadCeilingCandidate("unknown", 0, 80)
+		unknown.Signals.Load1PerCore = nil
+		usable := []PlacementCandidate{
+			loadCeilingCandidate("over", 3.2, 90),
+			unknown,
+			loadCeilingCandidate("under", 0.6, 10),
+		}
+		if got, reason := k.decide(usable, 0); got != 2 || reason != "load_over_ceiling" {
+			t.Fatalf("decide=%d %q, want under load_over_ceiling", got, reason)
+		}
+	})
+
+	t.Run("tagged score", func(t *testing.T) {
+		policy := loadCeilingPolicy(t, `{"load_ceiling_per_core":2.5}`)
+		policy.LocalMachine = "over"
+		policy.SpillTargets = []string{"unknown", "under"}
+		policy.Power = map[string]float64{"over": 500, "unknown": 400, "under": 100}
+		policy.Tags = map[string][]string{"over": {"gpu"}, "unknown": {"gpu"}, "under": {"gpu"}}
+		hub := placementPowerHub(t, "", policy)
+		t.Cleanup(func() { _ = hub.Close() })
+		for _, machine := range []string{"over", "unknown", "under"} {
+			hub.connect(machine, "test", "fixture", &hubAgent{}, true)
+		}
+		result := hub.makeTaggedPlacement(policy, placementMetrics{load1: map[string]float64{"over": 3.2, "under": 0.6}}, "hub-only", time.Time{}, []string{"gpu"})
+		if result.Decision != "under" || result.Reason != "load_over_ceiling" {
+			t.Fatalf("tagged decision=%q reason=%q, want under load_over_ceiling", result.Decision, result.Reason)
+		}
+	})
+}
+
+// Tagged results keep over-ceiling hosts visible while the decision skips them.
+func TestPlacementLoadCeilingTaggedCandidatesRetainOverHost(t *testing.T) {
+	policy := loadCeilingPolicy(t, `{"load_ceiling_per_core":2.5}`)
+	policy.LocalMachine = "over"
+	policy.SpillTargets = []string{"under"}
+	policy.Power = map[string]float64{"over": 500, "under": 100}
+	policy.Tags = map[string][]string{"over": {"gpu"}, "under": {"gpu"}}
+	hub := placementPowerHub(t, "", policy)
+	t.Cleanup(func() { _ = hub.Close() })
+	for _, machine := range []string{"over", "under"} {
+		hub.connect(machine, "test", "fixture", &hubAgent{}, true)
+	}
+	result := hub.makeTaggedPlacement(policy, placementMetrics{load1: map[string]float64{"over": 3.2, "under": 0.6}}, "hub-only", time.Time{}, []string{"gpu"})
+	if len(result.Candidates) != 2 || result.Candidates[0].Machine != "over" || result.Candidates[1].Machine != "under" {
+		t.Fatalf("tagged candidates=%+v, want both hosts in score order", result.Candidates)
+	}
+	if result.Decision != "under" || result.Reason != "load_over_ceiling" {
+		t.Fatalf("tagged decision=%q reason=%q, want under load_over_ceiling", result.Decision, result.Reason)
 	}
 }
 

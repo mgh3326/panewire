@@ -265,7 +265,7 @@ func (k placementScoreK) decide(usable []PlacementCandidate, winner int) (int, s
 	if k.loadCeiling > 0 && loadCeilingApplies(usable, k.loadCeiling) {
 		kept := make([]int, 0, len(usable))
 		for i, c := range usable {
-			if !loadOverCeiling(c, k.loadCeiling) {
+			if loadAtOrUnderCeiling(c, k.loadCeiling) {
 				kept = append(kept, i)
 			}
 		}
