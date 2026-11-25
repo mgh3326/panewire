@@ -741,11 +741,17 @@ type HubServer struct {
 	// reviewerEndSettled holds the reviewer jobs the pass found ended, so it
 	// reads each hk record once while the job stays in its window.
 	reviewerEndSettled map[string]bool
-	spawnStartBy       time.Duration
-	spawnStartByMargin time.Duration
-	spawnGrantDrain    bool
-	spawnRollbackDrain bool
-	supersedeClose     bool
+	// reviewerEndSkip holds the operations (by request id) the pass judged
+	// once and never needs to read again while they stay in its window: a spawn
+	// that is not a reviewer and a reviewer job found ended (hk 6394).
+	// reviewerEndLastRead is what the latest pass read from the store.
+	reviewerEndSkip     map[string]bool
+	reviewerEndLastRead reviewerEndRead
+	spawnStartBy        time.Duration
+	spawnStartByMargin  time.Duration
+	spawnGrantDrain     bool
+	spawnRollbackDrain  bool
+	supersedeClose      bool
 	// supersedeWarned keeps a retried landing from repeating its warn. In
 	// memory only; the durable intent is the supersede_landings row.
 	supersedeWarned sync.Map
