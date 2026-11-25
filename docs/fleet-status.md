@@ -78,7 +78,8 @@ passed shows `available` and a malformed one `unknown`. Placement's
 The selection-true band is the plan: each row's `tier`, `pool`, `account`,
 `seat` and `outcome` come from the real selector (`selectFor`) over the hub's
 own fleet App, its `[local].pool_policy`, admission classes, `NormalizeFree`,
-publisher liveness and clock. A console that wants a band reads the plan row
+publisher liveness and the same hub cycle clock used for the snapshot and
+quota rows. A console that wants a band reads the plan row
 for the grade it cares about, and the quota rows as its evidence. A
 per-account band for every rung is a follow-up inside `fleet`, not a second
 implementation here.
@@ -91,9 +92,11 @@ own fleet App and the hub's placement view. It is a dry run: no account is
 measured (a reading that would need measuring keeps its stored value and the
 row may report `QUOTA_UNKNOWN` or a refusal), no host or slot is reserved, no
 load is refreshed or republished, and the plan transport refuses both dispatch
-and refresh. When the hub cannot build its fleet App, every grade still gets a
-row with `outcome` `POLICY_UNAVAILABLE` so the document's shape does not
-change.
+and refresh. The fleet App's clock is the same clock used to assemble the
+snapshot, so time based placement checks in the plan share the cycle time with
+`at` and quota freshness. When the hub cannot build its fleet App, every grade
+still gets a row with `outcome` `POLICY_UNAVAILABLE` so the document's shape
+does not change.
 
 ## No secrets
 

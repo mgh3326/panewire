@@ -103,6 +103,29 @@ func TestFleetStatusGoldenDocument(t *testing.T) {
 	}
 }
 
+func TestFleetStatusAppUsesHubClock(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 34, 56, 0, time.UTC)
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens: map[string]string{"operator": "operator-token"},
+		Now:    func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hub.Close() })
+	hub.spawnNewApp = func(io.Writer, io.Writer) (*fleet.App, error) {
+		return &fleet.App{Now: time.Now}, nil
+	}
+
+	app := hub.fleetStatusApp()
+	if app == nil {
+		t.Fatal("fleetStatusApp returned nil")
+	}
+	if got := app.Now(); !got.Equal(now) || got.Location() != time.UTC {
+		t.Fatalf("fleet status plan clock = %v, want %v in UTC", got, now.UTC())
+	}
+}
+
 // The document's keys are a closed list: nothing the page would render can
 // arrive under an unreviewed name, and no account value is an email or a
 // credential-shaped string.
