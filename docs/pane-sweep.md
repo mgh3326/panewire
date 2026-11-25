@@ -342,7 +342,9 @@ After it closes a job's pane, the sweep removes the worktree the node
 prepared for that job, and the job's local branch with it. A merged end
 removes only a clean worktree whose HEAD merged; a non-merged end (a canceled
 task, a job closed abandoned or superseded) saves the worktree's changes to
-`<job dir>/abandoned-worktree.patch` first and removes it whatever its state.
+`<job dir>/abandoned-worktree.patch` first and removes it whatever its state
+(an orphaned checkout's patch lands elsewhere; see
+[Checkout sweep](#checkout-sweep)).
 Only a worktree of the clone under the node's own work root is the node's; a
 requester's design worktree, a worktree another job still uses, a dirty one
 on a merged end, and every remote branch stay.
@@ -373,23 +375,55 @@ stays under the rules above.
 
 ## Checkout sweep
 
-`panewire node sweep-checkouts [--host <machine>] [--dry-run]` is the
-operator's pass over the checkouts that already lie on a node (hk 5091). It
-lists every `*-checkout` directory under the node's work root that is a
-linked worktree of one of its clones, attributes each to a job — a readable
-job record's receipt cwd first, then the spawn journal for a record that is
-gone — and judges it live or not: a job that has not ended, a terminal job
-whose pane herdr still lists, or a pane working inside an orphaned checkout
-keeps it (`job_live`, `pane_open`). Everything else goes through the same
-guarded path as the tail — the node work root, no other job using it, not a
-symlink, no ignored state — and a job-owned checkout is discarded with its
-patch saved; a directory that is not the owning job's own `<job>-checkout`
-is kept `task_open_kept`. `--dry-run` reports each row as `would_remove`
-without changing anything. The answer is one JSON document of
-`{path, job, outcome, reason}` rows: `removed`, `kept` or `would_remove`, in
-path order. A checkout whose job cannot be attributed, whose job record or
-herdr list cannot be read, or whose patch cannot be saved is kept with the
-reason, so the pass never removes blind.
+`panewire node sweep-checkouts --host <machine> --hub-url <url>
+--hub-token-env <file> [--hub-cf-env <file>] [--dry-run]` is the operator's
+pass over the checkouts that already lie on a node (hk 5091), and the node runs
+the same pass once a day
+([loops.md](loops.md#daily-kept-worktree-revisit)). It lists every
+`*-checkout` directory under the node's work root that is a linked worktree of
+one of its clones and attributes each to a job: a readable job record's receipt
+cwd first, then, for a record that is gone, the directory a completed spawn in
+the node's spawn journal prepared. The name alone attributes nothing.
+
+A checkout with a **job record** is live while the job has not ended
+(`job_live`) or herdr still lists the pane of a terminal job that was not
+reaped (`pane_open`).
+
+An **orphaned** checkout has no record: the job dir TTL
+([job-dir-ttl.md](job-dir-ttl.md)) deletes an ended job's directory whether or
+not its checkout still lies on the host, and a spawn that fails before its
+claim never writes one. A missing record proves nothing, so an orphan goes only
+when all of this holds (hk 6291):
+
+| Proof | Kept as |
+|---|---|
+| No spawn of the job is still executing on the node | `job_live` |
+| hk holds the job as `completed`, `lost`, `failed` or `refused`; any other state is a live job | `job_live` |
+| Or hk holds no record and every spawn of the job failed without a pane. An unreadable hk, a record naming another job, or a launched job hk does not hold proves nothing | `job_unconfirmed` |
+| `herdr pane list` and `herdr agent list` can both be read | `agents_unreadable` |
+| Neither list has a pane with the job's pane id or label (from the journal or the hk record), or one whose directory or foreground directory is the checkout or inside it | `pane_open` |
+
+The node reads hk with its own credential (`handoffkeep_env` in `spawn.json`).
+Right before the removal it takes the clone's git operation lock, the one a
+spawn's worktree preparation takes (`clone_busy` when it cannot), and checks
+the journal and both herdr lists again.
+
+Every checkout that passes goes through the same guarded path as the tail — the
+node work root, no other job using it, not a symlink, no ignored state — and a
+job-owned checkout is discarded with its patch saved. The patch goes to the job
+directory; an orphan whose job directory is gone has it saved as
+`<inbox root>/orphan-checkouts/<job>/abandoned-worktree.patch` (mode 0600),
+beside `jobs/`. The gone job directory is not made again, and nothing deletes
+`orphan-checkouts/` on a timer. A directory that is not the owning job's own
+`<job>-checkout` is kept `task_open_kept`.
+
+`--dry-run` reports each row as `would_remove` without changing anything. The
+answer is one JSON document of `{path, job, outcome, reason}` rows: `removed`,
+`kept` or `would_remove`, in path order. A bad invocation prints what is wrong
+and the usage on stderr and exits 2; `--help` prints the usage. A checkout
+whose job cannot be attributed (`no_job`), whose job record or herdr list
+cannot be read, or whose patch cannot be saved is kept with the reason, so the
+pass never removes blind.
 
 ## Configuration
 

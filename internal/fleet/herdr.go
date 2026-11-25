@@ -118,6 +118,7 @@ type Agent struct {
 	Kind           string          `json:"agent"`
 	Status         string          `json:"agent_status"`
 	CWD            string          `json:"cwd"`
+	ForegroundCWD  string          `json:"foreground_cwd,omitempty"`
 	StateChangeSeq *int64          `json:"state_change_seq,omitempty"`
 	Focused        bool            `json:"focused,omitempty"`
 	Session        json.RawMessage `json:"agent_session,omitempty"`
@@ -176,6 +177,10 @@ type Pane struct {
 	Pane  string `json:"pane_id"`
 	Label string `json:"label"`
 	Name  string `json:"name"`
+	// CWD is the pane's shell directory and ForegroundCWD its foreground
+	// process's.
+	CWD           string `json:"cwd"`
+	ForegroundCWD string `json:"foreground_cwd"`
 }
 
 // panes reads `herdr pane list`, the full pane inventory, through the shared

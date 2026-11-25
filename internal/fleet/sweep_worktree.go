@@ -187,7 +187,11 @@ func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, en
 	if !ok {
 		return sweepWorktreePatchFailed
 	}
-	if err := saveAbandonedWorktree(a, j.ID, base, end.reason, status.Out, diff.Out+untracked); err != nil {
+	patchDir, err := s.abandonedWorktreeDir(a, j.ID)
+	if err == nil {
+		err = saveAbandonedWorktree(patchDir, j.ID, base, end.reason, status.Out, diff.Out+untracked)
+	}
+	if err != nil {
 		a.warn("worktree retained: %v", err)
 		return sweepWorktreePatchFailed
 	}
@@ -260,10 +264,33 @@ func sweepUntrackedDiff(ctx context.Context, a *App, cwd string) (string, bool) 
 	return out.String(), true
 }
 
-// saveAbandonedWorktree writes the patch file through an os.Root on the job
-// directory, with its mode set before any byte is written.
-func saveAbandonedWorktree(a *App, jobID, base, reason, status, diff string) error {
-	root, err := os.OpenRoot(filepath.Join(a.Jobs, jobID))
+// abandonedWorktreeDir is the directory a job's patch is saved in: its job
+// directory, or, for an orphaned checkout whose job directory is gone,
+// orphanPatches/<job>, made here. The gone job directory is not made again: the
+// job dir TTL deleted it, and one holding only a patch would be a job no reader
+// understands.
+func (s *TaskPaneSweeper) abandonedWorktreeDir(a *App, jobID string) (string, error) {
+	dir := filepath.Join(a.Jobs, jobID)
+	if s.orphanPatches == "" {
+		return dir, nil
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		return dir, err
+	}
+	dir = filepath.Join(s.orphanPatches, jobID)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	// The removal that follows deletes the work, so the new entries are synced.
+	durable.SyncDirectoryBestEffort(s.orphanPatches)
+	durable.SyncDirectoryBestEffort(filepath.Dir(s.orphanPatches))
+	return dir, nil
+}
+
+// saveAbandonedWorktree writes the patch file through an os.Root on dir, with
+// its mode set before any byte is written.
+func saveAbandonedWorktree(dir, jobID, base, reason, status, diff string) error {
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return err
 	}
