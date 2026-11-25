@@ -64,6 +64,16 @@ func readFleetEvents(t *testing.T, a *App) (string, []map[string]string) {
 	return string(raw), events
 }
 
+func TestFleetEventWithoutAbsoluteStateDirDoesNotWriteRelative(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	a := &App{}
+	a.emitFleetEvent("test", "job-a", "refused", "config", "")
+	if _, err := os.Stat(filepath.Join(cwd, ".local")); !os.IsNotExist(err) {
+		t.Fatalf("event writer created relative state under cwd: stat .local err=%v", err)
+	}
+}
+
 func TestSpawnRefusalRequestIDDistinguishesCoordinatorAndNode(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

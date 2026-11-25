@@ -1553,11 +1553,13 @@ func (s *TaskPaneSweeper) reportEndedPanes(a *App, counts map[string]int) {
 	}
 	s.info("ended job panes open", "open", total, "stale", s.staleOpen, "reasons", fmt.Sprint(counts))
 	body := []byte(b.String())
-	dir := filepath.Join(a.stateDir(), "metrics")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		a.warn("pane metric not written: %v", err)
-	} else if err := durable.ReplaceFileAtomically(filepath.Join(dir, paneSweepMetricFile), ".panewire_panes-*.tmp", body, 0600); err != nil {
-		a.warn("pane metric not written: %v", err)
+	if stateDir := a.stateDir(); stateDir != "" {
+		dir := filepath.Join(stateDir, "metrics")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			a.warn("pane metric not written: %v", err)
+		} else if err := durable.ReplaceFileAtomically(filepath.Join(dir, paneSweepMetricFile), ".panewire_panes-*.tmp", body, 0600); err != nil {
+			a.warn("pane metric not written: %v", err)
+		}
 	}
 	s.publishPaneMetricTextfile(a, body)
 }

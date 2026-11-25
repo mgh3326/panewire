@@ -177,8 +177,8 @@ type App struct {
 	// Version is the build line `panewire --version` prints, compared with the
 	// remote hosts' by the preflight.
 	Version string
-	// StateDir holds panewire's local state (the routing policy cache); empty
-	// means ~/.local/state/panewire under Home.
+	// StateDir holds panewire's local state; it must be absolute. When empty,
+	// stateDir derives ~/.local/state/panewire only from an absolute Home.
 	StateDir string
 	// workspaceLockRoot overrides the host-fixed herdr workspace lock
 	// directory; empty means defaultWorkspaceLockRoot of this uid. Only tests
@@ -253,7 +253,7 @@ func New(out, errout io.Writer) (*App, error) {
 	a.LoadRatio = a.loadRatio
 	a.Version = BuildVersion
 	a.EnforceTrust = true
-	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
+	if v := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(v) {
 		a.StateDir = filepath.Join(v, "panewire")
 	}
 	return a, nil

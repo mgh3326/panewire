@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -36,13 +37,21 @@ func runPlacementRequeueCLI(args []string, stdout, stderr io.Writer) int {
 		return ExitConditionInvalid
 	}
 	if *stateDir != "" {
-		app.StateDir = *stateDir
+		app.StateDir, err = filepath.Abs(*stateDir)
+		if err != nil {
+			fmt.Fprintf(stderr, "placement-requeue failed: %v\n", err)
+			return ExitInternal
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	result, err := app.RequeueRejectedPlacements(ctx)
 	if err != nil {
-		fmt.Fprintf(stderr, "placement-requeue failed: %s is unreadable\n", result.Dir)
+		if result.Dir == "" {
+			fmt.Fprintf(stderr, "placement-requeue failed: %v\n", err)
+		} else {
+			fmt.Fprintf(stderr, "placement-requeue failed: %s is unreadable: %v\n", result.Dir, err)
+		}
 		return ExitInternal
 	}
 	counts := map[string]int{}

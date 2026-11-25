@@ -103,7 +103,11 @@ func (a *App) lockHostWorkspace(ctx context.Context, name string) (*os.File, err
 // lockStateDirWorkspace holds the lock every binary before hk 6434 takes, at
 // its unchanged path under the state directory.
 func (a *App) lockStateDirWorkspace(ctx context.Context, name string) (*os.File, error) {
-	dir := filepath.Join(a.stateDir(), "workspace-locks")
+	stateDir := a.stateDir()
+	if stateDir == "" {
+		return nil, errors.New("workspace lock requires an absolute StateDir or Home")
+	}
+	dir := filepath.Join(stateDir, "workspace-locks")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}

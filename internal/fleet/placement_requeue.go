@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,11 @@ type PlacementRequeue struct {
 // its .reason sidecar; a refused or unavailable one stays there for the next
 // run. The hub itself never calls this.
 func (a *App) RequeueRejectedPlacements(ctx context.Context) (PlacementRequeue, error) {
-	dir := filepath.Join(a.stateDir(), "placements-rejected")
+	stateDir := a.stateDir()
+	if stateDir == "" {
+		return PlacementRequeue{}, errors.New("placement quarantine requires an absolute StateDir or Home")
+	}
+	dir := filepath.Join(stateDir, "placements-rejected")
 	result := PlacementRequeue{Dir: dir}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -96,6 +101,8 @@ func (a *App) requeueRejectedPlacement(ctx context.Context, dir, name string) Re
 	}
 	// A record that did not reach hk stays in the quarantine alone: the spool
 	// copy this pass wrote is dropped so a later replay posts it once.
-	_ = os.Remove(filepath.Join(a.stateDir(), "placements", name))
+	if stateDir := a.stateDir(); stateDir != "" {
+		_ = os.Remove(filepath.Join(stateDir, "placements", name))
+	}
 	return row
 }
