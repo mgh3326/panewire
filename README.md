@@ -139,10 +139,10 @@ those authenticated machine IDs; other nodes remain visible as
 `presence-only` in `hub-status` and `/v1/nodes`.
 
 See [docs/hub-r6.md](docs/hub-r6.md) for token-file formats, CLI examples, the
-closed WebSocket vocabulary, and the NCP/systemd + tunnel deployment runbook.
+closed WebSocket vocabulary, and the systemd + Cloudflare tunnel deployment checklist (host oci).
 How the hub stops on SIGTERM and how a node redials: [docs/hub-drain.md](docs/hub-drain.md).
-[docs/runbooks/hub-log-access.md](docs/runbooks/hub-log-access.md) covers how a
-non-root operator reads hub logs on NCP.
+[docs/runbooks/hub-log-access.md](docs/runbooks/hub-log-access.md) says where hub
+logs are read on oci.
 
 A hub restart does not fail the idempotent calls: inbox commands, the spawn
 submit and the node's repeatable hub calls are sent again through a transport

@@ -10,10 +10,12 @@ path passed to `panewire hub --placement-policy`) and uses its local machine
 first. A local candidate spills only when it is disconnected or not
 accepting, its free memory is below `memory_free_pct_min`, its thermal speed
 limit is below one, or active heartbeat jobs reach `max_active_jobs`.
-`spill_targets` are considered in policy order. Load never filters a
-candidate; it ranks candidates through `score` (see
-[Measured-load score](#measured-load-score)), and callers that rank hosts —
-panewire's host-first placement — read that score.
+`spill_targets` are considered in policy order. Load ranks candidates
+through `score` (see [Measured-load score](#measured-load-score)), and callers
+that rank hosts — panewire's host-first placement — read that score. The one
+exception is the load ceiling (see [The decision](#the-decision)): it leaves a
+host out only while another usable host is at or under it, and it never makes a
+spawn wait or refuse.
 
 ```json
 {
@@ -587,7 +589,20 @@ candidates (connected, accepting, above the memory floor, not throttled, under
 the job cap, with a free task slot). A host with no terms (an old hub) has an
 unknown `free`, never a low one: the floor does not apply to it.
 
-1. **Free floor.** A host whose `free` (the product of the terms, before
+1. **Load ceiling.** A host whose load1 per core (the same three-minute
+   reading the `load` term ranks on) is above `load_ceiling_per_core` (default
+   2.5) is left out of the decision while another usable host is at or under
+   it. When the policy-order winner is over the ceiling the decision moves to
+   the first host at or under it in policy order, and `reason` is
+   `load_over_ceiling`. Every host over the ceiling is then left out of the
+   rules below, so one cannot take the decision as a challenger either. A host
+   at exactly the ceiling is not over it. A host whose load is unknown is
+   neither over nor under: it cannot lift the ceiling, and nothing is left out
+   for its missing reading (the `load_unknown` rule is unchanged). When every
+   usable host is over the ceiling, none is left out and the rules below rank
+   them exactly as they did before. The ceiling only redirects a decision to
+   another usable host: it never makes a spawn wait or refuse. 0 disables it.
+2. **Free floor.** A host whose `free` (the product of the terms, before
    `power` and the bridge) is under `free_floor` (default 0.05) is not chosen
    while another usable host has `free` at or above it. When the policy-order
    winner is under the floor, the decision moves to the first host at or above
@@ -597,7 +612,7 @@ unknown `free`, never a low one: the floor does not apply to it.
    saturated host (2026-11-13 04:00:57Z, task 4172: oci at 99.8 % CPU busy
    scored +0.05 because it alone had no claims, while rpi at `free` 0.218 scored
    -17.4).
-2. **All below the floor.** If every usable host is under it, no host is a good
+3. **All below the floor.** If every usable host is under it, no host is a good
    place. `reason` is `all_loaded` and the decision goes to the highest
    `free * power` less the bridge cost of the jobs already decided onto the
    host, which is the score (ties: higher `free * power`, then policy order). The
@@ -605,7 +620,7 @@ unknown `free`, never a low one: the floor does not apply to it.
    bridge term moves with each decided job, while `free` and `power` do not move
    until the claims and the metrics catch up. This replaces the earlier
    "highest `mem` term when the best score is under 15" rule.
-3. **Hysteresis.** Among the hosts at or above the floor, the winner (the
+4. **Hysteresis.** Among the hosts at or above the floor, the winner (the
    policy-order winner, or the first host at the floor in policy order when the
    floor moved the decision) keeps the decision unless the best other host at
    the floor scores at least 1.25 times as much (for a winner scoring under
@@ -625,7 +640,7 @@ which reads as above the floor and is still unusable). An unusable host is a
 fallback and never outranks a usable one, whatever its `free` or bucket. Within a
 tier, bucket, the hub's decision and the score order the hosts as before. When
 every usable host is under the floor, the highest score ranks first (as in rule
-2, so decided jobs count) and the bucket does not apply. With no awake host under
+3, so decided jobs count) and the bucket does not apply. With no awake host under
 the floor, or none usable, the ranking is unchanged. A host under the floor is
 ranked behind, not removed: it is still tried if every other host refuses the
 job. The hub's verdict covers the local host like any other.
@@ -640,12 +655,18 @@ flag; their readers do not decode strictly. A hub that predates the flag sends
 none, and no host is then under the floor.
 
 A decision the rules left alone has no `reason`. Tagged requests (below) have
-no policy-order winner and always take the highest score.
+no policy-order winner: they take the highest score among the hosts at or under
+the load ceiling, and `reason` is `load_over_ceiling` when the ceiling moved
+the decision off the highest-scoring host.
 
 The spawn engine ranks hosts by the same scores, and prefers the host the hub
-named within a load bucket, so the margin holds there too. A spawn that does
-not go through the hub (`panewire spawn` on a node without a hub decision)
-ranks on score alone.
+named within a load bucket, so the margin holds there too. The hub's load
+ceiling reaches the engine as that decision, not as a rule the engine evaluates
+again: the engine has no per-core load1 reading of its own, and its local guard
+reads the node's load5 over the CPU count, a different measure. A fallback
+after a refusal may still try a host over the ceiling; the ceiling redirects a
+decision and never blocks a spawn. A spawn that does not go through the hub
+(`panewire spawn` on a node without a hub decision) ranks on score alone.
 
 ### Constants
 
@@ -658,6 +679,7 @@ default.
   "mem_floor": 0.20, "mem_span": 0.20,
   "pagein_half_mbps": 10, "linux_swap_in_half_mbps": 20,
   "load_knee": 0.75, "load_cap": 4,
+  "load_ceiling_per_core": 2.5,
   "jobs_half": 8, "bridge_cost": 10,
   "hysteresis": 1.25, "free_floor": 0.05
 }}
@@ -665,8 +687,10 @@ default.
 
 `bridge_cost` is the points one claim costs a power-100 host (0..10000); a host
 of power `p` pays `bridge_cost * 100 / p`. `free_floor` (0..1) is the free
-fraction under which a host is not chosen while another is at or above it. The
-earlier `claim_cost` and `all_loaded_below` still load and are ignored.
+fraction under which a host is not chosen while another is at or above it.
+`load_ceiling_per_core` (0..100) is the load1 per core above which a host is
+left out while another usable host is at or under it; 0 disables the ceiling.
+The earlier `claim_cost` and `all_loaded_below` still load and are ignored.
 
 **Rollout and rollback.** The policy decoder refuses unknown keys, so an older
 binary rejects a `placement.json` that sets `bridge_cost` or `free_floor`
@@ -686,8 +710,9 @@ Every decision leaves two kinds of Loki fleet event (`tool=panewire`, see
 `deploy/alloy/README.md`), so a later tuning can replay it:
 
 - `kind=placement`, one per placement decision, with `request_id` (the hub
-  spawn request), `job`, `chosen`, `reason` (`policy_order`, `challenger`,
-  `below_free_floor`, `all_loaded`, else the ranking metric) and `candidates`:
+  spawn request), `job`, `chosen`, `reason` (`policy_order`,
+  `load_over_ceiling`, `challenger`, `below_free_floor`, `all_loaded`, else
+  the ranking metric) and `candidates`:
   for every host its `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs`,
   their product `free`, its `power`, its
   `bridge` count (claims inside the bridge window) and `outcome`.
@@ -1033,11 +1058,12 @@ still follows policy order among usable machines, adjusted by the
 [decision rules](#the-decision); power shapes `score` and therefore the order
 of `candidates`.
 
-## Draft NCP policy file (not deployed)
+## Draft policy file (not deployed)
 
-The production hub (`panewire-hub.service` on NCP) currently runs with no
-policy file, so it uses the compiled default (`local_machine` `mac-work`,
-which matches no real machine). The operator-approved draft for the real
+History: while the hub still ran on the former host ncp (returned 2026-11-24),
+it ran with no policy file, so it used the compiled default (`local_machine`
+`mac-work`, which matches no real machine). This page does not record whether
+the hub on oci runs with a policy file. The operator-approved draft for the real
 fleet — 3/3/2 task slots per `decision/2026-09-23/task-slots-per-machine` —
 is:
 

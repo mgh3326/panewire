@@ -1549,7 +1549,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			a.stage("landing", startedLanding)
 		}
 	}()
-	if e = a.confirmBrief(ctx, seat.Kind, pane, pointer, initialScreen); e != nil {
+	confirm, e := a.confirmBrief(ctx, seat.Kind, pane, pointer, initialScreen)
+	if e != nil {
 		return e
 	}
 	if seat.Kind == "omp" || seat.Kind == "cmd" {
@@ -1606,6 +1607,14 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if id := spawnNodeRequestID(ctx); id != "" {
 		receipt["node_request_id"] = id
 	}
+	// The brief that appeared in the composer after the landing proof, and the
+	// one Return that submitted it (hk 6483), so the case can be counted.
+	if confirm.LateComposer {
+		receipt["brief_late_composer"] = true
+	}
+	if confirm.LateReturn {
+		receipt["brief_late_return"] = true
+	}
 	if e = a.event(ctx, s.Job, "job.spawned", receipt); e != nil {
 		return e
 	}
@@ -1636,7 +1645,11 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	} else if s.laneUnregistered {
 		laneStatus = " lane=UNREGISTERED"
 	}
-	fmt.Fprintf(a.Out, "OK pane=%s session=%s model=%s label=%s status=working landed=yes job=%s quota_record=%s/quota_pool%s placement=%s\n", pane, a.herdrSession(), s.Profile, s.Label, s.Job, pool, laneStatus, s.placement.execution.receipt())
+	briefStatus := ""
+	if confirm.LateComposer {
+		briefStatus = " brief=late_composer"
+	}
+	fmt.Fprintf(a.Out, "OK pane=%s session=%s model=%s label=%s status=working landed=yes job=%s quota_record=%s/quota_pool%s placement=%s%s\n", pane, a.herdrSession(), s.Profile, s.Label, s.Job, pool, laneStatus, s.placement.execution.receipt(), briefStatus)
 	a.finishPlacement(ctx, s, nil)
 	if s.laneUnregistered && a.envOr("PANEWIRE_LANE_STRICT", "WRK_LANE_STRICT") == "1" {
 		return fail(exitLaneUnregistered, "%s pane exists but lane is UNREGISTERED", s.Role)

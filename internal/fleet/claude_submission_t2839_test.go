@@ -224,7 +224,9 @@ func TestBriefSubmitConfigIsValidated(t *testing.T) {
 	}
 }
 
-// Return would answer a dialog's default choice.
+// Return would answer a dialog's default choice, so a blocked pane never gets
+// one, even when its composer visibly holds the brief (hk 6483 review: the
+// dialog owns the keystroke).
 func TestClaudeReturnNeverPressedWhileBlocked(t *testing.T) {
 	a, d := claudeDeliveryApp(t, func(d *claudeDelivery) string {
 		if d.pastes == 0 {

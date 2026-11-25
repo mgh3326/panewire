@@ -76,7 +76,7 @@ func TestDeliverWaitWorkingRequiresScreenProof(t *testing.T) {
 	if err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief); err != nil {
 		t.Fatal(err)
 	}
-	if f.waits != 1 || f.lists != 0 || f.reads != 2 {
+	if f.waits != 1 || f.lists != 0 || f.reads != 3 {
 		t.Fatalf("waits=%d lists=%d reads=%d", f.waits, f.lists, f.reads)
 	}
 }
@@ -94,6 +94,8 @@ func TestDeliverWaitTimeoutRetryCadence(t *testing.T) {
 	}
 }
 
+// A blocked pane is waiting on a dialog: Return would confirm the dialog's
+// default, so it never gets one, even with the brief in the composer.
 func TestDeliverWaitBlockedDoesNotSpinOrSubmit(t *testing.T) {
 	a, f := waitDeliveryApp(t, func(time.Duration) Result { return waitAnswer("blocked") })
 	f.status = "blocked"
@@ -137,6 +139,8 @@ func TestDeliverWaitWorkingWithComposerIsNotProof(t *testing.T) {
 	}
 }
 
+// A wait timeout is not an idle pane: the status is read again before any
+// Return, and a blocked pane gets none (its dialog would take the keystroke).
 func TestDeliverWaitTimeoutChecksStatusBeforeReturn(t *testing.T) {
 	var f *deliveryWaitFake
 	a, fake := waitDeliveryApp(t, func(d time.Duration) Result { f.now = f.now.Add(d); f.status = "blocked"; return waitTimeout() })

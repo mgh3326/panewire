@@ -741,8 +741,8 @@ func TestT961TesterLogFileTightensExistingWideFile(t *testing.T) {
 
 // A file the hub process can write but does not own (e.g. root-owned
 // /dev/null, crw-rw-rw-) cannot be chmod'ed: startup is rejected. This is the
-// shape the runbook's Option B would produce if the file were not owned by
-// the documented unprivileged account.
+// shape a mis-owned `--log-file` would produce (see the `--log-file`
+// paragraph in docs/hub-r6.md).
 func TestT961TesterLogFileNotOwnedRejectsStartup(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root owns everything")
