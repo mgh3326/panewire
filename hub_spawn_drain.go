@@ -131,7 +131,7 @@ func (s *laneInboxStore) backfillSpawnBoundMachines(parent context.Context) erro
 	if err != nil || recorded {
 		return err
 	}
-	var batches []int
+	batches := []int{}
 	for after := ""; ; {
 		read, last, err := s.backfillSpawnBoundBatch(ctx, after)
 		if err != nil {

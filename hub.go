@@ -1020,7 +1020,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		if marked := inbox.store.succeededNoticesMarked; marked != nil {
 			config.Logger.Info("hub backfilled succeeded spawn notifications as telemetry-recorded", "rows", *marked)
 		}
-		if batches := inbox.store.spawnBoundBackfilled; len(batches) > 0 {
+		if batches := inbox.store.spawnBoundBackfilled; batches != nil {
 			rows := 0
 			for _, read := range batches {
 				rows += read
