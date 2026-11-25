@@ -1277,8 +1277,11 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   contains the sha; otherwise `sha-missing`). It then runs `git worktree add
   --detach <dir> <sha>`, so the worktree sits at `sha`, never at the fetched
   tip. An existing worktree is reused only when detached at exactly that
-  commit and clean. `exclude` and `include` are accepted in this mode only
-  (hk 5098): each entry is a plain path or pattern — one that starts with `!`
+  commit and clean. The node records the job directory identity under the clone
+  Git operation lock and checks it again before changing sparse settings and
+  before reporting reuse. An identity mismatch returns `job_dir_link`.
+  `exclude` and `include` are accepted in this mode only (hk 5098): each
+  entry is a plain path or pattern — one that starts with `!`
   or `/`, or contains `..`, a NUL or a newline, is `invalid_args`; at most 64
   excludes and 500 includes, each at most 4096 bytes, 128 KiB together. With
   either list

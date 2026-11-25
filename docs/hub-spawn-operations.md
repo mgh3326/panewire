@@ -1136,17 +1136,42 @@ inside the job dir for a lane spawn. A hub older than this rule reports such a
 landed spawn as `unknown` (nothing is launched again), so upgrade the hub before
 or with its nodes.
 
+### Node restart
+
+A node starting with one spawn slot starts with an empty admission gate.
+A node starting with more than one slot reads executing rows from its local
+journal before admitting new work. A checkout row holds its overlap key, or
+holds the node exclusively if its key is missing. A legacy row without claim
+times also holds the node exclusively if its key is missing. A current row
+without a checkout or key holds nothing. Checkout admission compares the
+configured root's resolved path with the roots on unreleased holds and refuses
+a mismatch as `checkout_refused:work_root_changed`.
+
+Each hold ends when settle completes its row or two minutes after the later
+of the admission deadline and the grant's start-by time, whichever comes
+first. Legacy holds expire ten minutes after node start. Admission checks
+expiry itself, so an unprovable row can stay executing after its hold ends.
+
+A failed journal read blocks admission while the node retries after one, two,
+and four seconds. If all attempts fail, the node logs
+`spawn admission seed failed` and admission stays exclusive until two minutes
+after node start, then opens with no seeded holds.
+
 ### Spawn identity
 
 A hub spawn's argv names its job in one way, the launcher's
 (`fleet.ParseSpawnIdentity`): the job is `--job`, else the `-l` label; a flag's
+value is never read as a flag; a repeated flag keeps its last value. The
 overlap key (node and hub), the node journal's `job_id` and `label`, the
 node's never-started, expired and timeout answers, its `node_spawn` fleet
 events, the hub's fenced-attempt answer, the hub's landed-pane check and the
 lane write's accepted-spawn proof all name the job this way (hk 6401, hk 6495).
 So a restart settles a spawn sent without `--job` from the job record under its
-label, instead of completing it `lost` as `journal_row_without_job`. A row an
-older build journaled for such a spawn keeps its empty `job_id`.
+label, instead of completing it `lost` as `journal_row_without_job`. Durable
+spawn records also tolerate the retired `--builder-family` and `--routing-role`
+flags as one-value no-ops when the lane proof reads their identity; other
+unknown flags remain unreadable. A row an older build journaled for such a
+spawn keeps its empty `job_id`.
 
 ### A job.spawn the node cannot accept
 

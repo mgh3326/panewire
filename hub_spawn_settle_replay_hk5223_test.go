@@ -31,7 +31,7 @@ func settledSparseRestart(t *testing.T) (*settleFixture, hubOutboundMessage, hub
 	strippedCheckout := *withLists.Checkout
 	strippedCheckout.Exclude, strippedCheckout.Include = nil, nil
 	stripped.Checkout = &strippedCheckout
-	if claimed, _, err := f.journal.claim(t.Context(), withLists); err != nil || !claimed {
+	if claimed, _, err := f.journal.claim(t.Context(), withLists, spawnJournalHold{}); err != nil || !claimed {
 		t.Fatalf("claim %v %v", claimed, err)
 	}
 	dir := filepath.Join(f.jobs, "jobs", "job-a", "events")

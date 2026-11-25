@@ -594,12 +594,16 @@ unknown `free`, never a low one: the floor does not apply to it.
    reading the `load` term ranks on) is above `load_ceiling_per_core` (default
    2.5) is left out of the decision while another usable host is at or under
    it. When the policy-order winner is over the ceiling the decision moves to
-   the first host at or under it in policy order, and `reason` is
+   the first host with a known load at or under it in policy order, and
+   `reason` is
    `load_over_ceiling`. Every host over the ceiling is then left out of the
    rules below, so one cannot take the decision as a challenger either. A host
    at exactly the ceiling is not over it. A host whose load is unknown is
-   neither over nor under: it cannot lift the ceiling, and nothing is left out
-   for its missing reading (the `load_unknown` rule is unchanged). When every
+   neither over nor under and cannot lift the ceiling. If the policy-order
+   winner is over the ceiling, only a host known at or under it can take the
+   redirected choice. Unknown-load hosts remain in the rules below, including
+   the free-floor rule, and remain in the candidate trace (`load_unknown` is
+   unchanged). When every
    usable host is over the ceiling, none is left out and the rules below rank
    them exactly as they did before. The ceiling only redirects a decision to
    another usable host: it never makes a spawn wait or refuse. 0 disables it.
@@ -656,9 +660,12 @@ flag; their readers do not decode strictly. A hub that predates the flag sends
 none, and no host is then under the floor.
 
 A decision the rules left alone has no `reason`. Tagged requests (below) have
-no policy-order winner: they take the highest score among the hosts at or under
-the load ceiling, and `reason` is `load_over_ceiling` when the ceiling moved
-the decision off the highest-scoring host.
+no policy-order winner: they take the highest score among hosts with a known
+load at or under the ceiling when it applies. Their `Candidates` still lists
+every usable matching host in score order, including over-ceiling hosts, so
+`--explain` shows which entries the ceiling excluded from the decision.
+`reason` is `load_over_ceiling` when this moves the decision off the
+highest-scoring host.
 
 The spawn engine ranks hosts by the same scores, and prefers the host the hub
 named within a load bucket, so the margin holds there too. The hub's load
@@ -1187,7 +1194,10 @@ active-job and task-slot guards. They do not fall back to an untagged local host
 an unknown capability, a full host or a disconnected wake target. No matching
 capacity returns `decision: null`, an empty candidate list and
 `reason: no_tagged_capacity`; the CLI exits nonzero with a repair hint. If Prometheus is unavailable, the existing hub-only presence/score fallback still applies; this is not a fresh load or quota guarantee. The cache
-key includes the canonical tag set. Untagged requests retain the existing
+key includes the canonical tag set. When the load ceiling applies, a tagged
+decision uses the highest-scoring matching host with a known load at or below
+the ceiling, while `Candidates` retains every usable matching host in score
+order, including over-ceiling hosts. Untagged requests retain the existing
 local/spill policy order.
 
 This is a recommendation, not a job reservation, quota grant or execution lease.
