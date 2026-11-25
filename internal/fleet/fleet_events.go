@@ -230,8 +230,8 @@ func selectionTerms(sel map[string]any) []fleetevent.HostSelection {
 // placementTerms projects the plan's candidates for the placement event: each
 // host's score and the hub's terms behind it (cpu, mem, io, load, jobs, power,
 // bridge), and the reason the chosen host won. The reason is the hub's own
-// when the chosen host is the one the hub named (policy_order, challenger,
-// below_free_floor, all_loaded), else the ranking metric. It carries numbers and host ids only;
+// when the chosen host is the one the hub named (policy_order, load_over_ceiling,
+// challenger, below_free_floor, all_loaded), else the ranking metric. It carries numbers and host ids only;
 // no screen text, brief or argv.
 func placementTerms(p *placePlan, chosen, ranking string) ([]fleetevent.Candidate, string) {
 	reason := ranking

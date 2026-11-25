@@ -25,10 +25,15 @@ const (
 	placementDefaultSwapInHalf = 20.0
 	placementDefaultLoadKnee   = 0.75
 	placementDefaultLoadCap    = 4.0
-	placementDefaultJobsHalf   = 8.0
-	placementDefaultBridgeCost = 10.0
-	placementDefaultHysteresis = 1.25
-	placementDefaultFreeFloor  = 0.05
+	// placementDefaultLoadCeiling is the load1 per core above which a host is
+	// left out of a decision while another usable host is at or under it
+	// (operator decision 515). It ranks nothing: it only redirects a spawn
+	// that would otherwise land on a host the submit path cannot keep up with.
+	placementDefaultLoadCeiling = 2.5
+	placementDefaultJobsHalf    = 8.0
+	placementDefaultBridgeCost  = 10.0
+	placementDefaultHysteresis  = 1.25
+	placementDefaultFreeFloor   = 0.05
 )
 
 // PlacementScoreConfig is the optional "score" object of placement.json. A nil
@@ -57,6 +62,12 @@ type PlacementScoreConfig struct {
 	// FreeFloor is the free fraction under which a host is not chosen while
 	// another usable host is at or above it.
 	FreeFloor *float64 `json:"free_floor,omitempty"`
+	// LoadCeilingPerCore is the load1 per core above which a host is left out
+	// of a decision while another usable host is at or under it. It reads the
+	// same three-minute load1-per-core value the load term ranks on, and it
+	// only applies to a known value: a host whose load is unknown keeps the
+	// load_unknown rule. 0 turns it off; unset keeps the default 2.5.
+	LoadCeilingPerCore *float64 `json:"load_ceiling_per_core,omitempty"`
 	// ClaimCost and AllLoadedBelow are retired (bridge_cost and free_floor
 	// replace them). They stay decodable so a stale policy file still loads,
 	// and their values are ignored.
@@ -66,7 +77,7 @@ type PlacementScoreConfig struct {
 
 // placementScoreK is PlacementScoreConfig with every default filled in.
 type placementScoreK struct {
-	memFloor, memSpan, pageInHalf, swapInHalf, loadKnee, loadCap, jobsHalf, bridgeCost, hysteresis, freeFloor float64
+	memFloor, memSpan, pageInHalf, swapInHalf, loadKnee, loadCap, loadCeiling, jobsHalf, bridgeCost, hysteresis, freeFloor float64
 }
 
 func (c *PlacementScoreConfig) valid() bool {
@@ -85,14 +96,14 @@ func (c *PlacementScoreConfig) valid() bool {
 		loadCap = *c.LoadCap
 	}
 	return in(c.MemFloor, 0, 1) && pos(c.MemSpan, 1) && pos(c.PageInHalfMBps, 100000) && pos(c.LinuxSwapInHalfMBps, 100000) &&
-		in(c.LoadKnee, 0, 100) && pos(c.LoadCap, 100) && pos(c.JobsHalf, 10000) && in(c.BridgeCost, 0, 10000) &&
+		in(c.LoadKnee, 0, 100) && pos(c.LoadCap, 100) && in(c.LoadCeilingPerCore, 0, 100) && pos(c.JobsHalf, 10000) && in(c.BridgeCost, 0, 10000) &&
 		in(c.Hysteresis, 1, 100) && in(c.FreeFloor, 0, 1) &&
 		knee < loadCap
 }
 
 func (p PlacementPolicy) scoreK() placementScoreK {
 	k := placementScoreK{placementDefaultMemFloor, placementDefaultMemSpan, placementDefaultPageInHalf, placementDefaultSwapInHalf,
-		placementDefaultLoadKnee, placementDefaultLoadCap, placementDefaultJobsHalf, placementDefaultBridgeCost, placementDefaultHysteresis, placementDefaultFreeFloor}
+		placementDefaultLoadKnee, placementDefaultLoadCap, placementDefaultLoadCeiling, placementDefaultJobsHalf, placementDefaultBridgeCost, placementDefaultHysteresis, placementDefaultFreeFloor}
 	c := p.Score
 	if c == nil {
 		return k
@@ -101,7 +112,7 @@ func (p PlacementPolicy) scoreK() placementScoreK {
 		from *float64
 		to   *float64
 	}{{c.MemFloor, &k.memFloor}, {c.MemSpan, &k.memSpan}, {c.PageInHalfMBps, &k.pageInHalf}, {c.LinuxSwapInHalfMBps, &k.swapInHalf},
-		{c.LoadKnee, &k.loadKnee}, {c.LoadCap, &k.loadCap}, {c.JobsHalf, &k.jobsHalf}, {c.BridgeCost, &k.bridgeCost},
+		{c.LoadKnee, &k.loadKnee}, {c.LoadCap, &k.loadCap}, {c.LoadCeilingPerCore, &k.loadCeiling}, {c.JobsHalf, &k.jobsHalf}, {c.BridgeCost, &k.bridgeCost},
 		{c.Hysteresis, &k.hysteresis}, {c.FreeFloor, &k.freeFloor}} {
 		if o.from != nil {
 			*o.to = *o.from
@@ -192,11 +203,43 @@ func (k placementScoreK) hysteresisBar(w float64) float64 {
 	return w * k.hysteresis
 }
 
+// loadOverCeiling reports that the host has a known load1 per core above the
+// ceiling. A host with no reading is never over it.
+func loadOverCeiling(c PlacementCandidate, ceiling float64) bool {
+	return c.Signals != nil && c.Signals.Load1PerCore != nil && *c.Signals.Load1PerCore > ceiling
+}
+
+// loadAtOrUnderCeiling reports a known load1 per core at or under the ceiling.
+// An unknown reading counts as neither side: it does not lift the ceiling.
+func loadAtOrUnderCeiling(c PlacementCandidate, ceiling float64) bool {
+	return c.Signals != nil && c.Signals.Load1PerCore != nil && *c.Signals.Load1PerCore <= ceiling
+}
+
+// loadCeilingApplies reports that the ceiling leaves a host out of this set:
+// at least one candidate is over it and at least one other is known at or
+// under it. When every known host is over, or no host is known, it applies to
+// none and the set is ranked as it always was.
+func loadCeilingApplies(usable []PlacementCandidate, ceiling float64) bool {
+	over, atOrUnder := false, false
+	for _, c := range usable {
+		over = over || loadOverCeiling(c, ceiling)
+		atOrUnder = atOrUnder || loadAtOrUnderCeiling(c, ceiling)
+	}
+	return over && atOrUnder
+}
+
 // decide applies the decision rules that sit on top of the scores, to the
 // usable candidates in policy order (winner is the index of the policy-order
 // winner). It returns the index of the candidate that takes the decision and
 // the reason:
 //
+//   - "load_over_ceiling": the policy-order winner had a known load1 per core
+//     above loadCeiling and another usable host was known at or under it; the
+//     decision moved to the first such host in policy order, and every host
+//     over the ceiling was left out of the rules below (operator decision 515).
+//     When every usable host is over the ceiling none is left out: the rules
+//     below rank them as they always did. A host whose load is unknown is
+//     neither over nor under, so it cannot lift the ceiling.
 //   - "below_free_floor": the policy-order winner had free under freeFloor
 //     while another usable host did not; the decision moved to the first host
 //     at or above the floor (hysteresis then applies among those).
@@ -212,28 +255,47 @@ func (k placementScoreK) hysteresisBar(w float64) float64 {
 // A host with no terms has an unknown free, not a low one: it is never under
 // the floor, and a decision where no host has terms is the old score rule.
 func (k placementScoreK) decide(usable []PlacementCandidate, winner int) (int, string) {
-	below := func(c PlacementCandidate) bool {
+	// considered holds the indices into usable that the rules below may pick,
+	// so the returned index stays an index into the caller's slice.
+	considered := make([]int, len(usable))
+	for i := range considered {
+		considered[i] = i
+	}
+	reason := ""
+	if k.loadCeiling > 0 && loadCeilingApplies(usable, k.loadCeiling) {
+		kept := make([]int, 0, len(usable))
+		for i, c := range usable {
+			if !loadOverCeiling(c, k.loadCeiling) {
+				kept = append(kept, i)
+			}
+		}
+		considered = kept
+		if loadOverCeiling(usable[winner], k.loadCeiling) {
+			winner, reason = kept[0], "load_over_ceiling"
+		}
+	}
+	below := func(i int) bool {
+		c := usable[i]
 		return c.Signals != nil && c.Signals.Terms != nil && c.Signals.Terms.Free() < k.freeFloor
 	}
 	var above []int
-	for i, c := range usable {
-		if !below(c) {
+	for _, i := range considered {
+		if !below(i) {
 			above = append(above, i)
 		}
 	}
 	if len(above) == 0 {
-		pick := 0
-		for i, c := range usable {
-			p := usable[pick]
+		pick := considered[0]
+		for _, i := range considered[1:] {
+			c, p := usable[i], usable[pick]
 			if c.Score > p.Score || (c.Score == p.Score && c.Signals.Terms.Free()*c.Signals.Power > p.Signals.Terms.Free()*p.Signals.Power) {
 				pick = i
 			}
 		}
 		return pick, "all_loaded"
 	}
-	floorReason := ""
-	if below(usable[winner]) {
-		winner, floorReason = above[0], "below_free_floor"
+	if below(winner) {
+		winner, reason = above[0], "below_free_floor"
 	}
 	challenger := -1
 	for _, i := range above {
@@ -244,5 +306,5 @@ func (k placementScoreK) decide(usable []PlacementCandidate, winner int) (int, s
 	if challenger >= 0 && usable[challenger].Score > usable[winner].Score && usable[challenger].Score >= k.hysteresisBar(usable[winner].Score) {
 		return challenger, "challenger"
 	}
-	return winner, floorReason
+	return winner, reason
 }
