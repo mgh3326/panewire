@@ -213,6 +213,10 @@ func (mysqlDialect) storedKey(key string) any {
 
 func (d mysqlDialect) storedKeys(key string) []any { return []any{d.storedKey(key)} }
 
+// storedKeyForms: MySQL stores one form per key (a digest when oversized), so
+// the stored value is its only form.
+func (mysqlDialect) storedKeyForms(stored any) []any { return []any{stored} }
+
 func (mysqlDialect) ownsSchema() bool { return false }
 
 // batchOrder is the AUTO_INCREMENT column MySQL needs in place of a rowid.

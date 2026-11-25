@@ -29,7 +29,7 @@ func TestStoredEventKeyFormsPostgres_t6486(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			var got []string
-			for _, form := range storedEventKeyForms(c.dialect, c.dialect.storedKey(c.key)) {
+			for _, form := range c.dialect.storedKeyForms(c.dialect.storedKey(c.key)) {
 				got = append(got, string(storeCopyBytes(form)))
 			}
 			if !slices.Equal(got, c.want) {
@@ -39,11 +39,11 @@ func TestStoredEventKeyFormsPostgres_t6486(t *testing.T) {
 	}
 	// A Postgres form that is not hex is kept as it is, so the query still
 	// compares the stored value.
-	if forms := storedEventKeyForms(dialectPostgres, "not-hex!"); len(forms) != 1 || forms[0] != "not-hex!" {
+	if forms := dialectPostgres.storedKeyForms("not-hex!"); len(forms) != 1 || forms[0] != "not-hex!" {
 		t.Fatalf("non-hex stored key forms %v", forms)
 	}
 	// Each form keeps the type the dialect binds: SQLite's text stays text.
-	if forms := storedEventKeyForms(dialectSQLite, "short"); len(forms) != 1 || forms[0] != "short" {
+	if forms := dialectSQLite.storedKeyForms("short"); len(forms) != 1 || forms[0] != "short" {
 		t.Fatalf("sqlite forms %v", forms)
 	}
 }
