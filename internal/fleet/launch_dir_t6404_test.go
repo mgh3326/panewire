@@ -23,9 +23,9 @@ type laneFixture struct {
 func newLaneFixture(t *testing.T) *laneFixture {
 	t.Helper()
 	a, s, f, _ := cmdFixture(t)
+	// A live lane, unlike a mock one, needs no MCP descriptor.
 	s.ExecutionLane = "live"
 	l := &laneFixture{a: a, s: s, f: f, w: s.CWD, other: filepath.Join(filepath.Dir(s.CWD), "job-b")}
-	// A live lane needs no mock descriptor.
 	mkdirs(t, l.other)
 	return l
 }

@@ -1434,9 +1434,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return fail(exitConfig, "workspace trust: %v", e)
 	}
 	// The grant above resolved the path as it is now.
-	startedVerify := time.Now()
 	if e = s.launchDir.verify(s.CWD); e != nil {
-		a.stage("launch", startedVerify)
+		a.stage("launch", time.Now())
 		return e
 	}
 	// The launch may not spend the brief's submit window (hk 5174): it ends

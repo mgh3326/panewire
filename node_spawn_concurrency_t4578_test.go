@@ -600,7 +600,7 @@ func TestNodeSpawnLaneReadAsFlag_t4578(t *testing.T) {
 	if got, want := (&HubClient{spawnConfigPath: config}).spawnTargetFor(message).Key, spawnOverlapKey("job-c", message.Args); got != want {
 		t.Fatalf("a lane changed the key to %q, want %q", got, want)
 	}
-	lane := hubSpawnIdentity(message.Args).ExecutionLane
+	lane := hubSpawnFlagArg(message.Args, "-L")
 	if _, err := fleet.BindLaunchDir(filepath.Join(root, "job-c"), lane); lane != "live" || !errors.Is(err, fleet.ErrLaneOutsideWorktree) {
 		t.Fatalf("lane=%q err=%v", lane, err)
 	}
