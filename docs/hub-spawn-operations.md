@@ -1822,8 +1822,11 @@ design hk:doc `design/2026-11-18/pw-4898-hub-store-mysql` §2-§3).
 - `spawn_placement_snapshots` and `spawn_notifications` keep their rows and
   their `recorded`, `delivered` and `telemetry_recorded` columns. The telemetry
   claim and the stuck-notice lookup still go by `event_id` on
-  `spawn_notifications`; the outbox row does not wait for telemetry, which a
-  successful notice never records. Hk 5297 prunes the history tables by age.
+  `spawn_notifications`; the outbox row does not wait for telemetry. A
+  succeeded outcome owes none, so its notice is written with
+  `telemetry_recorded=1`, and the older ones were marked once (hk 6283;
+  postgres 0039, mysql 0032, SQLite at start). Hk 5297 prunes the history
+  tables by age.
 - A crash between the work and the delete leaves the row. The next pass redoes
   the work under its idempotency key: the hk placement record is keyed by
   job and attempt, and a lane event by its event id.

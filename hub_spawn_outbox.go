@@ -61,7 +61,7 @@ func (s *laneInboxStore) saveSpawnNotice(ctx context.Context, eventID string, ta
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?)`, "")), eventID, task.Request.RequestID, task.Job, task.Owner, raw, now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,telemetry_recorded) VALUES(?,?,?,?,?,?,?)`, "")), eventID, task.Request.RequestID, task.Job, task.Owner, raw, now.UnixMilli(), spawnNoticeRecordedAtInsert(eventID)); err != nil {
 		return err
 	}
 	if err := s.enqueueSpawnNotice(ctx, tx, eventID); err != nil {

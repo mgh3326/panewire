@@ -1007,6 +1007,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	if inbox != nil {
 		configkeys.Warn(config.Logger, config.DeliveryPolicyPath, inbox.policy.ignoredKeys)
+		if marked := inbox.store.succeededNoticesMarked; marked != nil {
+			config.Logger.Info("hub backfilled succeeded spawn notifications as telemetry-recorded", "rows", *marked)
+		}
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
