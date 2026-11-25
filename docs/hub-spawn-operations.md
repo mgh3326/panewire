@@ -1831,11 +1831,14 @@ design hk:doc `design/2026-11-18/pw-4898-hub-store-mysql` §2-§3).
   `terminal_ms` only when no `spawn_reservations` row names it and nothing
   else still needs it (an owed or unrecorded notification, an unrecorded
   snapshot, an open supersede landing, a live consult, a live pool action of
-  the job, an unposted task-failure comment). Only a request that ended
-  before any node took it (given up, or refused or cancelled while waiting on
-  its start conditions) or went retryable loses its reservation, so an
-  operation that reached a node is kept with its reservation, notifications
-  and snapshots. The pass deletes no notification or snapshot row. Deleting
+  the job, an unposted task-failure comment). The reservation is released
+  for every given_up, refused or cancelled outcome that `releaseEndedSpawn`
+  ends, including an attempt that was bound or sent to a node and ended
+  without starting (`endUnstartedAttempt`), and for a retryable outcome
+  (never pruned: retryable is not terminal). Such an operation can be
+  pruned once nothing above holds it. A succeeded or failed operation keeps
+  its reservation, so it is kept with its notifications and snapshots. The
+  pass deletes no notification or snapshot row. Deleting
   ended operations that still have a reservation was considered and not
   built (operator decision 499, A; the reader tests skipped with
   `decision 494 adverse finding` record why).
