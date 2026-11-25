@@ -1068,14 +1068,27 @@ while its dispatch is open the hub sends the node nothing else. If the query
 fails, that scan holds nothing back, the coordinator counts a silent error and
 the pass is repeated.
 
-Rows bound before the columns existed are filled once at the first start of a
-hub that has them, in batches of 500 by request id, before the coordinator
-runs. The start records it (`go_spawn_operations_bound_exclusive_backfill` in
-`panewire_schema_migrations`; on SQLite `PRAGMA user_version` 2), and
-`hub store-copy` refuses a source without that record. A hub rolled back past
-the columns neither writes nor clears them, and a later upgrade does not fill
-them again: an exclusive such a hub bound, still unsent at the upgrade, marks
-nothing until it is sent or unbound.
+Two start-up passes keep the columns true, both before the coordinator runs and
+both in batches of 500 by request id:
+
+- **Backfill, once.** Rows bound before the columns existed are filled at the
+  first start of a hub that has them. The start records it
+  (`go_spawn_operations_bound_exclusive_backfill` in
+  `panewire_schema_migrations`; on SQLite `PRAGMA user_version` 2), and
+  `hub store-copy` refuses a source without that record.
+- **Repair, at every start** (the one exception to "the columns are filled
+  once"). A hub rolled back past the columns neither writes nor clears them, so
+  after a later upgrade a row can hold blank or stale values. Each start reads
+  the operations in `spawn_queue` that are in flight on a node (`bound`,
+  `dispatching`, `reconciling`, `deadline_exceeded` and their `_grant` forms)
+  and rewrites those whose columns differ from their node request. Finished,
+  `retryable` and unbound rows are not touched. A start with nothing differing
+  writes no row; one that rewrites any logs
+  `hub repaired the drain columns of spawn operations in flight`.
+
+A row that an older hub writes after the newer one has started (two hub
+processes overlapping on one store) waits for the next start, or for the end of
+its attempt.
 
 | Behaviour | Tests |
 |---|---|
@@ -1087,6 +1100,9 @@ nothing until it is sent or unbound.
 | Bind writes and unbind clears the columns | `TestBindWritesBoundMachineAndExclusive_t6404` |
 | One row per machine | `TestBoundExclusiveSpawnsReturnsOldestPerMachine_t6433` |
 | The backfill is batched and runs once | `TestBoundMachineBackfillBoundedBatches_t6404` |
+| A start repairs blank and stale rows in flight | `TestSpawnBoundRepairFillsBlankInFlightRow_t6433`, `TestSpawnBoundRepairCorrectsStaleInFlightRow_t6433` |
+| It leaves finished, `retryable` and unbound rows alone | `TestSpawnBoundRepairLeavesTerminalRow_t6433` |
+| It is batched, and a start with nothing differing writes no row | `TestSpawnBoundRepairSecondStartWritesNothing_t6433` |
 
 ### Spawn identity
 

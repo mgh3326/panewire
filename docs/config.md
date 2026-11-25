@@ -525,6 +525,11 @@ distinct job dirs at once and advertises `spawn_slots_v1=N` in hello. Unset,
 not advertised and the hub keeps one-at-a-time dispatch. A change binds at the
 node's next registration (reconnect or restart). The admission rules are in
 [hub-spawn-operations.md](hub-spawn-operations.md#acceptance-and-identity).
+While a spawn without a checkout waits for such a node, the hub holds back the
+checkout spawns queued after it. It reads which spawns wait from two store
+columns that are backfilled once, at upgrade, and repaired for the attempts in
+flight at every hub start, which covers a rollback in between
+([the drain](hub-spawn-operations.md#drain-for-a-spawn-without-a-checkout)).
 
 Two steps are **not proven safe** for N>1, and they are the boundary of this
 opt-in (hk 4821):
