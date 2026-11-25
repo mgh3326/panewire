@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -20,6 +21,11 @@ var errCheckoutSweepNoWorkRoot = errors.New("checkout sweep: work root unset")
 // is swept; this pass is for the ones that outlived their record — a job dir
 // the TTL took, a spawn that failed before its receipt, a --keep job — and
 // for the checkouts already lying on the hosts.
+//
+// A checkout no local record claims is an orphan. It goes only with proof that
+// its job ended (orphanEnded) and that no pane is its own or works inside it
+// (orphanPaneKeep), and its patch is saved outside the job directory that is
+// gone (OrphanPatches, hk 6291).
 
 // CheckoutSweepRow is one *-checkout worktree's verdict. Outcome is
 // "removed", "kept" or "would_remove" (dry run only); Reason is the keep
@@ -38,6 +44,10 @@ const (
 	sweepCheckoutAgentsUnknown = "agents_unreadable"
 	sweepCheckoutNoJob         = "no_job"
 	sweepCheckoutJobUnreadable = "job_unreadable"
+	// An orphan whose end neither hk nor the node's spawns prove.
+	sweepCheckoutJobUnconfirmed = "job_unconfirmed"
+	// An orphan whose clone another git operation held.
+	sweepCheckoutCloneBusy = "clone_busy"
 )
 
 // CheckoutSweepLiveKeep reports whether a checkout sweep keep reason means a
@@ -49,15 +59,41 @@ func CheckoutSweepLiveKeep(reason string) bool {
 	return reason == sweepCheckoutJobLive || reason == sweepCheckoutPaneOpen
 }
 
-// CheckoutSweep holds what one pass needs. OrphanOwner names the job a
-// *-checkout directory belonged to when no local job record claims it — the
-// node's spawn journal on the hub path — and returns "" when nothing
-// attributes it. Info receives one line per kept or removed checkout.
+// CheckoutOrphan is what the node's own spawns say about the job a *-checkout
+// belonged to when no local job record claims it. The zero value attributes
+// nothing.
+type CheckoutOrphan struct {
+	Job string
+	// Panes and Labels are every pane id and label the job's spawns named: an
+	// earlier spawn's pane may still be open after a later one.
+	Panes, Labels []string
+	// InFlight reports a spawn of the job the node has not finished.
+	InFlight bool
+	// NeverLaunched reports that every spawn of the job finished as a failure
+	// without a pane: the one end that needs no hk record.
+	NeverLaunched bool
+}
+
+// CheckoutSweep holds what one pass needs. OrphanOwner attributes a *-checkout
+// directory no local job record claims — from the node's spawn journal on the
+// hub path. It is asked again right before an orphan's removal. Info receives
+// one line per kept or removed checkout.
 type CheckoutSweep struct {
 	WorkRoot    string
 	DryRun      bool
-	OrphanOwner func(dir string) string
-	Info        func(message string, attrs ...any)
+	OrphanOwner func(dir string) CheckoutOrphan
+	// OrphanRecords reads the hk job record that proves an orphan's job ended.
+	// Nil proves nothing, so every orphan is kept.
+	OrphanRecords JobStore
+	// OrphanHold, when set, takes the lock a spawn's worktree preparation
+	// takes on clone and returns its release; an orphan's last check and its
+	// removal run under it.
+	OrphanHold func(ctx context.Context, clone string) (release func(), err error)
+	// OrphanPatches is the directory an orphan's patch is saved under, as
+	// <OrphanPatches>/<job>/, when its job directory is gone. Empty keeps such
+	// a checkout, since its work could not be saved.
+	OrphanPatches string
+	Info          func(message string, attrs ...any)
 }
 
 func (s *CheckoutSweep) info(message string, attrs ...any) {
@@ -102,7 +138,7 @@ func (s *CheckoutSweep) Pass(ctx context.Context, a *App) ([]CheckoutSweepRow, e
 	for _, dir := range dirs {
 		row := CheckoutSweepRow{Path: dir, Outcome: "kept"}
 		j, known := owners[sweepResolved(dir)]
-		orphan := false
+		var orphan CheckoutOrphan
 		if !known {
 			for _, id := range unreadable {
 				if eventsMention(filepath.Join(a.Jobs, id, "events"), dir) {
@@ -111,8 +147,9 @@ func (s *CheckoutSweep) Pass(ctx context.Context, a *App) ([]CheckoutSweepRow, e
 				}
 			}
 			if row.Reason == "" && s.OrphanOwner != nil {
-				if id := s.OrphanOwner(dir); id != "" {
-					j, orphan, known = Job{ID: id, Receipt: map[string]any{"cwd": dir}}, true, true
+				// The id names a directory the patch is written to.
+				if found := s.OrphanOwner(dir); validID(found.Job) {
+					orphan, j, known = found, Job{ID: found.Job, Receipt: map[string]any{"cwd": dir}}, true
 				}
 			}
 		}
@@ -121,8 +158,15 @@ func (s *CheckoutSweep) Pass(ctx context.Context, a *App) ([]CheckoutSweepRow, e
 		}
 		if row.Reason == "" {
 			row.Job = j.ID
-			if live, reason := s.jobLive(j, orphan, dir, agentsFor); live {
-				row.Reason = reason
+			var record map[string]any
+			var keep string
+			if orphan.Job == "" {
+				keep = s.jobKeep(j, agentsFor)
+			} else if record, keep = s.orphanEnded(ctx, orphan); keep == "" {
+				keep = s.orphanPaneKeep(ctx, a, orphan, record, dir)
+			}
+			if keep != "" {
+				row.Reason = keep
 			} else {
 				clone, branch, owned, reason := ts.worktreePlan(ctx, a, j, dir, end)
 				switch {
@@ -131,8 +175,7 @@ func (s *CheckoutSweep) Pass(ctx context.Context, a *App) ([]CheckoutSweepRow, e
 				case s.DryRun:
 					row.Outcome, row.Reason = "would_remove", "discard"
 				default:
-					base := filepath.Base(filepath.Clean(dir))
-					if reason := ts.removeWorktree(ctx, a, j, end, clone, branch, dir, base, owned); reason == "" {
+					if reason := s.removeCheckout(ctx, a, j, orphan, record, end, clone, branch, dir, owned); reason == "" {
 						row.Outcome = "removed"
 					} else {
 						row.Reason = reason
@@ -203,41 +246,124 @@ func (s *CheckoutSweep) jobOwners(a *App) (map[string]Job, []string, error) {
 	return owners, unreadable, nil
 }
 
-// jobLive reports whether the checkout's job or a pane still uses it: a
-// record that has not ended or been reaped, a terminal record whose pane
-// herdr still lists, or — for a job whose record is gone — any pane working
-// inside the directory. An unreadable herdr list keeps every candidate that
-// could have a pane, so nothing is removed blind.
-func (s *CheckoutSweep) jobLive(j Job, orphan bool, dir string, agentsFor func() ([]Agent, bool)) (bool, string) {
-	if orphan {
-		agents, ok := agentsFor()
-		if !ok {
-			return true, sweepCheckoutAgentsUnknown
-		}
-		for _, agent := range agents {
-			if agent.CWD != "" && (sweepSamePath(agent.CWD, dir) || sweepWithin(dir, agent.CWD)) {
-				return true, sweepCheckoutPaneOpen
+// removeCheckout removes a checkout worktreePlan cleared and returns the keep
+// reason when it stays. An orphan is removed under OrphanHold and judged once
+// more there: a spawn of its job may have started, or a pane moved in, since
+// the pass first looked.
+func (s *CheckoutSweep) removeCheckout(ctx context.Context, a *App, j Job, orphan CheckoutOrphan, record map[string]any, end paneSweepEnd, clone, branch, dir string, owned bool) string {
+	ts := &TaskPaneSweeper{WorkRoot: s.WorkRoot}
+	if orphan.Job != "" {
+		if s.OrphanHold != nil {
+			release, err := s.OrphanHold(ctx, clone)
+			if err != nil {
+				return sweepCheckoutCloneBusy
 			}
+			defer release()
 		}
-		return false, ""
+		now := s.OrphanOwner(dir)
+		if now.Job != orphan.Job || now.InFlight {
+			return sweepCheckoutJobLive
+		}
+		if reason := s.orphanPaneKeep(ctx, a, now, record, dir); reason != "" {
+			return reason
+		}
+		ts.orphanPatches = s.OrphanPatches
 	}
+	return ts.removeWorktree(ctx, a, j, end, clone, branch, dir, filepath.Base(filepath.Clean(dir)), owned)
+}
+
+// jobKeep names why the checkout's recorded job or its pane still uses it: a
+// record that has not ended or been reaped, or a terminal record whose pane
+// herdr still lists. An unreadable herdr list keeps every candidate that could
+// have a pane, so nothing is removed blind. "" when neither does.
+func (s *CheckoutSweep) jobKeep(j Job, agentsFor func() ([]Agent, bool)) string {
 	if j.Reaped {
-		return false, ""
+		return ""
 	}
 	if !j.Terminal {
-		return true, sweepCheckoutJobLive
+		return sweepCheckoutJobLive
 	}
 	if j.Pane == "" {
-		return false, ""
+		return ""
 	}
 	agents, ok := agentsFor()
 	if !ok {
-		return true, sweepCheckoutAgentsUnknown
+		return sweepCheckoutAgentsUnknown
 	}
 	for _, agent := range agents {
 		if agent.Pane == j.Pane {
-			return true, sweepCheckoutPaneOpen
+			return sweepCheckoutPaneOpen
 		}
 	}
-	return false, ""
+	return ""
+}
+
+// orphanEnded proves an orphan's job ended, since no local record can: no spawn
+// of it is in flight, and hk holds its record in a final state — or holds none
+// while every spawn of it failed before a pane. It returns the hk record, nil
+// when hk holds none, and the keep reason when the end is not proven.
+func (s *CheckoutSweep) orphanEnded(ctx context.Context, orphan CheckoutOrphan) (map[string]any, string) {
+	if orphan.InFlight {
+		return nil, sweepCheckoutJobLive
+	}
+	if s.OrphanRecords == nil {
+		return nil, sweepCheckoutJobUnconfirmed
+	}
+	record, err := s.OrphanRecords.Get(ctx, orphan.Job)
+	if errors.Is(err, errJobNotFound) {
+		if !orphan.NeverLaunched {
+			return nil, sweepCheckoutJobUnconfirmed
+		}
+		return nil, ""
+	}
+	if err != nil || record == nil {
+		return nil, sweepCheckoutJobUnconfirmed
+	}
+	if id := str(record, "job_id"); id != "" && id != orphan.Job {
+		return nil, sweepCheckoutJobUnconfirmed
+	}
+	switch str(record, "state") {
+	case "completed", "lost", "failed", "refused":
+		return record, ""
+	}
+	return nil, sweepCheckoutJobLive
+}
+
+// orphanPaneKeep keeps an orphan while herdr lists a pane that is its job's —
+// by any pane id or label its spawns or its hk record name — or a pane working
+// inside the directory. It reads both lists afresh: a plain shell is only in
+// the pane list. A list that cannot be read keeps the checkout.
+func (s *CheckoutSweep) orphanPaneKeep(ctx context.Context, a *App, orphan CheckoutOrphan, record map[string]any, dir string) string {
+	panes, err := a.panes(ctx)
+	if err != nil {
+		return sweepCheckoutAgentsUnknown
+	}
+	agents, err := a.agents(ctx)
+	if err != nil {
+		return sweepCheckoutAgentsUnknown
+	}
+	ids := append([]string{str(record, "pane_id")}, orphan.Panes...)
+	labels := append([]string{str(record, "label")}, orphan.Labels...)
+	named := func(value string, wanted []string) bool {
+		return value != "" && slices.Contains(wanted, value)
+	}
+	uses := func(pane string, names []string, cwds ...string) bool {
+		if named(pane, ids) || slices.ContainsFunc(names, func(name string) bool { return named(name, labels) }) {
+			return true
+		}
+		return slices.ContainsFunc(cwds, func(cwd string) bool {
+			return cwd != "" && (sweepSamePath(cwd, dir) || sweepWithin(dir, cwd))
+		})
+	}
+	for _, pane := range panes {
+		if uses(pane.Pane, []string{pane.Label, pane.Name}, pane.CWD, pane.ForegroundCWD) {
+			return sweepCheckoutPaneOpen
+		}
+	}
+	for _, agent := range agents {
+		if uses(agent.Pane, []string{agent.Name}, agent.CWD, agent.ForegroundCWD) {
+			return sweepCheckoutPaneOpen
+		}
+	}
+	return ""
 }
