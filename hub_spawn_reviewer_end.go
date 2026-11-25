@@ -2,7 +2,9 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -60,53 +62,103 @@ func (h *HubServer) runReviewerEnd(ctx context.Context) {
 }
 
 // reviewerEndWindow bounds how far back the pass looks for a succeeded
-// reviewer operation. reviewerEndPage is the rows one store read returns (a
-// variable so a test can force a second page). The pass pages through the whole
-// window: a limit on the newest rows would displace an older orphan from every
-// pass.
+// reviewer operation. The pass lists every succeeded operation in the window: a
+// limit on the newest rows would displace an older orphan from every pass.
 const reviewerEndWindow = 14 * 24 * time.Hour
 
+// reviewerEndPage is how many operations one full-row read fetches (a variable
+// so a test can force a second read).
 var reviewerEndPage = 500
 
-// succeededSpawns lists one page of the succeeded operations created
-// since `since`, newest first, starting after the (created, request) cursor; a
-// zero cursor starts at the newest. The caller keeps the reviewers: no text match
-// on the stored request is a safe filter, because argv takes the role as
-// `--role reviewer` or `--role=reviewer`.
-func (s *laneInboxStore) succeededSpawns(parent context.Context, since time.Time, after reviewerEndCursor, limit int) ([]hubSpawnTask, error) {
+// succeededSpawnIDs lists the request ids of the succeeded operations created
+// since `since`, newest first. It reads no payload: on MySQL (index
+// spawn_operations_created) and on SQLite and Postgres (spawn_operations_succeeded)
+// the ids come from the index alone. It is one read, not pages: MySQL sorted the
+// whole range again for every LIMIT page (hk 6394), so N rows cost N times the
+// page count.
+func (s *laneInboxStore) succeededSpawnIDs(parent context.Context, since time.Time) ([]string, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	query := `SELECT ` + spawnTaskColumns + ` FROM spawn_operations WHERE status='succeeded' AND created_ms>=?`
-	args := []any{since.UnixMilli()}
-	if after.request != "" {
-		query += ` AND (created_ms<? OR created_ms=? AND request_id<?)`
-		args = append(args, after.created, after.created, after.request)
-	}
-	rows, err := s.db.QueryContext(ctx, s.q(query+` ORDER BY created_ms DESC, request_id DESC LIMIT ?`), append(args, limit)...)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id FROM spawn_operations WHERE status='succeeded' AND created_ms>=? ORDER BY created_ms DESC, request_id DESC`), since.UnixMilli())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var tasks []hubSpawnTask
+	var ids []string
 	for rows.Next() {
-		task, err := scanSpawnTask(rows)
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// succeededSpawnsByID reads the full rows of the named operations that are
+// still succeeded, in the order of ids. The caller keeps the reviewers: no text
+// match on the stored request is a safe filter, because argv takes the role as
+// `--role reviewer` or `--role=reviewer`.
+func (s *laneInboxStore) succeededSpawnsByID(parent context.Context, ids []string) ([]hubSpawnTask, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	ctx, done := s.op(parent)
+	defer done()
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT request_id,`+spawnTaskColumns+` FROM spawn_operations WHERE status='succeeded' AND request_id IN (`+marks+`)`), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byID := make(map[string]hubSpawnTask, len(ids))
+	for rows.Next() {
+		var id string
+		task, err := scanSpawnTask(requestIDScanner{rows: rows, id: &id})
 		if err != nil {
 			return nil, err
 		}
-		tasks = append(tasks, task)
+		byID[id] = task
 	}
-	return tasks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	tasks := make([]hubSpawnTask, 0, len(byID))
+	for _, id := range ids {
+		if task, ok := byID[id]; ok {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks, nil
 }
 
-// reviewerEndCursor is the position after the last row of a page.
-type reviewerEndCursor struct {
-	created int64
-	request string
+// requestIDScanner reads a leading request_id column into id and hands the
+// rest to scanSpawnTask.
+type requestIDScanner struct {
+	rows *sql.Rows
+	id   *string
 }
+
+func (r requestIDScanner) Scan(dest ...any) error {
+	return r.rows.Scan(append([]any{r.id}, dest...)...)
+}
+
+// reviewerEndRead is what the last pass read from the store: the operations it
+// listed by id, and the ones it then read in full (payload included).
+type reviewerEndRead struct{ Listed, Full int }
 
 // endPostedReviewerJobs ends every succeeded reviewer spawn whose job posted a
-// result and whose hk record is still claimed or spawned, paging through every
-// reviewer operation in the window.
+// result and whose hk record is still claimed or spawned, looking at every
+// succeeded operation in the window.
+//
+// An operation the pass has judged needs no more reads while it stays in the
+// window (reviewerEndSkip): a spawn that is not a reviewer, and a reviewer job
+// found ended. Only the rest is read in full, so a pass costs one id list plus
+// the live reviewers, not the 11 KB payload of every operation of 14 days.
 func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 	if h.inbox == nil {
 		return
@@ -114,29 +166,45 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 	since := h.now().Add(-reviewerEndWindow)
 	seen := map[string]bool{}
 	var app *fleet.App
-	var cursor reviewerEndCursor
 	h.loopTick(loopReviewerEnd)
-	for {
-		tasks, err := h.inbox.store.succeededSpawns(ctx, since, cursor, reviewerEndPage)
+	ids, err := h.inbox.store.succeededSpawnIDs(ctx, since)
+	if err != nil {
+		h.loopNoteSilentError(loopReviewerEnd, "hub_spawn_reviewer_end.go:succeededSpawns", err)
+		h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
+		return
+	}
+	h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawns")
+	read := reviewerEndRead{Listed: len(ids)}
+	pending := h.reviewerEndUnjudged(ids)
+	for len(pending) > 0 {
+		page := pending[:min(reviewerEndPage, len(pending))]
+		pending = pending[len(page):]
+		tasks, err := h.inbox.store.succeededSpawnsByID(ctx, page)
 		if err != nil {
 			h.loopNoteSilentError(loopReviewerEnd, "hub_spawn_reviewer_end.go:succeededSpawns", err)
 			h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
 			return
 		}
-		h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawns")
+		read.Full += len(tasks)
 		for _, holder := range tasks {
+			request := holder.Request.RequestID
 			if holder.Status != "succeeded" || !validNodeJobName(holder.Job) {
+				h.skipReviewerEnd(request)
 				continue
 			}
 			spawn, err := fleet.ValidateSubmission(holder.Request)
 			if err != nil || spawn.Role != reviewerRole {
+				h.skipReviewerEnd(request)
 				continue
 			}
 			seen[holder.Job] = true
 			host := spawnHolderHost(holder)
 			if host == "" || h.reviewerEndSettledJob(holder.Job) || !h.nodeConnected(host) {
 				// Already ended, or the node cannot answer: nothing to read or
-				// write, and the next pass looks again.
+				// write, and the next pass looks again (an ended job no more).
+				if h.reviewerEndSettledJob(holder.Job) {
+					h.skipReviewerEnd(request)
+				}
 				continue
 			}
 			if app == nil {
@@ -146,14 +214,38 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 				}
 			}
 			h.endPostedReviewerJob(ctx, app, spawn, holder)
+			if h.reviewerEndSettledJob(holder.Job) {
+				h.skipReviewerEnd(request)
+			}
 		}
-		if len(tasks) < reviewerEndPage {
-			break
-		}
-		last := tasks[len(tasks)-1]
-		cursor = reviewerEndCursor{created: last.Created.UnixMilli(), request: last.Request.RequestID}
 	}
-	h.retainReviewerEnd(seen)
+	h.retainReviewerEnd(seen, ids)
+	h.mu.Lock()
+	h.reviewerEndLastRead = read
+	h.mu.Unlock()
+}
+
+// reviewerEndUnjudged is ids without the operations the pass already judged.
+func (h *HubServer) reviewerEndUnjudged(ids []string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pending := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !h.reviewerEndSkip[id] {
+			pending = append(pending, id)
+		}
+	}
+	return pending
+}
+
+// skipReviewerEnd records that the operation needs no further read.
+func (h *HubServer) skipReviewerEnd(request string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reviewerEndSkip == nil {
+		h.reviewerEndSkip = map[string]bool{}
+	}
+	h.reviewerEndSkip[request] = true
 }
 
 // nodeConnected reports that machine's node has an open connection.
@@ -277,11 +369,21 @@ func (h *HubServer) markReviewerEndSettled(job string) {
 	h.reviewerEndSettled[job] = true
 }
 
-// retainReviewerEnd forgets the jobs the pass no longer read, so both maps stay
-// bounded by the pass's window.
-func (h *HubServer) retainReviewerEnd(seen map[string]bool) {
+// retainReviewerEnd forgets the jobs the pass no longer read and the judged
+// operations that left the window, so every map stays bounded by the pass's
+// window.
+func (h *HubServer) retainReviewerEnd(seen map[string]bool, window []string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	inWindow := make(map[string]bool, len(window))
+	for _, id := range window {
+		inWindow[id] = true
+	}
+	for id := range h.reviewerEndSkip {
+		if !inWindow[id] {
+			delete(h.reviewerEndSkip, id)
+		}
+	}
 	for job := range h.reviewerEndLogged {
 		if !seen[job] {
 			delete(h.reviewerEndLogged, job)
