@@ -17,6 +17,10 @@ import (
 // changing anything.
 const nodeCommandCheckoutSweep = "checkout.sweep"
 
+// nodeOrphanPatchDir is the directory under the jobs inbox root, beside jobs/,
+// where the sweep saves the patch of a checkout whose job directory is gone.
+const nodeOrphanPatchDir = "orphan-checkouts"
+
 const (
 	// nodeCheckoutSweepRunTimeout bounds the whole pass; it outlasts the
 	// default command budget because a host can hold many stale checkouts,
@@ -84,15 +88,26 @@ func (client *HubClient) nodeCheckoutSweep(ctx context.Context, args nodeCheckou
 	}
 	app.Jobs = filepath.Join(client.jobsInboxRoot, "jobs")
 	app.HerdrSession = client.nodeSpawnSession()
-	owners := client.nodeCheckoutOrphanOwners(ctx)
-	rows, err := (&fleet.CheckoutSweep{
-		WorkRoot: workRoot,
-		DryRun:   args.DryRun,
-		OrphanOwner: func(dir string) string {
-			return owners[nodeResolvedPath(dir)]
-		},
-		Info: func(message string, attrs ...any) { slog.Info(message, attrs...) },
-	}).Pass(ctx, app)
+	owner, release := client.nodeCheckoutOrphans(ctx)
+	defer release()
+	sweep := &fleet.CheckoutSweep{
+		WorkRoot:    workRoot,
+		DryRun:      args.DryRun,
+		OrphanOwner: owner,
+		OrphanHold:  client.holdNodeCheckoutClone,
+		// An orphan has no job directory left to hold its patch.
+		OrphanPatches: filepath.Join(client.jobsInboxRoot, nodeOrphanPatchDir),
+		Info:          func(message string, attrs ...any) { slog.Info(message, attrs...) },
+	}
+	// An orphan's end is proven on hk with the node's own credential, as the
+	// pane sweep reads it. Without it the orphans are kept and the recorded
+	// jobs' checkouts are swept as usual.
+	if records, err := client.nodeJobStoreForCommand(); err == nil {
+		sweep.OrphanRecords = records
+	} else {
+		slog.Warn("checkout sweep: hk unavailable; orphans are kept")
+	}
+	rows, err := sweep.Pass(ctx, app)
 	if err != nil {
 		slog.Warn("checkout sweep failed", "reason", "pass-failed")
 		return nil, "sweep_failed"
@@ -184,20 +199,45 @@ func (client *HubClient) revisitKeptWorktrees(ctx context.Context) {
 	}
 }
 
-// nodeCheckoutOrphanOwners attributes a *-checkout directory to its job when
-// the job's local record is gone, from the spawn journal's completed results.
-// A node without a readable journal attributes nothing and the sweep keeps
-// the orphans it cannot prove.
-func (client *HubClient) nodeCheckoutOrphanOwners(ctx context.Context) map[string]string {
+// nodeCheckoutOrphans attributes a *-checkout directory to its job when the
+// job's local record is gone, from the spawn journal: the directory a completed
+// spawn prepared names the job, and every row of that job says whether a spawn
+// still runs and what it launched. Each call reads the job's rows again, so a
+// removal sees a spawn claimed during the pass. A node without a readable
+// journal attributes nothing and the sweep keeps the orphans it cannot prove.
+// release ends the pass's use of the journal.
+func (client *HubClient) nodeCheckoutOrphans(ctx context.Context) (owner func(dir string) fleet.CheckoutOrphan, release func()) {
 	journal, err := client.acquireSpawnJournal()
 	if err != nil {
-		return nil
+		return nil, func() {}
 	}
-	defer client.releaseSpawnJournal()
 	owners, err := journal.checkoutOwners(ctx)
 	if err != nil {
+		client.releaseSpawnJournal()
 		slog.Warn("checkout sweep: spawn journal unreadable; orphans stay unattributed")
-		return nil
+		return nil, func() {}
 	}
-	return owners
+	return func(dir string) fleet.CheckoutOrphan {
+		job := owners[nodeResolvedPath(dir)]
+		if job == "" {
+			return fleet.CheckoutOrphan{}
+		}
+		orphan, err := journal.checkoutJob(ctx, job)
+		if err != nil {
+			slog.Warn("checkout sweep: spawn journal unreadable; orphan stays unattributed", "job", job)
+			return fleet.CheckoutOrphan{}
+		}
+		return orphan
+	}, client.releaseSpawnJournal
+}
+
+// holdNodeCheckoutClone takes the per-clone git operation lock a spawn's
+// worktree preparation takes, so the sweep's removal of an orphan never
+// interleaves with a spawn preparing that directory again.
+func (client *HubClient) holdNodeCheckoutClone(ctx context.Context, clone string) (func(), error) {
+	path, err := nodeGitOpLockPath(clone)
+	if err != nil {
+		return nil, err
+	}
+	return acquireNodeGitOpLock(ctx, path, client.nodeGitOpWait())
 }

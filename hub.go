@@ -2848,6 +2848,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	go h.runLaneRelease(ctx.Done())
 	go h.runPaneSweep(ctx)
 	go h.runReviewerEnd(ctx)
+	go h.runEagerRoleRelease(ctx)
 	go h.runPoolTriggers(ctx)
 	h.startPoolActions(ctx)
 	go h.runFleetStatus(ctx)

@@ -1026,14 +1026,16 @@ each pane's close takes it, so the op never holds it across the whole pass.
 directory under the node's work root that is a linked worktree of one of its
 clones, attributes each to a job — a readable job record's receipt cwd, then
 the spawn journal for a record that is gone — and removes each non-live
-job-owned checkout through the pane sweep's guarded worktree path. `dry_run`
-reports without changing anything.
+job-owned checkout through the pane sweep's guarded worktree path. One whose
+record is gone also needs proof of its job's end and of no pane using it
+(hk 6291). `dry_run` reports without changing anything.
 
 It replies `{"dry_run":bool,"checkouts":[...]}` with one
 `{path, job, outcome, reason}` row per candidate in path order: `outcome` is
 `removed`, `kept` or `would_remove` (dry run only); `reason` is the keep
 reason (`job_live`, `pane_open`, `agents_unreadable`, `no_job`,
-`job_unreadable`, or the tail's own such as `task_open_kept`, `shared_kept`,
+`job_unreadable`, `job_unconfirmed`, `clone_busy`, or the tail's own such as
+`task_open_kept`, `shared_kept`,
 `symlink_kept`, `patch_failed_kept`), `discard` on a `would_remove` row, or
 empty. A
 candidate that cannot be judged is kept with its reason; the pass never
@@ -1044,7 +1046,8 @@ mutations that must not interleave with another acting command — and runs
 under its own 90-second budget, longer than the default command timeout. A
 node without a jobs root or work root answers `jobs_root_unset` or
 `work_root_unset`; a failed pass answers `sweep_failed`. The CLI is
-`panewire node sweep-checkouts --host <machine> [--dry-run]`.
+`panewire node sweep-checkouts --host <machine> --hub-url <url>
+--hub-token-env <file> [--hub-cf-env <file>] [--dry-run]`.
 
 ### `worktree.handover_check`
 

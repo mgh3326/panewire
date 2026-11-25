@@ -521,7 +521,7 @@ func (h *HubServer) escalateAuthor(ctx context.Context, request hubEscalateAutho
 	} else if stop {
 		return result, nil
 	}
-	if err := h.inbox.store.activateStagedSpawn(ctx, next.RequestID, h.now().UTC(), next.DeadlineSeconds); err != nil {
+	if err := h.activateStagedRow(ctx, next.RequestID, next.DeadlineSeconds); err != nil {
 		if current, readErr := h.inbox.store.spawnTask(ctx, next.RequestID); readErr == nil && current.Status != "staged" {
 			return h.escalateAuthorOutcome(ctx, app, request, owner, newJob, current)
 		}
@@ -660,30 +660,30 @@ func setEscalateAuthorHost(next *fleet.Submission, host string) {
 
 // activateExpiredLadderStage reconciles an expired stage's task binding and
 // activates it, the expiry pass's share of the staged-handoff rule (hk 5631).
-// It reports true when the stage is settled: released because the task moved
-// on or closed, or activated. An unreadable binding or a failed release leaves
-// it staged for the next pass.
-func (h *HubServer) activateExpiredLadderStage(ctx context.Context, app *fleet.App, task hubSpawnTask, parent, taskID, roleKey string) bool {
+// A stage the task moved past or closed is released, and one it can still take
+// is activated. Either store call notes the stage's exit (activateStagedRow,
+// releaseStagedRowNoting). An unreadable binding or a failed release leaves it
+// staged for the next pass.
+func (h *HubServer) activateExpiredLadderStage(ctx context.Context, app *fleet.App, task hubSpawnTask, parent, taskID, roleKey string) {
 	id := task.Request.LadderStep
 	if id == nil {
-		return false
+		return
 	}
 	request := hubEscalateAuthorRequest{Task: taskID, Job: parent, Round: id.Round, PR: id.PR}
-	result, stop, err := h.reconcileStagedLadderStage(ctx, app, request, task.Owner, task.Request.RequestID, roleKey, "")
+	_, stop, err := h.reconcileStagedLadderStage(ctx, app, request, task.Owner, task.Request.RequestID, roleKey, "")
 	if err != nil {
-		return false
+		return
 	}
 	if stop {
-		return result.Code == "job_mismatch" || result.Code == "task_closed"
+		return
 	}
-	if h.inbox.store.activateStagedSpawn(ctx, task.Request.RequestID, h.now().UTC(), task.Request.DeadlineSeconds) != nil {
-		return false
+	if h.activateStagedRow(ctx, task.Request.RequestID, task.Request.DeadlineSeconds) != nil {
+		return
 	}
 	select {
 	case h.spawnKick <- struct{}{}:
 	default:
 	}
-	return true
 }
 
 // An expired stage is cancelled only with fresh evidence that the old author
@@ -730,9 +730,7 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		roleKey := fleet.SpawnRoleKey(taskID, spawn.Role, spawn.ReviewPass)
 		state := escalateAuthorStr(record, "state")
 		if state == "lost" && escalateAuthorStr(record, "end_reason") == fleet.LadderStepEndReason(id.Round, task.Job) {
-			if h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey) {
-				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-			}
+			h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey)
 			continue
 		}
 		request := hubEscalateAuthorRequest{Job: id.Parent, Round: id.Round, PR: id.PR}
@@ -758,11 +756,8 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 				// while the task still names this author and is open. A task
 				// another job took over, or closed, supersedes the stage
 				// (released, never dispatched); an unreadable one keeps it.
-				if h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey) {
-					h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
-				}
+				h.activateExpiredLadderStage(ctx, app, task, id.Parent, taskID, roleKey)
 			case h.releaseStagedRow(ctx, task.Request.RequestID, "", roleKey) == nil:
-				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 				if probe.state == heldPanePresent {
 					_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 				} else {
@@ -773,7 +768,6 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		}
 		if hkTerminalState(state) {
 			if kept, err := h.withdrawStage(ctx, task.Request.RequestID, "", roleKey); err == nil && !kept {
-				h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 				h.escalateAuthorParentEnded(ctx, request, task.Owner)
 			}
 			continue
@@ -787,7 +781,6 @@ func (h *HubServer) expireStagedLadderSteps(ctx context.Context) {
 		if kept, err := h.withdrawStage(ctx, task.Request.RequestID, holder.Request.RequestID, roleKey); err != nil || kept {
 			continue
 		}
-		h.loopNoteDone(loopQuotaLadder, task.Request.RequestID)
 		_, _ = h.escalateAuthorRefusal(ctx, request, task.Owner, "staged_expired", "the staged step expired while the author remained present", false)
 	}
 }

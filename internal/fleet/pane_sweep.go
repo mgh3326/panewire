@@ -381,6 +381,10 @@ type TaskPaneSweeper struct {
 	// worktrees from. Empty keeps every worktree, since nothing then proves
 	// one was the node's (sweep_worktree.go).
 	WorkRoot string
+	// orphanPatches is where the checkout sweep saves the patch of a checkout
+	// whose job directory is gone (sweep_checkout.go). Empty, the patch goes
+	// only into the job directory.
+	orphanPatches string
 	// Info receives one line per closed pane and one per kept candidate. It
 	// gets ids and states only, never screen text.
 	Info func(message string, attrs ...any)

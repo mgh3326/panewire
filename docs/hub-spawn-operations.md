@@ -685,6 +685,34 @@ pane fact the node keeps: it does not end the job. The immediate `panewire emit`
 path reads finality from the event file it names, so it sends the same payload
 under the same outbox key as the scan.
 
+### Eager role release
+
+A job that is proven over has its (task, role) reservation released by a hub
+background pass, without waiting for a colliding submission (hk 6282). Proven
+over means both: its hk record is `completed`, `lost` or `escalated`, and its
+holder's node answered a complete `agents.list` that lacks the recorded pane id
+and the job's agent label (the probe the colliding-submission path uses). The
+pass runs once a minute, reads at most 16 held roles of succeeded or failed
+operations per pass in request id order, and resumes where the last pass
+stopped. It never holds the job's pool-action lock while it probes, so spawn
+admission does not wait on it; it takes that lock without waiting only for the
+write. It keeps the role for a present pane, a pane listed under the job's
+agent label, a holder with no recorded pane, `panes_ok: false`, a node error, an
+unreachable or disconnected node, a probe timeout, an hk read error, a job a
+pool action owns, and a job the hub records on another node or a later epoch.
+After an unanswered probe it skips that host for the rest of the pass. Only
+`task_role` becomes NULL: the reservation row and the operation stay. The write
+names the holder's request id, so a spawn admitted meanwhile keeps the role it
+holds, and the unique `task_role` index refuses a second holder. A released
+role is logged once as `hub released a proven-over task role`.
+
+The colliding-submission path below is unchanged. On it, a succeeded or failed
+holder whose hk record is `completed`, `lost` or `escalated` is released without
+a pane probe; only the pool-action fence is checked (audit: hk doc
+`findings/2026-11-25/hk6282-release-path-audit`).
+
+### Role release on a colliding submission
+
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
 node for its herdr panes (`agents.list`). Only a complete pane list that lacks

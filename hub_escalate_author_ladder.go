@@ -243,9 +243,47 @@ func (h *HubServer) releaseStagedRow(ctx context.Context, id, previousID, roleKe
 
 // releaseStagedRowNoting is releaseStagedRow with a note committed in the same
 // transaction as the release, so the note exists exactly when the release does.
+// Every release goes through here, so the quota_ladder exit is noted here too.
 func (h *HubServer) releaseStagedRowNoting(ctx context.Context, id, previousID, roleKey string, note stagedNote) error {
+	stage, readErr := h.inbox.store.spawnTask(ctx, id)
+	var err error
 	if previousID == "" {
-		return h.inbox.store.discardStagedSpawnNoting(ctx, id, roleKey, note)
+		err = h.inbox.store.discardStagedSpawnNoting(ctx, id, roleKey, note)
+	} else {
+		err = h.inbox.store.cancelStagedSpawnNoting(ctx, id, previousID, roleKey, note)
 	}
-	return h.inbox.store.cancelStagedSpawnNoting(ctx, id, previousID, roleKey, note)
+	if err == nil && readErr == nil {
+		h.noteStagedExit(stage)
+	}
+	return err
+}
+
+// activateStagedRow moves a staged step to accepted, the handoff every
+// activation path makes, and notes its exit like a release does.
+func (h *HubServer) activateStagedRow(ctx context.Context, id string, deadlineSeconds int) error {
+	stage, readErr := h.inbox.store.spawnTask(ctx, id)
+	err := h.inbox.store.activateStagedSpawn(ctx, id, h.now().UTC(), deadlineSeconds)
+	if err == nil && readErr == nil {
+		h.noteStagedExit(stage)
+	}
+	return err
+}
+
+// noteStagedExit is the quota_ladder exit edge of a staged step, whichever path
+// took it out of staged (activation, withdrawal, release or supersession). The
+// expiry pass makes a step made once its deadline has passed, and notes done only
+// on the branches it settles itself, so a stale step settled by any other path
+// would stay made-not-done and the alarm would fire for work that is not stuck.
+// A step that leaves before its deadline never went stale and is not counted: a
+// normal handoff adds neither made nor done, so it cannot dilute the done ratio
+// of the stuck steps the alarm watches. Every caller holds ladderMu, which the
+// expiry pass takes too, so a step cannot go stale between the pass's read and
+// its exit. Docs: docs/loops.md (quota_ladder).
+func (h *HubServer) noteStagedExit(stage hubSpawnTask) {
+	if stage.Deadline.UnixMilli() >= h.now().UnixMilli() {
+		return
+	}
+	id := stage.Request.RequestID
+	h.loopNoteMade(loopQuotaLadder, id)
+	h.loopNoteDone(loopQuotaLadder, id)
 }

@@ -2,6 +2,8 @@ package fleet
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -116,7 +118,8 @@ func checkoutSweepFixture(t *testing.T) (*paneSweepFixture, *sweepGitFake, *Chec
 	g.detached = true
 	f := newPaneSweepFixture(t)
 	f.withGit(g)
-	return f, g, &CheckoutSweep{WorkRoot: g.workRoot, OrphanOwner: func(string) string { return "" }, Info: f.sweeper.Info}
+	return f, g, &CheckoutSweep{WorkRoot: g.workRoot, OrphanOwner: func(string) CheckoutOrphan { return CheckoutOrphan{} },
+		OrphanRecords: f.store, OrphanPatches: filepath.Join(t.TempDir(), "orphan-checkouts"), Info: f.sweeper.Info}
 }
 
 // A *-checkout whose job ended and whose pane is gone is removed; one whose
@@ -175,33 +178,124 @@ func TestCheckoutSweepRemovesOnlyNonLiveJobCheckouts(t *testing.T) {
 	}
 }
 
-// A *-checkout a spawn journal attributes to a job whose local record is gone
-// is removed through the same guarded path; its patch lands in a job
-// directory the record would have used.
-func TestCheckoutSweepRemovesAnOrphanedCheckout(t *testing.T) {
+// orphanSweep seeds one orphan the node's spawns attribute to the ended job
+// consult-gone, which has no job directory left.
+func orphanSweep(t *testing.T) (*paneSweepFixture, *sweepGitFake, *CheckoutSweep, *CheckoutOrphan) {
+	t.Helper()
 	f, g, sweep := checkoutSweepFixture(t)
-	sweep.OrphanOwner = func(dir string) string {
-		if strings.HasSuffix(dir, "consult-gone-checkout") {
-			return "consult-gone"
-		}
-		return ""
-	}
-	g.worktree(t, "consult-gone-checkout")
-	// The journal names the job but its record dir is gone: stand one up so
-	// the patch has somewhere to land, as a record that outlived its events
-	// would.
-	if err := os.MkdirAll(filepath.Join(f.a.Jobs, "consult-gone"), 0700); err != nil {
+	orphan := &CheckoutOrphan{Job: "consult-gone", Panes: []string{"p-gone"}, Labels: []string{"consult-gone"}}
+	dir := g.worktree(t, "consult-gone-checkout")
+	if err := os.MkdirAll(f.a.Jobs, 0700); err != nil {
 		t.Fatal(err)
+	}
+	sweep.OrphanOwner = func(asked string) CheckoutOrphan {
+		if asked == dir {
+			return *orphan
+		}
+		return CheckoutOrphan{}
+	}
+	f.store.records["consult-gone"] = map[string]any{"job_id": "consult-gone", "state": "completed"}
+	return f, g, sweep, orphan
+}
+
+// A *-checkout a spawn journal attributes to an ended job whose local record
+// is gone is removed through the same guarded path; its patch lands under the
+// orphan patch directory, and the job directory is not made again.
+func TestCheckoutSweepRemovesAnOrphanedCheckout(t *testing.T) {
+	f, g, sweep, _ := orphanSweep(t)
+	g.diff = "diff --git a/x b/x\n+orphaned work\n"
+	var held []string
+	sweep.OrphanHold = func(_ context.Context, clone string) (func(), error) {
+		held = append(held, "taken "+clone)
+		return func() { held = append(held, fmt.Sprintf("released after %d removals", len(g.removed))) }, nil
 	}
 	rows, err := sweep.Pass(context.Background(), f.a)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != 1 || rows[0].Outcome != "removed" || rows[0].Job != "consult-gone" {
-		t.Fatalf("orphan rows = %+v", rows)
+		t.Fatalf("orphan rows = %+v; info=%v", rows, f.info)
+	}
+	body, err := os.ReadFile(filepath.Join(sweep.OrphanPatches, "consult-gone", AbandonedWorktreeFile))
+	if err != nil || !strings.Contains(string(body), "orphaned work") {
+		t.Fatalf("the orphan's patch was not saved: %v\n%s", err, body)
+	}
+	if _, err := os.Lstat(filepath.Join(f.a.Jobs, "consult-gone")); !os.IsNotExist(err) {
+		t.Fatalf("the gone job directory was made again: %v", err)
+	}
+	if want := []string{"taken " + g.clone, "released after 1 removals"}; !slices.Equal(held, want) {
+		t.Fatalf("lock = %q, want %q", held, want)
+	}
+}
+
+// An orphan whose job directory is still there keeps its patch in it.
+func TestCheckoutSweepSavesAnOrphanPatchInAnExistingJobDir(t *testing.T) {
+	f, _, sweep, _ := orphanSweep(t)
+	if err := os.MkdirAll(filepath.Join(f.a.Jobs, "consult-gone"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := sweep.Pass(context.Background(), f.a)
+	if err != nil || len(rows) != 1 || rows[0].Outcome != "removed" {
+		t.Fatalf("rows = %+v err=%v", rows, err)
 	}
 	if _, err := os.Stat(filepath.Join(f.a.Jobs, "consult-gone", AbandonedWorktreeFile)); err != nil {
 		t.Fatalf("the orphan's patch was not saved: %v", err)
+	}
+}
+
+// An orphan is kept whenever its end, its panes or its patch cannot be proven
+// or saved, and when the second look right before the removal finds it in use.
+func TestCheckoutSweepKeepsAnUnprovenOrphan(t *testing.T) {
+	for _, test := range []struct {
+		name, reason string
+		arrange      func(f *paneSweepFixture, sweep *CheckoutSweep, orphan *CheckoutOrphan)
+	}{
+		{"no record reader", sweepCheckoutJobUnconfirmed, func(_ *paneSweepFixture, s *CheckoutSweep, _ *CheckoutOrphan) { s.OrphanRecords = nil }},
+		{"hk unreadable", sweepCheckoutJobUnconfirmed, func(f *paneSweepFixture, _ *CheckoutSweep, _ *CheckoutOrphan) { f.store.getErr = errors.New("hk down") }},
+		{"another job's record", sweepCheckoutJobUnconfirmed, func(f *paneSweepFixture, _ *CheckoutSweep, _ *CheckoutOrphan) {
+			f.store.records["consult-gone"]["job_id"] = "consult-other"
+		}},
+		{"record's pane open", sweepCheckoutPaneOpen, func(f *paneSweepFixture, _ *CheckoutSweep, _ *CheckoutOrphan) {
+			f.store.records["consult-gone"]["pane_id"] = "p-moved"
+			f.status["p-moved"] = "idle"
+		}},
+		{"record's label open", sweepCheckoutPaneOpen, func(f *paneSweepFixture, _ *CheckoutSweep, _ *CheckoutOrphan) {
+			f.store.records["consult-gone"]["label"] = "renamed"
+			f.status["p-x"], f.names["p-x"] = "idle", "renamed"
+		}},
+		{"pane list unreadable", sweepCheckoutAgentsUnknown, func(f *paneSweepFixture, _ *CheckoutSweep, _ *CheckoutOrphan) { f.paneList = false }},
+		{"nowhere to save the patch", sweepWorktreePatchFailed, func(_ *paneSweepFixture, s *CheckoutSweep, _ *CheckoutOrphan) { s.OrphanPatches = "" }},
+		{"id that is no directory name", sweepCheckoutNoJob, func(_ *paneSweepFixture, _ *CheckoutSweep, o *CheckoutOrphan) { o.Job = "../escape" }},
+		{"clone busy", sweepCheckoutCloneBusy, func(_ *paneSweepFixture, s *CheckoutSweep, _ *CheckoutOrphan) {
+			s.OrphanHold = func(context.Context, string) (func(), error) { return nil, errors.New("busy") }
+		}},
+		{"spawn claimed during the pass", sweepCheckoutJobLive, func(_ *paneSweepFixture, s *CheckoutSweep, o *CheckoutOrphan) {
+			s.OrphanHold = func(context.Context, string) (func(), error) {
+				o.InFlight = true
+				return func() {}, nil
+			}
+		}},
+		{"pane opened during the pass", sweepCheckoutPaneOpen, func(f *paneSweepFixture, s *CheckoutSweep, _ *CheckoutOrphan) {
+			s.OrphanHold = func(context.Context, string) (func(), error) {
+				f.status["p-gone"] = "idle"
+				return func() {}, nil
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, g, sweep, orphan := orphanSweep(t)
+			test.arrange(f, sweep, orphan)
+			rows, err := sweep.Pass(context.Background(), f.a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 || rows[0].Outcome != "kept" || rows[0].Reason != test.reason {
+				t.Fatalf("rows = %+v, want kept %s", rows, test.reason)
+			}
+			if len(g.removed) != 0 {
+				t.Fatalf("a kept orphan was removed: %v", g.removed)
+			}
+		})
 	}
 }
 

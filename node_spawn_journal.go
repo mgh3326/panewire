@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -11,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // Entries are retained as deduplication tombstones. A restart with an executing
@@ -277,6 +280,46 @@ func (j *nodeSpawnJournal) checkoutOwners(ctx context.Context) (map[string]strin
 		owners[nodeResolvedPath(cwd)] = jobID
 	}
 	return owners, rows.Err()
+}
+
+// checkoutJob folds every journal row of job for the checkout sweep's orphan
+// judgement (hk 6291): whether a spawn of it is still executing, whether every
+// finished one failed without a pane, and every label and pane the rows name.
+// A result that cannot be decoded proves no failure.
+func (j *nodeSpawnJournal) checkoutJob(ctx context.Context, job string) (fleet.CheckoutOrphan, error) {
+	rows, err := j.db.QueryContext(ctx, `SELECT status,label,result FROM spawn_inbox WHERE job_id=? ORDER BY rowid`, job)
+	if err != nil {
+		return fleet.CheckoutOrphan{}, err
+	}
+	defer rows.Close()
+	orphan := fleet.CheckoutOrphan{Job: job, NeverLaunched: true}
+	for rows.Next() {
+		var status, label, stored string
+		if err := rows.Scan(&status, &label, &stored); err != nil {
+			return fleet.CheckoutOrphan{}, err
+		}
+		orphan.Labels = append(orphan.Labels, label)
+		if status != "completed" {
+			orphan.InFlight, orphan.NeverLaunched = true, false
+			continue
+		}
+		var result hubSpawnResult
+		if json.Unmarshal([]byte(stored), &result) != nil {
+			orphan.NeverLaunched = false
+			continue
+		}
+		pane := result.Pane
+		if result.Receipt != nil {
+			orphan.Panes = append(orphan.Panes, result.Receipt.Pane)
+			orphan.Labels = append(orphan.Labels, result.Receipt.Label)
+			pane = cmp.Or(pane, result.Receipt.Pane)
+		}
+		orphan.Panes = append(orphan.Panes, result.Pane)
+		if result.RC == 0 || pane != "" {
+			orphan.NeverLaunched = false
+		}
+	}
+	return orphan, rows.Err()
 }
 
 // resultOf returns the stored completion of a request, if it has one.
