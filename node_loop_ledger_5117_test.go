@@ -749,6 +749,55 @@ func TestNodeLoopsRestartAccumulatesDayCounts(t *testing.T) {
 	}
 }
 
+// TestNodeLoopsEmptyLastTickUsesNewEpochAge is the restart grace regression:
+// the machine was first seen twenty minutes ago, but this epoch arrived one
+// minute ago and its first five-minute ticker interval has not elapsed.
+func TestNodeLoopsEmptyLastTickUsesNewEpochAge(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &now, nil)
+	row := func() *hubNodeLoopsPayload {
+		return &hubNodeLoopsPayload{Date: loopDateOf(now), Epoch: "epoch", Rows: []hubNodeLoopRow{{
+			Mechanism: string(nodeTaskPaneSweep), IntervalS: 300, AgeS: -1,
+		}}}
+	}
+	hub.observeNodeLoops("machine-a", row(), now)
+
+	now = now.Add(20 * time.Minute)
+	newEpoch := row()
+	newEpoch.Epoch = "new-epoch"
+	hub.observeNodeLoops("machine-a", newEpoch, now)
+
+	now = now.Add(time.Minute)
+	for _, hit := range hub.nodeLoopNoticeHits(now) {
+		if hit.Machine == "machine-a" && hit.Mechanism == loopMechanism(nodeTaskPaneSweep) && strings.Contains(hit.Reason, "last_tick") {
+			t.Fatalf("new epoch got stale notice after one minute: %+v", hit)
+		}
+	}
+}
+
+// TestNodeLoopsEmptyLastTickEventuallyStalesForNewEpoch is mutant 2: epoch
+// grace is bounded, so a loop that never ticks still becomes stale.
+func TestNodeLoopsEmptyLastTickEventuallyStalesForNewEpoch(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	hub := loopLedgerTestHub(t, &now, nil)
+	row := func(epoch string) *hubNodeLoopsPayload {
+		return &hubNodeLoopsPayload{Date: loopDateOf(now), Epoch: epoch, Rows: []hubNodeLoopRow{{
+			Mechanism: string(nodeTaskPaneSweep), IntervalS: 300, AgeS: -1,
+		}}}
+	}
+	hub.observeNodeLoops("machine-a", row("old-epoch"), now)
+	now = now.Add(20 * time.Minute)
+	hub.observeNodeLoops("machine-a", row("new-epoch"), now)
+	now = now.Add(16 * time.Minute)
+
+	for _, hit := range hub.nodeLoopNoticeHits(now) {
+		if hit.Machine == "machine-a" && hit.Mechanism == loopMechanism(nodeTaskPaneSweep) && strings.Contains(hit.Reason, "last_tick") {
+			return
+		}
+	}
+	t.Fatalf("no stale notice after 16 minutes in new epoch: %+v", hub.nodeLoopNoticeHits(now))
+}
+
 // TestNodeLoopsNoReportRetiresAfterSevenDays is the fix for review finding 4
 // (low): machines silent for 7 or more consecutive days stop generating
 // daily no_report notices.

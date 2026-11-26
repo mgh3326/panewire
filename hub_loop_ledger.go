@@ -182,6 +182,9 @@ type loopLedgerState struct {
 	// node the same grace the hub's own startedAt gives a fresh hub: a slow
 	// loop is never stale before the node could have ticked three intervals.
 	nodeFirstSeen map[string]time.Time
+	// nodeEpochReceipts keeps the newest process epoch's first and latest hub
+	// receipt per machine, including across UTC daily report buckets.
+	nodeEpochReceipts map[string]nodeEpochReceipt
 	// nodeConsecutiveNoReport tracks how many consecutive closed days a machine
 	// has had no report. A machine silent for 7 consecutive days is considered
 	// retired and is no longer noticed every day.
@@ -225,9 +228,16 @@ type selectionDropRow struct {
 // loopsRowEntry with Machine set to the node id, so the daily document merge
 // is an append.
 type nodeLoopReport struct {
-	Date     string
-	Rows     []loopsRowEntry
-	Ages     map[string]int64
+	Date         string
+	Rows         []loopsRowEntry
+	Ages         map[string]int64
+	Received     time.Time
+	EpochStarted time.Time
+}
+
+type nodeEpochReceipt struct {
+	Epoch    string
+	Started  time.Time
 	Received time.Time
 }
 
@@ -240,6 +250,7 @@ func newLoopLedgerState() *loopLedgerState {
 		nodeReports:             make(map[string]map[string]map[string]nodeLoopReport),
 		nodeHbDays:              make(map[string]map[string]bool),
 		nodeFirstSeen:           make(map[string]time.Time),
+		nodeEpochReceipts:       make(map[string]nodeEpochReceipt),
 		nodeConsecutiveNoReport: make(map[string]int),
 		nodeNoticeSent:          make(map[string]string),
 		drops:                   make(map[string]map[selectionDropKey]int64),
@@ -655,7 +666,7 @@ func (h *HubServer) nodeLoopsRowsLocked(st *loopLedgerState, date string) []loop
 	for _, machine := range machines {
 		byEpoch := st.nodeReports[machine][date]
 		if len(byEpoch) > 0 {
-			rows, _ := mergeNodeEpochRows(machine, byEpoch)
+			rows, _, _ := mergeNodeEpochRows(machine, byEpoch)
 			out = append(out, rows...)
 			continue
 		}
@@ -669,7 +680,7 @@ func (h *HubServer) nodeLoopsRowsLocked(st *loopLedgerState, date string) []loop
 // earlier activity. The newest epoch supplies the process state (made, done,
 // interval_s, oldest_pending_s, last_tick, age_s) while event counts (ticks,
 // errors, silent_errors) are summed across all epochs.
-func mergeNodeEpochRows(machine string, byEpoch map[string]nodeLoopReport) ([]loopsRowEntry, map[string]time.Time) {
+func mergeNodeEpochRows(machine string, byEpoch map[string]nodeLoopReport) ([]loopsRowEntry, map[string]time.Time, time.Time) {
 	type epochEntry struct {
 		id  string
 		rep nodeLoopReport
@@ -686,6 +697,10 @@ func mergeNodeEpochRows(machine string, byEpoch map[string]nodeLoopReport) ([]lo
 	})
 
 	newest := epochs[len(epochs)-1].rep
+	epochStarted := newest.EpochStarted
+	if epochStarted.IsZero() {
+		epochStarted = newest.Received
+	}
 	apparentTicks := make(map[string]time.Time, len(newest.Rows))
 	if newest.Ages != nil {
 		for _, r := range newest.Rows {
@@ -696,7 +711,7 @@ func mergeNodeEpochRows(machine string, byEpoch map[string]nodeLoopReport) ([]lo
 	}
 
 	if len(epochs) == 1 {
-		return newest.Rows, apparentTicks
+		return newest.Rows, apparentTicks, epochStarted
 	}
 
 	merged := make(map[string]*loopsRowEntry, len(newest.Rows))
@@ -718,7 +733,7 @@ func mergeNodeEpochRows(machine string, byEpoch map[string]nodeLoopReport) ([]lo
 		out = append(out, *e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Mechanism < out[j].Mechanism })
-	return out, apparentTicks
+	return out, apparentTicks, epochStarted
 }
 
 // loopsRowKey names the hk document for a UTC date.
@@ -1056,7 +1071,21 @@ func (h *HubServer) observeNodeLoops(machineID string, loops *hubNodeLoopsPayloa
 	if st.nodeReports[machineID][loops.Date] == nil {
 		st.nodeReports[machineID][loops.Date] = make(map[string]nodeLoopReport)
 	}
-	st.nodeReports[machineID][loops.Date][loops.Epoch] = nodeLoopReport{Date: loops.Date, Rows: rows, Ages: ages, Received: received}
+	epochReceipt := st.nodeEpochReceipts[machineID]
+	epochStarted := received
+	if epochReceipt.Epoch == loops.Epoch {
+		epochStarted = epochReceipt.Started
+		if received.After(epochReceipt.Received) {
+			epochReceipt.Received = received
+			st.nodeEpochReceipts[machineID] = epochReceipt
+		}
+	} else if epochReceipt.Received.IsZero() || !received.Before(epochReceipt.Received) {
+		epochReceipt = nodeEpochReceipt{Epoch: loops.Epoch, Started: received, Received: received}
+		st.nodeEpochReceipts[machineID] = epochReceipt
+	}
+	st.nodeReports[machineID][loops.Date][loops.Epoch] = nodeLoopReport{
+		Date: loops.Date, Rows: rows, Ages: ages, Received: received, EpochStarted: epochStarted,
+	}
 }
 
 // nodeLoopNoticeHits applies the hub's three notice conditions to every
@@ -1074,7 +1103,7 @@ func (h *HubServer) nodeLoopNoticeHits(now time.Time) []loopNoticeHit {
 		if !ok || len(byEpoch) == 0 {
 			continue
 		}
-		rows, apparentTicks := mergeNodeEpochRows(machine, byEpoch)
+		rows, apparentTicks, epochStarted := mergeNodeEpochRows(machine, byEpoch)
 		for _, row := range rows {
 			interval := time.Duration(row.IntervalS) * time.Second
 			if interval > 0 {
@@ -1084,7 +1113,7 @@ func (h *HubServer) nodeLoopNoticeHits(now time.Time) []loopNoticeHit {
 						hits = append(hits, loopNoticeHit{Machine: machine, Mechanism: loopMechanism(row.Mechanism), Reason: fmt.Sprintf("last_tick older than %d intervals", loopStaleIntervals)})
 					}
 				} else if row.LastTick == "" {
-					if first, ok := st.nodeFirstSeen[machine]; ok && now.Sub(first) > loopStaleIntervals*interval {
+					if !epochStarted.IsZero() && now.Sub(epochStarted) > loopStaleIntervals*interval {
 						hits = append(hits, loopNoticeHit{Machine: machine, Mechanism: loopMechanism(row.Mechanism), Reason: fmt.Sprintf("last_tick older than %d intervals", loopStaleIntervals)})
 					}
 				} else if last, err := time.Parse(time.RFC3339, row.LastTick); err == nil && now.Sub(last) > loopStaleIntervals*interval {
