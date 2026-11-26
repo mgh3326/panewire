@@ -59,6 +59,16 @@ case with `absent_over_time`, which returns a value only when nothing arrived.
 Grouping labels that a line lacks become `unspecified`, never an empty
 string.
 
+Precondition: the stack's notification policy tree must have a receiver named
+`empty`. `fleet-review-missing` sets `notification_settings.receiver: "empty"`
+so it evaluates without notifying Discord. A missing `empty` makes Grafana
+reject the group PUT, and then none of the five rules is updated. The receiver
+lives in the policy tree, which is not in this repo; check it before applying.
+On the stack as read 2026-11-27 (brief fact, not re-read in this change), the
+notification policy root receiver is `empty` with no integrations. Without a
+live read, the warning in `apply.sh` (below) is the check. The policy tree is
+also outside `apply.sh`, so only the desk can change it.
+
 ```sh
 ./apply.sh --dry-run    # prints each request and body; reads no credentials
 GRAFANA_CLOUD_URL=https://<stack>.grafana.net GRAFANA_CLOUD_SA_TOKEN=<token> ./apply.sh
