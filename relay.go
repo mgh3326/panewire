@@ -1365,6 +1365,7 @@ func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason strin
 		return
 	}
 	h.logger.Info("relay replay retired", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "reason", reason)
+	h.noteStaleReplayRetire(record, reason)
 	payload, _ := json.Marshal(struct {
 		EventID  int64  `json:"event_id"`
 		Kind     string `json:"kind"`

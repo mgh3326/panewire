@@ -347,6 +347,39 @@ and the first drop after a restart is sent at once.
 The hub's own one-labelled-replay after a restart
 ([#1002](r27-busy-relay.md)) is unchanged and is not an escalation.
 
+## Stale replay notice (hk 6924)
+
+A real message the replay gate retires as `stale` (its receipt is older than
+`relayReplayMaxAge`, 24 h, when a startup or node-hello replay meets it) is one
+its lane may never have seen. The hub keeps a daily account of those rows and
+files one inbox item per owning design lane for each UTC day, once the day has
+closed.
+
+- **What is kept.** A `stale` retirement of a real message: not an idle-wake
+  report, not a `lane_gone` row, and not a row received after its worker job's
+  `job.completed` was recorded (the hk 6900 case, behind one predicate,
+  `staleReplayAfterJobCompletion`, to be dropped once 6900 is live). The owner
+  is the design lane of the worker job's spawn record; a row without one is
+  logged and left out.
+- **The item.** Filed inbox-class (`notify_type` `info`) to the design lane,
+  event id `stale-replay-<day>`. It names the rows the task did not overtake:
+  sender prefix, message type (the relay kind), received time, age at
+  retirement and the hk event id, at most ten of them, then a count of the rest.
+- **Overtaken rows.** A row is overtaken when its lane's hk task was merged,
+  closed or completed within **6 h after its receipt**, judged from the task's
+  end (its `updated_at` in a merged, deployed, done, dropped, canceled or
+  duplicate state, or a completed or canceled category). Overtaken rows are
+  counted in the footer, not listed. A task that cannot be read counts as not
+  overtaken, so its row is listed.
+- **No event on an empty day.** A day with no listed row for a lane files
+  nothing for that lane. Its rows are then marked filed.
+- **Survival.** The rows live in `relay_stale_notice_rows` (hub store, SQLite,
+  Postgres migration 0043, MySQL migration 0039), so a restart mid-day keeps
+  them. A filed day's rows are pruned after 14 days.
+
+Code: `relay_stale_notice.go`, `relay_stale_notice_store.go`. Tests:
+`relay_stale_notice_t6924_test.go`.
+
 ## Tests
 
 `relay_harness_delivery_t3276_test.go` drives a real hub over a fake
