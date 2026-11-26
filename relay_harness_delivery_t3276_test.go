@@ -393,6 +393,78 @@ func TestHarnessDeliveryRecordsProofSignal_t3276(t *testing.T) {
 	}
 }
 
+func TestMixedLaneUncertainBatchKeepsRowsUnconfirmedAndWarnsOnce(t *testing.T) {
+	rig := t3276Start(t)
+	routes := map[string]reportRelayRoute{
+		"design-first": {Machine: "host-a", Pane: "w1:pW"},
+		"worker-a":     {Machine: "host-a", Pane: "w1:pW", Parent: "design-first"},
+		"worker-b":     {Machine: "host-a", Pane: "w1:pW", Parent: "design-first"},
+	}
+	encodedRoutes, err := json.Marshal(map[string]any{"lanes": routes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rig.hub.reportRelayPath, encodedRoutes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transport := &spawnSentryTransport{}
+	rig.hub.spawnSentry = spawnReasonSentryClient(t, transport)
+	rig.node.relayInjectVerdict = func(context.Context, string, string, []string) relayInjectResult {
+		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: "codex", Evidence: "unproven:composer_unlocated"}
+	}
+
+	lanes := []string{"design-first", "worker-a", "worker-b", "worker-a", "worker-b", "worker-a"}
+	manager := rig.node.relayBusyManager()
+	group := make([]relayHeld, 0, len(lanes))
+	for i, lane := range lanes {
+		directive := rig.sendTo(lane, fmt.Sprintf("ev-mixed-batch-%d", i), "findings", "mixed lane member")
+		item := relayHeld{Pane: directive.Pane, Lane: directive.Lane, EventID: directive.EventID, JobID: directive.JobID, Text: directive.Text, RecvSeq: int64(i + 1), DeliverPolicy: "idle", HeldSince: time.Now()}
+		if inserted, err := manager.client.relayStore().InsertRelayHeld(t.Context(), item); err != nil || !inserted {
+			t.Fatalf("insert held row %d: inserted=%t err=%v", i, inserted, err)
+		}
+		group = append(group, item)
+	}
+	manager.deliver(t.Context(), group, false)
+
+	if rows, err := manager.client.relayStore().RelayHeldForPane(t.Context(), "w1:pW"); err != nil || len(rows) != 0 {
+		t.Fatalf("node held rows=%+v err=%v, want all six uncertain rows removed from held projection", rows, err)
+	}
+	for _, item := range group {
+		row := rig.row(item.EventID)
+		if row.DeliveredAt != "" || row.DeliveredTo != "" {
+			t.Errorf("row %d is delivered: %+v, want undelivered for one unconfirmed replay", item.EventID, row)
+		}
+		mark := unconfirmedMarkEventID(item.EventID)
+		found := false
+		rig.fake.mu.Lock()
+		for _, candidate := range rig.fake.rows {
+			if candidate.EventID == mark && candidate.OwnerLane == relayUnconfirmedMarkLane {
+				found = true
+				break
+			}
+		}
+		rig.fake.mu.Unlock()
+		if !found {
+			t.Errorf("row %d has no labelled unconfirmed replay marker %q", item.EventID, mark)
+		}
+	}
+	transport.mu.Lock()
+	warningCount := len(transport.events)
+	warningTags := map[string]string{}
+	if warningCount == 1 {
+		for key, value := range transport.events[0].Tags {
+			warningTags[key] = value
+		}
+	}
+	transport.mu.Unlock()
+	if warningCount != 1 {
+		t.Fatalf("Sentry warnings=%d, want one for the five worker rows", warningCount)
+	}
+	if warningTags["member_count"] != "6" || warningTags["lanes"] != "design-first,worker-a,worker-b" || warningTags["replay_source"] != "hub_unconfirmed_once" {
+		t.Fatalf("batch warning tags=%+v, want all affected lanes and the six-row replay summary", warningTags)
+	}
+}
+
 // Acceptance 2, missing-proof half: the text reaches the pane (it was typed)
 // but nothing shows it taken. It is typed once more at once, and then no
 // relay.delivered is recorded, the durable row stays open, and the design lane
