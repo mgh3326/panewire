@@ -1,15 +1,35 @@
 package panewire
 
 import (
+	"context"
 	"io"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket/wsjson"
 	"github.com/mgh3326/panewire/internal/fleet"
 )
+
+type taskPrecheckTwoAccountSource struct{ now time.Time }
+
+func (s taskPrecheckTwoAccountSource) Hosts(context.Context, string) ([]fleet.HostView, error) {
+	return nil, nil
+}
+
+func (s taskPrecheckTwoAccountSource) Presence(context.Context) ([]fleet.PresenceRecord, error) {
+	return []fleet.PresenceRecord{
+		{HostID: "machine-a", AccountKey: "p:0000000000000001", LastSeen: s.now},
+		{HostID: "machine-b", AccountKey: "p:0000000000000002", LastSeen: s.now},
+	}, nil
+}
+
+func (taskPrecheckTwoAccountSource) SharedAccount(_ context.Context, key string) (fleet.SharedAccount, error) {
+	zero := 0.0
+	return fleet.SharedAccount{Key: key, Observed: true, Fresh: true, Quota: &fleet.PoolView{Status: "ok", Class: "spend", Blocking: &zero}}, nil
+}
 
 func taskPrecheckUnavailableAnswer(requestID string) map[string]any {
 	return map[string]any{
@@ -153,5 +173,95 @@ func TestHKAnsweredTaskPrecheckRefusalStaysTerminal_t6812(t *testing.T) {
 func TestTaskPrecheckUnavailableDoesNotCountAsLaunchFailure_t6812(t *testing.T) {
 	if launchFailureReason("spawn_failed:task_precheck_unavailable") {
 		t.Fatal("task precheck outage counted as a launch failure")
+	}
+}
+
+func TestTaskPrecheckHostExclusionReachesCoordinatorAccountSelection_t6812(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	retryHK(t)
+	policy := backoffPolicyFile(t, `{"local_machine":"machine-a","spill_targets":["machine-b"],"max_active_jobs":5,"launch_backoff_minutes":10}`)
+	h, err := NewHubServer(HubServerConfig{
+		Tokens:         map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "node-token"},
+		InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"), PlacementPolicyPath: policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	now := time.Unix(1_800_000_000, 0).UTC()
+	h.now = func() time.Time { return now }
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		app := retryDispatchApp(t, out, errout)
+		app.Config.Hosts = map[string]map[string]any{"machine-a": {}, "machine-b": {}}
+		app.Config.HostOrder = []string{"machine-a", "machine-b"}
+		app.Source = taskPrecheckTwoAccountSource{now: app.Now()}
+		return app, nil
+	}
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	t14NamedNode(t, h, server, "machine-a", true, true)
+	nodeB := t14NamedNode(t, h, server, "machine-b", true, true)
+	request := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := hubSpawnRequest{RequestID: t14RequestID(681205), Machine: "machine-a", Args: []string{"--job", "test-job", "-m", "sonnet", "-l", "test-job", "--role", "implementer"}}
+	task, err = h.inbox.store.bindSpawn(t.Context(), request.RequestID, task.Attempt, node, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task = sentSpawnFixture(t, h.inbox.store, task)
+	transport := &directSpawnTransport{h: h, task: task, bound: true}
+	moved, err := transport.nextHostAfterRefusal(t.Context(), node, hubSpawnResult{
+		RC: 70, Error: "spawn_failed", Stage: "placement", Retryable: true,
+		StdoutTail: "stderr: task precheck unavailable: handoffkeep: connection refused",
+	})
+	if err != nil || !moved {
+		t.Fatalf("task precheck refusal did not return to coordinator: moved=%v err=%v", moved, err)
+	}
+	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil || len(saved.Exclusions) != 1 || saved.Exclusions[0].Machine != "machine-a" || saved.Exclusions[0].ExpiresMS != now.Add(h.hostRefusalBackoff()).UnixMilli() {
+		t.Fatalf("saved host exclusion=%+v err=%v", saved.Exclusions, err)
+	}
+
+	h.startSpawnCoordinator(t.Context())
+	sent := t14ReadNodeSpawn(t, nodeB)
+	if sent.RequestID == t14RequestID(681205) {
+		t.Fatalf("coordinator did not select machine-b's distinct account after excluding machine-a: %+v", sent)
+	}
+	if err := wsjson.Write(t.Context(), nodeB, map[string]any{
+		"type": "job.spawn.result", "request_id": sent.RequestID, "rc": 70,
+		"job_id": "", "pane": "", "stdout_tail": "stderr: terminal test refusal",
+		"error": "spawn_failed", "stage": "placement", "retryable": false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLongTaskPrecheckErrorKeepsRefusalCode_t6812(t *testing.T) {
+	result := hubSpawnResult{
+		RC: 70, Error: "spawn_failed",
+		StdoutTail: "stderr: task precheck unavailable: handoffkeep: " + strings.Repeat("upstream detail ", 100) + "\nFix: restore handoffkeep",
+	}
+	if got := spawnFailureCode(result); got != "task_precheck_unavailable" {
+		t.Fatalf("long precheck refusal code=%q, want task_precheck_unavailable", got)
+	}
+}
+
+func TestWithHostRefusalExclusionsIncludesParentUnreadable_t6812(t *testing.T) {
+	args := []string{"-m", "auto", "--exclude-host", "operator-choice"}
+	live := []hubSpawnExclusion{
+		{Machine: "machine-a", Reason: "spawn_failed:task_precheck_unavailable"},
+		{Machine: "machine-b", Reason: "spawn_failed:parent_unreadable"},
+		{Machine: "machine-c", Reason: "spawn_failed:brief_invalid"},
+		{Machine: "machine-d", Reason: "spawn_failed:quota_full", Pool: "claude"},
+	}
+	got := withHostRefusalExclusions(args, live)
+	if value := hubSpawnArg(got, "--exclude-host"); value != "machine-a,machine-b,operator-choice" {
+		t.Fatalf("host exclusions=%q, want both next-host refusals merged with existing exclusions", value)
+	}
+	if args[3] != "operator-choice" {
+		t.Fatalf("input args were modified: %v", args)
 	}
 }
