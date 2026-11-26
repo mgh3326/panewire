@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -208,6 +209,92 @@ func TestQuotaSuccessorTransientHolderReadKeepsMadeNotDone_t6691(t *testing.T) {
 	assertQuotaLadderLedger(t, f.hub, 1, 0)
 	if got := f.hub.loopSnapshot()[loopQuotaLadder].SilentErrors; got != 1 {
 		t.Fatalf("quota_ladder silent_errors=%d, want 1", got)
+	}
+}
+
+// An unknown ledger probe must not prevent the same pass from recovering a
+// sent successor's pointer. The normal recovery reads succeed after the probe's
+// one transient failure.
+func TestQuotaSuccessorUnknownProbeStillRecoversPointer_t6697(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-69-p3")
+	setQuotaLedgerDay(f.hub, time.Now())
+	successor := f.quotaClaimedSuccessor(t, "accepted")
+	f.bindSuccessor(t, successor, true)
+	f.holdsClaim(t, successor.Job)
+	f.paneClosed = true
+	f.jobs.failGets = 1 // the eligibility probe fails; recovery rereads succeed
+	wrote := make(chan int, 1)
+	go func() { wrote <- f.hub.reconcileQuotaReplacements(t.Context()) }()
+	readCtx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	firstCommand := make(chan []byte, 1)
+	go func() {
+		_, payload, err := f.node.Read(readCtx)
+		if err == nil {
+			firstCommand <- payload
+		}
+	}()
+	var payload []byte
+	select {
+	case payload = <-firstCommand:
+	case n := <-wrote:
+		t.Fatalf("wrote %d records without pointer recovery command, want recovery", n)
+	case <-readCtx.Done():
+		t.Fatal("pointer recovery did not send a pane probe")
+	}
+	var command map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &command); err != nil {
+		t.Fatal(err)
+	}
+	roleReplyPanes(t, f.node, command, []nodeAgentRow{}, true)
+	markLost := nodeCommandRead(t, f.node)
+	nodeCommandReplyTo(t, f.node, markLost, map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}})
+	if n := <-wrote; n != 1 {
+		t.Fatalf("wrote %d records after unknown probe, want 1", n)
+	}
+	assertQuotaLadderLedger(t, f.hub, 1, 1)
+}
+
+// A successful read for another successor in the same pass must not clear a
+// failed site's streak. Repeated mixed-result passes count one silent error.
+func TestQuotaSuccessorMixedProbeFailuresCountOncePerStreak_t6697(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-69-p4")
+	setQuotaLedgerDay(f.hub, time.Now())
+	f.quotaClaimedSuccessor(t, "accepted")
+
+	old := "mwr-69-p4-other"
+	f.jobs.records[old] = map[string]any{"state": "spawned", "pool": "claude"}
+	holderRequest := quotaHolderRequest("reviewer", old)
+	holderRequest.RequestID = "d676220b-e763-4af1-aefd-000000000204"
+	taskArg := slices.Index(holderRequest.Args, "--task")
+	holderRequest.Args[taskArg+1] = "204"
+	holder, _, err := f.hub.inbox.store.claimSpawn(t.Context(), holderRequest, old, "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), holder, hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	next, _, ok := quotaReplacementJob(old)
+	if !ok {
+		t.Fatalf("%q has no quota successor name", old)
+	}
+	request, err := quotaReplacementRequest(holderRequest, old, next, "claude", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.hub.inbox.store.claimSpawnFrom(t.Context(), request, next, "parent", time.Now(), old); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `UPDATE spawn_operations SET payload='{' WHERE request_id=?`, f.holder.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		f.hub.reconcileQuotaReplacements(t.Context())
+	}
+	if got := f.hub.loopSnapshot()[loopQuotaLadder].SilentErrors; got != 1 {
+		t.Fatalf("quota_ladder silent_errors=%d after mixed passes, want 1", got)
 	}
 }
 
