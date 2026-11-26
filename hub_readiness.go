@@ -227,9 +227,9 @@ func launchFailureReason(reason string) bool {
 	switch code {
 	case "spawn_failed":
 		engineCode, _, _ := strings.Cut(detail, ":")
-		// A parent lookup can fail before the harness starts; benching its
-		// (host, kind) would block unrelated requests that do not need that job.
-		return engineCode != "parent_unreadable"
+		// An hk lookup can fail before the harness starts; benching its
+		// (host, kind) would block unrelated requests that do not need that row.
+		return engineCode != "parent_unreadable" && engineCode != "task_precheck_unavailable"
 	case "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable":
 		return true
 	default:

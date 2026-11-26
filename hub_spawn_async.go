@@ -911,7 +911,11 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	request := task.Request
 	// A seat a refusal found full stays out of this request's later
 	// selections (hk 5358).
-	request.Args = withQuotaExclusions(request.Args, liveExclusions(task.Exclusions, h.now()))
+	liveHostExclusions := liveExclusions(task.Exclusions, h.now())
+	request.Args = withQuotaExclusions(request.Args, liveHostExclusions)
+	if spawnPinnedHost(task) == "" {
+		request.Args = withHostRefusalExclusions(request.Args, liveHostExclusions)
+	}
 	if pinnedHost := spawnPinnedHost(task); pinnedHost != "" {
 		request.Args = append([]string(nil), request.Args...)
 		foundHost := false
@@ -1357,14 +1361,15 @@ var nextHostRefusals = map[string]bool{
 	// The job dir under this host's work root is a link, or stopped being the
 	// directory prepare checked; another host with its own work root prepares
 	// it (hk 6402).
-	"checkout_refused:job_dir_link":      true,
-	"checkout_refused:work_root_changed": true,
-	"spawn_failed:hooks_review":          true,
-	"spawn_failed:trust_prompt":          true,
-	"spawn_failed:omp_setup_wizard":      true,
-	"spawn_failed:auth_unavailable":      true,
-	"spawn_failed:parent_unreadable":     true,
-	"launch_proof_failed":                true,
+	"checkout_refused:job_dir_link":          true,
+	"checkout_refused:work_root_changed":     true,
+	"spawn_failed:hooks_review":              true,
+	"spawn_failed:trust_prompt":              true,
+	"spawn_failed:omp_setup_wizard":          true,
+	"spawn_failed:auth_unavailable":          true,
+	"spawn_failed:parent_unreadable":         true,
+	"spawn_failed:task_precheck_unavailable": true,
+	"launch_proof_failed":                    true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement
@@ -1372,6 +1377,37 @@ var nextHostRefusals = map[string]bool{
 func spawnRefusalTriesNextHost(reason string) bool {
 	code, _, _ := strings.Cut(reason, ": ")
 	return nextHostRefusals[code]
+}
+
+// withHostRefusalExclusions keeps a prior host-local refusal out of the next
+// placement decision before fleet selection chooses an account. This is
+// request-scoped; pinned requests keep their requested host.
+func withHostRefusalExclusions(args []string, live []hubSpawnExclusion) []string {
+	var hosts []string
+	for _, excluded := range live {
+		if excluded.Machine != "" && spawnRefusalTriesNextHost(excluded.Reason) && !slices.Contains(hosts, excluded.Machine) {
+			hosts = append(hosts, excluded.Machine)
+		}
+	}
+	if len(hosts) == 0 {
+		return args
+	}
+	next := slices.Clone(args)
+	for i := 0; i+1 < len(next); i++ {
+		if next[i] != "--exclude-host" {
+			continue
+		}
+		for _, existing := range strings.Split(next[i+1], ",") {
+			if existing != "" && !slices.Contains(hosts, existing) {
+				hosts = append(hosts, existing)
+			}
+		}
+		slices.Sort(hosts)
+		next[i+1] = strings.Join(hosts, ",")
+		return next
+	}
+	slices.Sort(hosts)
+	return append(next, "--exclude-host", strings.Join(hosts, ","))
 }
 
 // spawnStageBeforeJobClaim reports a node result stage that ends before the
@@ -2185,12 +2221,18 @@ func spawnResultRefusal(tail string) string {
 	if text == "" && start > 0 {
 		text = lines[start-1]
 	}
-	return spawnRefusalLine(text)
+	return spawnRefusalText(text)
 }
 
 // spawnRefusalLine makes refusal text safe to store and relay: redacted, on one
 // line (handoffkeep rejects control characters) and bounded from its tail.
 func spawnRefusalLine(text string) string {
+	return utf8SuffixWithin(spawnRefusalText(text), hubSpawnReasonLimit-64)
+}
+
+// spawnRefusalText normalizes a refusal without shortening it, so stable-code
+// classification can still see a marker at the start of a long hk error.
+func spawnRefusalText(text string) string {
 	lines := strings.FieldsFunc(fleetEventRedact(text), func(r rune) bool { return r == '\n' || r == '\r' })
 	for i, line := range lines {
 		lines[i] = strings.TrimSpace(strings.Map(func(r rune) rune {
@@ -2200,7 +2242,7 @@ func spawnRefusalLine(text string) string {
 			return r
 		}, line))
 	}
-	return utf8SuffixWithin(strings.Join(lines, "; "), hubSpawnReasonLimit-64)
+	return strings.Join(lines, "; ")
 }
 
 func spawnResultFix(tail string) string {
