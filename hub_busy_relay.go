@@ -72,7 +72,20 @@ func decodeRelayBatchedPayload(raw []byte) (relayBatchedPayload, bool) {
 
 func decodeRelayUncertainBatchPayload(raw []byte) (relayUncertainBatchPayload, bool) {
 	var value relayUncertainBatchPayload
-	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || !validLaneReference(value.Lane) || value.MemberCount < 2 || (value.Verdict != "maybe_in_pane" && value.Verdict != "nonce_missing") || value.Evidence == "" || len(value.Evidence) > 512 || value.ReplaySource != "hub_unconfirmed_once" {
+	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || !validLaneReference(value.Lane) || len(value.Lanes) == 0 || value.MemberCount < 2 || (value.Verdict != "maybe_in_pane" && value.Verdict != "nonce_missing") || value.Evidence == "" || len(value.Evidence) > 512 || value.ReplaySource != "hub_unconfirmed_once" {
+		return relayUncertainBatchPayload{}, false
+	}
+	seen := make(map[string]struct{}, len(value.Lanes))
+	for _, lane := range value.Lanes {
+		if !validLaneReference(lane) {
+			return relayUncertainBatchPayload{}, false
+		}
+		if _, duplicate := seen[lane]; duplicate {
+			return relayUncertainBatchPayload{}, false
+		}
+		seen[lane] = struct{}{}
+	}
+	if value.Lanes[0] != value.Lane {
 		return relayUncertainBatchPayload{}, false
 	}
 	return value, true

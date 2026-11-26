@@ -154,7 +154,11 @@ func (h *HubServer) observeRelayDropped(machine string, dropped relayDroppedPayl
 }
 
 func (h *HubServer) observeRelayUncertainBatch(machine string, batch relayUncertainBatchPayload) {
-	worker, _ := h.relayLaneRoles(batch.Lane)
+	worker := false
+	for _, lane := range batch.Lanes {
+		laneWorker, _ := h.relayLaneRoles(lane)
+		worker = worker || laneWorker
+	}
 	if !worker {
 		return
 	}
@@ -163,7 +167,7 @@ func (h *HubServer) observeRelayUncertainBatch(machine string, batch relayUncert
 		harness = "unknown"
 	}
 	h.captureWarning([]string{"relay-dropped-batch", batch.Verdict, harness}, fmt.Sprintf("RELAY_DROPPED %s/%s members=%d", batch.Verdict, harness, batch.MemberCount), map[string]string{
-		"job": batch.JobID, "lane": batch.Lane, "machine": machine, "pane": batch.Pane, "reason": batch.Verdict, "evidence": batch.Evidence, "harness": harness, "member_count": fmt.Sprint(batch.MemberCount), "replay_source": batch.ReplaySource,
+		"job": batch.JobID, "lane": batch.Lane, "lanes": strings.Join(batch.Lanes, ","), "machine": machine, "pane": batch.Pane, "reason": batch.Verdict, "evidence": batch.Evidence, "harness": harness, "member_count": fmt.Sprint(batch.MemberCount), "replay_source": batch.ReplaySource,
 	})
 }
 

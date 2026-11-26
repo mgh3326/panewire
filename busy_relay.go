@@ -247,14 +247,28 @@ type relayDroppedPayload struct {
 }
 
 type relayUncertainBatchPayload struct {
-	JobID        string `json:"job_id"`
-	Pane         string `json:"pane"`
-	Lane         string `json:"lane"`
-	MemberCount  int    `json:"member_count"`
-	Verdict      string `json:"verdict"`
-	Evidence     string `json:"evidence"`
-	Harness      string `json:"harness,omitempty"`
-	ReplaySource string `json:"replay_source"`
+	JobID        string   `json:"job_id"`
+	Pane         string   `json:"pane"`
+	Lane         string   `json:"lane"`
+	Lanes        []string `json:"lanes"`
+	MemberCount  int      `json:"member_count"`
+	Verdict      string   `json:"verdict"`
+	Evidence     string   `json:"evidence"`
+	Harness      string   `json:"harness,omitempty"`
+	ReplaySource string   `json:"replay_source"`
+}
+
+func relayUncertainBatch(group []relayHeld, verdict, evidence, harness string) relayUncertainBatchPayload {
+	lanes := make([]string, 0, len(group))
+	seen := make(map[string]struct{}, len(group))
+	for _, item := range group {
+		if _, ok := seen[item.Lane]; ok {
+			continue
+		}
+		seen[item.Lane] = struct{}{}
+		lanes = append(lanes, item.Lane)
+	}
+	return relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: group[0].Lane, Lanes: lanes, MemberCount: len(group), Verdict: verdict, Evidence: evidence, Harness: harness, ReplaySource: "hub_unconfirmed_once"}
 }
 
 // relayBusyManager serializes each pane, so a returned wait can batch every
@@ -1291,7 +1305,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		case relayInjectRetryable:
 			if previousUncertain {
 				if len(group) > 1 {
-					manager.emit("relay.uncertain_batch", relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: group[0].Lane, MemberCount: len(group), Verdict: "maybe_in_pane", Evidence: result.Evidence, Harness: result.Harness, ReplaySource: "hub_unconfirmed_once"})
+					manager.emit("relay.uncertain_batch", relayUncertainBatch(group, "maybe_in_pane", result.Evidence, result.Harness))
 				}
 				for _, item := range group {
 					manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane previous_attempt_unproven " + result.Evidence), OriginalEventID: item.EventID})
@@ -1319,7 +1333,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 				dropEvidence = "previous_attempt_unproven:" + dropEvidence
 			}
 			if len(group) > 1 {
-				manager.emit("relay.uncertain_batch", relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: group[0].Lane, MemberCount: len(group), Verdict: "maybe_in_pane", Evidence: dropEvidence, Harness: result.Harness, ReplaySource: "hub_unconfirmed_once"})
+				manager.emit("relay.uncertain_batch", relayUncertainBatch(group, "maybe_in_pane", dropEvidence, result.Harness))
 			}
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane " + result.Evidence), OriginalEventID: item.EventID})
@@ -1351,7 +1365,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			landed = append(landed, item)
 		}
 		if len(uncertain) > 1 {
-			manager.emit("relay.uncertain_batch", relayUncertainBatchPayload{JobID: uncertain[0].JobID, Pane: uncertain[0].Pane, Lane: uncertain[0].Lane, MemberCount: len(uncertain), Verdict: "nonce_missing", Evidence: result.Evidence, Harness: result.Harness, ReplaySource: "hub_unconfirmed_once"})
+			manager.emit("relay.uncertain_batch", relayUncertainBatch(uncertain, "nonce_missing", result.Evidence, result.Harness))
 		}
 		for _, item := range uncertain {
 			manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane nonce_missing " + result.Evidence), OriginalEventID: item.EventID})

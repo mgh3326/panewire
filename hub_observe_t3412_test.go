@@ -79,7 +79,7 @@ func TestRelayUncertainBatchWarnsOnceAndKeepsPerRowOutcomes(t *testing.T) {
 	for id := int64(101); id <= 106; id++ {
 		hub.observeRelayDropped("host-a", relayDroppedPayload{JobID: fmt.Sprintf("lane-event-worker-a-e%d", id), Pane: "w1:p1", Lane: "worker-a", OriginalEventID: id, Reason: relayDroppedCheckPane, Harness: "codex", BatchUncertain: true})
 	}
-	hub.observeRelayUncertainBatch("host-a", relayUncertainBatchPayload{JobID: "lane-event-worker-a-e101", Pane: "w1:p1", Lane: "worker-a", MemberCount: 6, Verdict: "maybe_in_pane", Evidence: "unproven:composer_unlocated", Harness: "codex", ReplaySource: "hub_unconfirmed_once"})
+	hub.observeRelayUncertainBatch("host-a", relayUncertainBatchPayload{JobID: "lane-event-worker-a-e101", Pane: "w1:p1", Lane: "worker-a", Lanes: []string{"worker-a"}, MemberCount: 6, Verdict: "maybe_in_pane", Evidence: "unproven:composer_unlocated", Harness: "codex", ReplaySource: "hub_unconfirmed_once"})
 
 	if len(*events) != 6 {
 		t.Fatalf("fleet outcomes=%d, want six per-row outcomes: %+v", len(*events), *events)
