@@ -82,10 +82,11 @@ The pane is proven gone by a recorded reap or close of the job (`panewire jobs
 reap`, a `pane.close` the hub issued, or a job close), by a lost job, or by a
 hub probe that finds the pane unlisted on its node. The probe runs off the relay
 path, at most once per minute while the pane is listed, so the first event
-after a pane dies may still reach it. The hub's record is in memory, so a
-restarted hub re-proves the pane gone with a probe. An unknown bound job is not
-proof that the route has ended, regardless of other jobs sharing its pane. For a
-route without a job ID, the hub infers the end only when its machine and pane
+after a pane dies may still reach it. The pane-gone mark is in memory: after a
+restart the job record comes back from the node's reports, and a probe re-proves
+the pane gone. A job the hub does not rebuild is unknown, so its route is kept.
+An unknown bound job is not proof that the route has ended, regardless of other
+jobs sharing its pane. For a route without a job ID, the hub infers the end only when its machine and pane
 match at least one completed job in that lane, every such job's pane is proven
 gone, and no matching job is live. Once proven, this drops the event with
 `job_ended`, while a takeover route bound to a live or not-yet-known successor

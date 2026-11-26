@@ -331,7 +331,9 @@ type hubJobRecord struct {
 	// PaneGone is set once the job's pane is proven gone: a reap or close, a
 	// pane.close the hub issued, a lost pane, or a probe that found the pane
 	// unlisted. Completion alone never sets it (relay_route_pane.go). In memory
-	// only: a restarted hub re-proves it with a probe.
+	// only: after a restart the record comes back from the node's reports, and
+	// a probe of its pane sets it again. A record the hub does not rebuild is
+	// unknown, not ended.
 	PaneGone bool
 	// PaneProbedAt is when the last pane probe finished; paneProbing marks one in
 	// flight. Both bound the relay path's probes (relay_route_pane.go).
