@@ -1363,6 +1363,7 @@ var nextHostRefusals = map[string]bool{
 	"spawn_failed:trust_prompt":          true,
 	"spawn_failed:omp_setup_wizard":      true,
 	"spawn_failed:auth_unavailable":      true,
+	"spawn_failed:parent_unreadable":     true,
 	"launch_proof_failed":                true,
 }
 

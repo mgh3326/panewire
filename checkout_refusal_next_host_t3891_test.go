@@ -163,6 +163,23 @@ func TestCheckoutRefusalDetailDoesNotCountTowardLaunchBackoff(t *testing.T) {
 	}
 }
 
+func TestParentUnreadableDoesNotCountTowardLaunchBackoff_t6760(t *testing.T) {
+	kind := fleet.ProfileKind("sonnet")
+	if kind == "" {
+		t.Fatal("sonnet profile has no harness kind for backoff accounting")
+	}
+	h := asyncSpawnHub(t)
+	for range 2 {
+		h.observeLaunchResult("machine-a", "sonnet", hubSpawnResult{RC: 75}, "spawn_failed:parent_unreadable", time.Now().UTC())
+	}
+	h.mu.Lock()
+	entry := h.launchBackoffs[launchKey{"machine-a", kind}]
+	h.mu.Unlock()
+	if entry != nil {
+		t.Fatalf("parent metadata lookup failures counted toward launch backoff: %+v", entry)
+	}
+}
+
 func TestPinnedCheckoutRefusalStaysTerminal(t *testing.T) {
 	h := asyncSpawnHub(t)
 	server := httptest.NewServer(h.Handler())
