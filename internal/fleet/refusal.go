@@ -136,6 +136,9 @@ var spawnRefusals = []spawnRefusal{
 	// The parent id and hk error follow this prefix, so classify it before
 	// their words can match a broader refusal such as "brief" or "workspace".
 	{match: "parent metadata unreadable", code: "parent_unreadable", hint: "Check handoffkeep reachability from the executing host and restore access there before retrying; hk is unreachable from that host."},
+	// The precheck failed before hk could answer for this task. Keep this ahead
+	// of broad rows because hk's transport error text is included after it.
+	{match: "task precheck unavailable", code: "task_precheck_unavailable", hint: "Restore handoffkeep reachability from the executing host, then replay the request; an automatic placement can try another host."},
 	// hk 6434: the refusal names a path and the word "workspace", which the
 	// broader rows below would claim.
 	{match: workspaceLockRootUnsafe, code: workspaceLockRootUnsafe, hint: "Remove the directory the refusal names, as its owner or root, on the executing host (docs/config.md, Host aliases and workspaces), then repeat the same command."},
