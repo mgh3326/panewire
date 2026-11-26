@@ -1062,7 +1062,9 @@ func (h *HubServer) observeNodeLoops(machineID string, loops *hubNodeLoopsPayloa
 			SilentErrors: r.SilentErrors, LastTick: r.LastTick,
 			OldestPendingS: r.OldestPendingS,
 		})
-		ages[r.Mechanism] = r.AgeS
+		if loops.Epoch != "" {
+			ages[r.Mechanism] = r.AgeS
+		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Mechanism < rows[j].Mechanism })
 	if st.nodeReports[machineID] == nil {
@@ -1071,17 +1073,20 @@ func (h *HubServer) observeNodeLoops(machineID string, loops *hubNodeLoopsPayloa
 	if st.nodeReports[machineID][loops.Date] == nil {
 		st.nodeReports[machineID][loops.Date] = make(map[string]nodeLoopReport)
 	}
-	epochReceipt := st.nodeEpochReceipts[machineID]
+	epochReceipt, hasEpochReceipt := st.nodeEpochReceipts[machineID]
 	epochStarted := received
-	if epochReceipt.Epoch == loops.Epoch {
+	if hasEpochReceipt && epochReceipt.Epoch == loops.Epoch {
 		epochStarted = epochReceipt.Started
 		if received.After(epochReceipt.Received) {
 			epochReceipt.Received = received
 			st.nodeEpochReceipts[machineID] = epochReceipt
 		}
-	} else if epochReceipt.Received.IsZero() || !received.Before(epochReceipt.Received) {
+	} else if !hasEpochReceipt || epochReceipt.Received.IsZero() || !received.Before(epochReceipt.Received) {
 		epochReceipt = nodeEpochReceipt{Epoch: loops.Epoch, Started: received, Received: received}
 		st.nodeEpochReceipts[machineID] = epochReceipt
+	}
+	if loops.Epoch == "" {
+		epochStarted = st.nodeFirstSeen[machineID]
 	}
 	st.nodeReports[machineID][loops.Date][loops.Epoch] = nodeLoopReport{
 		Date: loops.Date, Rows: rows, Ages: ages, Received: received, EpochStarted: epochStarted,
