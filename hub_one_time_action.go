@@ -45,9 +45,9 @@ type oneTimeActionState struct {
 	AnchorRef   string
 	WaitTaskID  int64
 	WaitID      int64
-	// SightedAt is the latest sighting of a login need, kept in memory only. A
-	// report must be newer than it to count toward the clear, so a report
-	// computed before the refusal cannot clear an untold need (hk 5686 review).
+	// SightedAt is the latest sighting of a login need. It is durable so a
+	// report computed before the latest sighting cannot clear the need after a
+	// hub restart.
 	SightedAt time.Time
 }
 

@@ -255,6 +255,7 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		{"wait_id", "BIGINT NOT NULL DEFAULT 0"},
 		{"confirmed_ms", "BIGINT NOT NULL DEFAULT 0"},
 		{"anchor_ref", "TEXT NOT NULL DEFAULT ''"},
+		{"sighted_ms", "BIGINT NOT NULL DEFAULT 0"},
 	} {
 		if _, err := addTableColumn(ctx, db, "one_time_action_notices", column.name, column.definition); err != nil {
 			db.Close()
