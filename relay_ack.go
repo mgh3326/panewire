@@ -23,8 +23,11 @@ type relayPending struct {
 	armToken   *byte
 	windowID   *byte
 	dropReason string
-	idleWake   idleWakeRouteRequest
-	held       bool
+	// dropHarness is the harness that drop named; it decides what some drop
+	// reasons prove (obligationDropFault).
+	dropHarness string
+	idleWake    idleWakeRouteRequest
+	held        bool
 }
 
 func relayPendingKey(eventID int64, jobID string) string {
@@ -129,7 +132,7 @@ func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 		h.mu.Unlock()
 		fault := obligationAckTimeout
 		if pending.dropReason != "" {
-			fault = obligationFaultFor(pending.dropReason)
+			fault = obligationDropFault(pending.dropReason, pending.dropHarness)
 		}
 		scheduled := h.scheduleRelayRetry(h.closeCtx, pending, fault)
 		h.mu.Lock()

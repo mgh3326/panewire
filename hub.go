@@ -1027,6 +1027,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 			}
 			config.Logger.Info("hub backfilled the drain columns of bound spawn operations", "rows", rows, "batches", len(batches))
 		}
+		if marked := inbox.store.earlierCopiesMarked; marked > 0 {
+			config.Logger.Info("hub marked the working-expired copies an earlier build made as revived", "rows", marked)
+		}
 		if repaired := inbox.store.spawnBoundRepaired; repaired > 0 {
 			config.Logger.Info("hub repaired the drain columns of spawn operations in flight", "rows", repaired)
 		}

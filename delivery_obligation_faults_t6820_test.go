@@ -15,14 +15,14 @@ import (
 )
 
 // t6820Drop is one way a node gives up on a copy: its relay.unconfirmed report
-// and the relay.dropped that follows.
-type t6820Drop struct{ report, drop string }
+// and the relay.dropped that follows, which names the pane's harness.
+type t6820Drop struct{ report, drop, harness string }
 
 var (
-	t6820ReadFailed   = t6820Drop{"maybe_in_pane presend:unproven:read_failed", relayDroppedPaneReadFailed}
-	t6820PromptFailed = t6820Drop{relayUnconfirmedPromptFailed, relayDroppedRetriesExhausted}
-	t6820Maybe        = t6820Drop{"maybe_in_pane unproven:composer_empty", relayDroppedCheckPane}
-	t6820Working      = t6820Drop{relayDroppedWorkingExpired, relayDroppedWorkingExpired}
+	t6820ReadFailed   = t6820Drop{report: "maybe_in_pane presend:unproven:read_failed", drop: relayDroppedPaneReadFailed, harness: "claude"}
+	t6820PromptFailed = t6820Drop{report: relayUnconfirmedPromptFailed, drop: relayDroppedRetriesExhausted, harness: "claude"}
+	t6820Maybe        = t6820Drop{report: "maybe_in_pane unproven:composer_empty", drop: relayDroppedCheckPane, harness: "claude"}
+	t6820Working      = t6820Drop{report: relayDroppedWorkingExpired, drop: relayDroppedWorkingExpired, harness: "cmd"}
 )
 
 func t6820Report(t *testing.T, rig *t6384Rig, d hubRelayInjectEvent, how t6820Drop) {
@@ -31,12 +31,25 @@ func t6820Report(t *testing.T, rig *t6384Rig, d hubRelayInjectEvent, how t6820Dr
 		t650Send(t, rig.hub, "host-a", rig.agent, "relay.unconfirmed", relayAckPayload{JobID: d.JobID, Pane: d.Pane, OriginalEventID: d.EventID, Reason: how.report})
 	}
 	if how.drop != "" {
-		t650Send(t, rig.hub, "host-a", rig.agent, "relay.dropped", relayDroppedPayload{JobID: d.JobID, Pane: d.Pane, Lane: d.Lane, OriginalEventID: d.EventID, Reason: how.drop})
+		t650Send(t, rig.hub, "host-a", rig.agent, "relay.dropped", relayDroppedPayload{JobID: d.JobID, Pane: d.Pane, Lane: d.Lane, OriginalEventID: d.EventID, Reason: how.drop, Harness: how.harness})
 	}
 }
 
 func t6820Wake(pane string, sequence uint64) idleWakeRouteRequest {
 	return idleWakeRouteRequest{Pane: pane, EventID: "idle:w1:session:" + strconv.FormatUint(sequence, 10), StateChangeSeq: sequence}
+}
+
+// t6820AwaitDropExpiry waits for the goroutine a drop with no report starts:
+// it stores the fault, then closes the window and frees the row's claim under
+// one lock, so a pass after this finds both done.
+func t6820AwaitDropExpiry(t *testing.T, rig *t6384Rig, d hubRelayInjectEvent) {
+	t.Helper()
+	eventually(t, 2*time.Second, "the dropped window to close", func() bool {
+		rig.hub.mu.Lock()
+		defer rig.hub.mu.Unlock()
+		_, open := rig.hub.relayControl.relayPending[relayPendingKey(d.EventID, d.JobID)]
+		return !open
+	})
 }
 
 // t6820Idle reports pane idle and runs one pass.
@@ -179,11 +192,11 @@ func TestRevivedCopyRefusedForMaybeTyped(t *testing.T) {
 func TestMaybeInPaneGetsOneLabelledCopyEver(t *testing.T) {
 	for name, first := range map[string]t6820Drop{
 		"check pane":       t6820Maybe,
-		"previous attempt": {"maybe_in_pane previous_attempt_unproven prompt_failed", relayDroppedCheckPane},
+		"previous attempt": {report: "maybe_in_pane previous_attempt_unproven prompt_failed", drop: relayDroppedCheckPane},
 		"unproven no drop": {report: "maybe_in_pane after_return:unproven:no_adapter"},
 		"unknown reason":   {report: "return_failed"},
 		"drop only":        {drop: relayDroppedCheckPane},
-		"unproven read":    {"maybe_in_pane presend:unproven:read_failed", relayDroppedCheckPane},
+		"unproven read":    {report: "maybe_in_pane presend:unproven:read_failed", drop: relayDroppedCheckPane},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rig := newT6384Rig(t)
@@ -191,8 +204,7 @@ func TestMaybeInPaneGetsOneLabelledCopyEver(t *testing.T) {
 			t6820Report(t, rig, d, first)
 			t6820Report(t, rig, d, first)
 			if first.report == "" {
-				// The drop's own goroutine stores the fault.
-				eventually(t, 2*time.Second, "the drop's fault", func() bool { return rig.obligation(d.EventID).Fault != "" })
+				t6820AwaitDropExpiry(t, rig, d)
 			}
 			rig.pass(0)
 			copy := rig.injected()
@@ -230,7 +242,7 @@ func TestPaneReadFailedRetriesToBudget(t *testing.T) {
 	for name, how := range map[string]t6820Drop{
 		"pane read failed":     t6820ReadFailed,
 		"inject budget spent":  t6820PromptFailed,
-		"drop without reports": {drop: relayDroppedRetriesExhausted},
+		"drop without reports": {drop: relayDroppedRetriesExhausted, harness: "claude"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rig := newT6384Rig(t)
@@ -238,12 +250,7 @@ func TestPaneReadFailedRetriesToBudget(t *testing.T) {
 			for i, wait := range []time.Duration{0, time.Minute} {
 				t6820Report(t, rig, d, how)
 				if how.report == "" {
-					eventually(t, 2*time.Second, "the drop's fault", func() bool {
-						rig.hub.mu.Lock()
-						defer rig.hub.mu.Unlock()
-						_, open := rig.hub.relayControl.relayPending[relayPendingKey(d.EventID, d.JobID)]
-						return !open
-					})
+					t6820AwaitDropExpiry(t, rig, d)
 				}
 				rig.pass(wait)
 				d = rig.injected()
@@ -523,7 +530,7 @@ func TestWorkingExpiryAfterHeldRetryIsRevived(t *testing.T) {
 	t650Send(t, rig.hub, "host-a", rig.agent, "relay.held", relayHeldPayload{EventID: d.EventID, JobID: d.JobID, Pane: d.Pane, Lane: "lane-a",
 		Reason: "retry", HeldSince: rig.clock.Now().Format(time.RFC3339Nano), DeliverPolicy: relayDeliverDirective})
 	rig.pass(0)
-	t6820Report(t, rig, d, t6820Working)
+	t6820Report(t, rig, d, t6820Drop{report: relayDroppedWorkingExpired, drop: relayDroppedWorkingExpired, harness: "omp"})
 	rig.pass(time.Minute)
 	if o := rig.obligation(d.EventID); o.Fault != relayDroppedWorkingExpired || o.State != obligationExhausted || len(rig.agent.relays) != 0 {
 		t.Fatalf("after the held expiry: %+v", o)
@@ -616,7 +623,7 @@ func TestObligationFaultClasses(t *testing.T) {
 		obligationAckTimeout:                                       {obligationAckTimeout, obligationSafe},
 		relayDroppedPaneReadFailed:                                 {relayDroppedPaneReadFailed, obligationSafe},
 		relayDroppedRetriesExhausted:                               {relayDroppedRetriesExhausted, obligationSafe},
-		"prompt_failed":                                            {relayDroppedRetriesExhausted, obligationSafe},
+		"prompt_failed":                                            {obligationFaultPromptUnproven, obligationMaybeTyped},
 		relayDroppedWorkingExpired:                                 {relayDroppedWorkingExpired, obligationWorkingExpired},
 		relayDroppedJobEnded:                                       {relayDroppedJobEnded, obligationNeverRetry},
 		relayDroppedCheckPane:                                      {relayDroppedCheckPane, obligationMaybeTyped},
@@ -634,9 +641,21 @@ func TestObligationFaultClasses(t *testing.T) {
 			t.Errorf("%q = %s class %d, want %s class %d", reason, fault, class, want.fault, want.class)
 		}
 	}
-	for _, fault := range []string{obligationFaultUnconfirmed, obligationFaultReadUnproven, relayDroppedMaybeInPane} {
+	for _, fault := range []string{obligationFaultUnconfirmed, obligationFaultReadUnproven, obligationFaultPromptUnproven, relayDroppedMaybeInPane} {
 		if classifyObligationFault(fault) != obligationMaybeTyped {
 			t.Errorf("%s is not maybe typed", fault)
+		}
+	}
+	// A spent inject budget is safe only where a rejected send types nothing.
+	for harness, want := range map[string]string{
+		"claude": relayDroppedRetriesExhausted, "codex": relayDroppedRetriesExhausted, "omp": relayDroppedRetriesExhausted,
+		"devin": relayDroppedMaybeInPane, "Devin": relayDroppedMaybeInPane, "": relayDroppedMaybeInPane,
+	} {
+		if got := obligationDropFault(relayDroppedRetriesExhausted, harness); got != want {
+			t.Errorf("spent inject budget on %q = %s, want %s", harness, got, want)
+		}
+		if got := obligationDropFault(relayDroppedPaneReadFailed, harness); got != relayDroppedPaneReadFailed {
+			t.Errorf("failed pane read on %q = %s", harness, got)
 		}
 	}
 }
@@ -699,7 +718,7 @@ func TestObligationStoreContractFaults(t *testing.T) {
 			}
 			// A drop from a machine the obligation does not name changes nothing
 			// unless the lane routes there now.
-			if _, err := s.noteObligationDrop(ctx, 7, "lane-a", "host-other", false, relayDroppedCheckPane, now); err != nil || read().fault != relayDroppedWorkingExpired {
+			if _, err := s.noteObligationDrop(ctx, 7, "lane-a", "host-other", false, relayDroppedCheckPane, "claude", now); err != nil || read().fault != relayDroppedWorkingExpired {
 				t.Fatalf("a foreign drop changed the fault: %+v err=%v", read(), err)
 			}
 			at := read().lastFaultAt
@@ -716,7 +735,7 @@ func TestObligationStoreContractFaults(t *testing.T) {
 			if !requested.revivable(later) || requested.nextAt != 0 {
 				t.Fatalf("requested row: %+v", requested)
 			}
-			if due, err := s.noteObligationDrop(ctx, 7, "lane-a", "host-a", false, relayDroppedWorkingExpired, later); err != nil || !due {
+			if due, err := s.noteObligationDrop(ctx, 7, "lane-a", "host-a", false, relayDroppedWorkingExpired, "cmd", later); err != nil || !due {
 				t.Fatalf("the drop did not make the request due: %v %v", due, err)
 			}
 			requested = read()
@@ -737,4 +756,115 @@ func TestObligationStoreContractFaults(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A drop settles a prompt_failed report on every backend, by the harness it
+// names: devin and no name keep it maybe typed, any other harness gives it the
+// drop's own fault. Killed by: settling on any harness; settling with a
+// maybe-typed drop.
+func TestObligationStoreContractPromptDrops(t *testing.T) {
+	for _, backend := range laneInboxBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			s := backend.fresh(t)()
+			ctx := t.Context()
+			now := time.Date(2026, 11, 27, 9, 0, 0, 0, time.UTC)
+			for i, step := range []struct{ drop, harness, want string }{
+				{relayDroppedRetriesExhausted, "devin", obligationFaultPromptUnproven},
+				{relayDroppedRetriesExhausted, "", obligationFaultPromptUnproven},
+				{relayDroppedPaneReadFailed, "devin", obligationFaultPromptUnproven},
+				{relayDroppedCheckPane, "claude", obligationFaultPromptUnproven},
+				{relayDroppedRetriesExhausted, "claude", relayDroppedRetriesExhausted},
+				{relayDroppedPaneReadFailed, "claude", relayDroppedPaneReadFailed},
+				{relayDroppedWorkingExpired, "omp", relayDroppedWorkingExpired},
+				{relayDroppedJobEnded, "devin", relayDroppedJobEnded},
+			} {
+				id := int64(100 + i)
+				key := "lane.event/lane-a/prompt-" + strconv.Itoa(i)
+				o := newDeliveryObligation{key: key, relayID: id, kind: "lane.event", lane: "lane-a", machine: "host-a", pane: "w1:p1", attempts: 1}
+				if err := s.flagObligationRetry(ctx, o, obligationFaultFor(relayUnconfirmedPromptFailed), "", now); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.noteObligationDrop(ctx, id, "lane-a", "host-a", false, step.drop, step.harness, now.Add(time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				if got, err := s.retryObligationForKey(ctx, key); err != nil || got.fault != step.want {
+					t.Fatalf("drop %s on %q = %s, want %s (err %v)", step.drop, step.harness, got.fault, step.want, err)
+				}
+			}
+		})
+	}
+}
+
+// The marking runs once on every backend: it takes the labelled
+// working-expired rows an earlier build left, and leaves every later row
+// alone. Killed by: marking at every start; marking a row with no label or
+// another fault; not recording the run.
+func TestObligationStoreContractEarlierCopies(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		first := queueTestStore(t, open)
+		ctx := t.Context()
+		now := time.Date(2026, 11, 27, 9, 0, 0, 0, time.UTC)
+		rows := []struct {
+			id              int64
+			state, fault    string
+			labelled        int
+			revivedAfterRun int
+		}{
+			{201, obligationExhausted, relayDroppedWorkingExpired, 1, 1},
+			{202, obligationOwed, relayDroppedWorkingExpired, 1, 1},
+			{203, obligationExhausted, relayDroppedWorkingExpired, 0, 0},
+			{204, obligationExhausted, relayDroppedMaybeInPane, 1, 0},
+			{205, obligationOwed, obligationAckTimeout, 1, 0},
+		}
+		seed := func(s *laneInboxStore, id int64, state, fault string, labelled int) {
+			t.Helper()
+			key := "lane.event/lane-a/earlier-" + strconv.FormatInt(id, 10)
+			o := newDeliveryObligation{key: key, relayID: id, kind: "lane.event", lane: "lane-a", machine: "host-a", pane: "w1:p1", attempts: 1}
+			if err := s.createObligation(ctx, o, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET state=?,fault=?,labelled=?,last_fault_at=? WHERE relay_id=?`), state, fault, labelled, now.UnixMilli(), id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		revived := func(s *laneInboxStore, id int64) (n int) {
+			t.Helper()
+			if err := s.db.QueryRowContext(ctx, s.q(`SELECT revived FROM delivery_obligations WHERE relay_id=?`), id).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		for _, row := range rows {
+			seed(first, row.id, row.state, row.fault, row.labelled)
+		}
+		// The store as a build without the marking left it.
+		forget := `DELETE FROM panewire_schema_migrations WHERE version='` + obligationEarlierCopiesVersion + `'`
+		if first.dialect.ownsSchema() {
+			forget = `PRAGMA user_version=2`
+		}
+		if _, err := first.db.ExecContext(ctx, forget); err != nil {
+			t.Fatal(err)
+		}
+		if err := first.close(); err != nil {
+			t.Fatal(err)
+		}
+		second := queueTestStore(t, open)
+		if second.earlierCopiesMarked != 2 {
+			t.Fatalf("marked %d rows, want 2", second.earlierCopiesMarked)
+		}
+		for _, row := range rows {
+			if got := revived(second, row.id); got != row.revivedAfterRun {
+				t.Errorf("row %d (%s, labelled %d): revived=%d, want %d", row.id, row.fault, row.labelled, got, row.revivedAfterRun)
+			}
+		}
+		// A row this build labels afterwards keeps its revive across a start.
+		seed(second, 206, obligationExhausted, relayDroppedWorkingExpired, 1)
+		if err := second.close(); err != nil {
+			t.Fatal(err)
+		}
+		third := queueTestStore(t, open)
+		if got := revived(third, 206); got != 0 || third.earlierCopiesMarked != 0 {
+			t.Fatalf("a second start marked again: revived=%d marked=%d", got, third.earlierCopiesMarked)
+		}
+	})
 }

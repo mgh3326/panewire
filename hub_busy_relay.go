@@ -170,7 +170,8 @@ func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayl
 		if pending.dropReason != "" {
 			return relayPending{}, true
 		}
-		pending.held, pending.armToken, pending.dropReason = false, new(byte), dropped.Reason
+		pending.held, pending.armToken = false, new(byte)
+		pending.dropReason, pending.dropHarness = dropped.Reason, dropped.Harness
 		h.relayControl.relayPending[key] = pending
 	} else {
 		h.cancelRelayPendingLocked(dropped.OriginalEventID, dropped.JobID)

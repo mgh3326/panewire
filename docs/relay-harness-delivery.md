@@ -303,7 +303,10 @@ the table. Everything else is `relay.unconfirmed`:
 
 Messages that are not worker directives keep their earlier budgets: a rejected
 send is re-held until the pane is idle, up to 3 sends (devin 2), and an unproven
-send is never re-typed.
+send is never re-typed. devin may type part of a send herdr rejects, so a hub
+with an inbox store gives such a devin row one labelled copy at most; a rejected
+send on another harness retries to the hub's budget
+([r20-relay-persistence.md](r20-relay-persistence.md), "Faults and copies").
 
 Must-ack semantics are unchanged. An injected `findings`, `decision`, `ready`
 or `blocked` item stays unread until the worker runs `panewire inbox ack <id>`.

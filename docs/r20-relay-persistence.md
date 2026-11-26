@@ -390,11 +390,12 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
 |---|---|---|---|
 | `ack_timeout` | no report inside the ack window | unknown | to the budget |
 | `pane_read_failed` | the drop after a failed pre-send read | nothing | to the budget |
-| `inject_failed_max_attempts` | a `prompt_failed` report, or the drop | nothing | to the budget |
+| `inject_failed_max_attempts` | the drop of a harness named and not devin | nothing | to the budget |
 | `unrouted` | a pass that found no route for a row with one of the three faults above | nothing was queued | no spend; to the budget once the route returns |
 | `working_wait_expired` | the report or drop | nothing | no budget copy; one revived copy at an idle wake |
-| `maybe_in_pane`, `delivery_uncertain_check_pane` | the report or drop | maybe the text | one labelled copy, ever |
+| `maybe_in_pane`, `delivery_uncertain_check_pane` | the report or drop; also an `inject_failed_max_attempts` drop from devin or naming no harness | maybe the text | one labelled copy, ever |
 | `pane_read_unproven` | a `maybe_in_pane presend:unproven:read_failed` report, until its drop says which | maybe the text | as above; the drop makes it `pane_read_failed` or `delivery_uncertain_check_pane` |
+| `prompt_unproven` | a `prompt_failed` report, until a drop settles it | maybe the text (devin may type part of a rejected send) | as above, once the node no longer holds the row |
 | `unproven` | any other node reason | maybe the text | one labelled copy, ever |
 | `unconfirmed` | a legacy marker or a retired labelled replay | maybe the text | one labelled copy, ever |
 | `job_ended` | the drop | the lane's job ended | none; the row stays open in handoffkeep |
@@ -405,6 +406,10 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
   never replaced by them. `job_ended` replaces any fault.
 - A node's drop is applied to the obligation even when its report already ended
   the ack window, so a working expiry after a held retry is learned.
+- A `prompt_failed` report names no harness. A later drop from a harness named
+  and not devin settles it: a safe fault or a working expiry takes its place.
+  A drop from devin, or naming no harness, leaves it maybe typed. While the
+  node still holds the row, a pass does not end it for this fault.
 - A `job.*` copy carries no label and has no revive: the three safe faults retry
   to the budget, `job_ended` never, and any other gets one copy.
 - An idle wake sets `revive_requested` on one row. The pass takes the revive
@@ -412,6 +417,11 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
   attempts to the ceiling and queues one copy. A copy that was not queued gives
   the revive back. A maybe-typed or `job_ended` row never revives, and neither
   does a drop older than 24 hours.
+- A build before the revive counted its idle copy in `labelled` alone and kept
+  `working_wait_expired` when that copy failed. The first start of a build with
+  the revive marks every labelled `working_wait_expired` row `revived`, once per
+  store (`PRAGMA user_version` 3 on SQLite, a `panewire_schema_migrations` row
+  elsewhere). Rows labelled after that start keep their revive.
 - A row with no route spends nothing, writes no design-lane notice and is
   announced `relay.unrouted` once per process. A `lane.event` is retired as
   `lane_gone` only when it is an idle-wake report (above), never because its own

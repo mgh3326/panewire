@@ -173,6 +173,11 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	}
 
 	if !revive && o.retriesDone(record.Kind) {
+		// The node still holds a row whose send was rejected. Its drop says
+		// whether anything was typed, so the row is not ended ahead of it.
+		if o.fault == obligationFaultPromptUnproven && h.relayHeldByNode(record.ID) {
+			return wait(blocked)
+		}
 		return exhaust()
 	}
 
@@ -289,6 +294,14 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 		h.broadcastRelayReplayInjected(record, route, attempts, source)
 	}
 	return nil
+}
+
+// relayHeldByNode reports whether a node says it holds the row.
+func (h *HubServer) relayHeldByNode(id int64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, held := h.relayHeld[id]
+	return held
 }
 
 // The replay lock covers only validation and the nonblocking queue write.

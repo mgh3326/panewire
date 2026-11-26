@@ -27,6 +27,11 @@ const (
 	// drop. The node sends it too when an earlier attempt may have typed the
 	// text, so it counts as maybe typed until the drop says which it was.
 	obligationFaultReadUnproven = "pane_read_unproven"
+	// obligationFaultPromptUnproven is a prompt_failed report: herdr rejected
+	// the send. The report names no harness, and devin may have typed part of
+	// the text, so it counts as maybe typed until a drop from a harness whose
+	// rejected send types nothing settles it.
+	obligationFaultPromptUnproven = "prompt_unproven"
 
 	// relayUnconfirmedReadFailed and relayUnconfirmedPromptFailed are
 	// relay.unconfirmed reasons that prove more than their class does.
@@ -68,9 +73,7 @@ func obligationFaultFor(reason string) string {
 		relayDroppedCheckPane, relayDroppedJobEnded:
 		return reason
 	case relayUnconfirmedPromptFailed:
-		// herdr rejected the send; the node retries it and drops it as
-		// inject_failed_max_attempts once its own budget is spent.
-		return relayDroppedRetriesExhausted
+		return obligationFaultPromptUnproven
 	case relayUnconfirmedReadFailed:
 		return obligationFaultReadUnproven
 	}
@@ -78,6 +81,35 @@ func obligationFaultFor(reason string) string {
 		return relayDroppedMaybeInPane
 	}
 	return obligationFaultUnproven
+}
+
+// promptRejectProvesUntyped reports whether a send herdr rejected on harness
+// typed nothing. devin's may have typed part of the text
+// (devinRelayInjectGuarded), and a drop that names no harness proves nothing.
+func promptRejectProvesUntyped(harness string) bool {
+	return harness != "" && !strings.EqualFold(harness, "devin")
+}
+
+// obligationDropFault names the fault a node's drop on harness stands for. A
+// node spends its inject budget on rejected sends, so that drop is safe only
+// where a rejected send types nothing.
+func obligationDropFault(reason, harness string) string {
+	if reason == relayDroppedRetriesExhausted && !promptRejectProvesUntyped(harness) {
+		return relayDroppedMaybeInPane
+	}
+	return obligationFaultFor(reason)
+}
+
+// obligationDropReplaces is obligationFaultReplaces for a drop. One from a
+// harness whose rejected send types nothing also settles a prompt_failed
+// report: the safe fault or working expiry it names takes that report's place.
+func obligationDropReplaces(fault, harness string) (condition string, args []any) {
+	condition, args = obligationFaultReplaces(fault)
+	class := classifyObligationFault(fault)
+	if promptRejectProvesUntyped(harness) && (class == obligationSafe || class == obligationWorkingExpired) {
+		return "(" + condition + " OR fault=?)", append(args, obligationFaultPromptUnproven)
+	}
+	return condition, args
 }
 
 // obligationFaultReplaces is the condition on the stored fault under which
@@ -136,7 +168,7 @@ func (h *HubServer) noteObligationDrop(ctx context.Context, machine string, drop
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	current := routes[dropped.Lane].Machine == machine
 	store := h.inbox.store
-	due, err := store.noteObligationDrop(ctx, dropped.OriginalEventID, dropped.Lane, machine, current, obligationFaultFor(dropped.Reason), h.now().UTC())
+	due, err := store.noteObligationDrop(ctx, dropped.OriginalEventID, dropped.Lane, machine, current, dropped.Reason, dropped.Harness, h.now().UTC())
 	if err != nil {
 		h.logger.Warn("relay drop was not recorded on its obligation", "event_id", dropped.OriginalEventID, "reason", dropped.Reason, "error", store.loggable("drop fault", err))
 		return
@@ -148,14 +180,15 @@ func (h *HubServer) noteObligationDrop(ctx context.Context, machine string, drop
 
 // noteObligationDrop reports whether an untaken revive of the row was made due:
 // the drop ends the node's hold, which is what kept the pass from queueing it.
-func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int64, lane, machine string, current bool, fault string, now time.Time) (bool, error) {
+func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int64, lane, machine string, current bool, reason, harness string, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	where, keys := "relay_id=? AND lane=? AND fault<>'' AND "+obligationOpen, []any{relayID, lane}
 	if !current {
 		where, keys = where+" AND machine=?", append(keys, machine)
 	}
-	replace, replaced := obligationFaultReplaces(fault)
+	fault := obligationDropFault(reason, harness)
+	replace, replaced := obligationDropReplaces(fault, harness)
 	// fault is assigned last: MySQL reads an assigned column's new value.
 	args := slices.Concat(replaced, []any{now.UnixMilli()}, replaced, []any{fault}, keys)
 	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
