@@ -878,14 +878,10 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	}
 	h.loopClearSilent("hub_quota_replace.go:newSpawnApp")
 	written := 0
-	settled := make(map[string]bool)
 	for _, successor := range successors {
-		// The ledger counts the successor by its pending state, read before the
-		// pointer is written (quotaSuccessorPending, hk 6312).
-		pending, isSettled := h.quotaSuccessorPending(ctx, app, successor)
-		if isSettled {
-			settled[successor.Request.RequestID] = true
-		}
+		// The ledger counts only successors whose permanent pointer prerequisites
+		// still hold, read before the pointer is written.
+		pending := h.quotaSuccessorPending(ctx, app, successor)
 		if pending {
 			h.loopNoteMade(loopQuotaLadder, successor.Job)
 		} else {
@@ -907,65 +903,52 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 			h.loopNoteDone(loopQuotaLadder, successor.Job)
 		}
 	}
-	h.loopSetQuotaSettled(settled)
 	return written
 }
 
-// quotaSuccessorPending reports whether a quota successor is still pending work
-// for the quota_ladder ledger, and whether its verdict is settled (final for
-// the life of the process, and cached so later passes skip the record read).
+// quotaSuccessorPending reports whether a quota successor can still be settled
+// by the reconcile pass for the quota_ladder ledger.
 //
-// The ledger's pending state is a successor that is claimed, has no pointer yet,
-// and has not ended unsent:
+// Permanent pointer prerequisites are checked here, matching
+// finishQuotaReplacement. A present or unknown predecessor pane is deliberately
+// not checked: the pass may be unable to close it, but it remains visible as
+// stuck work. The ledger's pending state is a successor that has not ended
+// unsent, has a succeeded reviewer holder with matching lineage, and has a
+// claimed/spawned predecessor record with a valid pool:
 //
 //   - Ended unsent: the operation status is failed, refused, given_up or
 //     cancelled (the terminal statuses other than succeeded, spawnTerminalStatuses).
 //     Not pending, and not read.
-//   - Pointer written, or left without one: the predecessor's hk record is no
-//     longer claimed or spawned. finishQuotaReplacement writes the replaced_by
-//     pointer only from those two states, and hk never rewrites a lost record,
-//     so no pointer can follow. Not pending, and settled.
-//   - Anything else (the predecessor still claimed or spawned, or its record
-//     missing or unreadable): pending.
+//   - Impossible pointer: the holder is missing, not succeeded, not a reviewer,
+//     or fails quotaLineageHolds; or the predecessor record is missing,
+//     unreadable, no longer claimed/spawned, or has an invalid pool. Not pending.
+//   - Eligible pointer: all permanent prerequisites still hold. Pending until
+//     the pointer is written or a later pass observes an impossible prerequisite.
 //
 // It reads the predecessor's record with the app the pass already holds and
 // changes no replacement state.
-func (h *HubServer) quotaSuccessorPending(ctx context.Context, app *fleet.App, successor hubSpawnTask) (pending, settled bool) {
+func (h *HubServer) quotaSuccessorPending(ctx context.Context, app *fleet.App, successor hubSpawnTask) bool {
 	switch successor.Status {
 	case "failed", "refused", "given_up", "cancelled":
-		return false, false
+		return false
 	}
-	id := successor.Request.RequestID
-	if h.loopQuotaSettled(id) {
-		return false, true
+	holder, err := h.inbox.store.latestSpawnForJob(ctx, successor.ReplacedFrom)
+	if err != nil || holder.Status != "succeeded" || !quotaLineageHolds(successor, holder, successor.ReplacedFrom) {
+		return false
+	}
+	prior, err := fleet.ValidateSubmission(holder.Request)
+	if err != nil || prior.Role != "reviewer" {
+		return false
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	record, exists, err := app.ExistingJob(readCtx, successor.ReplacedFrom)
 	cancel()
 	if err != nil || !exists {
-		return true, false
+		return false
 	}
 	state, _ := record["state"].(string)
-	if state == "claimed" || state == "spawned" {
-		return true, false
-	}
-	return false, true
-}
-
-// loopQuotaSettled reports whether the last pass settled a successor's verdict.
-func (h *HubServer) loopQuotaSettled(id string) bool {
-	st := h.loopLedger()
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.quotaSettled[id]
-}
-
-// loopSetQuotaSettled replaces the settled set with the one a pass just read.
-func (h *HubServer) loopSetQuotaSettled(settled map[string]bool) {
-	st := h.loopLedger()
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.quotaSettled = settled
+	pool, _ := record["pool"].(string)
+	return (state == "claimed" || state == "spawned") && spawnargs.ValuePattern.MatchString(pool)
 }
 
 // quotaSuccessorSent reports whether a claimed successor's snapshot is placed or

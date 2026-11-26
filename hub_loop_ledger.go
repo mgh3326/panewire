@@ -41,11 +41,11 @@ import (
 //     into owed) -> lines sent or cleared.
 //   - inbox (flow): batches (by batch id) and wake lanes (by lane) ->
 //     batches marked sent, wake lines sent.
-//   - quota_ladder (flow): quota successors (by job) still pending their
+//   - quota_ladder (flow): quota successors (by job) still eligible for their
 //     replaced_by pointer, and expired ladder stages (by request id) -> the
-//     pointer written, or the successor ended unsent, its predecessor left
-//     claimed/spawned, or the stage activated, discarded or cancelled. A done
-//     counts only for an item made that day (docs/loops.md).
+//     pointer written, a permanent pointer prerequisite ceased to hold, the
+//     successor ended unsent, or the stage activated, discarded or cancelled.
+//     A done counts only for an item made that day (docs/loops.md).
 //   - pool_triggers (scan): ticks and errors only.
 //   - pool_exhausted_sweep (flow): jobs on an exhausted pool (by job) ->
 //     jobs notified or queued.
@@ -197,12 +197,6 @@ type loopLedgerState struct {
 	// reason and account (the selection_drops group of the daily row). A
 	// date's counts leave with its row.
 	drops map[string]map[selectionDropKey]int64
-	// quotaSettled holds the quota successors whose predecessor's hk record had
-	// left claimed or spawned when the last reconcile pass read it. The record
-	// never returns to those states (hk never rewrites a lost record), so the
-	// verdict is final and a later pass need not read the record again. Each
-	// pass replaces the set, so it covers only the successors still scanned.
-	quotaSettled map[string]bool
 }
 
 // spawnNoticeRow is one entry of the daily row's spawn_notices group.
