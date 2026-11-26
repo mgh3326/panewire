@@ -68,6 +68,21 @@ func TestOneTimeLoginNeedWaitsForAcceptingHost(t *testing.T) {
 	}
 }
 
+func TestOneTimeDialogStillNoticedWhenHostNotAccepting(t *testing.T) {
+	h, fake, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 27, 3, 0, 0, 0, time.UTC)
+	setAcceptingOverrideForTest(h, "oci", "off")
+	report := readinessWith(start, "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent, Dialog: fleet.DialogCodexHooksReview})
+	h.noteReadinessActions("oci", report, start)
+	if got := oneTimeMessages(t, h, transport); len(got) != 1 || got[0] != "ACTION NEEDED: oci codex — run codex once and choose Trust all and continue" {
+		t.Fatalf("dialog notice while host override is off = %q", got)
+	}
+	if got := fake.openOperatorWaits(); len(got) != 1 {
+		t.Fatalf("dialog operator waits while host override is off = %+v, want one", got)
+	}
+}
+
 // A readiness report computed before a newer login-missing sighting cannot
 // start or complete the clear countdown, even if it reaches the worker later.
 func TestOneTimeLoginNeedIgnoresCleanReportOlderThanLatestSighting(t *testing.T) {
@@ -183,5 +198,29 @@ func TestOneTimeLoginSightedAtSurvivesHubRestart(t *testing.T) {
 	}
 	if state, ok := second.oneTimeStateOf(key); !ok || !state.ConfirmedAt.IsZero() {
 		t.Fatalf("state after stale reports = %+v, present=%t; want unconfirmed standing need", state, ok)
+	}
+}
+
+func TestOneTimeDelayedDialogKeepsReceiptTimeBoundary(t *testing.T) {
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 27, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+	missing := oneTimeWaitDialog(start)
+	h.noteReadinessActions("oci", missing, start.Add(3*cycle))
+	if got := oneTimeMessages(t, h, transport); len(got) != 1 {
+		t.Fatalf("initial dialog notice count = %d, want one", len(got))
+	}
+	clean := func(checked, received time.Time) {
+		t.Helper()
+		h.noteReadinessActions("oci", oneTimeWaitClean(checked), received)
+		settleOneTimeNotices(t, h)
+	}
+	// These reports were computed before the delayed dialog report was received.
+	clean(start.Add(cycle), start.Add(4*cycle))
+	clean(start.Add(2*cycle), start.Add(5*cycle))
+	h.noteReadinessActions("oci", oneTimeWaitDialog(start.Add(6*cycle)), start.Add(6*cycle))
+	if got := oneTimeMessages(t, h, transport); len(got) != 1 {
+		t.Fatalf("a dialog report with an earlier CheckedAt backdated the told episode: %q", got)
 	}
 }

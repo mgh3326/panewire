@@ -141,16 +141,14 @@ func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender 
 	queued := map[oneTimeActionKey]bool{}
 	touched := map[oneTimeActionKey]bool{}
 	var barriers []chan struct{}
-	suppressed := map[string]bool{}
 	for _, obs := range batch {
 		switch {
 		case obs.done != nil:
 			barriers = append(barriers, obs.done)
 		case obs.report != nil:
-			suppressed[obs.machine] = h.oneTimeNoticeSuppressed(obs.machine)
-			sightedAt := obs.report.CheckedAt
-			if sightedAt.IsZero() {
-				sightedAt = obs.at
+			loginSightedAt := obs.report.CheckedAt
+			if loginSightedAt.IsZero() {
+				loginSightedAt = obs.at
 			}
 			for _, key := range h.clearOneTimeActions(obs.machine, obs.report) {
 				touched[key] = true
@@ -161,22 +159,24 @@ func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender 
 					continue
 				}
 				if harness.Dialog != "" {
-					h.considerOneTimeSighting(obs.machine, kind, harness.Dialog, sightedAt, queued, &untold, touched, !suppressed[obs.machine])
+					key := oneTimeActionKey{machine: obs.machine, kind: kind, need: harness.Dialog}
+					h.considerOneTimeSighting(obs.machine, kind, harness.Dialog, obs.at, obs.at, queued, &untold, touched, !h.oneTimeNoticeSuppressed(key))
 				}
 				if kind != "cmd" && harness.Login == fleet.ReadinessLoginMissing {
-					h.considerOneTimeSighting(obs.machine, kind, oneTimeLoginMissing, sightedAt, queued, &untold, touched, !suppressed[obs.machine])
+					key := oneTimeActionKey{machine: obs.machine, kind: kind, need: oneTimeLoginMissing}
+					h.considerOneTimeSighting(obs.machine, kind, oneTimeLoginMissing, obs.at, loginSightedAt, queued, &untold, touched, !h.oneTimeNoticeSuppressed(key))
 				}
 			}
 		default:
-			suppressed[obs.machine] = h.oneTimeNoticeSuppressed(obs.machine)
-			h.considerOneTimeSighting(obs.machine, obs.kind, obs.need, obs.at, queued, &untold, touched, !suppressed[obs.machine])
+			key := oneTimeActionKey{machine: obs.machine, kind: obs.kind, need: obs.need}
+			h.considerOneTimeSighting(obs.machine, obs.kind, obs.need, obs.at, obs.at, queued, &untold, touched, !h.oneTimeNoticeSuppressed(key))
 		}
 	}
 	for _, s := range untold {
 		if sender.base.Err() != nil {
 			break
 		}
-		if h.oneTimeNoticeSuppressed(s.key.machine) {
+		if h.oneTimeNoticeSuppressed(s.key) {
 			continue
 		}
 		if err := h.deliverOneTimeAction(sender, s); err != nil {
@@ -220,10 +220,13 @@ func (h *HubServer) applyOneTimeObservations(batch []oneTimeObservation, sender 
 // in its clear countdown when it shows again. An untold need joins this batch's
 // delivery once, at the first sighting. touched records every need the batch
 // saw so the handoffkeep wait sync can re-assert the standing ones.
-func (h *HubServer) oneTimeNoticeSuppressed(machine string) bool {
+func (h *HubServer) oneTimeNoticeSuppressed(key oneTimeActionKey) bool {
+	if key.need != oneTimeLoginMissing {
+		return false
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.acceptingOverrideLocked(machine) == "off"
+	return h.acceptingOverrideLocked(key.machine) == "off"
 }
 
 func (h *HubServer) oneTimeActionKeysForMachine(machine string) []oneTimeActionKey {
@@ -238,7 +241,7 @@ func (h *HubServer) oneTimeActionKeysForMachine(machine string) []oneTimeActionK
 	return keys
 }
 
-func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.Time, queued map[oneTimeActionKey]bool, untold *[]oneTimeSighting, touched map[oneTimeActionKey]bool, deliver bool) {
+func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at, sightedAt time.Time, queued map[oneTimeActionKey]bool, untold *[]oneTimeSighting, touched map[oneTimeActionKey]bool, deliver bool) {
 	s, ok := oneTimeSightingFor(machine, kind, need, at)
 	if !ok {
 		return
@@ -246,7 +249,7 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 	touched[s.key] = true
 	if !deliver {
 		if s.key.need == oneTimeLoginMissing {
-			h.recordSuppressedLoginNeed(s.key, s.at)
+			h.recordSuppressedLoginNeed(s.key, sightedAt)
 		}
 		return
 	}
@@ -254,15 +257,15 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 	if state, ok := h.oneTimeActions[s.key]; ok && s.key.need == oneTimeLoginMissing {
 		// Reports older than this sighting cannot clear the login need (SightedAt).
 		// Sightings can be applied out of time order, so keep the latest.
-		if s.at.After(state.SightedAt) {
-			state.SightedAt = s.at
+		if sightedAt.After(state.SightedAt) {
+			state.SightedAt = sightedAt
 			if err := h.saveOneTimeLocked(s.key, state); err != nil {
 				h.logger.Warn("one-time action notice could not be stored", "host", s.key.machine, "kind", s.key.kind, "error", err)
 			}
 		}
 	}
 	if state, ok := h.oneTimeActions[s.key]; ok && !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() {
-		if !state.GoneSince.IsZero() && !staleLoginSighting(s.key, state, s.at) {
+		if !state.GoneSince.IsZero() && !staleLoginSighting(s.key, state, sightedAt) {
 			state.GoneSince = time.Time{}
 			if err := h.saveOneTimeLocked(s.key, state); err != nil {
 				h.logger.Warn("one-time action notice could not be stored", "host", s.key.machine, "kind", s.key.kind, "error", err)
@@ -275,7 +278,7 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at time.
 	// A login need stands from this sighting, delivered or not: placement reads
 	// it, and a failed notice leaves ToldAt zero so the delivery is tried again.
 	if s.key.need == oneTimeLoginMissing {
-		h.standLoginNeed(s.key, s.at)
+		h.standLoginNeed(s.key, sightedAt)
 	}
 	if queued[s.key] {
 		return

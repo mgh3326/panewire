@@ -241,7 +241,7 @@ func (h *HubServer) reconcileOneTimeWait(ctx context.Context, key oneTimeActionK
 	switch {
 	case !state.ConfirmedAt.IsZero():
 		err = h.closeOneTimeWait(ctx, key)
-	case h.oneTimeNoticeSuppressed(key.machine) && state.holdsWait():
+	case h.oneTimeNoticeSuppressed(key) && state.holdsWait():
 		err = h.clearOneTimeWaitOn(ctx, key, oneTimeActionFor(key.kind, key.need), state.WaitTaskID, state.WaitID, "panewire: host accepting disabled")
 	case state.GoneSince.IsZero() && (!state.ToldAt.IsZero() || state.holdsWait()):
 		err = h.openOneTimeWait(ctx, key)
@@ -258,7 +258,7 @@ func (h *HubServer) reconcileOneTimeWait(ctx context.Context, key oneTimeActionK
 // write the wait, then record its id. A pass that fails at any step leaves the
 // row in a state the next pass resumes from.
 func (h *HubServer) openOneTimeWait(ctx context.Context, key oneTimeActionKey) error {
-	if h.oneTimeNoticeSuppressed(key.machine) {
+	if h.oneTimeNoticeSuppressed(key) {
 		return nil
 	}
 	action := oneTimeActionFor(key.kind, key.need)
