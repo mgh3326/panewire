@@ -1793,6 +1793,14 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				return
 			}
 		}
+		if message.Kind == "relay.uncertain_batch" {
+			batch, valid := decodeRelayUncertainBatchPayload(message.Payload)
+			if !valid {
+				h.countUnknownMessage()
+				return
+			}
+			h.observeRelayUncertainBatch(machineID, batch)
+		}
 		if message.Kind == "relay.dropped" {
 			dropped, valid := decodeRelayDroppedPayload(message.Payload)
 			if !valid {
@@ -2323,6 +2331,11 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "relay.uncertain_batch" {
+			if _, valid := decodeRelayUncertainBatchPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		if message.Kind == "relay.dropped" {
 			if _, valid := decodeRelayDroppedPayload(rawPayload); !valid {
 				return hubInbound{}, false
@@ -2337,7 +2350,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "state", "note", "job.completed", "job.escalate", "job.joined", "job.lost", "job.revoked", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped":
+	case "heartbeat", "state", "note", "job.completed", "job.escalate", "job.joined", "job.lost", "job.revoked", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped", "relay.uncertain_batch":
 		return true
 	}
 	return false
