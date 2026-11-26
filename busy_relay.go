@@ -242,7 +242,19 @@ type relayDroppedPayload struct {
 	Reason          string `json:"reason"`
 	// Harness is the pane's harness at the drop, when the node could read it.
 	// The hub's Sentry fingerprint names it; an older hub ignores the field.
-	Harness string `json:"harness,omitempty"`
+	Harness        string `json:"harness,omitempty"`
+	BatchUncertain bool   `json:"batch_uncertain,omitempty"`
+}
+
+type relayUncertainBatchPayload struct {
+	JobID        string `json:"job_id"`
+	Pane         string `json:"pane"`
+	Lane         string `json:"lane"`
+	MemberCount  int    `json:"member_count"`
+	Verdict      string `json:"verdict"`
+	Evidence     string `json:"evidence"`
+	Harness      string `json:"harness,omitempty"`
+	ReplaySource string `json:"replay_source"`
 }
 
 // relayBusyManager serializes each pane, so a returned wait can batch every
@@ -621,6 +633,10 @@ func (manager *relayBusyManager) inject(ctx context.Context, group []relayHeld, 
 // rearm. relay.dropped clears the hub's held projection; the hub's durable
 // row stays undelivered. The drop reports an actionable reason.
 func (manager *relayBusyManager) stopWithoutRetry(item relayHeld, harness, evidence string) {
+	manager.stopWithoutRetryBatch(item, harness, evidence, false)
+}
+
+func (manager *relayBusyManager) stopWithoutRetryBatch(item relayHeld, harness, evidence string, batchUncertain bool) {
 	if item.EventID == 0 || item.Lane == "" {
 		return
 	}
@@ -631,7 +647,7 @@ func (manager *relayBusyManager) stopWithoutRetry(item relayHeld, harness, evide
 	if strings.HasPrefix(evidence, "presend:unproven:read_failed") {
 		reason = relayDroppedPaneReadFailed
 	}
-	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: reason, Harness: harness})
+	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: reason, Harness: harness, BatchUncertain: batchUncertain})
 }
 
 // relayAckReason keeps a reason inside the hub's relay ack bounds: one line,
@@ -1274,9 +1290,12 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		switch result.Outcome {
 		case relayInjectRetryable:
 			if previousUncertain {
+				if len(group) > 1 {
+					manager.emit("relay.uncertain_batch", relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: group[0].Lane, MemberCount: len(group), Verdict: "maybe_in_pane", Evidence: result.Evidence, Harness: result.Harness, ReplaySource: "hub_unconfirmed_once"})
+				}
 				for _, item := range group {
 					manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane previous_attempt_unproven " + result.Evidence), OriginalEventID: item.EventID})
-					manager.stopWithoutRetry(item, result.Harness, "previous_attempt_unproven:"+result.Evidence)
+					manager.stopWithoutRetryBatch(item, result.Harness, "previous_attempt_unproven:"+result.Evidence, len(group) > 1)
 				}
 				continue
 			}
@@ -1299,9 +1318,12 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			if previousUncertain {
 				dropEvidence = "previous_attempt_unproven:" + dropEvidence
 			}
+			if len(group) > 1 {
+				manager.emit("relay.uncertain_batch", relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: group[0].Lane, MemberCount: len(group), Verdict: "maybe_in_pane", Evidence: dropEvidence, Harness: result.Harness, ReplaySource: "hub_unconfirmed_once"})
+			}
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane " + result.Evidence), OriginalEventID: item.EventID})
-				manager.stopWithoutRetry(item, result.Harness, dropEvidence)
+				manager.stopWithoutRetryBatch(item, result.Harness, dropEvidence, len(group) > 1)
 			}
 			continue
 		}
@@ -1320,13 +1342,20 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			return result.Proven == nil || slices.Contains(result.Proven, relayNonce(item))
 		}
 		var landed []relayHeld
+		var uncertain []relayHeld
 		for _, item := range group {
 			if !proven(item) {
-				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane nonce_missing " + result.Evidence), OriginalEventID: item.EventID})
-				manager.stopWithoutRetry(item, result.Harness, result.Evidence)
+				uncertain = append(uncertain, item)
 				continue
 			}
 			landed = append(landed, item)
+		}
+		if len(uncertain) > 1 {
+			manager.emit("relay.uncertain_batch", relayUncertainBatchPayload{JobID: uncertain[0].JobID, Pane: uncertain[0].Pane, Lane: uncertain[0].Lane, MemberCount: len(uncertain), Verdict: "nonce_missing", Evidence: result.Evidence, Harness: result.Harness, ReplaySource: "hub_unconfirmed_once"})
+		}
+		for _, item := range uncertain {
+			manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane nonce_missing " + result.Evidence), OriginalEventID: item.EventID})
+			manager.stopWithoutRetryBatch(item, result.Harness, result.Evidence, len(uncertain) > 1)
 		}
 		if len(landed) > 1 {
 			ids := make([]int64, 0, len(landed))

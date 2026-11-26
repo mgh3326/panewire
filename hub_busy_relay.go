@@ -70,6 +70,14 @@ func decodeRelayBatchedPayload(raw []byte) (relayBatchedPayload, bool) {
 	return value, true
 }
 
+func decodeRelayUncertainBatchPayload(raw []byte) (relayUncertainBatchPayload, bool) {
+	var value relayUncertainBatchPayload
+	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || !validLaneReference(value.Lane) || value.MemberCount < 2 || (value.Verdict != "maybe_in_pane" && value.Verdict != "nonce_missing") || value.Evidence == "" || len(value.Evidence) > 512 || value.ReplaySource != "hub_unconfirmed_once" {
+		return relayUncertainBatchPayload{}, false
+	}
+	return value, true
+}
+
 func (h *HubServer) rememberRelayHeld(machine string, held relayHeldPayload) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -74,6 +74,30 @@ func TestRelayRoutineDropEmitsEventWithoutSentry(t *testing.T) {
 	}
 }
 
+func TestRelayUncertainBatchWarnsOnceAndKeepsPerRowOutcomes(t *testing.T) {
+	hub, events, transport := acceptObserveHub(t)
+	for id := int64(101); id <= 106; id++ {
+		hub.observeRelayDropped("host-a", relayDroppedPayload{JobID: fmt.Sprintf("lane-event-worker-a-e%d", id), Pane: "w1:p1", Lane: "worker-a", OriginalEventID: id, Reason: relayDroppedCheckPane, Harness: "codex", BatchUncertain: true})
+	}
+	hub.observeRelayUncertainBatch("host-a", relayUncertainBatchPayload{JobID: "lane-event-worker-a-e101", Pane: "w1:p1", Lane: "worker-a", MemberCount: 6, Verdict: "maybe_in_pane", Evidence: "unproven:composer_unlocated", Harness: "codex", ReplaySource: "hub_unconfirmed_once"})
+
+	if len(*events) != 6 {
+		t.Fatalf("fleet outcomes=%d, want six per-row outcomes: %+v", len(*events), *events)
+	}
+	for i, event := range *events {
+		if event.Outcome != "dropped:"+relayDroppedCheckPane || event.Job != fmt.Sprintf("lane-event-worker-a-e%d", 101+i) {
+			t.Fatalf("fleet outcome[%d]=%+v, want the unchanged dropped row", i, event)
+		}
+	}
+	if len(transport.events) != 1 {
+		t.Fatalf("Sentry warnings=%d, want one", len(transport.events))
+	}
+	failure := transport.events[0]
+	if failure.Level != sentry.LevelWarning || failure.Tags["member_count"] != "6" || failure.Tags["evidence"] != "unproven:composer_unlocated" || failure.Tags["replay_source"] != "hub_unconfirmed_once" {
+		t.Fatalf("batch warning=%+v, missing count/verdict evidence/replay source", failure)
+	}
+}
+
 // A relay delivered for a worker lane is recorded once, and a design lane's
 // row is recorded too.
 func TestRelayDeliveredEmitsOneFleetEvent(t *testing.T) {

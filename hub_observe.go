@@ -141,7 +141,7 @@ func (h *HubServer) observeRelayDropped(machine string, dropped relayDroppedPayl
 		return
 	}
 	h.emitFleet(fleetEvent{Kind: "relay", Job: dropped.JobID, Outcome: "dropped:" + reason, Reason: reason, Detail: relayDetail(dropped.Lane, machine, dropped.Pane, dropped.Harness, dropped.Reason)})
-	if !worker || !relayDropWarns(reason) {
+	if !worker || !relayDropWarns(reason) || dropped.BatchUncertain {
 		return
 	}
 	harness := fleetEventCode(dropped.Harness)
@@ -150,6 +150,20 @@ func (h *HubServer) observeRelayDropped(machine string, dropped relayDroppedPayl
 	}
 	h.captureWarning([]string{"relay-dropped", reason, harness}, "RELAY_DROPPED "+reason+"/"+harness, map[string]string{
 		"job": dropped.JobID, "lane": dropped.Lane, "machine": machine, "pane": dropped.Pane, "reason": reason, "harness": harness,
+	})
+}
+
+func (h *HubServer) observeRelayUncertainBatch(machine string, batch relayUncertainBatchPayload) {
+	worker, _ := h.relayLaneRoles(batch.Lane)
+	if !worker {
+		return
+	}
+	harness := fleetEventCode(batch.Harness)
+	if harness == "" {
+		harness = "unknown"
+	}
+	h.captureWarning([]string{"relay-dropped-batch", batch.Verdict, harness}, fmt.Sprintf("RELAY_DROPPED %s/%s members=%d", batch.Verdict, harness, batch.MemberCount), map[string]string{
+		"job": batch.JobID, "lane": batch.Lane, "machine": machine, "pane": batch.Pane, "reason": batch.Verdict, "evidence": batch.Evidence, "harness": harness, "member_count": fmt.Sprint(batch.MemberCount), "replay_source": batch.ReplaySource,
 	})
 }
 
