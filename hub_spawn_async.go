@@ -1357,14 +1357,15 @@ var nextHostRefusals = map[string]bool{
 	// The job dir under this host's work root is a link, or stopped being the
 	// directory prepare checked; another host with its own work root prepares
 	// it (hk 6402).
-	"checkout_refused:job_dir_link":      true,
-	"checkout_refused:work_root_changed": true,
-	"spawn_failed:hooks_review":          true,
-	"spawn_failed:trust_prompt":          true,
-	"spawn_failed:omp_setup_wizard":      true,
-	"spawn_failed:auth_unavailable":      true,
-	"spawn_failed:parent_unreadable":     true,
-	"launch_proof_failed":                true,
+	"checkout_refused:job_dir_link":          true,
+	"checkout_refused:work_root_changed":     true,
+	"spawn_failed:hooks_review":              true,
+	"spawn_failed:trust_prompt":              true,
+	"spawn_failed:omp_setup_wizard":          true,
+	"spawn_failed:auth_unavailable":          true,
+	"spawn_failed:parent_unreadable":         true,
+	"spawn_failed:task_precheck_unavailable": true,
+	"launch_proof_failed":                    true,
 }
 
 // spawnRefusalTriesNextHost names a node refusal that moves an auto placement

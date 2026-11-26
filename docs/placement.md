@@ -314,6 +314,7 @@ failed to launch counts:
 |---|---|---|
 | `spawn_failed`, with or without its engine code (`spawn_failed:<code>`) | yes | the engine did not launch on this host |
 | `spawn_failed:parent_unreadable` | no | hk could not answer the parent-job lookup from this host; an automatic placement may try its next candidate |
+| `spawn_failed:task_precheck_unavailable` | no | hk could not answer the task precheck from this host; an automatic placement may try its next candidate |
 | `spawn_disabled` | yes | the host's spawn policy refuses every launch |
 | `cwd_unmapped` | yes | the host has no path for the repository |
 | `brief_doc_unavailable` | yes | the host cannot fetch or resolve its brief document |
@@ -361,9 +362,9 @@ A refusal that moves an `--host auto` request to the next host (the codes
 `checkout_refused:job_dir_link`, the
 first-run `spawn_failed:hooks_review`, `spawn_failed:trust_prompt`,
 `spawn_failed:omp_setup_wizard`, `spawn_failed:auth_unavailable`,
-`spawn_failed:parent_unreadable`, and `launch_proof_failed`) rules its host
-out only for the launch backoff above
-(`launch_backoff_minutes`, 30 by default). Its expiry is stored with the
+`spawn_failed:parent_unreadable`, `spawn_failed:task_precheck_unavailable`,
+and `launch_proof_failed`) rules its host out only for the launch backoff
+above (`launch_backoff_minutes`, 30 by default). Its expiry is stored with the
 request, so a hub restart keeps it. After the backoff the next placement check
 asks that host again, and a repeat refusal rules it out for another backoff. A
 refusal the hub does not class as host-local (for example `deadline_not_started`)
