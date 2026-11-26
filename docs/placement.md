@@ -415,8 +415,12 @@ ACTION NEEDED: oci codex — run codex once and choose Trust all and continue
 A need is a readiness `dialog` value or `login: missing`; a refusal above counts
 as a report of the same need. The text carries the host, the kind and the
 action only, never screen content. The hub tells each (host, kind, need) once
-while it stands. One notice worker owns those sends: the refusal and readiness
-handlers hand it their observations and return at once, it coalesces repeat
+while it stands. A login need on a host with accepting override `off` is still
+recorded in readiness for placement, but it does not send an ACTION NEEDED
+notice or open an operator wait. When accepting is turned back on, the next
+readiness sighting tells the standing need and opens its wait. One notice worker
+owns those sends: the refusal and readiness handlers hand it their observations
+and return at once, it coalesces repeat
 sightings, and it allows one delivery attempt per untold need at a time. A need
 is recorded as told only when that attempt's own request is answered 2xx, within
 a 2 s deadline derived from hub shutdown. A late 2xx for an earlier attempt, a
@@ -424,9 +428,11 @@ drop, a rate-limit skip, a non-2xx, a network error, a timeout or shutdown leave
 the need untold, and the next sighting tries again. Hub shutdown stops the
 worker, cancels its request and joins it before the store closes. With no Sentry
 DSN nothing is told, and the next report tries again. The told state is kept in
-the hub store (table `one_time_action_notices`: Postgres migrations 0026 and 0034,
-MySQL migrations 0019 and 0027) and read back at start, so a hub restart does
-not tell a standing need again. While a need stands, the hub also holds one
+the hub store (table `one_time_action_notices`: Postgres migrations 0026, 0034
+and 0042; MySQL migrations 0019, 0027 and 0038) and read back at start, so a hub
+restart does not tell a standing need again. The latest login-need sighting is
+stored too, so a delayed report computed before that sighting cannot clear the
+need after restart. While a need stands, the hub also holds one
 handoffkeep operator wait on an intake anchor task per (host, kind, need)
 (`hub_one_time_wait.go`): it opens once after the notice and closes after the
 anti-flap clear. The wait id is kept in the same row; a failed hk write is

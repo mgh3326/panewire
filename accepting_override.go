@@ -409,6 +409,9 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 	}
 	h.placementCache = placementCache{}
 	h.mu.Unlock()
+	if body.Mode == "off" {
+		h.enqueueOneTimeWaits(h.oneTimeActionKeysForMachine(machine)...)
+	}
 	h.kickSpawnPlacement()
 	writeJSON(writer, http.StatusOK, struct {
 		Machine             string `json:"machine"`

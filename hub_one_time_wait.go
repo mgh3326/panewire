@@ -241,6 +241,8 @@ func (h *HubServer) reconcileOneTimeWait(ctx context.Context, key oneTimeActionK
 	switch {
 	case !state.ConfirmedAt.IsZero():
 		err = h.closeOneTimeWait(ctx, key)
+	case h.oneTimeNoticeSuppressed(key) && state.holdsWait():
+		err = h.clearOneTimeWaitOn(ctx, key, oneTimeActionFor(key.kind, key.need), state.WaitTaskID, state.WaitID, "panewire: host accepting disabled")
 	case state.GoneSince.IsZero() && (!state.ToldAt.IsZero() || state.holdsWait()):
 		err = h.openOneTimeWait(ctx, key)
 	}
@@ -256,6 +258,9 @@ func (h *HubServer) reconcileOneTimeWait(ctx context.Context, key oneTimeActionK
 // write the wait, then record its id. A pass that fails at any step leaves the
 // row in a state the next pass resumes from.
 func (h *HubServer) openOneTimeWait(ctx context.Context, key oneTimeActionKey) error {
+	if h.oneTimeNoticeSuppressed(key) {
+		return nil
+	}
 	action := oneTimeActionFor(key.kind, key.need)
 	if action == "" {
 		return nil
@@ -330,9 +335,9 @@ func (h *HubServer) settleRefusedOneTimeOpen(ctx context.Context, key oneTimeAct
 	return err
 }
 
-// closeOneTimeWait clears the need's wait once the clear is confirmed and drops
-// the row when nothing is left (oneTimeRowKept). A row that holds no wait has
-// nothing to close, and no wait is created to find one: a wait is only ever
+// closeOneTimeWait clears the need's wait once the clear is confirmed, then
+// retains any login clear watermark (oneTimeRowKept). A row that holds no wait
+// has nothing to close, and no wait is created to find one: a wait is only ever
 // opened by openOneTimeWait.
 func (h *HubServer) closeOneTimeWait(ctx context.Context, key oneTimeActionKey) error {
 	state, ok := h.oneTimeStateOf(key)
