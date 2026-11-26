@@ -7,9 +7,12 @@ package panewire
 // was reported maybe typed. Read by this build, the row would still be owed a
 // revive, so it is marked as having had it. It runs once per store: this build
 // labels rows too (a budget copy that ends in a working expiry), and those are
-// still owed their revive.
+// still owed their revive. A store copy carries the record with the rows.
 
-import "context"
+import (
+	"context"
+	"database/sql"
+)
 
 // obligationEarlierCopiesVersion is the row the marking adds to the migration
 // ledger on Postgres and MySQL. No migration file has this name.
@@ -68,4 +71,20 @@ func (s *laneInboxStore) earlierObligationCopiesRecorded(ctx context.Context) (b
 	var recorded int
 	err := s.db.QueryRowContext(ctx, s.q(`SELECT COUNT(*) FROM panewire_schema_migrations WHERE version=?`), obligationEarlierCopiesVersion).Scan(&recorded)
 	return recorded > 0, err
+}
+
+// copyEarlierObligationCopiesRecord makes a Postgres or MySQL copy target
+// record the marking exactly when its source does (recorded), in the
+// transaction that copies the obligations. Without the record the target's next
+// start marks the copied rows; with it, that start leaves them alone.
+func copyEarlierObligationCopiesRecord(ctx context.Context, target *sql.Tx, recorded bool) error {
+	// The version is a constant, so no dialect's placeholder is needed.
+	if _, err := target.ExecContext(ctx, `DELETE FROM panewire_schema_migrations WHERE version='`+obligationEarlierCopiesVersion+`'`); err != nil {
+		return err
+	}
+	if !recorded {
+		return nil
+	}
+	_, err := target.ExecContext(ctx, `INSERT INTO panewire_schema_migrations(version) VALUES('`+obligationEarlierCopiesVersion+`')`)
+	return err
 }

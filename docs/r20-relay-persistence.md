@@ -422,6 +422,8 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
   the revive marks every labelled `working_wait_expired` row `revived`, once per
   store (`PRAGMA user_version` 3 on SQLite, a `panewire_schema_migrations` row
   elsewhere). Rows labelled after that start keep their revive.
+  `hub store-copy` of `delivery_obligations` carries that record: the target
+  holds it exactly when the source does.
 - A row with no route spends nothing, writes no design-lane notice and is
   announced `relay.unrouted` once per process. A `lane.event` is retired as
   `lane_gone` only when it is an idle-wake report (above), never because its own

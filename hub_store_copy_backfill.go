@@ -44,6 +44,16 @@ func storeCopySourceSpawnBoundBackfilled(ctx context.Context, src *storeCopyDB) 
 	})
 }
 
+// storeCopySourceEarlierCopiesMarked reports whether the source ran the marking
+// of an earlier build's obligation copies (hk 6820). Such a source is not
+// refused: the copy hands its answer to the target
+// (copyEarlierObligationCopiesRecord).
+func storeCopySourceEarlierCopiesMarked(ctx context.Context, src *storeCopyDB) (bool, error) {
+	return storeCopySourceRecords(ctx, src, sqliteObligationEarlierCopiesVersion, func(version string) bool {
+		return version == obligationEarlierCopiesVersion
+	})
+}
+
 // storeCopySourceRecords reports whether the source records a backfill: on
 // SQLite a user_version of at least sqliteVersion, otherwise a ledger row that
 // recorded accepts.
