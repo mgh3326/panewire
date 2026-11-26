@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"path/filepath"
@@ -190,6 +191,7 @@ func TestTaskPrecheckHostExclusionReachesCoordinatorAccountSelection_t6812(t *te
 	t.Cleanup(func() { _ = h.Close() })
 	now := time.Unix(1_800_000_000, 0).UTC()
 	h.now = func() time.Time { return now }
+	withoutSpawnBackoff(h)
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		app := retryDispatchApp(t, out, errout)
 		app.Config.Hosts = map[string]map[string]any{"machine-a": {}, "machine-b": {}}
@@ -226,7 +228,41 @@ func TestTaskPrecheckHostExclusionReachesCoordinatorAccountSelection_t6812(t *te
 	}
 
 	h.startSpawnCoordinator(t.Context())
-	sent := t14ReadNodeSpawn(t, nodeB)
+	type nodeRead struct {
+		message hubOutboundMessage
+		err     error
+	}
+	readCtx, cancelRead := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancelRead()
+	read := make(chan nodeRead, 1)
+	go func() {
+		_, payload, err := nodeB.Read(readCtx)
+		if err != nil {
+			read <- nodeRead{err: err}
+			return
+		}
+		message, valid := parseHubOutbound(payload)
+		if !valid || message.Type != "job.spawn" {
+			read <- nodeRead{err: errors.New("machine-b received a non-spawn message")}
+			return
+		}
+		read <- nodeRead{message: message}
+	}()
+	var received nodeRead
+	var placement hubSpawnTask
+	eventually(t, 15*time.Second, "machine-b spawn dispatch or another placement outcome", func() bool {
+		select {
+		case received = <-read:
+			return true
+		default:
+		}
+		placement, err = h.inbox.store.spawnTask(t.Context(), request.RequestID)
+		return err == nil && (placement.Status == "failed" || placement.ParkReason != "" && placement.ParkReason != spawnParkLaunchBackoff || placement.Node != nil && placement.Node.Machine != "machine-b")
+	})
+	if received.err != nil || received.message.Type != "job.spawn" {
+		t.Fatalf("machine-b was not dispatched after excluding machine-a: state=%+v read_error=%v", placement, received.err)
+	}
+	sent := received.message
 	if sent.RequestID == t14RequestID(681205) {
 		t.Fatalf("coordinator did not select machine-b's distinct account after excluding machine-a: %+v", sent)
 	}
