@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"testing"
@@ -144,13 +145,111 @@ func TestQuotaPendingSuccessorStaysMadeNotDone_t6312(t *testing.T) {
 	for i := range 19 {
 		old := fmt.Sprintf("mwr-64-old-%02d", i)
 		f.jobs.records[old] = map[string]any{"state": "spawned", "pool": "claude"}
-		f.claimSuccessorOf(t, old)
+		holderRequest := quotaHolderRequest("reviewer", old)
+		holderRequest.RequestID = fmt.Sprintf("d676220b-e763-4af1-aefd-%012d", 100+i)
+		taskArg := slices.Index(holderRequest.Args, "--task")
+		holderRequest.Args[taskArg+1] = fmt.Sprintf("%d", 100+i)
+		holder, _, err := f.hub.inbox.store.claimSpawn(t.Context(), holderRequest, old, "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.hub.inbox.store.completeSpawn(t.Context(), holder, hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		next, _, ok := quotaReplacementJob(old)
+		if !ok {
+			t.Fatalf("%q has no quota successor name", old)
+		}
+		request, err := quotaReplacementRequest(holderRequest, old, next, "claude", "claude", "reviewer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := f.hub.inbox.store.claimSpawnFrom(t.Context(), request, next, "parent", time.Now(), old); err != nil {
+			t.Fatal(err)
+		}
 	}
 	f.hub.reconcileQuotaReplacements(t.Context())
 	assertQuotaLadderLedger(t, f.hub, 20, 0)
 	if !slices.Contains(f.hub.loopsProgressHits(), loopQuotaLadder) {
 		t.Fatalf("made=20 done=0 has no progress hit: %+v", f.hub.loopsProgressHits())
 	}
+}
+
+// A succeeded successor is not pending when a permanent pointer prerequisite
+// cannot be met. These cases used to be re-counted as made on every UTC day.
+func TestQuotaSuccessorWithImpossiblePointerIsNotMade_t6676(t *testing.T) {
+	t.Run("non-reviewer holder", func(t *testing.T) {
+		f := newQuotaReplaceFixture(t, "reviewer", "mwr-66-p1")
+		successor := f.claimSuccessorOf(t, f.job)
+		f.setSuccessorStatus(t, successor, "succeeded")
+		roleArg := slices.Index(f.holder.Request.Args, "--role")
+		if roleArg < 0 {
+			t.Fatal("holder has no --role")
+		}
+		f.holder.Request.Args[roleArg+1] = "implementer"
+		if passArg := slices.Index(f.holder.Request.Args, "--review-pass"); passArg >= 0 {
+			f.holder.Request.Args = slices.Delete(f.holder.Request.Args, passArg, passArg+2)
+		}
+		payload, err := json.Marshal(f.holder.Request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `UPDATE spawn_operations SET payload=? WHERE request_id=?`, string(payload), f.holder.Request.RequestID); err != nil {
+			t.Fatal(err)
+		}
+		for day := range 2 {
+			setQuotaLedgerDay(f.hub, time.Now().Add(time.Duration(day)*24*time.Hour))
+			f.reconcileSendingNothing(t)
+			assertQuotaLadderLedger(t, f.hub, 0, 0)
+		}
+	})
+
+	t.Run("missing predecessor record", func(t *testing.T) {
+		f := newQuotaReplaceFixture(t, "reviewer", "mwr-66-p2")
+		successor := f.claimSuccessorOf(t, f.job)
+		f.setSuccessorStatus(t, successor, "succeeded")
+		delete(f.jobs.records, f.job)
+		f.hub.reconcileQuotaReplacements(t.Context())
+		assertQuotaLadderLedger(t, f.hub, 0, 0)
+	})
+
+	t.Run("holder has not succeeded", func(t *testing.T) {
+		f := newQuotaReplaceFixture(t, "reviewer", "mwr-66-p4")
+		successor := f.claimSuccessorOf(t, f.job)
+		f.setSuccessorStatus(t, successor, "succeeded")
+		if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `UPDATE spawn_operations SET status='failed' WHERE request_id=?`, f.holder.Request.RequestID); err != nil {
+			t.Fatal(err)
+		}
+		f.hub.reconcileQuotaReplacements(t.Context())
+		assertQuotaLadderLedger(t, f.hub, 0, 0)
+	})
+
+	t.Run("lineage mismatch", func(t *testing.T) {
+		f := newQuotaReplaceFixture(t, "reviewer", "mwr-66-p5")
+		successor := f.claimSuccessorOf(t, f.job)
+		f.setSuccessorStatus(t, successor, "succeeded")
+		if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `UPDATE spawn_operations SET replaced_reason='backfill' WHERE request_id=?`, successor.Request.RequestID); err != nil {
+			t.Fatal(err)
+		}
+		f.hub.reconcileQuotaReplacements(t.Context())
+		assertQuotaLadderLedger(t, f.hub, 0, 0)
+	})
+
+	t.Run("predecessor pane remains present past replacement budget", func(t *testing.T) {
+		f := newQuotaReplaceFixture(t, "reviewer", "mwr-66-p3")
+		successor := f.claimSuccessorOf(t, f.job)
+		f.setSuccessorStatus(t, successor, "succeeded")
+		f.paneStatus = "idle"
+		setQuotaLedgerDay(f.hub, time.Now().Add(quotaReplaceBudget))
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f.hub.reconcileQuotaReplacements(t.Context())
+		}()
+		f.serveCommands(t, 1) // present stopped pane is left alone without a stop sequence
+		<-done
+		assertQuotaLadderLedger(t, f.hub, 1, 0)
+	})
 }
 
 // A day shaped like production (60 successors, none pending) counts nothing and
