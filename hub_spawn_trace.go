@@ -52,8 +52,10 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		recorded, err := h.inbox.store.db.ExecContext(ctx, h.inbox.store.q(`UPDATE spawn_notifications SET telemetry_recorded=1 WHERE event_id=? AND telemetry_recorded=0`), eventID)
 		if err == nil {
 			if n, _ := h.inbox.store.dialect.rowsMatched(recorded); n == 1 {
-				reason := spawnTraceReason(result.Reason)
-				hub.CaptureEvent(&sentry.Event{Level: sentry.LevelError, Message: "SPAWN_FAILED " + result.Stage + "/" + reason, Fingerprint: []string{"spawn", result.Stage, reason}, Tags: map[string]string{"stage": result.Stage, "reason": reason, "request": task.Request.RequestID, "attempt": strconv.Itoa(task.Attempt)}})
+				if !spawnSentryRequesterRefusal(result.Reason) {
+					reason := spawnTraceReason(result.Reason)
+					hub.CaptureEvent(&sentry.Event{Level: sentry.LevelError, Message: "SPAWN_FAILED " + result.Stage + "/" + reason, Fingerprint: []string{"spawn", result.Stage, reason}, Tags: map[string]string{"stage": result.Stage, "reason": reason, "request": task.Request.RequestID, "attempt": strconv.Itoa(task.Attempt)}})
+				}
 			}
 		}
 	}
@@ -103,6 +105,32 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		trace.StartTime = earliest
 	}
 	trace.Finish()
+}
+
+// spawnSentryRequesterRefusalCodes are outcomes caused by the requester's own
+// input or withdrawal. They remain in the operation trace and owner notice,
+// but do not consume the shared Sentry error-event quota.
+var spawnSentryRequesterRefusalCodes = [...]string{
+	"admission_refused",
+	"brief_invalid",
+	"invalid_args",
+	"invalid_request",
+	"label_invalid",
+	"requester_withdrawn",
+	"usage",
+}
+
+func spawnSentryRequesterRefusal(reason string) bool {
+	code, _, _ := strings.Cut(reason, ":")
+	if code == "spawn_failed" {
+		code, _, _ = strings.Cut(strings.TrimPrefix(reason, "spawn_failed:"), ":")
+	}
+	for _, requesterCode := range spawnSentryRequesterRefusalCodes {
+		if code == requesterCode {
+			return true
+		}
+	}
+	return false
 }
 
 // spawnSentryClient is the hub's private Sentry client, built once from the
