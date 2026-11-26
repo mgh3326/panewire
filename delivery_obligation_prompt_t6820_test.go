@@ -77,10 +77,11 @@ func TestRejectedSendIsMaybeTypedOnDevinOnly(t *testing.T) {
 	}
 }
 
-// The later drops of the same delivery do not make devin's text safe: a failed
-// read on the node's retry, or the drop alone with its report lost. Killed by:
-// letting that drop settle the report; ignoring the harness when the drop
-// expires the ack window.
+// Nothing the node says afterwards makes devin's text safe: not a failed read on
+// its retry, and not one on the hub's copy, which proves nothing about the first
+// send. That holds with the drop alone, its report lost, too. Killed by:
+// reading the rejection report as safe; letting a devin drop settle it;
+// ignoring the harness when the drop expires the ack window.
 func TestDevinRejectedSendStaysMaybeTyped(t *testing.T) {
 	report := func(t *testing.T, rig *t6384Rig, d hubRelayInjectEvent, reason string) {
 		t650Send(t, rig.hub, "host-a", rig.agent, "relay.unconfirmed", relayAckPayload{JobID: d.JobID, Pane: d.Pane, OriginalEventID: d.EventID, Reason: reason})
@@ -110,21 +111,13 @@ func TestDevinRejectedSendStaysMaybeTyped(t *testing.T) {
 			run(t, rig, d)
 			rig.pass(0)
 			copy := rig.injected()
-			report(t, rig, copy, "prompt_failed")
-			drop(t, rig, copy, relayDroppedRetriesExhausted)
-			t6820NoMoreCopiesAfter(t, rig, copy.Pane)
+			report(t, rig, copy, "maybe_in_pane presend:unproven:read_failed")
+			drop(t, rig, copy, relayDroppedPaneReadFailed)
+			t6820NoMoreCopies(t, rig, copy.Pane, 1)
+			if c := t6820CountsOf(t, rig, d.EventID); c.labelled != 1 || c.revived != 0 {
+				t.Fatalf("devin row: %+v %+v", c, rig.obligation(d.EventID))
+			}
 		})
-	}
-}
-
-func t6820NoMoreCopiesAfter(t *testing.T, rig *t6384Rig, pane string) {
-	t.Helper()
-	for i, wait := range []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, obligationParkRecheck} {
-		rig.hub.redeliverWorkingExpiredOnIdle("host-a", t6820Wake(pane, uint64(i+1)))
-		rig.pass(wait)
-		if got := t3426Injected(rig.agent); len(got) != 0 {
-			t.Fatalf("a further copy was queued after %v: %+v", wait, got)
-		}
 	}
 }
 

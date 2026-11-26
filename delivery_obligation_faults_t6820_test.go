@@ -758,37 +758,42 @@ func TestObligationStoreContractFaults(t *testing.T) {
 	}
 }
 
-// A drop settles a prompt_failed report on every backend, by the harness it
-// names: devin and no name keep it maybe typed, any other harness gives it the
-// drop's own fault. Killed by: settling on any harness; settling with a
-// maybe-typed drop.
+// On every backend a drop acts by the harness it names. Over a prompt_failed
+// report, devin and no name keep the row maybe typed, any other harness gives it
+// the drop's own fault. Over a timeout, a spent inject budget is safe only on a
+// harness named and not devin. Killed by: settling on any harness; settling with
+// a maybe-typed drop; reading a spent budget as safe whatever the harness.
 func TestObligationStoreContractPromptDrops(t *testing.T) {
 	for _, backend := range laneInboxBackends() {
 		t.Run(backend.name, func(t *testing.T) {
 			s := backend.fresh(t)()
 			ctx := t.Context()
 			now := time.Date(2026, 11, 27, 9, 0, 0, 0, time.UTC)
-			for i, step := range []struct{ drop, harness, want string }{
-				{relayDroppedRetriesExhausted, "devin", obligationFaultPromptUnproven},
-				{relayDroppedRetriesExhausted, "", obligationFaultPromptUnproven},
-				{relayDroppedPaneReadFailed, "devin", obligationFaultPromptUnproven},
-				{relayDroppedCheckPane, "claude", obligationFaultPromptUnproven},
-				{relayDroppedRetriesExhausted, "claude", relayDroppedRetriesExhausted},
-				{relayDroppedPaneReadFailed, "claude", relayDroppedPaneReadFailed},
-				{relayDroppedWorkingExpired, "omp", relayDroppedWorkingExpired},
-				{relayDroppedJobEnded, "devin", relayDroppedJobEnded},
+			rejected := obligationFaultFor(relayUnconfirmedPromptFailed)
+			for i, step := range []struct{ held, drop, harness, want string }{
+				{rejected, relayDroppedRetriesExhausted, "devin", obligationFaultPromptUnproven},
+				{rejected, relayDroppedRetriesExhausted, "", obligationFaultPromptUnproven},
+				{rejected, relayDroppedPaneReadFailed, "devin", obligationFaultPromptUnproven},
+				{rejected, relayDroppedCheckPane, "claude", obligationFaultPromptUnproven},
+				{rejected, relayDroppedRetriesExhausted, "claude", relayDroppedRetriesExhausted},
+				{rejected, relayDroppedPaneReadFailed, "claude", relayDroppedPaneReadFailed},
+				{rejected, relayDroppedWorkingExpired, "omp", relayDroppedWorkingExpired},
+				{rejected, relayDroppedJobEnded, "devin", relayDroppedJobEnded},
+				{obligationAckTimeout, relayDroppedRetriesExhausted, "devin", relayDroppedMaybeInPane},
+				{obligationAckTimeout, relayDroppedRetriesExhausted, "", relayDroppedMaybeInPane},
+				{obligationAckTimeout, relayDroppedRetriesExhausted, "claude", relayDroppedRetriesExhausted},
 			} {
 				id := int64(100 + i)
 				key := "lane.event/lane-a/prompt-" + strconv.Itoa(i)
 				o := newDeliveryObligation{key: key, relayID: id, kind: "lane.event", lane: "lane-a", machine: "host-a", pane: "w1:p1", attempts: 1}
-				if err := s.flagObligationRetry(ctx, o, obligationFaultFor(relayUnconfirmedPromptFailed), "", now); err != nil {
+				if err := s.flagObligationRetry(ctx, o, step.held, "", now); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := s.noteObligationDrop(ctx, id, "lane-a", "host-a", false, step.drop, step.harness, now.Add(time.Second)); err != nil {
 					t.Fatal(err)
 				}
 				if got, err := s.retryObligationForKey(ctx, key); err != nil || got.fault != step.want {
-					t.Fatalf("drop %s on %q = %s, want %s (err %v)", step.drop, step.harness, got.fault, step.want, err)
+					t.Fatalf("drop %s on %q over %s = %s, want %s (err %v)", step.drop, step.harness, step.held, got.fault, step.want, err)
 				}
 			}
 		})
