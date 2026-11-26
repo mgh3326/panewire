@@ -141,7 +141,15 @@ func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayl
 	// A dropped lease will never emit relay.released, so its ack window would
 	// otherwise sit held=true forever. The durable row is deliberately left
 	// undelivered; replay re-registers a fresh pending entry when it retries.
-	h.cancelRelayPendingLocked(dropped.OriginalEventID, dropped.JobID)
+	if h.inbox != nil && pending.kind != "" && relayDroppedIsUnconfirmed(dropped.Reason) {
+		if pending.dropReason != "" {
+			return relayPending{}, true
+		}
+		pending.held, pending.armToken, pending.dropReason = false, new(byte), dropped.Reason
+		h.relayControl.relayPending[key] = pending
+	} else {
+		h.cancelRelayPendingLocked(dropped.OriginalEventID, dropped.JobID)
+	}
 	return pending, true
 }
 

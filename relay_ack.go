@@ -18,10 +18,11 @@ type relayPending struct {
 	// for the acknowledgement window; the hub stays stateless about relays.
 	eventID int64
 	// Expiry and node reports use the original event's durable identity.
-	kind     string
-	event    hubJobEventPayload
-	armToken *byte
-	held     bool
+	kind       string
+	event      hubJobEventPayload
+	armToken   *byte
+	dropReason string
+	held       bool
 }
 
 func relayPendingKey(eventID int64, jobID string) string {
@@ -50,14 +51,16 @@ func (h *HubServer) startRelayAckEvent(kind string, event hubJobEventPayload, ma
 // registerRelayAckEvent records an accepted directive, but deliberately does
 // not start the delivery clock until a busy node releases it to its pane.
 func (h *HubServer) registerRelayAckEvent(kind string, event hubJobEventPayload, machine, pane string, eventID int64) {
-	key := relayPendingKey(eventID, event.JobID)
 	h.mu.Lock()
-	if _, exists := h.relayControl.relayPending[key]; exists {
-		h.mu.Unlock()
-		return
+	defer h.mu.Unlock()
+	h.registerRelayAckEventLocked(kind, event, machine, pane, eventID)
+}
+
+func (h *HubServer) registerRelayAckEventLocked(kind string, event hubJobEventPayload, machine, pane string, eventID int64) {
+	key := relayPendingKey(eventID, event.JobID)
+	if _, exists := h.relayControl.relayPending[key]; !exists {
+		h.relayControl.relayPending[key] = relayPending{machine: machine, pane: pane, eventID: eventID, kind: kind, event: event}
 	}
-	h.relayControl.relayPending[key] = relayPending{machine: machine, pane: pane, eventID: eventID, kind: kind, event: event}
-	h.mu.Unlock()
 }
 
 func (h *HubServer) armRelayAckEvent(eventID int64, jobID string) {
@@ -122,7 +125,14 @@ func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 		pending.armToken = token
 		h.relayControl.relayPending[key] = pending
 		h.mu.Unlock()
-		scheduled := h.scheduleRelayRetry(h.closeCtx, pending, obligationAckTimeout)
+		fault := obligationAckTimeout
+		if pending.dropReason != "" {
+			fault = obligationFaultUnconfirmed
+			if pending.dropReason == relayDroppedWorkingExpired {
+				fault = relayDroppedWorkingExpired
+			}
+		}
+		scheduled := h.scheduleRelayRetry(h.closeCtx, pending, fault)
 		h.mu.Lock()
 		current, exists := h.relayControl.relayPending[key]
 		if !exists || current.armToken != token || current.held {
@@ -138,6 +148,12 @@ func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 			return
 		}
 		delete(h.relayControl.relayPending, key)
+		if pending.dropReason != "" {
+			h.rememberWorkingExpiredLocked(pending, relayAckPayload{Reason: pending.dropReason})
+			delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
+			h.mu.Unlock()
+			return
+		}
 		delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
 	}
 

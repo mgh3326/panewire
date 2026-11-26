@@ -17,7 +17,7 @@ func reportUnconfirmedRetry(t *testing.T, rig *t6384Rig, directive hubRelayInjec
 func TestRetrySpendsBeforeQueue(t *testing.T) {
 	rig := newT6384Rig(t)
 	directive := rig.send("lane-a", "spend-first")
-	reportUnconfirmedRetry(t, rig, directive)
+	rig.hub.expireRelayAck(relayPendingKey(directive.EventID, directive.JobID))
 	type observation struct {
 		spent  int
 		queued int
@@ -64,8 +64,7 @@ func TestSpentIsAuthoritativeAcrossCrash(t *testing.T) {
 	if err != nil || !spent {
 		t.Fatalf("spend=%v, err=%v", spent, err)
 	}
-	// The previous process stopped after the durable spend and before its
-	// handoffkeep write or queue. Neither the walk nor Sweep may repeat it.
+	// The previous process stopped after the durable spend and before queueing. Neither the walk nor Sweep may repeat it.
 	if err := rig.hub.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +85,7 @@ func TestLabelledCopyRaisesHKAttemptsToCeiling(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rig := newT6384Rig(t)
 			directive := rig.send("lane-a", "ceiling")
-			reportUnconfirmedRetry(t, rig, directive)
+			rig.hub.expireRelayAck(relayPendingKey(directive.EventID, directive.JobID))
 			before := rig.fake.count("POST", "/v1/relay/events")
 			if fail {
 				rig.fake.mu.Lock()
@@ -113,15 +112,20 @@ func TestRollbackDoesNotRetypeMaybeTyped(t *testing.T) {
 	rig := newT6384Rig(t)
 	directive := rig.send("lane-a", "rollback")
 	reportUnconfirmedRetry(t, rig, directive)
-	rig.pass(0)
-	rig.injected()
 
+	// Rollback before the first Sweep must be protected too.
 	// The compatibility replay takes the old binary's path and sees only
 	// handoffkeep. It has no access to the obligation or to any live claim.
 	old, agent := quietHub(t, "", "off", rig.client, &rig.clock.now)
 	old.replayUndeliveredRelayRows(t.Context(), "", relayReplaySourceStartup, "rollback listing")
 	if len(agent.relays) != 0 {
-		t.Fatalf("compatibility replay queued %d copies", len(agent.relays))
+		t.Fatalf("compatibility replay queued %d copies before the first sweep", len(agent.relays))
+	}
+	rig.pass(0)
+	rig.injected()
+	old.replayUndeliveredRelayRows(t.Context(), "", relayReplaySourceStartup, "rollback listing")
+	if len(agent.relays) != 0 {
+		t.Fatalf("compatibility replay queued %d copies after the retry", len(agent.relays))
 	}
 }
 
@@ -261,5 +265,107 @@ func TestT1002JobObligationRetryUsesOriginalReport(t *testing.T) {
 	copy := rig.injected()
 	if copy.Text != directive.Text || copy.EventID != directive.EventID {
 		t.Fatalf("job retry changed the report: %+v", copy)
+	}
+}
+
+func TestT1034FirstFaultImportsLegacyAttemptBudget(t *testing.T) {
+	for _, mode := range []string{"report", "legacy-marker"} {
+		t.Run(mode, func(t *testing.T) {
+			rig := newT6384Rig(t)
+			directive := rig.send("lane-a", "already-at-ceiling")
+			rig.fake.mu.Lock()
+			for _, row := range rig.fake.rows {
+				if row.ID == directive.EventID {
+					row.Attempts = relayReplayMaxAttempts
+				}
+			}
+			rig.fake.mu.Unlock()
+			if mode == "report" {
+				reportUnconfirmedRetry(t, rig, directive)
+			} else {
+				marker := t6384Event(relayUnconfirmedMarkLane, unconfirmedMarkEventID(directive.EventID), "legacy mark")
+				_, _, err := rig.client.appendEvent(t.Context(), rig.hub.relayEventRequest("lane.event", marker, reportRelayRoute{}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := rig.hub.Close(); err != nil {
+					t.Fatal(err)
+				}
+				rig.start()
+				rig.hub.replayUndeliveredRelayEvents(t.Context())
+			}
+			rig.pass(0)
+			if o := rig.obligation(directive.EventID); o.Spent != relayReplayMaxAttempts || o.State != obligationExhausted || len(rig.agent.relays) != 0 {
+				t.Fatalf("legacy budget reopened: obligation=%+v queued=%d", o, len(rig.agent.relays))
+			}
+		})
+	}
+}
+
+func TestT1034DropRetainsWindowUntilFaultWriteSucceeds(t *testing.T) {
+	rig := newT6384Rig(t)
+	directive := rig.send("lane-a", "terminal-drop")
+	store := rig.hub.inbox.store
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_drop BEFORE UPDATE OF fault ON delivery_obligations BEGIN SELECT RAISE(FAIL, 'fixture store outage'); END`); err != nil {
+		t.Fatal(err)
+	}
+	t650Send(t, rig.hub, "host-a", rig.agent, "relay.dropped", relayDroppedPayload{
+		JobID: directive.JobID, OriginalEventID: directive.EventID, Pane: directive.Pane,
+		Lane: "lane-a", Reason: relayDroppedMaybeInPane,
+	})
+	eventually(t, 2*time.Second, "the drop fault write failed", func() bool {
+		return strings.Contains(rig.logs.String(), "relay retry could not be scheduled")
+	})
+	if _, err := store.db.Exec("DROP TRIGGER reject_drop"); err != nil {
+		t.Fatal(err)
+	}
+	// Drive the same persistence retry the timer invokes.
+	rig.hub.expireRelayAck(relayPendingKey(directive.EventID, directive.JobID))
+	rig.pass(0)
+	if copy := rig.injected(); copy.EventID != directive.EventID {
+		t.Fatalf("retried the wrong row: %+v", copy)
+	}
+}
+
+func TestT1034SweepDoesNotDelayFirstIdleWake(t *testing.T) {
+	rig := newT6384Rig(t)
+	directive := rig.send("lane-a", "first-idle-window")
+	t650Send(t, rig.hub, "host-a", rig.agent, "relay.unconfirmed", relayAckPayload{
+		JobID: directive.JobID, OriginalEventID: directive.EventID, Pane: directive.Pane, Reason: relayDroppedWorkingExpired,
+	})
+	rig.pass(0)
+	if len(rig.agent.relays) != 0 {
+		t.Fatal("sweep queued a working-expired row before idle")
+	}
+	rig.hub.redeliverWorkingExpiredOnIdle("host-a", idleWakeRouteRequest{
+		Pane: directive.Pane, EventID: "idle:w1:session:1", StateChangeSeq: 1,
+	})
+	if copy := rig.injected(); !strings.HasPrefix(copy.Text, relayIdleRedeliveryLabel(rig.row(directive.EventID))) {
+		t.Fatalf("idle retry did not carry the idle label: %q", copy.Text)
+	}
+}
+
+func TestT1034RetryChecksAppliedGateAtQueueTime(t *testing.T) {
+	rig := newT6384Rig(t)
+	directive := rig.send("lane-a", "applied-during-spend")
+	rig.hub.expireRelayAck(relayPendingKey(directive.EventID, directive.JobID))
+	replacement := &hubAgent{relays: make(chan hubRelayInjectEvent, 4)}
+	rig.fake.mu.Lock()
+	rig.fake.observe = func(method, path string) {
+		if method != "POST" || path != "/v1/relay/events" {
+			return
+		}
+		rig.hub.mu.Lock()
+		defer rig.hub.mu.Unlock()
+		node := rig.hub.nodes["host-a"]
+		node.agent, node.appliedPending = replacement, true
+	}
+	rig.fake.mu.Unlock()
+	rig.pass(0)
+	if old, next := len(rig.agent.relays), len(replacement.relays); old != 0 || next != 0 {
+		t.Fatalf("retry raced with applied proof: old queue=%d replacement queue=%d", old, next)
+	}
+	if o := rig.obligation(directive.EventID); o.Spent != 2 {
+		t.Fatalf("the registration did not change during the spend: %+v", o)
 	}
 }

@@ -1434,7 +1434,7 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 			case marks[record.ID]:
 				if h.inbox == nil {
 					h.replayLegacyUnconfirmed(ctx, record, source, digestMarks[record.ID])
-				} else if reason := h.relayReplayRetireReason(record); reason != "" {
+				} else if reason := h.relayReplayRetireReason(record); reason != "" && !h.replayDefersUnconfirmedBatch(record) {
 					h.retireRelayReplay(record, reason)
 				}
 			default:
@@ -1463,10 +1463,17 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string
 // injected, and the caller decides once the walk has counted the lane's
 // backlog (flushReplayGaps). A nil collector injects at once.
 func (h *HubServer) replayRelayEventCollecting(record handoffkeepRelayEvent, source string, gap *replayGap) {
-	if h.retireLegacyChatReplay(record) || h.replayInbox(record) {
+	if h.retireLegacyChatReplay(record) {
 		return
 	}
 	event := relayEventFromRecord(record)
+	managed := h.relayRetryIsManaged(relayEventDedupeKey(record.Kind, event), record.ID)
+	if managed && h.relayReplayRetireReason(record) != "" && h.replayDefersUnconfirmedBatch(record) {
+		return
+	}
+	if h.replayInbox(record) {
+		return
+	}
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
@@ -1483,7 +1490,7 @@ func (h *HubServer) replayRelayEventCollecting(record handoffkeepRelayEvent, sou
 		h.retireRelayReplay(record, reason)
 		return
 	}
-	if h.relayRetryIsManaged(relayEventDedupeKey(record.Kind, event), record.ID) {
+	if managed {
 		return
 	}
 	if record.Attempts >= relayReplayMaxAttempts {

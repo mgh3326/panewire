@@ -26,12 +26,14 @@ func (s *laneInboxStore) flagObligationRetry(parent context.Context, o newDelive
 	defer done()
 	where, keys := s.eventKeyPredicate(o.key)
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
-		SET next_at=CASE WHEN fault='' THEN ? ELSE next_at END,
+		SET spent=CASE WHEN fault='' AND spent<? THEN ? ELSE spent END,
+		    attempts_seen=CASE WHEN fault='' AND attempts_seen<? THEN ? ELSE attempts_seen END,
+		    next_at=CASE WHEN fault='' THEN ? ELSE next_at END,
 		    last_fault_at=CASE WHEN fault='' OR fault='ack_timeout' THEN ? ELSE last_fault_at END,
 		    updated_at=CASE WHEN fault='' THEN ? ELSE updated_at END,
 		    fault=CASE WHEN fault='' OR fault='ack_timeout' THEN ? ELSE fault END,
 		    marker_event_id=CASE WHEN marker_event_id='' THEN ? ELSE marker_event_id END
-		WHERE state='owed' AND `+where), append([]any{now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), fault, marker}, keys...)...)
+		WHERE state='owed' AND `+where), append([]any{o.attempts, o.attempts, o.attempts, o.attempts, now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), fault, marker}, keys...)...)
 	return err
 }
 
@@ -57,6 +59,19 @@ func (h *HubServer) relayRetryIsManaged(key string, relayID int64) bool {
 	return owned || err != nil
 }
 
+// An aged unconfirmed batch stays with the reconciler so its claim release
+// can complete before any replay retirement.
+func (h *HubServer) replayDefersUnconfirmedBatch(record handoffkeepRelayEvent) bool {
+	if record.Kind != "lane.event" {
+		return false
+	}
+	batch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
+	if err != nil {
+		h.logger.Warn("unconfirmed replay batch lookup failed", "event_id", record.ID)
+	}
+	return batch || err != nil
+}
+
 // spendObligationRetry claims one scheduled attempt with a compare-and-swap.
 // The write commits before any handoffkeep call or queue operation.
 func (s *laneInboxStore) spendObligationRetry(parent context.Context, o openObligation, labelled int, now, next time.Time) (bool, error) {
@@ -77,7 +92,7 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	store := h.inbox.store
 	event := relayEventFromRecord(record)
 	if record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || event.OwnerLane == "" || event.JobID == "" ||
-		h.replayAwaitsAppliedReport(record) || h.relayReplayRetireReasonAged(record, source != relayReplaySourceIdle) != "" {
+		h.replayAwaitsAppliedReport(record) {
 		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
 	}
 	if h.retireLegacyChatReplay(record) {
@@ -101,6 +116,11 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 		}
 	}
 
+	// A digest must release its claims even when its original body aged out.
+	if h.relayReplayRetireReasonAged(record, source != relayReplaySourceIdle) != "" {
+		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
+	}
+
 	// Re-evaluate the current inbox policy before routing a saved body.
 	if h.replayInboxAged(record, false) {
 		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
@@ -120,11 +140,12 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	_, claimed := h.relayDedupe[key]
 	_, held := h.relayHeld[record.ID]
 	claimed = claimed || held
-	if !claimed {
+	available := record.Kind != "lane.event" || h.retryLaneAgentReadyLocked(route.Machine, agent)
+	if !claimed && available {
 		h.relayDedupe[key] = record.ID
 	}
 	h.mu.Unlock()
-	if claimed {
+	if claimed || !available {
 		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
 	}
 	queued := false
@@ -166,12 +187,32 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 			label = relayIdleRedeliveryLabel(record)
 		}
 		directive.Text = label + directive.Text
-		queued = h.queueLaneRelayDirective(event, route, agent, record.ID, key, directive)
+		// Node registration and appliedPending updates also hold h.mu.
+		// Bind the gate to the actual agent through the queue write.
+		h.mu.Lock()
+		if !h.retryLaneAgentReadyLocked(route.Machine, agent) {
+			h.mu.Unlock()
+			return false, store.deferUnqueuedLabel(ctx, o.id, o.spent+1, next, now.Add(obligationRecheckMin))
+		}
+		h.registerRelayAckEventLocked(record.Kind, event, route.Machine, route.Pane, record.ID)
+		queued = agent.queueRelay(directive)
+		h.mu.Unlock()
+		if queued {
+			h.armRelayAckEvent(record.ID, event.JobID)
+		} else {
+			h.forgetRelayAckEvent(record.ID, event.JobID)
+			h.broadcastRelayUnrouted(event)
+		}
 	}
 	if queued {
 		h.broadcastRelayReplayInjected(record, route, attempts, source)
 	}
 	return true, nil
+}
+
+func (h *HubServer) retryLaneAgentReadyLocked(machine string, agent *hubAgent) bool {
+	node := h.nodes[machine]
+	return node != nil && node.agent == agent && !node.appliedPending
 }
 
 func (h *HubServer) bumpObligationAttempts(ctx context.Context, record handoffkeepRelayEvent, route reportRelayRoute, labelled bool) (int, bool) {
@@ -202,9 +243,9 @@ func (s *laneInboxStore) retryObligationForKey(parent context.Context, key strin
 	defer done()
 	where, keys := s.eventKeyPredicate(key)
 	var o openObligation
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT id,relay_id,event_key,state,created_at,next_at,fault,spent,labelled,attempts_seen,last_fault_at
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT id,relay_id,event_key,state,created_at,next_at,fault,spent,labelled,attempts_seen
 		FROM delivery_obligations WHERE `+where), keys...).
-		Scan(&o.id, &o.relayID, &o.storedKey, &o.state, &o.createdAt, &o.nextAt, &o.fault, &o.spent, &o.labelled, &o.attemptsSeen, &o.lastFaultAt)
+		Scan(&o.id, &o.relayID, &o.storedKey, &o.state, &o.createdAt, &o.nextAt, &o.fault, &o.spent, &o.labelled, &o.attemptsSeen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return o, nil
 	}

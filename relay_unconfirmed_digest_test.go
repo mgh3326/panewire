@@ -284,3 +284,39 @@ func TestUnconfirmedReplayOfProducerEventNamedLikeADigestIsStillReplayed(t *test
 		t.Fatalf("row delivered_to = %q", got)
 	}
 }
+
+func TestUnconfirmedStaleDigestReleasesClaims(t *testing.T) {
+	for _, mode := range []string{"scheduled", "legacy-marker"} {
+		t.Run(mode, func(t *testing.T) {
+			rig := unconfirmedDigestStart(t)
+			rig.fake.mu.Lock()
+			for _, row := range rig.fake.rows {
+				if row.ID == rig.batch {
+					row.ReceivedAt = rig.now.Format(time.RFC3339)
+				}
+			}
+			rig.fake.mu.Unlock()
+			if mode == "legacy-marker" {
+				markID := unconfirmedMarkEventID(rig.batch) + relayUnconfirmedDigestMarkSuffix
+				marker := t6384Event(relayUnconfirmedMarkLane, markID, "legacy batch mark")
+				_, _, err := rig.hk.appendEvent(t.Context(), handoffkeepRelayEventRequest{
+					Kind: "lane.event", JobID: marker.JobID, Epoch: 1, OwnerLane: marker.OwnerLane,
+					EventID: marker.EventID, Text: marker.Text,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			rig.now = rig.now.Add(relayReplayMaxAge + time.Hour)
+			h, agent := rig.restart(t)
+			if len(agent.relays) != 0 {
+				t.Fatal("the stale batch was injected")
+			}
+			h.flushInbox()
+			if len(agent.relays) != 1 {
+				t.Fatalf("fresh escalations = %d, want one after releasing the stale batch's claims", len(agent.relays))
+			}
+			wantUnconfirmedSettlement(t, h, rig.fake, rig.batch, obligationSettledDigest)
+		})
+	}
+}

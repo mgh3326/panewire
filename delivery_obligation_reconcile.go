@@ -283,10 +283,9 @@ func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, re
 			return store.closeObligation(ctx, o.id, obligationSettled, obligationSettledDigest, now)
 		}
 	}
-	// An in-process working expiry keeps the existing idle-wake trigger.
-	// After a restart the memory entry is gone, so restore the old restart
-	// fallback through the scheduled retry.
-	waitingForIdle := o.fault == relayDroppedWorkingExpired && o.lastFaultAt >= h.startedAt.UnixMilli()
+	h.mu.Lock()
+	_, waitingForIdle := h.relayControl.workingExpired[o.relayID]
+	h.mu.Unlock()
 	if own && o.state == obligationOwed && o.fault != "" && !waitingForIdle {
 		_, err := h.retryObligation(ctx, o, record, now, obligationRetrySource)
 		return err

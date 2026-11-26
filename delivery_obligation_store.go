@@ -193,11 +193,11 @@ func (s *laneInboxStore) saveAdoptCursor(parent context.Context, afterID, wrappe
 type openObligation struct {
 	id, relayID int64
 	// storedKey is the event_key column's bytes, in the dialect's form.
-	storedKey                      []byte
-	state                          string
-	createdAt, nextAt, lastFaultAt int64
-	fault                          string
-	spent, labelled, attemptsSeen  int
+	storedKey                     []byte
+	state                         string
+	createdAt, nextAt             int64
+	fault                         string
+	spent, labelled, attemptsSeen int
 }
 
 // tracks reports whether the obligation is the one for the hub key. A key is
@@ -211,7 +211,7 @@ func (s *laneInboxStore) tracks(o openObligation, key string) bool {
 func (s *laneInboxStore) dueObligations(parent context.Context, now time.Time, limit int) ([]openObligation, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,relay_id,event_key,state,created_at,next_at,fault,spent,labelled,attempts_seen,last_fault_at FROM delivery_obligations WHERE `+obligationOpen+` AND next_at<=? ORDER BY next_at,id LIMIT ?`), now.UnixMilli(), limit)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,relay_id,event_key,state,created_at,next_at,fault,spent,labelled,attempts_seen FROM delivery_obligations WHERE `+obligationOpen+` AND next_at<=? ORDER BY next_at,id LIMIT ?`), now.UnixMilli(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,7 @@ func (s *laneInboxStore) dueObligations(parent context.Context, now time.Time, l
 	var due []openObligation
 	for rows.Next() {
 		var o openObligation
-		if err := rows.Scan(&o.id, &o.relayID, &o.storedKey, &o.state, &o.createdAt, &o.nextAt, &o.fault, &o.spent, &o.labelled, &o.attemptsSeen, &o.lastFaultAt); err != nil {
+		if err := rows.Scan(&o.id, &o.relayID, &o.storedKey, &o.state, &o.createdAt, &o.nextAt, &o.fault, &o.spent, &o.labelled, &o.attemptsSeen); err != nil {
 			return nil, err
 		}
 		due = append(due, o)

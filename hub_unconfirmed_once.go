@@ -122,24 +122,35 @@ func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending
 			kind: pending.kind, lane: pending.event.OwnerLane, machine: pending.machine, pane: pending.pane,
 			attempts: record.Attempts,
 		}
+		store := h.inbox.store
+		if err := store.flagObligationRetry(ctx, o, fault, "", h.now().UTC()); err != nil {
+			h.logger.Warn("relay retry could not be scheduled", "event_id", record.ID, "error", store.loggable("schedule retry", err))
+			return false
+		}
 		if record.Kind == "lane.event" {
-			batch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
+			// Establish rollback protection before accepting a maybe-typed
+			// report. Seed spent first, while attempts still counts sends.
+			batch, err := store.isDigestBatch(record.OwnerLane, record.EventID)
 			if err != nil {
 				h.logger.Warn("relay unconfirmed batch lookup failed", "event_id", record.ID)
 				return false
 			}
-			// The no-store replay cannot identify a batch. Protect it from
-			// replay after the kill switch is used, including before Sweep
-			// releases the items for a fresh digest.
-			if batch {
+			needsProtection := fault != obligationAckTimeout || batch
+			if !needsProtection {
+				tracked, err := store.retryObligationForKey(ctx, o.key)
+				if err != nil {
+					h.logger.Warn("relay retry fault could not be read", "event_id", record.ID, "error", store.loggable("retry fault", err))
+					return false
+				}
+				// An earlier explicit report can have persisted its fault
+				// while handoffkeep refused the rollback protection.
+				needsProtection = tracked.state == obligationOwed && tracked.fault != obligationAckTimeout
+			}
+			if needsProtection {
 				if _, ok := h.bumpObligationAttempts(ctx, record, reportRelayRoute{Machine: pending.machine, Pane: pending.pane}, true); !ok {
 					return false
 				}
 			}
-		}
-		if err := h.inbox.store.flagObligationRetry(ctx, o, fault, "", h.now().UTC()); err != nil {
-			h.logger.Warn("relay retry could not be scheduled", "event_id", record.ID, "error", h.inbox.store.loggable("schedule retry", err))
-			return false
 		}
 		return true
 	}
@@ -367,18 +378,4 @@ func (h *HubServer) convertDeliveredMarker(ctx context.Context, newObligation ne
 	}
 	h.retireRelayReplay(marker, relayUnconfirmedMarkRetireReason)
 	return nil
-}
-
-// A node can end the window with a drop even when its unconfirmed report did
-// not arrive. Only a drop that owned a live window is allowed to schedule.
-func (h *HubServer) finishRelayDrop(ctx context.Context, pending relayPending, reason string) {
-	fault := obligationFaultUnconfirmed
-	if reason == relayDroppedWorkingExpired {
-		fault = relayDroppedWorkingExpired
-	}
-	if !h.scheduleRelayRetry(ctx, pending, fault) {
-		return
-	}
-	h.forgetRelayEvent(relayEventDedupeKey(pending.kind, pending.event))
-	h.rememberWorkingExpired(pending, relayAckPayload{Reason: reason})
 }

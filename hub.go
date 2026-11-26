@@ -1804,8 +1804,8 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				h.countUnknownMessage()
 				return
 			}
-			if h.inbox != nil && pending.kind != "" && relayDroppedIsUnconfirmed(dropped.Reason) {
-				h.finishRelayDrop(ctx, pending, dropped.Reason)
+			if pending.dropReason != "" {
+				go h.expireRelayAckWindow(relayPendingKey(dropped.OriginalEventID, dropped.JobID), pending.armToken)
 			}
 			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
@@ -1866,11 +1866,11 @@ func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string,
 		if !h.scheduleRelayRetry(ctx, pending, fault) {
 			return
 		}
+		h.rememberWorkingExpired(pending, ack)
 		h.consumeRelayPending(key)
 		if h.inbox != nil {
 			h.forgetRelayEvent(relayEventDedupeKey(pending.kind, pending.event))
 		}
-		h.rememberWorkingExpired(pending, ack)
 		h.observeRelayUnconfirmed(pending, ack)
 		h.recordInboxStage(relayEventDedupeKey(pending.kind, pending.event), laneInboxStageUnconfirmed, ack.Reason, machineID, pending.pane)
 		// Logging it keeps a dropped-ack diagnosis greppable.

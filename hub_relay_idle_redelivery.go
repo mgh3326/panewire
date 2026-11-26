@@ -36,15 +36,22 @@ const (
 // time bounds the re-delivery's age: the row's receipt can be up to
 // relay.cmd_hold_max older, since the node held it that long.
 type workingExpiredRow struct {
-	lane      string
-	droppedAt time.Time
-	tries     int
+	lane       string
+	droppedAt  time.Time
+	tries      int
+	retryToken *byte
 }
 
 // rememberWorkingExpired records a row the node dropped as
 // working_wait_expired once its unconfirmed mark is durable. Only lane.event
 // rows are remembered: they are the rows the marked replay re-delivers.
 func (h *HubServer) rememberWorkingExpired(pending relayPending, ack relayAckPayload) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.rememberWorkingExpiredLocked(pending, ack)
+}
+
+func (h *HubServer) rememberWorkingExpiredLocked(pending relayPending, ack relayAckPayload) {
 	if ack.Reason != relayDroppedWorkingExpired || pending.kind != "lane.event" || pending.event.OwnerLane == "" {
 		return
 	}
@@ -55,8 +62,6 @@ func (h *HubServer) rememberWorkingExpired(pending relayPending, ack relayAckPay
 	if id < 1 {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.relayControl.workingExpired == nil {
 		h.relayControl.workingExpired = make(map[int64]workingExpiredRow)
 	}
@@ -89,7 +94,7 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 	var pick int64
 	for id, row := range h.relayControl.workingExpired {
 		route, ok := routes[row.lane]
-		if ok && !route.Sink && route.Machine == machine && route.Pane == request.Pane && (pick == 0 || id < pick) {
+		if row.retryToken == nil && ok && !route.Sink && route.Machine == machine && route.Pane == request.Pane && (pick == 0 || id < pick) {
 			pick = id
 		}
 	}
@@ -100,8 +105,8 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 		return
 	}
 	row := h.relayControl.workingExpired[pick]
-	delete(h.relayControl.workingExpired, pick)
 	if h.now().UTC().Sub(row.droppedAt) > relayReplayMaxAge {
+		delete(h.relayControl.workingExpired, pick)
 		// As old as the replay window allows: the restart replay retires it.
 		h.mu.Unlock()
 		return
@@ -110,7 +115,17 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 		h.relayControl.idleRedelivered = make(map[string]idleRedeliveryWake)
 	}
 	h.relayControl.idleRedelivered[paneKey] = wake
+	token := new(byte)
+	row.retryToken = token
+	h.relayControl.workingExpired[pick] = row
 	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.relayControl.workingExpired[pick].retryToken == token {
+			delete(h.relayControl.workingExpired, pick)
+		}
+	}()
 	// restore puts the row and the pane's previous wake back when this wake
 	// spent nothing, so a later wake (or a retry of this one) tries again.
 	restore := func(why string) {
@@ -129,6 +144,7 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 			return
 		}
 		h.logger.Warn("idle re-delivery will retry at the next idle wake", "event_id", pick, "why", why)
+		row.retryToken = nil
 		h.relayControl.workingExpired[pick] = row
 	}
 	ctx := context.Background()
@@ -160,12 +176,7 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 		if o.state != obligationOwed || o.labelled > 0 || record.DeliveredAt != "" {
 			return
 		}
-		now := h.now().UTC()
-		if o.nextAt > now.UnixMilli() {
-			restore("obligation_retry_not_due")
-			return
-		}
-		finished, err := h.retryObligation(ctx, o, record, now, relayReplaySourceIdle)
+		finished, err := h.retryObligation(ctx, o, record, h.now().UTC(), relayReplaySourceIdle)
 		if err != nil || !finished {
 			restore("obligation_retry_deferred")
 		}
