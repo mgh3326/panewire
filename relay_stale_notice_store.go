@@ -14,7 +14,7 @@ import (
 // migration 0043 and MySQL in migration 0039; both carry the same columns.
 var relayStaleNoticeSchema = []string{
 	`CREATE TABLE IF NOT EXISTS relay_stale_notice_rows (
- relay_id INTEGER PRIMARY KEY, notice_day VARCHAR(10) NOT NULL, design_lane VARCHAR(255) NOT NULL,
+ relay_id INTEGER PRIMARY KEY, notice_day VARCHAR(32) NOT NULL, design_lane VARCHAR(255) NOT NULL,
  worker_lane VARCHAR(255) NOT NULL, job VARCHAR(255) NOT NULL DEFAULT '', task_id VARCHAR(32) NOT NULL DEFAULT '',
  kind VARCHAR(64) NOT NULL, sender VARCHAR(32) NOT NULL DEFAULT '', hk_event_id VARCHAR(255) NOT NULL DEFAULT '',
  received_ms BIGINT NOT NULL, retired_ms BIGINT NOT NULL, filed INTEGER NOT NULL DEFAULT 0)`,

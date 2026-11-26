@@ -4,7 +4,7 @@
 -- MySQL twin is migration 0039.
 CREATE TABLE IF NOT EXISTS relay_stale_notice_rows (
     relay_id BIGINT PRIMARY KEY,
-    notice_day VARCHAR(10) NOT NULL,
+    notice_day VARCHAR(32) NOT NULL,
     design_lane VARCHAR(255) NOT NULL,
     worker_lane VARCHAR(255) NOT NULL,
     job VARCHAR(255) NOT NULL DEFAULT '',

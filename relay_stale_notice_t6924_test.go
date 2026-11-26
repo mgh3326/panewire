@@ -385,3 +385,19 @@ func TestT6924SenderPrefix(t *testing.T) {
 		}
 	}
 }
+
+// The copy reads relay_stale_notice_rows in relay_id order on every backend. A
+// text COLLATE on the bigint key is refused by Postgres with SQLSTATE 42804, the
+// CI failure of the older-source copy. Killed by: removing the table from
+// storeCopyNumericKeys.
+func TestT6924CopyOrdersRelayIDAsNumber(t *testing.T) {
+	table, ok := storeCopyTableNamed("relay_stale_notice_rows")
+	if !ok {
+		t.Fatal("relay_stale_notice_rows is not a portable table")
+	}
+	for name, d := range map[string]sqlDialect{"postgres": dialectPostgres, "mysql": dialectMySQL, "sqlite": dialectSQLite} {
+		if got := storeCopyOrderBy(d, table); got != "relay_id" {
+			t.Errorf("%s order by %q, want %q", name, got, "relay_id")
+		}
+	}
+}

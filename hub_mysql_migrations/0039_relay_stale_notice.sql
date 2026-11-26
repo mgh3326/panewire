@@ -4,7 +4,7 @@
 -- applied-if: SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='relay_stale_notice_rows'
 CREATE TABLE relay_stale_notice_rows (
  relay_id BIGINT NOT NULL,
- notice_day VARCHAR(10) NOT NULL,
+ notice_day VARCHAR(32) NOT NULL,
  design_lane VARCHAR(255) NOT NULL,
  worker_lane VARCHAR(255) NOT NULL,
  job VARCHAR(255) NOT NULL DEFAULT '',

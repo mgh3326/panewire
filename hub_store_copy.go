@@ -45,6 +45,11 @@ var storeCopyTables = []storeCopyTable{
 // event_key columns are plain text.
 var storeCopyHubKeyTables = map[string]bool{"lane_inbox": true, "delivery_obligations": true}
 
+// storeCopyNumericKeys names, for a table whose key is a BIGINT that the
+// application (not a sequence) supplies, that key column. It orders as a number
+// on every backend: Postgres rejects COLLATE on a bigint (SQLSTATE 42804).
+var storeCopyNumericKeys = map[string]string{"relay_stale_notice_rows": "relay_id"}
+
 // storeCopyOlderSourceTables are tables an older source may lack: a store
 // written before the table's release has no such table, so no rows to copy.
 // The copier reads a missing one as empty. supersede_lane_cause is the MySQL
@@ -354,6 +359,23 @@ type storeCopyResult struct {
 	sum              [32]byte
 }
 
+// storeCopyOrderBy is the key order a source is read in: text keys collate as
+// the byte order the digest uses (C on Postgres, BINARY on MySQL). A numeric key
+// is ordered as itself, since Postgres refuses COLLATE on a bigint (SQLSTATE
+// 42804).
+func storeCopyOrderBy(dialect sqlDialect, table storeCopyTable) string {
+	parts := strings.Split(table.key, ",")
+	for i, p := range parts {
+		numeric := p == "attempt" || p == "singleton" || storeCopySequenceColumns[table.name] == p || storeCopyNumericKeys[table.name] == p
+		if !numeric && dialect == dialectPostgres {
+			parts[i] = p + ` COLLATE "C"`
+		} else if !numeric && dialect == dialectMySQL {
+			parts[i] = "BINARY " + p
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 func storeCopyScan(ctx context.Context, tx *sql.Tx, source, target *storeCopyDB, writer *sql.Tx, table storeCopyTable, cols []string, copyRows bool) (storeCopyResult, error) {
 	var result storeCopyResult
 	h := sha256.New()
@@ -375,16 +397,7 @@ func storeCopyScan(ctx context.Context, tx *sql.Tx, source, target *storeCopyDB,
 			}
 		}
 	}
-	parts := strings.Split(table.key, ",")
-	for i, p := range parts {
-		numeric := p == "attempt" || p == "singleton" || storeCopySequenceColumns[table.name] == p
-		if !numeric && source.dialect == dialectPostgres {
-			parts[i] = p + ` COLLATE "C"`
-		} else if !numeric && source.dialect == dialectMySQL {
-			parts[i] = "BINARY " + p
-		}
-	}
-	order := strings.Join(parts, ",")
+	order := storeCopyOrderBy(source.dialect, table)
 	query := "SELECT " + strings.Join(queryCols, ",") + " FROM " + table.name + " ORDER BY " + order + " LIMIT ? OFFSET ?"
 	insert := "INSERT INTO " + table.name + " (" + strings.Join(cols, ",") + ") "
 	if target.dialect == dialectPostgres && table.name == "lane_inbox_batches" {
