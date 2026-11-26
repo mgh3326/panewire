@@ -55,6 +55,7 @@ var spawnRefusalCauses = []struct {
 	{"AUTH_UNAVAILABLE: target no longer holds the selected account", exitAuthUnavailable, "auth_unavailable"},
 	{"seat does not allow role worker", exitSeatRefused, "seat_refused"},
 	{"role_restricted: removed astra seat alias", exitSeatRefused, "role_restricted"},
+	{"parent metadata unreadable: handoffkeep: unavailable", exitStateConflict, "parent_unreadable"},
 	{"BRIEF_SUBMISSION_UNCONFIRMED: session=s pane=p; no working transition or submitted brief turn", exitSubmitUnconfirmed, "submit_unconfirmed"},
 	{"agent must be idle before initial brief", exitSubmitUnconfirmed, "submit_unconfirmed"},
 	{"WORKSPACE_TRUST_REQUIRED: Codex directory trust prompt for /w; brief withheld; approve only this worktree in the executing CODEX_HOME", exitTrustPrompt, "trust_prompt"},
@@ -95,6 +96,14 @@ func TestSpawnRefusalCodeUnclassifiedIsEmpty(t *testing.T) {
 	}
 }
 
+func TestParentUnreadableRefusalHintNamesExecutingHost_t6760(t *testing.T) {
+	err := fail(exitStateConflict, "parent metadata unreadable: handoffkeep unavailable")
+	fix := spawnRefusalFix(err)
+	if !strings.Contains(fix, "handoffkeep") || !strings.Contains(fix, "executing host") {
+		t.Fatalf("parent unreadable hint %q does not identify hk reachability from the executing host", fix)
+	}
+}
+
 func TestSpawnRefusalCodeFromTheRealFailSites(t *testing.T) {
 	a, _, f, _ := cmdFixture(t)
 	f.Do = func(Command) Result {
@@ -121,6 +130,8 @@ func TestSpawnRefusalTextWinsOverExitStatusInTableOrder(t *testing.T) {
 		{"requires PANEWIRE_E6_ARM=x@y", exitSeatRefused, "e6_arm_required"},
 		{"workspace trust: malformed workspace trust store", exitConfig, "trust_store_malformed"},
 		{"workspace trust: permission denied", exitConfig, "trust_store"},
+		{"parent metadata unreadable: handoffkeep: unavailable", exitStateConflict, "parent_unreadable"},
+		{"parent job job-a not found: --parent-job must name an existing job", exitStateConflict, "state_conflict"},
 		{"symlink path refused: /srv/workspace/brief", exitUsage, "symlink_path"},
 		{"unrecognised", exitSeatRefused, "seat_refused"},
 	} {

@@ -191,6 +191,7 @@ var spawnRefusals = []spawnRefusal{
 	{rc: exitPreflight, code: "preflight", hint: spawnPreflightHint},
 	{rc: exitSeatRefused, code: "seat_refused", hint: "Use panewire resolve --role ROLE --t Tn to select a rung admitted for the requested role and task, then retry with that policy."},
 	{rc: exitLaneUnregistered, code: "lane_unregistered", hint: "Run panewire lanes to inspect routing and register the committed pane's lane before dispatching more work; do not relaunch the live job."},
+	{match: "parent metadata unreadable", code: "parent_unreadable", hint: "Check handoffkeep reachability from the executing host and restore access there before retrying; hk is unreachable from that host."},
 	{rc: exitStateConflict, code: "state_conflict", hint: "Inspect the job's saved report and events under jobs/JOB; reconcile the conflicting task/job binding before retrying."},
 	{rc: exitRoleWait, code: "role_wait", hint: "Wait until a listed eligible pool resets, refresh it with panewire quota refresh POOL, then retry."},
 	{rc: exitRoleEscalate, code: "role_escalate", hint: "Emit a decision to the parent lane naming the exhausted role pools; choose another authorized policy only after its reply."},
