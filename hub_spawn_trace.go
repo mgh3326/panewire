@@ -52,8 +52,10 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		recorded, err := h.inbox.store.db.ExecContext(ctx, h.inbox.store.q(`UPDATE spawn_notifications SET telemetry_recorded=1 WHERE event_id=? AND telemetry_recorded=0`), eventID)
 		if err == nil {
 			if n, _ := h.inbox.store.dialect.rowsMatched(recorded); n == 1 {
-				reason := spawnTraceReason(result.Reason)
-				hub.CaptureEvent(&sentry.Event{Level: sentry.LevelError, Message: "SPAWN_FAILED " + result.Stage + "/" + reason, Fingerprint: []string{"spawn", result.Stage, reason}, Tags: map[string]string{"stage": result.Stage, "reason": reason, "request": task.Request.RequestID, "attempt": strconv.Itoa(task.Attempt)}})
+				if level, capture := spawnSentryFailurePolicy(result.Reason); capture {
+					reason := spawnTraceReason(result.Reason)
+					hub.CaptureEvent(&sentry.Event{Level: level, Message: "SPAWN_FAILED " + result.Stage + "/" + reason, Fingerprint: []string{"spawn", result.Stage, reason}, Tags: map[string]string{"stage": result.Stage, "reason": reason, "request": task.Request.RequestID, "attempt": strconv.Itoa(task.Attempt)}})
+				}
 			}
 		}
 	}
@@ -103,6 +105,34 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		trace.StartTime = earliest
 	}
 	trace.Finish()
+}
+
+// spawnSentryRefusalPolicies are the closed set of requester-side refusal
+// codes with special Sentry handling. Admission refusals remain visible as
+// warnings because quota and policy gates can be fleet-level issues; caller
+// input errors and withdrawals do not consume the shared error-event quota.
+var spawnSentryRefusalPolicies = [...]struct {
+	code    string
+	level   sentry.Level
+	capture bool
+}{
+	{code: "admission_refused", level: sentry.LevelWarning, capture: true},
+	{code: "brief_invalid"},
+	{code: "requester_withdrawn"},
+	{code: "usage"},
+}
+
+func spawnSentryFailurePolicy(reason string) (sentry.Level, bool) {
+	code, _, _ := strings.Cut(reason, ":")
+	if code == "spawn_failed" {
+		code, _, _ = strings.Cut(strings.TrimPrefix(reason, "spawn_failed:"), ":")
+	}
+	for _, policy := range spawnSentryRefusalPolicies {
+		if code == policy.code {
+			return policy.level, policy.capture
+		}
+	}
+	return sentry.LevelError, true
 }
 
 // spawnSentryClient is the hub's private Sentry client, built once from the

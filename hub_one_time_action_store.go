@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// oneTimeActionSchema is also installed by Postgres migrations 0026 and 0034 (MySQL 0019 and 0027).
+// oneTimeActionSchema is also installed by Postgres migrations 0026, 0034 and 0042 (MySQL 0019, 0027 and 0038).
 // The milliseconds are UTC; 0 means unset: told_ms is 0 while a recurrence is
 // untold, gone_ms is 0 while the need shows, confirmed_ms is 0 until anti-flap
 // clearing confirms the need gone. wait_task_id and wait_id name the
@@ -16,6 +16,7 @@ const oneTimeActionSchema = `CREATE TABLE IF NOT EXISTS one_time_action_notices 
  told_ms BIGINT NOT NULL, gone_ms BIGINT NOT NULL DEFAULT 0,
  wait_task_id BIGINT NOT NULL DEFAULT 0, wait_id BIGINT NOT NULL DEFAULT 0,
  confirmed_ms BIGINT NOT NULL DEFAULT 0, anchor_ref TEXT NOT NULL DEFAULT '',
+ sighted_ms BIGINT NOT NULL DEFAULT 0,
  PRIMARY KEY(machine, kind, need))`
 
 const oneTimeActionStoreTimeout = 5 * time.Second
@@ -65,10 +66,10 @@ func (h *HubServer) deleteOneTimeActionLocked(key oneTimeActionKey) error {
 }
 
 // loadOneTimeActions reads the rows back from the hub store at start, so a
-// standing need is not told again after a restart, and every row that still
-// holds a wait or a confirmed clear is handed to the wait worker, so that
-// close is owed even when no readiness report comes. A read that fails leaves
-// the map empty and is logged.
+// standing need is not told again after a restart. Every row that still holds
+// a wait is handed to the wait worker, so that close is owed even when no
+// readiness report comes. Confirmed login rows without waits remain as clear
+// watermarks. A read that fails leaves the map empty and is logged.
 func (h *HubServer) loadOneTimeActions() {
 	if h.inbox == nil {
 		return
@@ -82,12 +83,11 @@ func (h *HubServer) loadOneTimeActions() {
 	}
 	var owed []oneTimeActionKey
 	h.oneTimeMu.Lock()
-	// A restored login row has no sighting time (SightedAt is not stored), so it
-	// counts only reports newer than this start: a conservative bound that can
-	// only delay a clear.
+	// Rows created before SightedAt was stored have no boundary; use hub start
+	// as a conservative fallback for those rows only.
 	started := h.now().UTC()
 	for key, state := range told {
-		if key.need == oneTimeLoginMissing {
+		if key.need == oneTimeLoginMissing && state.SightedAt.IsZero() {
 			state.SightedAt = started
 			told[key] = state
 		}
@@ -95,7 +95,7 @@ func (h *HubServer) loadOneTimeActions() {
 	h.oneTimeActions = told
 	h.refreshLoginNeedsLocked()
 	for key, state := range told {
-		if state.holdsWait() || !state.ConfirmedAt.IsZero() {
+		if state.holdsWait() {
 			owed = append(owed, key)
 		}
 	}
@@ -106,8 +106,8 @@ func (h *HubServer) loadOneTimeActions() {
 func (s *laneInboxStore) putOneTimeAction(parent context.Context, key oneTimeActionKey, state oneTimeActionState) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO one_time_action_notices(machine,kind,need,told_ms,gone_ms,wait_task_id,wait_id,confirmed_ms,anchor_ref) VALUES(?,?,?,?,?,?,?,?,?)`, "machine,kind,need", s.dialect.assignIncoming("told_ms", "gone_ms", "wait_task_id", "wait_id", "confirmed_ms", "anchor_ref"))),
-		key.machine, key.kind, key.need, milliOrZero(state.ToldAt), milliOrZero(state.GoneSince), state.WaitTaskID, state.WaitID, milliOrZero(state.ConfirmedAt), state.AnchorRef)
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.upsert(`INSERT INTO one_time_action_notices(machine,kind,need,told_ms,gone_ms,wait_task_id,wait_id,confirmed_ms,anchor_ref,sighted_ms) VALUES(?,?,?,?,?,?,?,?,?,?)`, "machine,kind,need", s.dialect.assignIncoming("told_ms", "gone_ms", "wait_task_id", "wait_id", "confirmed_ms", "anchor_ref", "sighted_ms"))),
+		key.machine, key.kind, key.need, milliOrZero(state.ToldAt), milliOrZero(state.GoneSince), state.WaitTaskID, state.WaitID, milliOrZero(state.ConfirmedAt), state.AnchorRef, milliOrZero(state.SightedAt))
 	return err
 }
 
@@ -122,7 +122,7 @@ func (s *laneInboxStore) deleteOneTimeAction(parent context.Context, key oneTime
 func (s *laneInboxStore) oneTimeActions(parent context.Context) (map[oneTimeActionKey]oneTimeActionState, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT machine,kind,need,told_ms,gone_ms,wait_task_id,wait_id,confirmed_ms,anchor_ref FROM one_time_action_notices`))
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT machine,kind,need,told_ms,gone_ms,wait_task_id,wait_id,confirmed_ms,anchor_ref,sighted_ms FROM one_time_action_notices`))
 	if err != nil {
 		return nil, err
 	}
@@ -132,12 +132,14 @@ func (s *laneInboxStore) oneTimeActions(parent context.Context) (map[oneTimeActi
 		var key oneTimeActionKey
 		var state oneTimeActionState
 		var toldMS, goneMS, confirmedMS int64
-		if err := rows.Scan(&key.machine, &key.kind, &key.need, &toldMS, &goneMS, &state.WaitTaskID, &state.WaitID, &confirmedMS, &state.AnchorRef); err != nil {
+		var sightedMS int64
+		if err := rows.Scan(&key.machine, &key.kind, &key.need, &toldMS, &goneMS, &state.WaitTaskID, &state.WaitID, &confirmedMS, &state.AnchorRef, &sightedMS); err != nil {
 			return nil, err
 		}
 		state.ToldAt = timeOrZero(toldMS)
 		state.GoneSince = timeOrZero(goneMS)
 		state.ConfirmedAt = timeOrZero(confirmedMS)
+		state.SightedAt = timeOrZero(sightedMS)
 		told[key] = state
 	}
 	return told, rows.Err()

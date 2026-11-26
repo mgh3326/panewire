@@ -615,6 +615,9 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 				confirm, cancelConfirm := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 				latest, rereadErr := hkGetTask(confirm, s.Task)
 				cancelConfirm()
+				if rereadErr != nil {
+					ev["rebind_confirmation_failed"] = true
+				}
 				if rereadErr == nil {
 					if latest.Refs.JobID == s.Job && latest.ClaimedBy == s.Label {
 						ev["rebound_from"] = newFrom
@@ -696,7 +699,11 @@ func (a *App) finishTaskTakeover(ctx context.Context, s *Spawn, task client.Task
 	a.registerOwnLane(laneCtx, s, owner, pane, machine)
 	reason := str(ev, "rebind_error")
 	id := sha256.Sum256([]byte(s.Job))
-	text := fmt.Sprintf("[panewire] TASK_REBIND_FAILED job=%s task=%s reason=%s; rebind manually", s.Job, s.Task, reason)
+	noticeHint := "; rebind manually"
+	if ev["rebind_confirmation_failed"] == true {
+		noticeHint = "; the bind may already have committed; check handoffkeep tasks show " + s.Task + " before rebinding by hand"
+	}
+	text := fmt.Sprintf("[panewire] TASK_REBIND_FAILED job=%s task=%s reason=%s%s", s.Job, s.Task, reason, noticeHint)
 	notice, cancelNotice := context.WithTimeout(uncancelled, 10*time.Second)
 	defer cancelNotice()
 	r := a.call(notice, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-rebind-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))

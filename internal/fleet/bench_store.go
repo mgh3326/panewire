@@ -48,13 +48,9 @@ func (a *App) benchStore() (*BenchStore, error) {
 }
 
 func (a *App) repsPath() string {
-	dir := a.StateDir
+	dir := a.stateDir()
 	if dir == "" {
-		base := os.Getenv("XDG_STATE_HOME")
-		if base == "" {
-			base = filepath.Join(a.Home, ".local", "state")
-		}
-		dir = filepath.Join(base, "panewire")
+		return ""
 	}
 	return filepath.Join(dir, "reps.json")
 }
