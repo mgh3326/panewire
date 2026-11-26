@@ -169,7 +169,7 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 			restore("obligation_retry_not_due", false)
 			return
 		}
-		finished, err := h.retryObligation(ctx, o, record, now, relayReplaySourceIdle)
+		finished, err := h.retryObligation(ctx, o, record, now, relayReplaySourceIdle, token)
 		if err != nil || !finished {
 			restore("obligation_retry_deferred", true)
 		}

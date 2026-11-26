@@ -88,7 +88,7 @@ func (s *laneInboxStore) spendObligationRetry(parent context.Context, o openObli
 	return count == 1, err
 }
 
-func (h *HubServer) retryObligation(ctx context.Context, o openObligation, record handoffkeepRelayEvent, now time.Time, source string) (bool, error) {
+func (h *HubServer) retryObligation(ctx context.Context, o openObligation, record handoffkeepRelayEvent, now time.Time, source string, idleToken *byte) (bool, error) {
 	store := h.inbox.store
 	event := relayEventFromRecord(record)
 	if record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || event.OwnerLane == "" || event.JobID == "" ||
@@ -122,12 +122,8 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	}
 
 	// Re-evaluate the current inbox policy before routing a saved body.
-	if h.replayInboxAged(record, false) {
+	if h.replayInboxAfterAgeGate(record) {
 		return false, store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
-	}
-
-	if o.spent >= relayReplayMaxAttempts || (o.fault != obligationAckTimeout && (o.labelled > 0 || (record.Kind != "lane.event" && o.spent > o.attemptsSeen))) {
-		return true, store.exhaustObligation(ctx, o.id, o.fault, now, now.Add(obligationParkRecheck))
 	}
 
 	route, agent, routed := h.resolveRelayRoute(record.Kind, event)
@@ -139,22 +135,39 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	h.mu.Lock()
 	_, claimed := h.relayDedupe[key]
 	_, held := h.relayHeld[record.ID]
+	owner, idleOwned := h.relayControl.workingExpired[record.ID]
+	validIdle := !idleOwned
+	if source == relayReplaySourceIdle {
+		validIdle = idleOwned && idleToken != nil && owner.retryToken == idleToken
+	}
 	claimed = claimed || held
 	available := record.Kind != "lane.event" || h.retryLaneAgentReadyLocked(route.Machine, agent)
-	if !claimed && available {
+	if validIdle && !claimed && available {
 		h.relayDedupe[key] = record.ID
 	}
 	h.mu.Unlock()
+	if !validIdle {
+		return false, nil
+	}
 	if claimed || !available {
 		return false, store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
 	}
-	queued := false
+	releaseClaim := true
 	defer func() {
-		if !queued {
-			h.forgetRelayEvent(key)
+		if releaseClaim {
+			h.mu.Lock()
+			if h.relayDedupe[key] == record.ID {
+				delete(h.relayDedupe, key)
+			}
+			h.mu.Unlock()
 		}
 	}()
+	if o.spent >= relayReplayMaxAttempts || (o.fault != obligationAckTimeout && (o.labelled > 0 || (record.Kind != "lane.event" && o.spent > o.attemptsSeen))) {
+		return true, store.exhaustObligation(ctx, o.id, o.fault, now, now.Add(obligationParkRecheck))
+	}
+
 	if h.refuseInboxOnlyBody(record.Kind, event, record.ID, key) {
+		releaseClaim = false // The inbox-only path already released it.
 		return false, nil
 	}
 	labelled := 0
@@ -169,19 +182,27 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 		return spent, err
 	}
 
+	releaseLabel := func(delay time.Duration, cause error) (bool, error) {
+		return false, errors.Join(cause, store.deferUnqueuedLabel(context.WithoutCancel(ctx), o.id, o.spent+1, next, now.Add(delay)))
+	}
 	attempts, bumped := h.bumpObligationAttempts(ctx, record, route, labelled != 0)
 	if labelled != 0 && !bumped {
-		return false, store.deferUnqueuedLabel(ctx, o.id, o.spent+1, next, now.Add(5*time.Minute))
+		return releaseLabel(5*time.Minute, nil)
 	}
 	// A late ack may have landed while the attempt was being committed.
 	latest, found, err := h.handoffkeep.relayEvent(ctx, record.ID)
 	if (err != nil || !found) && labelled != 0 {
-		return false, errors.Join(err, store.deferUnqueuedLabel(context.WithoutCancel(ctx), o.id, o.spent+1, next, now.Add(obligationRecheckMin)))
+		return releaseLabel(obligationRecheckMin, err)
 	}
-	if err != nil || !found || latest.DeliveredAt != "" || strings.HasPrefix(latest.DeliveredTo, relayReplayRetiredMarker) {
+	if err != nil || !found {
 		return true, err
 	}
+	if latest.DeliveredAt != "" || strings.HasPrefix(latest.DeliveredTo, relayReplayRetiredMarker) {
+		return true, h.classifyObservedObligation(ctx, o, latest, now, true)
+	}
+	var queued bool
 	if labelled == 0 {
+		releaseClaim = false // injectRelayEvent owns the claim from here.
 		queued = h.injectRelayEvent(record.Kind, event, route, agent, nil, record.ID, key)
 	} else {
 		directive := h.inboxRelayDirective(record.Kind, event, route, record.ID)
@@ -193,13 +214,14 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 		var current bool
 		queued, current = h.queueObligationLaneRetry(ctx, record.ID, event, route, agent, directive)
 		if !current {
-			return false, store.deferUnqueuedLabel(context.WithoutCancel(ctx), o.id, o.spent+1, next, now.Add(obligationRecheckMin))
+			return releaseLabel(obligationRecheckMin, nil)
 		}
 		if queued {
+			releaseClaim = false
 			h.armRelayAckEvent(record.ID, event.JobID)
 		} else {
-			h.forgetRelayAckEvent(record.ID, event.JobID)
 			h.broadcastRelayUnrouted(event)
+			return releaseLabel(obligationRecheckMin, nil)
 		}
 	}
 	if queued {
@@ -217,8 +239,11 @@ func (h *HubServer) queueObligationLaneRetry(ctx context.Context, id int64, even
 	if ctx.Err() != nil || !h.retryLaneAgentReadyLocked(route.Machine, agent) {
 		return false, false
 	}
+	if !agent.queueRelay(directive) {
+		return false, true
+	}
 	h.registerRelayAckEventLocked("lane.event", event, route.Machine, route.Pane, id)
-	return agent.queueRelay(directive), true
+	return true, true
 }
 
 func (h *HubServer) retryLaneAgentReadyLocked(machine string, agent *hubAgent) bool {

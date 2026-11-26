@@ -227,6 +227,31 @@ func (s *laneInboxStore) dueObligations(parent context.Context, now time.Time, l
 	return due, rows.Err()
 }
 
+// openObligationsByRelayID reads idle proof candidates independently of next_at.
+func (s *laneInboxStore) openObligationsByRelayID(parent context.Context, ids []int64) (map[int64]openObligation, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,relay_id,event_key,state,created_at,next_at,fault,spent,labelled,attempts_seen FROM delivery_obligations WHERE `+obligationOpen+` AND kind='lane.event' AND relay_id IN (`+marks+`)`), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[int64]openObligation)
+	for rows.Next() {
+		var o openObligation
+		if err := rows.Scan(&o.id, &o.relayID, &o.storedKey, &o.state, &o.createdAt, &o.nextAt, &o.fault, &o.spent, &o.labelled, &o.attemptsSeen); err != nil {
+			return nil, err
+		}
+		result[o.relayID] = o
+	}
+	return result, rows.Err()
+}
+
 // closeObligation ends an open obligation as confirmed, or as settled for
 // reason.
 func (s *laneInboxStore) closeObligation(parent context.Context, id int64, state, reason string, now time.Time) error {

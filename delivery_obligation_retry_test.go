@@ -515,3 +515,152 @@ func TestT1034FoldedJobFaultPreservesProducerClaim(t *testing.T) {
 		})
 	}
 }
+
+func TestT1034CanceledCeilingWriteReleasesLabel(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "canceled-ceiling")
+	// A legacy marker schedules the retry without first raising the ceiling.
+	marker := t6384Event(relayUnconfirmedMarkLane, unconfirmedMarkEventID(d.EventID), "legacy mark")
+	if _, _, err := rig.client.appendEvent(t.Context(), rig.hub.relayEventRequest("lane.event", marker, reportRelayRoute{})); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig.start()
+	rig.hub.replayUndeliveredRelayEvents(t.Context())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	client := *rig.client.client
+	oldClient := rig.client.client
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	client.Transport = hubRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPost && req.URL.Path == "/v1/relay/events" {
+			cancel()
+			return nil, ctx.Err()
+		}
+		return base.RoundTrip(req)
+	})
+	rig.client.client = &client
+	rig.hub.classifyObligations(ctx)
+	rig.client.client = oldClient
+	if o := rig.obligation(d.EventID); o.Spent != 2 || len(rig.agent.relays) != 0 {
+		t.Fatalf("canceled write: spent=%d queued=%d", o.Spent, len(rig.agent.relays))
+	}
+	rig.pass(5 * time.Minute)
+	rig.injected()
+}
+
+func TestT1034FullRelayQueueReleasesLabel(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "full-retry-queue")
+	reportUnconfirmedRetry(t, rig, d)
+	for range cap(rig.agent.relays) {
+		rig.agent.relays <- hubRelayInjectEvent{}
+	}
+	rig.pass(0)
+	for range cap(rig.agent.relays) {
+		<-rig.agent.relays
+	}
+	if o := rig.obligation(d.EventID); o.Spent != 2 {
+		t.Fatalf("queue refusal spent=%d", o.Spent)
+	}
+	rig.pass(time.Minute)
+	rig.injected()
+}
+
+func TestObligationIdleProofScanMakesProgress(t *testing.T) {
+	for _, count := range []int{1, 51} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			rig := newT6384Rig(t)
+			store := rig.hub.inbox.store
+			now := rig.clock.Now()
+			for i := range count {
+				record := t6384Row(int64(100+i), "lane-a", "idle-proof-"+strconv.Itoa(i), 1)
+				rig.fake.seedUndelivered(record)
+				event := relayEventFromRecord(record)
+				o := newDeliveryObligation{key: relayEventDedupeKey(record.Kind, event), relayID: record.ID, kind: record.Kind, lane: record.OwnerLane, attempts: 1}
+				if err := store.flagObligationRetry(t.Context(), o, relayDroppedWorkingExpired, "", now); err != nil {
+					t.Fatal(err)
+				}
+				rig.hub.mu.Lock()
+				if rig.hub.relayControl.workingExpired == nil {
+					rig.hub.relayControl.workingExpired = make(map[int64]workingExpiredRow)
+				}
+				rig.hub.relayControl.workingExpired[record.ID] = workingExpiredRow{lane: record.OwnerLane, droppedAt: now}
+				rig.hub.mu.Unlock()
+			}
+			ordinary := rig.send("lane-a", "healthy-proof-retry")
+			reportUnconfirmedRetry(t, rig, ordinary)
+
+			last := int64(99 + count)
+			if count > 1 {
+				if err := rig.client.markDelivered(t.Context(), last, "host-a", "w1:p1"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := *rig.client.client
+			base := client.Transport
+			if base == nil {
+				base = http.DefaultTransport
+			}
+			reads := 0
+			client.Transport = hubRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodGet && req.URL.Path == "/v1/relay/events" {
+					reads++
+					if req.URL.Query().Get("after_id") == "99" {
+						return nil, errors.New("fixture earliest idle proof unavailable")
+					}
+				}
+				return base.RoundTrip(req)
+			})
+			rig.client.client = &client
+			for range 7 {
+				reads = 0
+				rig.hub.classifyObligations(t.Context())
+				if reads > obligationClassifyLimit {
+					t.Fatalf("proof reads exceeded the sweep bound: %d", reads)
+				}
+			}
+			if count > 1 {
+				rig.want(last, obligationConfirmed, "")
+			}
+			rig.injected()
+			if got := rig.obligation(100); got.NextAt != now.UnixMilli() {
+				t.Fatalf("idle read moved the deadline: %+v", got)
+			}
+		})
+	}
+}
+
+func TestT1034RetryClaimRespectsNewIdleOwner(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "idle-owner-at-claim")
+	t650Send(t, rig.hub, "host-a", rig.agent, "relay.unconfirmed", relayAckPayload{
+		JobID: d.JobID, OriginalEventID: d.EventID, Pane: d.Pane, Reason: relayDroppedWorkingExpired,
+	})
+	record := rig.row(d.EventID)
+	key := relayEventDedupeKey(record.Kind, relayEventFromRecord(record))
+	o, err := rig.hub.inbox.store.retryObligationForKey(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sweep arrives at the retry path with a due snapshot that predates its
+	// observation of the idle owner installed by the report.
+	if _, err := rig.hub.retryObligation(t.Context(), o, record, rig.clock.Now(), obligationRetrySource, nil); err != nil {
+		t.Fatal(err)
+	}
+	if spent := rig.obligation(d.EventID).Spent; spent != o.spent || len(rig.agent.relays) != 0 {
+		t.Fatalf("sweep bypassed idle ownership: spent=%d queued=%d", spent, len(rig.agent.relays))
+	}
+	rig.hub.redeliverWorkingExpiredOnIdle("host-a", idleWakeRouteRequest{
+		Pane: d.Pane, EventID: "idle:w1:session:1", StateChangeSeq: 1,
+	})
+	if copy := rig.injected(); !strings.HasPrefix(copy.Text, relayIdleRedeliveryLabel(record)) {
+		t.Fatalf("idle copy=%q", copy.Text)
+	}
+}
