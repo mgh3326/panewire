@@ -335,9 +335,9 @@ func (h *HubServer) settleRefusedOneTimeOpen(ctx context.Context, key oneTimeAct
 	return err
 }
 
-// closeOneTimeWait clears the need's wait once the clear is confirmed and drops
-// the row when nothing is left (oneTimeRowKept). A row that holds no wait has
-// nothing to close, and no wait is created to find one: a wait is only ever
+// closeOneTimeWait clears the need's wait once the clear is confirmed, then
+// retains any login clear watermark (oneTimeRowKept). A row that holds no wait
+// has nothing to close, and no wait is created to find one: a wait is only ever
 // opened by openOneTimeWait.
 func (h *HubServer) closeOneTimeWait(ctx context.Context, key oneTimeActionKey) error {
 	state, ok := h.oneTimeStateOf(key)

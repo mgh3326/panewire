@@ -254,6 +254,10 @@ func (h *HubServer) considerOneTimeSighting(machine, kind, need string, at, sigh
 		return
 	}
 	h.oneTimeMu.Lock()
+	if state, ok := h.oneTimeActions[s.key]; ok && s.key.need == oneTimeLoginMissing && !state.ConfirmedAt.IsZero() && staleLoginSighting(s.key, state, sightedAt) {
+		h.oneTimeMu.Unlock()
+		return
+	}
 	if state, ok := h.oneTimeActions[s.key]; ok && s.key.need == oneTimeLoginMissing {
 		// Reports older than this sighting cannot clear the login need (SightedAt).
 		// Sightings can be applied out of time order, so keep the latest.
@@ -293,6 +297,9 @@ func (h *HubServer) recordSuppressedLoginNeed(key oneTimeActionKey, at time.Time
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
 	state, ok := h.oneTimeActions[key]
+	if ok && !state.ConfirmedAt.IsZero() && staleLoginSighting(key, state, at) {
+		return
+	}
 	if at.After(state.SightedAt) {
 		state.SightedAt = at
 	}
@@ -325,7 +332,13 @@ func touchedKeys(set map[oneTimeActionKey]bool) []oneTimeActionKey {
 // like that cannot undo the observation, so it does not restart the clear
 // (hk 5800). Dialog sightings are never stale here.
 func staleLoginSighting(key oneTimeActionKey, state oneTimeActionState, at time.Time) bool {
-	return key.need == oneTimeLoginMissing && !state.GoneSince.IsZero() && !at.After(state.GoneSince)
+	if key.need != oneTimeLoginMissing {
+		return false
+	}
+	if !state.ConfirmedAt.IsZero() && !at.After(state.ConfirmedAt) {
+		return true
+	}
+	return !state.GoneSince.IsZero() && !at.After(state.GoneSince)
 }
 
 // standLoginNeed keeps an untold login need's row, so the need stands while its
@@ -337,6 +350,9 @@ func (h *HubServer) standLoginNeed(key oneTimeActionKey, at time.Time) {
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
 	state, ok := h.oneTimeActions[key]
+	if ok && !state.ConfirmedAt.IsZero() && staleLoginSighting(key, state, at) {
+		return
+	}
 	updatedSightedAt := at.After(state.SightedAt)
 	if updatedSightedAt {
 		state.SightedAt = at

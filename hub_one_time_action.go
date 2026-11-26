@@ -36,8 +36,8 @@ type oneTimeActionKey struct{ machine, kind, need string }
 // full cycle). The wait is a separate obligation: AnchorRef is where the anchor
 // walk last reached, WaitTaskID is the anchor the wait is on (written before
 // the wait write, so an ambiguous write can be resolved), and WaitID is the
-// confirmed operator wait. A row lives while its episode is told or it holds a
-// wait; see oneTimeRowKept.
+// confirmed operator wait. A row lives while its episode is told, while it
+// holds a wait, or as a login clear watermark; see oneTimeRowKept.
 type oneTimeActionState struct {
 	ToldAt      time.Time
 	GoneSince   time.Time
@@ -64,13 +64,14 @@ func (s oneTimeActionState) clearBoundary() time.Time {
 // episode the clear has not yet confirmed needs its row; so does a wait that
 // is not known to be closed, even after its episode ended. A login need is
 // remembered from its first sighting, told or not: placement reads it
-// (standingLoginNeeds), and a failed notice only leaves ToldAt zero to retry.
+// (standingLoginNeeds), and a confirmed clear remains as a watermark against
+// delayed reports from the old episode.
 func oneTimeRowKept(key oneTimeActionKey, state oneTimeActionState) bool {
 	if state.holdsWait() {
 		return true
 	}
 	if key.need == oneTimeLoginMissing {
-		return state.ConfirmedAt.IsZero()
+		return true
 	}
 	return !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero()
 }
@@ -163,11 +164,11 @@ func (h *HubServer) noteReadinessActions(machine string, report *fleet.Readiness
 // clearOneTimeActions advances the clear of every told need of machine that
 // report reads. A report that shows the need cancels a pending clear. A report
 // that shows it gone starts the clear countdown, and a later gone report at
-// least one cycle after that confirms the clear. A confirmed clear with no wait
-// to close drops the row here; one with a wait stays until the wait worker has
-// closed it (hub_one_time_wait.go). A recurrence after a confirmed clear starts
-// a new untold episode and keeps any wait it holds. It returns the needs whose
-// clear was just confirmed, so the wait worker can close their waits.
+// least one cycle after that confirms the clear. A confirmed clear closes any
+// wait; login rows stay as clear watermarks against delayed sightings. A
+// recurrence after a confirmed clear starts a new untold episode and keeps any
+// wait it holds. It returns the needs whose clear was just confirmed, so the
+// wait worker can close their waits.
 func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness) []oneTimeActionKey {
 	h.oneTimeMu.Lock()
 	defer h.oneTimeMu.Unlock()
@@ -188,6 +189,9 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 		shows := readinessShowsNeed(harness, key.need)
 		switch {
 		case shows && !state.ConfirmedAt.IsZero():
+			if key.need == oneTimeLoginMissing && !report.CheckedAt.After(state.ConfirmedAt) {
+				continue
+			}
 			// The need returned after its clear was confirmed: a new untold episode.
 			// A wait still held stays; the new episode re-asserts it on the same
 			// anchor, which cancels the pending close.

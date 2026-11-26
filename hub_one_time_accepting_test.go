@@ -133,9 +133,9 @@ func TestSuppressedLoginNeedKeepsClearAfterStaleSighting(t *testing.T) {
 	h.noteReadinessActions("oci", readiness(staleAt, fleet.ReadinessLoginMissing), cleanAt.Add(time.Second))
 	h.noteReadinessActions("oci", readiness(cleanAt.Add(cycle), fleet.ReadinessLoginPresent), cleanAt.Add(cycle))
 	settleOneTimeNotices(t, h)
-	if got := h.oneTimeActionKeysForMachine("oci"); len(got) != 0 {
-		state, _ := h.oneTimeStateOf(key)
-		t.Fatalf("clean cycle did not clear the suppressed login need: %v state=%+v", got, state)
+	state, ok = h.oneTimeStateOf(key)
+	if !ok || !state.ConfirmedAt.Equal(cleanAt.Add(cycle)) {
+		t.Fatalf("clean cycle did not confirm the suppressed login need: %+v, present=%t", state, ok)
 	}
 	h.loginNeedMu.Lock()
 	defer h.loginNeedMu.Unlock()
@@ -165,6 +165,45 @@ func TestSuppressedToldLoginNeedKeepsClearAfterStaleSighting(t *testing.T) {
 	state, ok := h.oneTimeStateOf(key)
 	if !ok || !state.GoneSince.Equal(cleanAt) {
 		t.Fatalf("stale suppressed sighting restarted a told episode's clear: %+v, present=%t", state, ok)
+	}
+}
+
+func TestSuppressedLoginNeedIgnoresSightingBeforeConfirmedClear(t *testing.T) {
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 27, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+	key := oneTimeActionKey{machine: "oci", kind: "claude", need: oneTimeLoginMissing}
+	readiness := func(at time.Time, login string) *fleet.Readiness {
+		return readinessWith(at, "claude", fleet.HarnessReadiness{Installed: true, Login: login})
+	}
+	setAcceptingOverrideForTest(h, "oci", "off")
+	h.noteReadinessActions("oci", readiness(start, fleet.ReadinessLoginMissing), start)
+	cleanAt := start.Add(time.Minute)
+	h.noteReadinessActions("oci", readiness(cleanAt, fleet.ReadinessLoginPresent), cleanAt)
+	h.noteReadinessActions("oci", readiness(cleanAt.Add(cycle), fleet.ReadinessLoginPresent), cleanAt.Add(cycle))
+	settleOneTimeNotices(t, h)
+	state, ok := h.oneTimeStateOf(key)
+	if !ok || state.ConfirmedAt.IsZero() {
+		t.Fatalf("login clear watermark = %+v, present=%t; want confirmed", state, ok)
+	}
+	staleAt := start.Add(30 * time.Second)
+	h.noteReadinessActions("oci", readiness(staleAt, fleet.ReadinessLoginMissing), state.ConfirmedAt.Add(time.Second))
+	settleOneTimeNotices(t, h)
+	state, ok = h.oneTimeStateOf(key)
+	if !ok || !state.ConfirmedAt.Equal(cleanAt.Add(cycle)) {
+		t.Fatalf("stale sighting revived confirmed login need: %+v, present=%t", state, ok)
+	}
+	h.loginNeedMu.Lock()
+	gotNeeds := append([]string(nil), h.loginNeeds["oci"]...)
+	h.loginNeedMu.Unlock()
+	if len(gotNeeds) != 0 {
+		t.Fatalf("placement still sees a confirmed login clear: %v", gotNeeds)
+	}
+	setAcceptingOverrideForTest(h, "oci", "on")
+	h.noteReadinessActions("oci", readiness(state.ConfirmedAt.Add(time.Minute), fleet.ReadinessLoginPresent), state.ConfirmedAt.Add(time.Minute))
+	if got := oneTimeMessages(t, h, transport); len(got) != 0 {
+		t.Fatalf("stale login need was told after accepting returned: %q", got)
 	}
 }
 

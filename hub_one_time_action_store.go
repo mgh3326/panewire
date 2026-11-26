@@ -66,10 +66,10 @@ func (h *HubServer) deleteOneTimeActionLocked(key oneTimeActionKey) error {
 }
 
 // loadOneTimeActions reads the rows back from the hub store at start, so a
-// standing need is not told again after a restart, and every row that still
-// holds a wait or a confirmed clear is handed to the wait worker, so that
-// close is owed even when no readiness report comes. A read that fails leaves
-// the map empty and is logged.
+// standing need is not told again after a restart. Every row that still holds
+// a wait is handed to the wait worker, so that close is owed even when no
+// readiness report comes. Confirmed login rows without waits remain as clear
+// watermarks. A read that fails leaves the map empty and is logged.
 func (h *HubServer) loadOneTimeActions() {
 	if h.inbox == nil {
 		return
@@ -95,7 +95,7 @@ func (h *HubServer) loadOneTimeActions() {
 	h.oneTimeActions = told
 	h.refreshLoginNeedsLocked()
 	for key, state := range told {
-		if state.holdsWait() || !state.ConfirmedAt.IsZero() {
+		if state.holdsWait() {
 			owed = append(owed, key)
 		}
 	}
