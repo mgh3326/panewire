@@ -80,15 +80,17 @@ longer holds the route's pane. Completion alone does not end the route: a worker
 keeps its pane until its PR merges, and reviews, findings and design orders still
 reach it while its agent holds the pane (hk 6900). The route ends when a reap or
 close of the job (`panewire jobs reap`, a `pane.close` the hub issued, or a job
-close) or a lost job recorded the pane gone. Otherwise the hub asks the node,
-for each lane event, whether the route's pane is listed with the job's agent
-label as its occupant. Any other answer ends the route: the pane is unlisted, a
-reused pane id names another agent, the label is listed only on another pane,
-or the node did not answer. A node that cannot be asked therefore ends the route
-for that event, as before hk 6900. A lane event relayed on the node's own read
-loop waits for that answer up to the probe timeout. The pane-gone mark is in
-memory. A restarted hub rebuilds a job record from the node's reports; a job it
-does not rebuild is unknown, and its route is kept as before hk 6900.
+close) or a lost job recorded the pane gone. Otherwise the hub reads its node's
+latest heartbeat pane snapshot, under the lock that decides the event: the route
+holds only if a fresh, complete snapshot lists the job's agent label as the
+occupant of the route's pane. A snapshot that is stale, truncated, missing, or
+that omits the pane, shows another occupant, or lists the label only on another
+pane, ends the route for that event, as before hk 6900. The check makes no node
+round trip, so a lane event relayed on the node's own read loop is not held up.
+The snapshot can be up to its maximum age old, so a pane closed and reused inside
+that window can take one event. The pane-gone mark is in memory. A restarted hub
+rebuilds a job record from the node's reports; a job it does not rebuild is
+unknown, and its route is kept as before hk 6900.
 An unknown bound job is not proof that the route has ended, regardless of other
 jobs sharing its pane. For a route without a job ID, the hub infers the end only when its machine and pane
 match at least one completed job in that lane and the job's own agent does not

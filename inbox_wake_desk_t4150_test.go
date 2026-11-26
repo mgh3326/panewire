@@ -116,11 +116,14 @@ func TestInboxWakeDesignWithEndedJobRouteFallsBackToDesk(t *testing.T) {
 // pane is alive. The wake lands on the design pane, not the desk.
 func TestInboxWakeDesignCompletedJobPaneAliveKeepsDesignRoute(t *testing.T) {
 	r := newT3602Rig(t, "default")
-	r.h.routePaneProbe = t6900Occupant
 	routes := t4150BaseRoutes()
 	routes[t3602Design] = reportRelayRoute{Machine: "host-a", Pane: "w1:design", Job: "done-design-job"}
 	t4150Routes(t, r, routes)
 	t4150Snapshot(t, r, "w1:design", "w1:desk")
+	// The design agent holds its pane in the node's latest snapshot.
+	r.h.mu.Lock()
+	r.h.nodes["host-a"].sessionSnapshot = t6900Snapshot(r.h.now(), HubSession{PaneID: "w1:design", Label: t3602Design}, HubSession{PaneID: "w1:desk", Label: deskPolicyLane})
+	r.h.mu.Unlock()
 	r.h.mu.Lock()
 	r.h.jobs["done-design-job"] = &hubJobRecord{
 		HubActiveJob: HubActiveJob{JobID: "done-design-job", AgentLabel: t3602Design, Pane: "w1:design"},

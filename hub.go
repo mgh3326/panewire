@@ -331,10 +331,7 @@ type hubJobRecord struct {
 	// PaneGone is set once a reap, close, pane.close the hub issued or lost pane
 	// recorded the job's pane gone. Completion alone never sets it. In memory
 	// only (relay_route_pane.go).
-	PaneGone bool
-	// paneAlive is the latest probe's verdict that the job's own agent holds its
-	// route's pane. Only the relay path sets it, right before it decides an event.
-	paneAlive     bool
+	PaneGone      bool
 	Reassigning   bool
 	FencedNodes   map[string]uint64
 	Reassignments []hubJobReassignment
@@ -767,9 +764,6 @@ type HubServer struct {
 	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
 	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.
-	// routePaneProbe replaces the node probe of a completed job's pane (fixture
-	// seam; nil probes the node, relay_route_pane.go).
-	routePaneProbe func(ctx context.Context, machine, pane, agent string) heldProbe
 
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set

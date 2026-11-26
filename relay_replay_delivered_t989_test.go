@@ -83,9 +83,6 @@ func (rig *t989Rig) startHub() {
 		rig.t.Fatal(err)
 	}
 	rig.hub = hub
-	// Its agents hold no socket, so a completed job's pane probe must not reach
-	// one (relay_route_pane.go).
-	hub.routePaneProbe = unreachableRoutePaneProbe
 	rig.dest = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
 	rig.src = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
 	hub.mu.Lock()

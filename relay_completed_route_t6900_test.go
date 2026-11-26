@@ -1,15 +1,13 @@
 package panewire
 
-// hk 6900: a completed job keeps its lane route only while the job's own agent
-// holds the route's pane. Anything else ends the route job_ended. These tests
-// drive the hub's relay path with the node probe replaced by a fixture seam
-// (relay_route_pane.go).
+// hk 6900: a completed job keeps its lane route only while the node's latest
+// fresh pane snapshot shows the job's own agent on the route's pane. Anything else
+// ends the route job_ended. These tests drive the hub's relay path through the
+// same reader-side call a node's lane.event takes (relayLaneEvent with the sending
+// agent), with the verdict read from the snapshot the hub already holds.
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -30,26 +28,27 @@ func t6900Relay(t *testing.T, h *HubServer, agent *hubAgent, lane, eventID strin
 	return result
 }
 
-// t6900Occupant is the seam answer for a pane the job's own agent holds.
-func t6900Occupant(_ context.Context, _ string, pane, label string) heldProbe {
-	return heldProbe{state: heldPanePresent, row: nodeAgentRow{PaneID: pane, Name: label}}
+// t6900Snapshot is a fresh, complete snapshot of node-a's panes at now.
+func t6900Snapshot(now time.Time, sessions ...HubSession) *hubSessionSnapshotRecord {
+	return &hubSessionSnapshotRecord{sessions: sessions, paneIDsComplete: true, snapshotStatus: hubSnapshotStatusOK, receivedAt: now}
 }
 
-// unreachableRoutePaneProbe is the seam answer for a node that cannot be asked.
-// Rigs whose agents hold no connection use it: a probe there would write to a
-// nil socket, and no answer ends the route, as an unanswered probe does.
-func unreachableRoutePaneProbe(context.Context, string, string, string) heldProbe {
-	return heldProbe{reason: "node_unreachable"}
+// t6900SetSnapshot records snap as node-a's latest pane snapshot.
+func t6900SetSnapshot(h *HubServer, snap *hubSessionSnapshotRecord) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nodes["node-a"].sessionSnapshot = snap
 }
 
 // A completed job whose own agent holds its pane keeps its route: the lane event
-// reaches the pane. The design lane row is the desk/design case of hk 6613 item 1.
+// reaches the pane. The sender is the route's own node, the reader-path case.
+// The design lane row is the desk/design case of hk 6613 item 1.
 func TestCompletedJobRouteDeliversWhilePaneLives(t *testing.T) {
 	for _, lane := range []string{"lane-a", "panewire-design"} {
 		t.Run(lane, func(t *testing.T) {
 			jobs := map[string]*hubJobRecord{"job-x": {HubActiveJob: HubActiveJob{JobID: "job-x", AgentLabel: lane, Pane: "live-pane"}, Node: "node-a", Completed: true}}
 			h, _, agent := relayRegisteredRouteHub(t, t6900Route(lane, "job-x"), jobs)
-			h.routePaneProbe = t6900Occupant
+			t6900SetSnapshot(h, t6900Snapshot(h.now(), HubSession{PaneID: "live-pane", Label: lane}))
 			result := t6900Relay(t, h, agent, lane, "ev-live")
 			if !result.Routed {
 				t.Fatalf("a completed job whose agent holds its pane must keep its route: %+v", result)
@@ -61,16 +60,27 @@ func TestCompletedJobRouteDeliversWhilePaneLives(t *testing.T) {
 	}
 }
 
-// A recorded pane.close of the job's pane ends its route with no probe: the event
-// is dropped job_ended and the pane gets no injection.
+// A completed job's route on its own node, with the agent's socket never read by
+// the hub (the reader-path case), is decided from the snapshot without waiting on
+// the node: the event is routed promptly and the agent gets no command.
+func TestCompletedRouteSameNodeEventNeverWaitsOnNode(t *testing.T) {
+	jobs := map[string]*hubJobRecord{"job-x": {HubActiveJob: HubActiveJob{JobID: "job-x", AgentLabel: "lane-a", Pane: "live-pane"}, Node: "node-a", Completed: true}}
+	h, _, agent := relayRegisteredRouteHub(t, t6900Route("lane-a", "job-x"), jobs)
+	t6900SetSnapshot(h, t6900Snapshot(h.now(), HubSession{PaneID: "live-pane", Label: "lane-a"}))
+	started := time.Now()
+	result := t6900Relay(t, h, agent, "lane-a", "ev-same-node")
+	if !result.Routed || time.Since(started) > 2*time.Second {
+		t.Fatalf("same-node event: routed=%t elapsed=%s, want routed without waiting on the node", result.Routed, time.Since(started))
+	}
+}
+
+// A recorded pane.close of the job's pane ends its route even while the snapshot
+// still shows the agent: the event is dropped job_ended and gets no injection.
 func TestRecordedPaneCloseEndsCompletedJobRoute(t *testing.T) {
 	jobs := map[string]*hubJobRecord{"job-x": {HubActiveJob: HubActiveJob{JobID: "job-x", AgentLabel: "lane-a", Pane: "live-pane"}, Node: "node-a", Completed: true}}
 	h, server, agent := relayRegisteredRouteHub(t, t6900Route("lane-a", "job-x"), jobs)
-	h.routePaneProbe = func(context.Context, string, string, string) heldProbe {
-		t.Error("a recorded close must not need a probe")
-		return heldProbe{}
-	}
-	closed := hubNodeCommandResult{Result: json.RawMessage(`{"outcome":"closed"}`)}
+	t6900SetSnapshot(h, t6900Snapshot(h.now(), HubSession{PaneID: "live-pane", Label: "lane-a"}))
+	closed := hubNodeCommandResult{Result: []byte(`{"outcome":"closed"}`)}
 	h.releaseClosedPaneLanes("node-a", nodePaneCloseArgs{PaneID: "live-pane"}, closed, time.Now())
 	h.mu.Lock()
 	gone := h.jobs["job-x"].PaneGone
@@ -88,23 +98,36 @@ func TestRecordedPaneCloseEndsCompletedJobRoute(t *testing.T) {
 	}
 }
 
-// The job's agent does not hold the route's pane: the pane is unlisted, reused by
-// another agent, or the job's label is listed only on another pane. Each ends the
-// route, so the event is dropped job_ended and the pane gets no injection.
+// The job's agent is not on the route's pane. Each case ends the route, so the
+// event is dropped job_ended and the pane gets no injection.
 func TestCompletedRouteEndedWhenJobAgentDoesNotHoldPane(t *testing.T) {
 	cases := []struct {
-		name  string
-		probe heldProbe
+		name string
+		snap func(now time.Time) *hubSessionSnapshotRecord
 	}{
-		{name: "the pane is unlisted", probe: heldProbe{state: heldPaneAbsent, reason: "pane_and_label_not_listed"}},
-		{name: "the pane id is reused by another agent", probe: heldProbe{state: heldPanePresent, row: nodeAgentRow{PaneID: "live-pane", Name: "other-agent"}}},
-		{name: "the job's label is listed on another pane", probe: heldProbe{state: heldPanePresent, row: nodeAgentRow{PaneID: "successor-pane", Name: "lane-a"}}},
+		{name: "the pane is unlisted", snap: func(now time.Time) *hubSessionSnapshotRecord {
+			return t6900Snapshot(now, HubSession{PaneID: "other-pane", Label: "other-agent"})
+		}},
+		{name: "the pane id is reused by another agent", snap: func(now time.Time) *hubSessionSnapshotRecord {
+			return t6900Snapshot(now, HubSession{PaneID: "live-pane", Label: "other-agent"})
+		}},
+		{name: "the job's label is listed on another pane", snap: func(now time.Time) *hubSessionSnapshotRecord {
+			return t6900Snapshot(now, HubSession{PaneID: "successor-pane", Label: "lane-a"})
+		}},
+		{name: "the snapshot is stale", snap: func(now time.Time) *hubSessionSnapshotRecord {
+			return t6900Snapshot(now.Add(-sessionsFindSnapshotMaxAge-time.Second), HubSession{PaneID: "live-pane", Label: "lane-a"})
+		}},
+		{name: "the snapshot is truncated", snap: func(now time.Time) *hubSessionSnapshotRecord {
+			snap := t6900Snapshot(now, HubSession{PaneID: "live-pane", Label: "lane-a"})
+			snap.truncated = true
+			return snap
+		}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			jobs := map[string]*hubJobRecord{"job-x": {HubActiveJob: HubActiveJob{JobID: "job-x", AgentLabel: "lane-a", Pane: "live-pane"}, Node: "node-a", Completed: true}}
 			h, server, agent := relayRegisteredRouteHub(t, t6900Route("lane-a", "job-x"), jobs)
-			h.routePaneProbe = func(context.Context, string, string, string) heldProbe { return test.probe }
+			t6900SetSnapshot(h, test.snap(h.now()))
 			result := t6900Relay(t, h, agent, "lane-a", "ev-not-held")
 			if result.Routed || len(agent.relays) != 0 {
 				t.Fatalf("a pane the job's agent does not hold took a lane event: result=%+v injections=%d", result, len(agent.relays))
@@ -124,9 +147,8 @@ func TestCompletedRouteWithoutLiveAgentIsDroppedAsBefore(t *testing.T) {
 	jobs := map[string]*hubJobRecord{"job-x": {HubActiveJob: HubActiveJob{JobID: "job-x", AgentLabel: "lane-a", Pane: "live-pane"}, Node: "node-a", Completed: true}}
 	h, server, agent := relayRegisteredRouteHub(t, t6900Route("lane-a", "job-x"), jobs)
 	h.mu.Lock()
-	h.nodes["node-a"] = &hubNodeRecord{machineID: "node-a", state: "connected"}
+	h.nodes["node-a"] = &hubNodeRecord{machineID: "node-a", state: "connected", sessionSnapshot: t6900Snapshot(h.now(), HubSession{PaneID: "live-pane", Label: "lane-a"})}
 	h.mu.Unlock()
-	h.routePaneProbe = t6900Occupant
 	result := t6900Relay(t, h, agent, "lane-a", "ev-no-agent")
 	if result.Routed {
 		t.Fatalf("a route with no live agent routed: %+v", result)
@@ -137,21 +159,44 @@ func TestCompletedRouteWithoutLiveAgentIsDroppedAsBefore(t *testing.T) {
 	}
 }
 
-// The verdict is taken per event: each lane event to a completed route asks the
-// node, and no earlier answer is reused.
-func TestCompletedRouteAsksTheNodePerEvent(t *testing.T) {
+// The verdict follows the latest snapshot: held, then not held, then held again.
+func TestCompletedRouteVerdictFollowsLatestSnapshot(t *testing.T) {
 	jobs := map[string]*hubJobRecord{"job-x": {HubActiveJob: HubActiveJob{JobID: "job-x", AgentLabel: "lane-a", Pane: "live-pane"}, Node: "node-a", Completed: true}}
 	h, _, agent := relayRegisteredRouteHub(t, t6900Route("lane-a", "job-x"), jobs)
-	var probes atomic.Int32
-	h.routePaneProbe = func(ctx context.Context, machine, pane, label string) heldProbe {
-		probes.Add(1)
-		return t6900Occupant(ctx, machine, pane, label)
+	held := []HubSession{{PaneID: "live-pane", Label: "lane-a"}}
+	t6900SetSnapshot(h, t6900Snapshot(h.now(), held...))
+	if result := t6900Relay(t, h, agent, "lane-a", "ev-held-1"); !result.Routed {
+		t.Fatalf("held pane: %+v", result)
 	}
-	for i := range 3 {
-		t6900Relay(t, h, agent, "lane-a", fmt.Sprintf("ev-each-%d", i))
+	t6900SetSnapshot(h, t6900Snapshot(h.now()))
+	if result := t6900Relay(t, h, agent, "lane-a", "ev-unlisted"); result.Routed {
+		t.Fatalf("unlisted pane routed: %+v", result)
 	}
-	if got := probes.Load(); got != 3 {
-		t.Fatalf("probes=%d, want one per event", got)
+	t6900SetSnapshot(h, t6900Snapshot(h.now(), held...))
+	if result := t6900Relay(t, h, agent, "lane-a", "ev-held-2"); !result.Routed {
+		t.Fatalf("pane held again: %+v", result)
+	}
+}
+
+// A stale route row names a pane the job's agent does not hold. That ends the
+// event on that route, but must not mark the job's own pane gone: once the row is
+// repointed to the pane the agent holds, the next event is delivered.
+func TestCompletedRouteRepointedToLivePaneDeliversAfterStaleRow(t *testing.T) {
+	jobs := map[string]*hubJobRecord{"job-x": {HubActiveJob: HubActiveJob{JobID: "job-x", AgentLabel: "lane-a", Pane: "live-pane"}, Node: "node-a", Completed: true}}
+	h, _, agent := relayRegisteredRouteHub(t, `{"lanes":{"lane-a":{"machine":"node-a","pane":"old-pane","job":"job-x"}}}`, jobs)
+	t6900SetSnapshot(h, t6900Snapshot(h.now(), HubSession{PaneID: "live-pane", Label: "lane-a"}))
+	if result := t6900Relay(t, h, agent, "lane-a", "ev-stale-row"); result.Routed {
+		t.Fatalf("a stale row routed to a pane the job does not hold: %+v", result)
+	}
+	h.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"node-a","pane":"live-pane","job":"job-x"}}}`)
+	if result := t6900Relay(t, h, agent, "lane-a", "ev-repointed"); !result.Routed {
+		t.Fatalf("after the row was repointed to the live pane, the event must deliver: %+v", result)
+	}
+	h.mu.Lock()
+	gone := h.jobs["job-x"].PaneGone
+	h.mu.Unlock()
+	if gone {
+		t.Fatal("a stale route row marked the job's own pane gone")
 	}
 }
 
@@ -170,32 +215,5 @@ func TestTakeoverRouteDeliversToSuccessorDespiteReapedPredecessor(t *testing.T) 
 	}
 	if got := (<-agent.relays).Pane; got != "successor-pane" {
 		t.Fatalf("injected pane=%q, want successor-pane", got)
-	}
-}
-
-// A stale route row names a pane the job's agent does not hold. That ends the
-// event on that route, but must not mark the job's own pane gone: once the row is
-// repointed to the pane the agent holds, the next event is delivered.
-func TestCompletedRouteRepointedToLivePaneDeliversAfterStaleRow(t *testing.T) {
-	jobs := map[string]*hubJobRecord{"job-x": {HubActiveJob: HubActiveJob{JobID: "job-x", AgentLabel: "lane-a", Pane: "live-pane"}, Node: "node-a", Completed: true}}
-	h, _, agent := relayRegisteredRouteHub(t, `{"lanes":{"lane-a":{"machine":"node-a","pane":"old-pane","job":"job-x"}}}`, jobs)
-	h.routePaneProbe = func(ctx context.Context, machine, pane, label string) heldProbe {
-		if pane == "live-pane" {
-			return t6900Occupant(ctx, machine, pane, label)
-		}
-		return heldProbe{state: heldPaneAbsent, reason: "pane_and_label_not_listed"}
-	}
-	if result := t6900Relay(t, h, agent, "lane-a", "ev-stale-row"); result.Routed {
-		t.Fatalf("a stale row routed to a pane the job does not hold: %+v", result)
-	}
-	h.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"node-a","pane":"live-pane","job":"job-x"}}}`)
-	if result := t6900Relay(t, h, agent, "lane-a", "ev-repointed"); !result.Routed {
-		t.Fatalf("after the row was repointed to the live pane, the event must deliver: %+v", result)
-	}
-	h.mu.Lock()
-	gone := h.jobs["job-x"].PaneGone
-	h.mu.Unlock()
-	if gone {
-		t.Fatal("a stale route row marked the job's own pane gone")
 	}
 }

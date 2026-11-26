@@ -718,18 +718,15 @@ func (h *HubServer) queueLaneRelayPersisted(event hubJobEventPayload, agent *hub
 }
 
 func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (reportRelayRoute, *hubAgent, bool) {
-	routes := loadReportRelayRoutes(h.reportRelayPath)
-	h.refreshCompletedRoutePane(kind, event, routes)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.resolveRelayRouteLocked(kind, event, routes)
+	return h.resolveRelayRouteLocked(kind, event, loadReportRelayRoutes(h.reportRelayPath))
 }
 
 // resolveRelayRouteWithRoutes resolves one event against routes a caller read
 // once, so a decision it makes beside this resolution sees the same lanes file
 // (hk 4220). It takes h.mu exactly as resolveRelayRoute does.
 func (h *HubServer) resolveRelayRouteWithRoutes(kind string, event hubJobEventPayload, routes map[string]reportRelayRoute) (reportRelayRoute, *hubAgent, bool) {
-	h.refreshCompletedRoutePane(kind, event, routes)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.resolveRelayRouteLocked(kind, event, routes)
@@ -801,7 +798,7 @@ func (h *HubServer) laneJobEnded(lane string) bool {
 func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string) bool {
 	if route.Job != "" {
 		if job := h.jobs[route.Job]; job != nil {
-			return jobPaneEndedLocked(job)
+			return h.jobPaneEndedLocked(job, route)
 		}
 		return false
 	}
@@ -810,7 +807,7 @@ func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string
 		if job.AgentLabel != lane || job.Node != route.Machine || job.Pane != route.Pane {
 			continue
 		}
-		if !jobPaneEndedLocked(job) {
+		if !h.jobPaneEndedLocked(job, route) {
 			return false
 		}
 		ended = true

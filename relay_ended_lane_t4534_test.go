@@ -43,9 +43,8 @@ func TestLaneEventToEndedJobLaneIsUndeliverable(t *testing.T) {
 }
 
 // A registered route can outlive its completed job until reap, and its node
-// may still be connected. Once the reap is recorded the pane is proven gone
-// (hk 6900), so the event must not be injected into that pane: it is unrouted,
-// and the sender's row says job_ended.
+// may still be connected. The event must not be injected into that pane: it is
+// unrouted, and the sender's row says job_ended.
 func TestLaneEventToEndedJobLaneWithRegisteredRouteIsNotInjected(t *testing.T) {
 	h, server, _ := deliveryStageHub(t)
 	agent := &hubAgent{machineID: "node-a", relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
@@ -203,6 +202,5 @@ func relayRegisteredRouteHub(t *testing.T, lanes string, jobs map[string]*hubJob
 	h.jobs = jobs
 	h.mu.Unlock()
 	h.reportRelayPath = r20LanesFile(t, lanes)
-	h.routePaneProbe = unreachableRoutePaneProbe
 	return h, server, agent
 }

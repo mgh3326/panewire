@@ -38,7 +38,6 @@ func deliveryStageHub(t *testing.T) (*HubServer, *httptest.Server, *time.Time) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { h.Close() })
-	h.routePaneProbe = unreachableRoutePaneProbe
 	server := httptest.NewServer(h.Handler())
 	t.Cleanup(server.Close)
 	return h, server, &now
