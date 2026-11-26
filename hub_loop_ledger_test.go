@@ -53,6 +53,64 @@ func loopLedgerCountLines(logs *bytes.Buffer, substr string) int {
 	return n
 }
 
+// Missing epochs are the legacy two-field payload. Their never-ticked rows
+// age from the machine's first heartbeat rather than the latest receipt.
+func TestNodeLoopMissingEpochGoesStaleAfterThreeIntervals(t *testing.T) {
+	start := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	now := start
+	h := loopLedgerTestHub(t, &now, nil)
+	loops := &hubNodeLoopsPayload{Date: loopDateOf(start), Epoch: "previous-process", Rows: []hubNodeLoopRow{{
+		Mechanism: string(nodeTaskPaneSweep), IntervalS: int64(10 * time.Second / time.Second),
+	}}}
+	h.observeNodeLoops("machine-a", loops, start)
+	loops.Epoch = ""
+	h.observeNodeLoops("machine-a", loops, start.Add(time.Second))
+
+	now = start.Add(31 * time.Second)
+	hits := h.nodeLoopNoticeHits(now)
+	for _, hit := range hits {
+		if hit.Machine == "machine-a" && hit.Mechanism == loopMechanism(nodeTaskPaneSweep) && strings.Contains(hit.Reason, "intervals") {
+			return
+		}
+	}
+	t.Fatalf("missing-epoch never-ticked loop did not go stale after three intervals: %+v", hits)
+}
+
+func TestNodeLoopEpochStartPersistsAcrossDateAndReports(t *testing.T) {
+	first := time.Date(2026, 11, 18, 23, 59, 50, 0, time.UTC)
+	now := first
+	h := loopLedgerTestHub(t, &now, nil)
+	loops := func(date string) *hubNodeLoopsPayload {
+		return &hubNodeLoopsPayload{Date: date, Epoch: "process-a", Rows: []hubNodeLoopRow{{
+			Mechanism: string(nodeTaskPaneSweep), IntervalS: int64(10),
+		}}}
+	}
+	h.observeNodeLoops("machine-a", loops(loopDateOf(first)), first)
+
+	nextDate := time.Date(2026, 11, 19, 0, 0, 5, 0, time.UTC)
+	now = nextDate
+	h.observeNodeLoops("machine-a", loops(loopDateOf(nextDate)), nextDate)
+	st := h.loopLedger()
+	st.mu.Lock()
+	receipt := st.nodeEpochReceipts["machine-a"]
+	report := st.nodeReports["machine-a"][loopDateOf(nextDate)]["process-a"]
+	st.mu.Unlock()
+	if !receipt.Started.Equal(first) || !report.EpochStarted.Equal(first) {
+		t.Fatalf("same epoch start reset across UTC date: receipt=%v report=%v want %v", receipt.Started, report.EpochStarted, first)
+	}
+
+	later := nextDate.Add(time.Minute)
+	now = later
+	h.observeNodeLoops("machine-a", loops(loopDateOf(later)), later)
+	st.mu.Lock()
+	receipt = st.nodeEpochReceipts["machine-a"]
+	report = st.nodeReports["machine-a"][loopDateOf(later)]["process-a"]
+	st.mu.Unlock()
+	if !receipt.Started.Equal(first) || !report.EpochStarted.Equal(first) {
+		t.Fatalf("later same-epoch report reset Started: receipt=%v report=%v want %v", receipt.Started, report.EpochStarted, first)
+	}
+}
+
 // A store error in the spawn coordinator scan shows in the ledger, logs one
 // line per streak and counts once per streak, and names the mechanism in the
 // daily row and the notice.
