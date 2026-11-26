@@ -85,10 +85,12 @@ row is dropped only when:
 - the pane is gone or holds another occupant, or the lane moved (the lease
   gate: `pane_occupant_gone`, `pane_occupant_changed`, `lease_unverifiable`,
   `lane_rerouted`);
-- the node's own record of the lane's job (`jobs/<lane>/events`) shows the job
-  ended (`job_ended`), checked at every release, so a row is not typed into
-  the pane of an ended job even once it turns idle; a lane with no job record
-  keeps its hold;
+- the node's own record of the lane's job (`jobs/<lane>/events`) shows the
+  job's pane ended after its claim, by a `job.revoked`, `job.lost` or
+  `job.reaped` event (`job_ended`), checked at every release, so a row is not
+  typed into the pane of an ended job even once it turns idle. A `job.completed`
+  alone keeps the hold: the pane lives until its PR merges (hk 6900). A lane
+  with no job record keeps its hold;
 - the `relay.cmd_hold_max` ceiling passes, counted from when the row was held
   (default 24h; set it on the node with `PANEWIRE_RELAY_CMD_HOLD_MAX`, a Go
   duration; a ceiling below the policy wait also caps the first wait). Then the row is dropped as `working_wait_expired`, the design lane

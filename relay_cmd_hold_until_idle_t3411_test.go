@@ -233,7 +233,7 @@ func TestCmdHoldDroppedWhenJobEnded_t3411(t *testing.T) {
 		t.Fatalf("held rows=%+v, want the row kept while the job is live", rows)
 	}
 
-	write("00002-job.completed.json", "job.completed")
+	write("00002-job.revoked.json", "job.revoked")
 	// The next expiry drops the row, so no wait is armed after it.
 	clock.advance(relayCmdHoldRecheck + time.Minute)
 	rig.node.relayBusyManager().releaseWorking(t.Context(), "w1:pW", true)
@@ -526,7 +526,7 @@ func TestCmdHoldDroppedWhenJobEndedBeforeIdle_t3411(t *testing.T) {
 	if err := os.MkdirAll(events, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for name, kind := range map[string]string{"00001-job.claim.json": "job.claim", "00002-job.completed.json": "job.completed"} {
+	for name, kind := range map[string]string{"00001-job.claim.json": "job.claim", "00002-job.revoked.json": "job.revoked"} {
 		body, _ := json.Marshal(map[string]any{"kind": kind, "job_id": t3276Worker, "payload": map[string]any{"agent_label": t3276Worker}})
 		if err := os.WriteFile(filepath.Join(events, name), body, 0o600); err != nil {
 			t.Fatal(err)

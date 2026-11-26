@@ -430,7 +430,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		// are acknowledged without re-POSTing.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
-		if route.jobEnded || (route.Machine == "" && h.laneJobEnded(event.OwnerLane)) {
+		if route.jobEnded || (route.Machine == "" && !h.laneRegistered(event.OwnerLane) && h.laneJobEnded(event.OwnerLane)) {
 			// No pane will ever take this text, so the sender's row says
 			// undeliverable now instead of queued (hk 4534).
 			h.recordInboxStage(key, laneInboxStageDropped, relayDroppedJobEnded, "", "")
@@ -718,15 +718,18 @@ func (h *HubServer) queueLaneRelayPersisted(event hubJobEventPayload, agent *hub
 }
 
 func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (reportRelayRoute, *hubAgent, bool) {
+	routes := loadReportRelayRoutes(h.reportRelayPath)
+	h.refreshCompletedRoutePane(kind, event, routes)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.resolveRelayRouteLocked(kind, event, loadReportRelayRoutes(h.reportRelayPath))
+	return h.resolveRelayRouteLocked(kind, event, routes)
 }
 
 // resolveRelayRouteWithRoutes resolves one event against routes a caller read
 // once, so a decision it makes beside this resolution sees the same lanes file
 // (hk 4220). It takes h.mu exactly as resolveRelayRoute does.
 func (h *HubServer) resolveRelayRouteWithRoutes(kind string, event hubJobEventPayload, routes map[string]reportRelayRoute) (reportRelayRoute, *hubAgent, bool) {
+	h.refreshCompletedRoutePane(kind, event, routes)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.resolveRelayRouteLocked(kind, event, routes)
@@ -790,13 +793,16 @@ func (h *HubServer) laneJobEnded(lane string) bool {
 	return h.laneJobEndedLocked(lane)
 }
 
-// relayRouteJobEndedLocked checks the route's job first, preserving takeover
-// routes whose lane label still names a completed predecessor. A jobless route
-// is matched to a completed lane job only when both still name the same pane.
+// relayRouteJobEndedLocked reports whether a route's pane can take no more lane
+// events: its job has completed and the pane is proven gone (jobPaneEndedLocked).
+// The route's job is checked first, preserving takeover routes whose lane label
+// still names a completed predecessor. A jobless route is matched to a lane job
+// only when both still name the same pane. A completed job whose pane is not
+// yet proven gone keeps its route (hk 6900).
 func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string) bool {
 	if route.Job != "" {
 		if job := h.jobs[route.Job]; job != nil {
-			return job.Completed
+			return jobPaneEndedLocked(job)
 		}
 		return false
 	}
@@ -805,7 +811,7 @@ func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string
 		if job.AgentLabel != lane || job.Node != route.Machine || job.Pane != route.Pane {
 			continue
 		}
-		if !job.Completed {
+		if !jobPaneEndedLocked(job) {
 			return false
 		}
 		ended = true

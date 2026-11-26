@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -214,6 +215,8 @@ func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTra
 		h.jobs[intent.Job] = current
 	} else if current.Node == intent.From && current.Epoch == intent.Epoch && !current.Reassigning {
 		current.Node, current.Epoch, current.Orphaned, current.Completed = next.Node, next.Epoch, false, false
+		// The pane of the new owner is not the pane the old one ended with.
+		current.PaneGone, current.PaneProbedAt = false, time.Time{}
 	} else {
 		h.mu.Unlock()
 		return false

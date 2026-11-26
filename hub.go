@@ -327,7 +327,16 @@ type hubJobRecord struct {
 	Completed bool
 	// LostSettled is set with Completed when the node's final job.lost ended
 	// the job (its hk record is lost). Role admission reads it (hk 5351).
-	LostSettled   bool
+	LostSettled bool
+	// PaneGone is set once the job's pane is proven gone: a reap or close, a
+	// pane.close the hub issued, a lost pane, or a probe that found the pane
+	// unlisted. Completion alone never sets it (relay_route_pane.go). In memory
+	// only: a restarted hub re-proves it with a probe.
+	PaneGone bool
+	// PaneProbedAt is when the last pane probe finished; paneProbing marks one in
+	// flight. Both bound the relay path's probes (relay_route_pane.go).
+	PaneProbedAt  time.Time
+	paneProbing   bool
 	Reassigning   bool
 	FencedNodes   map[string]uint64
 	Reassignments []hubJobReassignment
@@ -760,6 +769,9 @@ type HubServer struct {
 	nodeCommandWait  time.Duration // fixture seam; zero is hubNodeCommandWait.
 	checkoutPullWait time.Duration // fixture seam; zero is hubCheckoutPullWait.
 	nodeAgentsWait   time.Duration // fixture seam; zero is hubNodeAgentsWait.
+	// routePaneProbe replaces the node probe of a completed job's pane (fixture
+	// seam; nil probes the node, relay_route_pane.go).
+	routePaneProbe func(ctx context.Context, machine, pane, agent string) heldProbe
 
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set

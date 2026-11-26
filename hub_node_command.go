@@ -450,6 +450,7 @@ func (h *HubServer) releaseClosedPaneLanes(machine string, args any, result hubN
 	if json.Unmarshal(result.Result, &closed) != nil || (closed.Outcome != nodePaneClosed && closed.Outcome != nodePaneGone) {
 		return
 	}
+	h.markPaneJobsGone(machine, closeArgs.PaneID)
 	h.releasePaneLanes(machine, closeArgs.PaneID, commandStart)
 }
 

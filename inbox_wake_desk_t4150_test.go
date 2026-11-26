@@ -98,10 +98,13 @@ func TestInboxWakeDesignWithEndedJobRouteFallsBackToDesk(t *testing.T) {
 	t4150Routes(t, r, routes)
 	t4150Snapshot(t, r, "w1:design", "w1:desk")
 	r.h.mu.Lock()
+	// A completed job ends its design route once its pane is proven gone, here
+	// by a recorded reap (hk 6900). Completion alone keeps the route.
 	r.h.jobs["ended-design-job"] = &hubJobRecord{
 		HubActiveJob: HubActiveJob{JobID: "ended-design-job", AgentLabel: t3602Design, Pane: "w1:design"},
 		Node:         "host-a",
 		Completed:    true,
+		PaneGone:     true,
 	}
 	r.h.mu.Unlock()
 	got := t4150Event(t, r, t3602Design)

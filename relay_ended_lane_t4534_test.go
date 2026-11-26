@@ -43,14 +43,15 @@ func TestLaneEventToEndedJobLaneIsUndeliverable(t *testing.T) {
 }
 
 // A registered route can outlive its completed job until reap, and its node
-// may still be connected. The event must not be injected into that pane: it is
-// unrouted, and the sender's row says job_ended.
+// may still be connected. Once the reap is recorded the pane is proven gone
+// (hk 6900), so the event must not be injected into that pane: it is unrouted,
+// and the sender's row says job_ended.
 func TestLaneEventToEndedJobLaneWithRegisteredRouteIsNotInjected(t *testing.T) {
 	h, server, _ := deliveryStageHub(t)
 	agent := &hubAgent{machineID: "node-a", relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
 	h.mu.Lock()
 	h.nodes = map[string]*hubNodeRecord{"node-a": {machineID: "node-a", agent: agent, state: "connected"}}
-	h.jobs = map[string]*hubJobRecord{"job-a": {HubActiveJob: HubActiveJob{JobID: "job-a", AgentLabel: "lane-a"}, Completed: true}}
+	h.jobs = map[string]*hubJobRecord{"job-a": {HubActiveJob: HubActiveJob{JobID: "job-a", AgentLabel: "lane-a"}, Completed: true, PaneGone: true}}
 	h.mu.Unlock()
 	h.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"node-a","pane":"completed-pane","job":"job-a"}}}`)
 	event := hubJobEventPayload{JobID: laneEventTransportID("lane-a", "ev-r"), Epoch: 1, OwnerLane: "lane-a", EventID: "ev-r", Text: "approval requested"}
@@ -102,7 +103,7 @@ func TestLaneEventToCompletedTakeoverRouteDoesNotFallbackToPredecessor(t *testin
 		`{"lanes":{"lane-a":{"machine":"node-a","pane":"successor-pane","job":"successor"}}}`,
 		map[string]*hubJobRecord{
 			"predecessor": {HubActiveJob: HubActiveJob{JobID: "predecessor", AgentLabel: "lane-a", Pane: "predecessor-pane"}, Node: "node-a"},
-			"successor":   {HubActiveJob: HubActiveJob{JobID: "successor", AgentLabel: "successor-label", Pane: "successor-pane"}, Node: "node-a", Completed: true},
+			"successor":   {HubActiveJob: HubActiveJob{JobID: "successor", AgentLabel: "successor-label", Pane: "successor-pane"}, Node: "node-a", Completed: true, PaneGone: true},
 		})
 	event := hubJobEventPayload{JobID: laneEventTransportID("lane-a", "ev-completed-successor"), Epoch: 1, OwnerLane: "lane-a", EventID: "ev-completed-successor", Text: "approval requested"}
 	result := h.relayLaneEvent(event, agent)
@@ -159,7 +160,7 @@ func TestLaneEventToUnboundRouteOnCompletedJobPaneIsNotInjected(t *testing.T) {
 	h, server, agent := relayRegisteredRouteHub(t,
 		`{"lanes":{"lane-a":{"machine":"node-a","pane":"old-pane"}}}`,
 		map[string]*hubJobRecord{
-			"old-job": {HubActiveJob: HubActiveJob{JobID: "old-job", AgentLabel: "lane-a", Pane: "old-pane"}, Node: "node-a", Completed: true},
+			"old-job": {HubActiveJob: HubActiveJob{JobID: "old-job", AgentLabel: "lane-a", Pane: "old-pane"}, Node: "node-a", Completed: true, PaneGone: true},
 		})
 	event := hubJobEventPayload{JobID: laneEventTransportID("lane-a", "ev-unbound-ended-pane"), Epoch: 1, OwnerLane: "lane-a", EventID: "ev-unbound-ended-pane", Text: "approval requested"}
 	result := h.relayLaneEvent(event, agent)
@@ -202,5 +203,6 @@ func relayRegisteredRouteHub(t *testing.T, lanes string, jobs map[string]*hubJob
 	h.jobs = jobs
 	h.mu.Unlock()
 	h.reportRelayPath = r20LanesFile(t, lanes)
+	h.routePaneProbe = unreachableRoutePaneProbe
 	return h, server, agent
 }

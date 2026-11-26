@@ -84,10 +84,23 @@ func (manager *relayBusyManager) keepWorkingCmdHold(parent context.Context, item
 	return true
 }
 
+// relayJobPaneEndKind reports whether a job event kind proves the job's pane is
+// gone: a close, a lost pane or a reap (hk 6900). job.completed does not. A
+// worker keeps its pane until its PR merges, so a row held for it waits for the
+// pane to turn idle, as it does for a live job.
+func relayJobPaneEndKind(kind string) bool {
+	switch kind {
+	case "job.revoked", "job.lost", "job.reaped":
+		return true
+	}
+	return false
+}
+
 // relayLaneJobEnded reports whether this node's own record of the job that
-// runs in lane says the job has ended. A worker's job id is its lane. No
-// record, an unreadable one, a lane that is not a job id, or a job that was
-// never claimed proves nothing, and the row keeps its hold up to the ceiling.
+// runs in lane says the job's pane has ended (relayJobPaneEndKind). A worker's
+// job id is its lane. No record, an unreadable one, a lane that is not a job id,
+// or a job that was never claimed proves nothing, and the row keeps its hold up
+// to the ceiling.
 func relayLaneJobEnded(inboxRoot, lane string) bool {
 	if inboxRoot == "" || !hubJobIDPattern.MatchString(lane) {
 		return false
@@ -114,7 +127,7 @@ func relayLaneJobEnded(inboxRoot, lane string) bool {
 		switch kind := event.eventKind(); {
 		case kind == "job.claimed" || kind == "job.claim":
 			claimed, ended = true, false
-		case hubJobEndKind(kind):
+		case relayJobPaneEndKind(kind):
 			ended = claimed
 		}
 	}
