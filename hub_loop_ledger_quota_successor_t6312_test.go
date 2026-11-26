@@ -175,6 +175,42 @@ func TestQuotaPendingSuccessorStaysMadeNotDone_t6312(t *testing.T) {
 	}
 }
 
+// A transient predecessor-record read after a successor was made must leave
+// its daily made/done verdict alone and report the read failure.
+func TestQuotaSuccessorTransientPredecessorReadKeepsMadeNotDone_t6691(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-69-p1")
+	setQuotaLedgerDay(f.hub, time.Now())
+	f.quotaClaimedSuccessor(t, "accepted")
+	f.hub.reconcileQuotaReplacements(t.Context())
+	assertQuotaLadderLedger(t, f.hub, 1, 0)
+
+	f.jobs.failGets = 1
+	f.hub.reconcileQuotaReplacements(t.Context())
+	assertQuotaLadderLedger(t, f.hub, 1, 0)
+	if got := f.hub.loopSnapshot()[loopQuotaLadder].SilentErrors; got != 1 {
+		t.Fatalf("quota_ladder silent_errors=%d, want 1", got)
+	}
+}
+
+// A malformed holder payload makes latestSpawnForJob fail after the successor
+// scan succeeds; that unknown read must preserve the earlier made verdict.
+func TestQuotaSuccessorTransientHolderReadKeepsMadeNotDone_t6691(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-69-p2")
+	setQuotaLedgerDay(f.hub, time.Now())
+	f.quotaClaimedSuccessor(t, "accepted")
+	f.hub.reconcileQuotaReplacements(t.Context())
+	assertQuotaLadderLedger(t, f.hub, 1, 0)
+
+	if _, err := f.hub.inbox.store.db.ExecContext(t.Context(), `UPDATE spawn_operations SET payload='{' WHERE request_id=?`, f.holder.Request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	f.hub.reconcileQuotaReplacements(t.Context())
+	assertQuotaLadderLedger(t, f.hub, 1, 0)
+	if got := f.hub.loopSnapshot()[loopQuotaLadder].SilentErrors; got != 1 {
+		t.Fatalf("quota_ladder silent_errors=%d, want 1", got)
+	}
+}
+
 // A succeeded successor is not pending when a permanent pointer prerequisite
 // cannot be met. These cases used to be re-counted as made on every UTC day.
 func TestQuotaSuccessorWithImpossiblePointerIsNotMade_t6676(t *testing.T) {
