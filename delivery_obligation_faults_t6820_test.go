@@ -421,44 +421,55 @@ func TestIdleWakeRevivesOneRowPerWake(t *testing.T) {
 	}
 }
 
-// A drop past its replay window is not revived. Killed by: no age bound.
+// A drop past its replay window is not revived: a wake then asks for nothing,
+// and a request left untaken that long is refused. Killed by: no age bound.
 func TestReviveBoundedByDropAge(t *testing.T) {
-	for _, taken := range []bool{false, true} {
-		t.Run(strconv.FormatBool(taken), func(t *testing.T) {
-			rig := newT6384Rig(t)
-			d := rig.send("lane-a", "old-drop")
-			t6820Report(t, rig, d, t6820Working)
-			rig.pass(0)
-			if taken {
-				t6820RequestWithoutPass(rig, d.Pane, 1)
-			}
-			rig.pass(relayReplayMaxAge + time.Minute)
-			if !taken {
-				t6820Idle(rig, d.Pane, 1)
-				if c := t6820CountsOf(t, rig, d.EventID); c.requested != 0 {
-					t.Fatalf("an aged drop was asked for: %+v", c)
-				}
-			}
-			// With the request made in time, the pass at the end of the window
-			// still ran it: only a request left untaken that long is refused.
-			want := 0
-			if taken {
-				want = 1
-			}
-			if got := len(t3426Injected(rig.agent)); got > want {
-				t.Fatalf("queued %d copies", got)
-			}
-		})
-	}
+	t.Run("wake after the window", func(t *testing.T) {
+		rig := newT6384Rig(t)
+		d := rig.send("lane-a", "old-drop")
+		t6820Report(t, rig, d, t6820Working)
+		rig.pass(0)
+		rig.pass(relayReplayMaxAge + time.Minute)
+		t6820Idle(rig, d.Pane, 1)
+		if c := t6820CountsOf(t, rig, d.EventID); c.requested != 0 || len(rig.agent.relays) != 0 {
+			t.Fatalf("an aged drop was asked for: %+v", c)
+		}
+	})
+	t.Run("request outlives the window", func(t *testing.T) {
+		rig := newT6384Rig(t)
+		d := rig.send("lane-a", "request-outlives-window")
+		t6820Report(t, rig, d, t6820Working)
+		t6820RequestWithoutPass(rig, d.Pane, 1)
+		rig.clock.advance(relayReplayMaxAge + time.Minute)
+		rig.pass(0)
+		if c := t6820CountsOf(t, rig, d.EventID); c.requested == 0 || c.revived != 0 || len(rig.agent.relays) != 0 {
+			t.Fatalf("a request past the window was taken: %+v", c)
+		}
+	})
+}
+
+// A row the budget already ended still takes a later fault from the report
+// alone, the drop having never arrived, and so earns its revive. Killed by:
+// recording a fault only on an owed row.
+func TestExhaustedRowTakesALaterFault(t *testing.T) {
 	rig := newT6384Rig(t)
-	d := rig.send("lane-a", "request-outlives-window")
-	t6820Report(t, rig, d, t6820Working)
-	t6820RequestWithoutPass(rig, d.Pane, 1)
-	rig.clock.advance(relayReplayMaxAge + time.Minute)
-	rig.pass(0)
-	if c := t6820CountsOf(t, rig, d.EventID); c.revived != 0 || len(rig.agent.relays) != 0 {
-		t.Fatalf("a request past the window was taken: %+v", c)
+	d := rig.send("lane-a", "exhausted-then-working")
+	for _, wait := range []time.Duration{0, time.Minute} {
+		t6820Report(t, rig, d, t6820ReadFailed)
+		rig.pass(wait)
+		d = rig.injected()
 	}
+	// The third copy is still unreported when the pass finds the budget spent.
+	rig.pass(5 * time.Minute)
+	if o := rig.obligation(d.EventID); o.State != obligationExhausted || o.Spent != relayReplayMaxAttempts || o.Fault != relayDroppedPaneReadFailed {
+		t.Fatalf("before the report: %+v", o)
+	}
+	t6820Report(t, rig, d, t6820Drop{report: relayDroppedWorkingExpired})
+	if o := rig.obligation(d.EventID); o.State != obligationExhausted || o.Fault != relayDroppedWorkingExpired {
+		t.Fatalf("after the report: %+v", o)
+	}
+	t6820Idle(rig, d.Pane, 1)
+	rig.injected()
 }
 
 // A revived copy that was never queued gives the revive back, and the next pass
