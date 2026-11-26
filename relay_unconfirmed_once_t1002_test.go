@@ -1,5 +1,8 @@
 package panewire
 
+// These cases pin the no-store compatibility replay. The store-backed cases
+// in delivery_obligation_retry_test.go exercise the replacement path.
+//
 // #1002: a relay row whose pane submission could not be proven
 // (relay.unconfirmed) is replayed at most once after a hub restart, visibly
 // labelled with its original send time, and retired whatever that replay's

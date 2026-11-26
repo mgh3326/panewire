@@ -268,7 +268,7 @@ func TestQuietReplayHandling(t *testing.T) {
 				if mode == "ordinary" {
 					h.replayRelayEvent(record, "startup")
 				} else {
-					h.replayMarkedUnconfirmed(context.Background(), record, "startup", false)
+					exerciseUnconfirmedPass(t, h, record)
 				}
 			}
 			replay(h)

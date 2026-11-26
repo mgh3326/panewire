@@ -111,7 +111,7 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 	}
 	delete(h.relayHeld, released.OriginalEventID)
 	if pendingExists {
-		pending.held, pending.armed = false, false
+		pending.held, pending.armToken = false, nil
 		h.relayControl.relayPending[key] = pending
 	}
 	go h.armRelayAckEvent(released.OriginalEventID, released.JobID)
@@ -126,22 +126,23 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 // a window bound to this machine and pane — the pane is part of the lease
 // the node itself reported, so a drop naming another pane is inconsistent
 // with its own held report, not with a lane move (#989).
-func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayload) bool {
+func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayload) (relayPending, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if held, exists := h.relayHeld[dropped.OriginalEventID]; exists && (held.Machine != machine || held.Pane != dropped.Pane) {
-		return false
+		return relayPending{}, false
 	}
 	key := relayPendingKey(dropped.OriginalEventID, dropped.JobID)
-	if pending, exists := h.relayControl.relayPending[key]; exists && (pending.machine != machine || pending.pane != dropped.Pane) {
-		return false
+	pending, exists := h.relayControl.relayPending[key]
+	if exists && (pending.machine != machine || pending.pane != dropped.Pane) {
+		return relayPending{}, false
 	}
 	delete(h.relayHeld, dropped.OriginalEventID)
 	// A dropped lease will never emit relay.released, so its ack window would
 	// otherwise sit held=true forever. The durable row is deliberately left
 	// undelivered; replay re-registers a fresh pending entry when it retries.
 	h.cancelRelayPendingLocked(dropped.OriginalEventID, dropped.JobID)
-	return true
+	return pending, true
 }
 
 // forgetRelayHeld drops the held projection for an event a node reports as

@@ -4,8 +4,7 @@ package panewire
 // docs/r20-relay-persistence.md, "Delivery obligations"). The relay path
 // creates an obligation once handoffkeep holds the row. A pass that Sweep
 // starts adopts the undelivered rows that have none, then closes obligations
-// from stored facts. It types nothing, retries nothing, notifies nobody and
-// writes nothing to handoffkeep.
+// from stored facts and retries scheduled unconfirmed deliveries.
 
 import (
 	"context"
@@ -125,7 +124,7 @@ func (s *obligationSweep) close() {
 }
 
 // startObligationReconcile runs one pass in the background unless one is
-// running. It takes no replay lock: it changes only the obligation tables.
+// running. Retry ownership is in the store, so it takes no replay lock.
 func (h *HubServer) startObligationReconcile() {
 	if h.inbox == nil || h.handoffkeep == nil || !h.obligations.mu.TryLock() {
 		return
@@ -283,6 +282,14 @@ func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, re
 		if released {
 			return store.closeObligation(ctx, o.id, obligationSettled, obligationSettledDigest, now)
 		}
+	}
+	// An in-process working expiry keeps the existing idle-wake trigger.
+	// After a restart the memory entry is gone, so restore the old restart
+	// fallback through the scheduled retry.
+	waitingForIdle := o.fault == relayDroppedWorkingExpired && o.lastFaultAt >= h.startedAt.UnixMilli()
+	if own && o.state == obligationOwed && o.fault != "" && !waitingForIdle {
+		_, err := h.retryObligation(ctx, o, record, now, obligationRetrySource)
+		return err
 	}
 	wait := obligationRecheck(now.Sub(time.UnixMilli(o.createdAt)))
 	if o.state != obligationOwed {

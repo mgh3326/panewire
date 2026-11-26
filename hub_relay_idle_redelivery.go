@@ -148,16 +148,38 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 		restore("applied_report_pending")
 		return
 	}
+	key := relayEventDedupeKey(record.Kind, relayEventFromRecord(record))
+
+	if h.inbox != nil {
+		store := h.inbox.store
+		o, err := store.retryObligationForKey(ctx, key)
+		if err != nil {
+			restore("obligation_read_failed")
+			return
+		}
+		if o.state != obligationOwed || o.labelled > 0 || record.DeliveredAt != "" {
+			return
+		}
+		now := h.now().UTC()
+		if o.nextAt > now.UnixMilli() {
+			restore("obligation_retry_not_due")
+			return
+		}
+		finished, err := h.retryObligation(ctx, o, record, now, relayReplaySourceIdle)
+		if err != nil || !finished {
+			restore("obligation_retry_deferred")
+		}
+		return
+	}
 	// The original send's injection claim outlives the node's drop: nothing
 	// releases it until a restart. That send is over, so its claim is released
 	// here and the replay takes it again; a claim another row holds stays.
-	key := relayEventDedupeKey(record.Kind, relayEventFromRecord(record))
 	h.mu.Lock()
 	if h.relayDedupe[key] == record.ID {
 		delete(h.relayDedupe, key)
 	}
 	h.mu.Unlock()
-	h.replayMarkedUnconfirmed(ctx, record, relayReplaySourceIdle, false)
+	h.replayLegacyUnconfirmed(ctx, record, relayReplaySourceIdle, false)
 	// The replay reports nothing back. It spends a row by closing it (the
 	// retire it writes before anything is queued, or a delivery), so a row
 	// still open afterwards was not spent: a failed retire, a failed re-read,

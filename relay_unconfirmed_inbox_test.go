@@ -1,14 +1,10 @@
 package panewire
 
-// A relay row whose pane submission was not proven gets one labelled replay
-// after a hub restart (#1002). When the lane inbox already shows the event to
-// the receiver — delivered, read, acked or superseded — that replay is spent
-// on nothing: the row and its marker retire without a pane injection.
+// Inbox evidence settles an unconfirmed obligation without a pane injection.
 
 import (
 	"context"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +21,7 @@ type unconfirmedInboxRig struct {
 }
 
 // unconfirmedInboxStart sends one must-ack READY through the inbox, has the
-// node report its submission unproven (which writes the marker), applies the
+// node report its submission unproven, applies the
 // inbox state, and returns the rig with the first hub closed.
 func unconfirmedInboxStart(t *testing.T, state string) *unconfirmedInboxRig {
 	t.Helper()
@@ -39,7 +35,7 @@ func unconfirmedInboxStart(t *testing.T, state string) *unconfirmedInboxRig {
 	directive := holdReceive(t, a)
 	rig.row = directive.EventID
 	if !h.markRelayEventUnconfirmed(relayPending{eventID: rig.row, kind: "lane.event", event: rig.event}) {
-		t.Fatal("the unconfirmed marker was not written")
+		t.Fatal("the retry was not scheduled")
 	}
 	store := h.inbox.store
 	key := relayEventDedupeKey("lane.event", rig.event)
@@ -96,32 +92,21 @@ func (rig *unconfirmedInboxRig) restart(t *testing.T) (*HubServer, *hubAgent) {
 	rig.hub = h
 	h.replayUndeliveredRelayEvents(context.Background())
 	h.replayUndeliveredLaneEvents(context.Background())
+	h.reconcileObligations(t.Context())
 	return h, a
 }
 
-func (rig *unconfirmedInboxRig) markerRow(t *testing.T) int64 {
+func wantUnconfirmedSettlement(t *testing.T, h *HubServer, fake *fakeHandoffkeep, id int64, reason string) {
 	t.Helper()
-	rig.fake.mu.Lock()
-	defer rig.fake.mu.Unlock()
-	for _, row := range rig.fake.rows {
-		if row.OwnerLane == relayUnconfirmedMarkLane {
-			return row.ID
+	for _, o := range t6384Obligations(t, h.inbox.store) {
+		if o.RelayID == id {
+			if o.State != obligationSettled || o.SettleReason != reason || fake.deliveredToFor(id) != "" {
+				t.Fatalf("obligation=%+v, durable destination=%q", o, fake.deliveredToFor(id))
+			}
+			return
 		}
 	}
-	t.Fatal("no unconfirmed marker row")
-	return 0
-}
-
-func (rig *unconfirmedInboxRig) retiredWrites(id int64) int {
-	rig.fake.mu.Lock()
-	defer rig.fake.mu.Unlock()
-	n := 0
-	for _, call := range rig.fake.calls {
-		if call.Method == "POST" && strings.Contains(call.Path, "/"+strconv.FormatInt(id, 10)+"/delivered") && strings.HasPrefix(asString(call.Body["pane"]), relayReplayRetiredPane) {
-			n++
-		}
-	}
-	return n
+	t.Fatalf("missing obligation for row %d", id)
 }
 
 func TestUnconfirmedReplaySkipsEventTheInboxAlreadyDelivered(t *testing.T) {
@@ -132,17 +117,11 @@ func TestUnconfirmedReplaySkipsEventTheInboxAlreadyDelivered(t *testing.T) {
 			if len(a.relays) != 0 {
 				t.Fatalf("a row the inbox shows as %s was injected: %q", state, (<-a.relays).Text)
 			}
-			if got := rig.fake.deliveredToFor(rig.row); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedInboxRetireReason {
-				t.Fatalf("row delivered_to = %q", got)
-			}
-			if got := rig.fake.deliveredToFor(rig.markerRow(t)); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedMarkRetireReason {
-				t.Fatalf("marker delivered_to = %q", got)
-			}
-			// A second restart finds nothing left to replay or retire.
-			h.replayUndeliveredRelayEvents(context.Background())
-			h.replayUndeliveredLaneEvents(context.Background())
-			if len(a.relays) != 0 || rig.retiredWrites(rig.row) != 1 {
-				t.Fatalf("second walk acted: injects=%d retire writes=%d", len(a.relays), rig.retiredWrites(rig.row))
+			wantUnconfirmedSettlement(t, h, rig.fake, rig.row, obligationSettledInbox)
+			h.replayUndeliveredRelayEvents(t.Context())
+			h.reconcileObligations(t.Context())
+			if len(a.relays) != 0 {
+				t.Fatal("second pass injected a settled row")
 			}
 		})
 	}
@@ -160,7 +139,7 @@ func TestUnconfirmedReplayStillReplaysOnceWhenTheInboxHoldsNothingDelivered(t *t
 			if !strings.HasPrefix(directive.Text, "[replayed after hub restart - first sent ") {
 				t.Fatalf("replay carries no label: %q", directive.Text)
 			}
-			if got := rig.fake.deliveredToFor(rig.row); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedRetireReason {
+			if got := rig.fake.deliveredToFor(rig.row); got != "" {
 				t.Fatalf("row delivered_to = %q", got)
 			}
 			h.replayUndeliveredRelayEvents(context.Background())
@@ -169,5 +148,23 @@ func TestUnconfirmedReplayStillReplaysOnceWhenTheInboxHoldsNothingDelivered(t *t
 				t.Fatal("the row was replayed a second time")
 			}
 		})
+	}
+}
+
+// exerciseUnconfirmedPass sets up the same durable fault as a live report,
+// using a pre-existing relay row fixture.
+func exerciseUnconfirmedPass(t *testing.T, h *HubServer, record handoffkeepRelayEvent) {
+	t.Helper()
+	event := relayEventFromRecord(record)
+	o := newDeliveryObligation{key: relayEventDedupeKey(record.Kind, event), relayID: record.ID, kind: record.Kind, lane: record.OwnerLane, attempts: record.Attempts}
+	if err := h.inbox.store.flagObligationRetry(t.Context(), o, obligationFaultUnconfirmed, "", h.now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := h.inbox.store.retryObligationForKey(t.Context(), o.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.classifyObligation(t.Context(), opened, record, h.now().UTC()); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -17,13 +17,11 @@ type relayPending struct {
 	// eventID is the handoffkeep row this injection came from. It lives only
 	// for the acknowledgement window; the hub stays stateless about relays.
 	eventID int64
-	// kind and event are retained for the same window so an expiry can record
-	// the spent attempt the only way the contract allows: a re-POST of this
-	// exact row. Nothing else reads them.
-	kind  string
-	event hubJobEventPayload
-	armed bool
-	held  bool
+	// Expiry and node reports use the original event's durable identity.
+	kind     string
+	event    hubJobEventPayload
+	armToken *byte
+	held     bool
 }
 
 func relayPendingKey(eventID int64, jobID string) string {
@@ -66,15 +64,16 @@ func (h *HubServer) armRelayAckEvent(eventID int64, jobID string) {
 	key := relayPendingKey(eventID, jobID)
 	h.mu.Lock()
 	pending, exists := h.relayControl.relayPending[key]
-	if !exists || pending.armed || pending.held {
+	if !exists || pending.armToken != nil || pending.held {
 		h.mu.Unlock()
 		return
 	}
-	pending.armed = true
+	token := new(byte)
+	pending.armToken = token
 	h.relayControl.relayPending[key] = pending
 	timeout := h.relayControl.relayAckTimeout
 	h.mu.Unlock()
-	time.AfterFunc(timeout, func() { h.expireRelayAck(key) })
+	time.AfterFunc(timeout, func() { h.expireRelayAckWindow(key, token) })
 }
 
 func (h *HubServer) forgetRelayAckEvent(eventID int64, jobID string) {
@@ -84,6 +83,10 @@ func (h *HubServer) forgetRelayAckEvent(eventID int64, jobID string) {
 }
 
 func (h *HubServer) expireRelayAck(key string) {
+	h.expireRelayAckWindow(key, nil)
+}
+
+func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 	h.mu.Lock()
 	pending, isPending := h.relayControl.relayPending[key]
 	if !isPending {
@@ -96,7 +99,7 @@ func (h *HubServer) expireRelayAck(key string) {
 			}
 		}
 	}
-	if pending.held {
+	if pending.held || (token != nil && pending.armToken != token) {
 		h.mu.Unlock()
 		return
 	}
@@ -104,18 +107,40 @@ func (h *HubServer) expireRelayAck(key string) {
 		h.mu.Unlock()
 		return
 	}
-	delete(h.relayControl.relayPending, key)
-	h.mu.Unlock()
-	// Every expired window spends an attempt and releases its lane.event claim.
-	// relayTimeouts only suppresses duplicate operator broadcasts below.
-	h.recordRelayAttempt(pending)
-	if pending.kind == "lane.event" {
-		// lanePersisted still remembers the durable row for source ACK recovery,
-		// but this active injection claim must be released so a later node hello
-		// can retry without a hub restart.
-		h.forgetRelayEvent(relayEventDedupeKey("lane.event", pending.event))
+	if h.inbox == nil {
+		delete(h.relayControl.relayPending, key)
+		h.mu.Unlock()
+		h.recordRelayAttempt(pending)
+		if pending.kind == "lane.event" {
+			h.forgetRelayEvent(relayEventDedupeKey(pending.kind, pending.event))
+		}
+		h.mu.Lock()
+	} else {
+		// Take over the timer while persistence is in progress. If an ack or
+		// release changes the window meanwhile, leave its newer state alone.
+		token = new(byte)
+		pending.armToken = token
+		h.relayControl.relayPending[key] = pending
+		h.mu.Unlock()
+		scheduled := h.scheduleRelayRetry(h.closeCtx, pending, obligationAckTimeout)
+		h.mu.Lock()
+		current, exists := h.relayControl.relayPending[key]
+		if !exists || current.armToken != token || current.held {
+			h.mu.Unlock()
+			return
+		}
+		if !scheduled {
+			timeout := h.relayControl.relayAckTimeout
+			h.mu.Unlock()
+			if h.closeCtx.Err() == nil {
+				time.AfterFunc(timeout, func() { h.expireRelayAckWindow(key, token) })
+			}
+			return
+		}
+		delete(h.relayControl.relayPending, key)
+		delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
 	}
-	h.mu.Lock()
+
 	broadcast := h.relayControl.rememberRelayTimeout(key)
 	h.mu.Unlock()
 	if !broadcast {
@@ -195,16 +220,14 @@ func (h *HubServer) findRelayPendingLocked(machineID string, ack relayAckPayload
 }
 
 // peekRelayPending resolves the window an unconfirmed report binds to and
-// keeps it live until its caller has written the durable mark.
+// keeps it live while its caller persists the fault.
 func (h *HubServer) peekRelayPending(machineID string, ack relayAckPayload) (string, relayPending, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.findRelayPendingLocked(machineID, ack)
 }
 
-// consumeRelayPending retires the window a peek resolved, once the durable
-// mark is on record. A window whose mark write failed stays consumed by its
-// caller's choice; the row then keeps today's replay behaviour.
+// consumeRelayPending retires a window after the caller persists the fault.
 func (h *HubServer) consumeRelayPending(key string) {
 	h.mu.Lock()
 	delete(h.relayControl.relayPending, key)

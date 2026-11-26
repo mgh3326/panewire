@@ -409,6 +409,10 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.recordInboxDelivered(key, "", "")
 		return relayLaneEventResult{ID: stored.ID, AlreadyDelivered: true}
 	}
+	if status == http.StatusOK && h.relayRetryIsManaged(key, stored.ID) {
+		h.forgetRelayEvent(key)
+		return relayLaneEventResult{ID: stored.ID, Duplicate: true}
+	}
 	if route.Sink {
 		if err := h.handoffkeep.markDelivered(ctx, stored.ID, relaySinkMachine, "sink:"+event.OwnerLane); err != nil {
 			h.logger.Warn("sink relay delivery was not recorded", "event_id", stored.ID, "lane", event.OwnerLane)
@@ -511,6 +515,11 @@ func (h *HubServer) relayJobEventFromContext(ctx context.Context, senderMachine,
 		h.queueRelayPersisted(kind, event, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID)
 		h.broadcastRelayAlreadyDelivered(kind, event, stored)
 		h.recordInboxDelivered(key, "", "")
+		return
+	}
+	if status == http.StatusOK && stored.EventID == event.EventID && h.relayRetryIsManaged(key, stored.ID) {
+		h.queueRelayPersisted(kind, event, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID)
+		h.forgetRelayEvent(key)
 		return
 	}
 	h.injectRelayEvent(kind, event, route, destinationAgent, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID, key)
@@ -848,8 +857,12 @@ func (h *HubServer) injectLaneRelayEvent(event hubJobEventPayload, route reportR
 	if h.refuseInboxOnlyBody("lane.event", event, eventID, key) {
 		return false
 	}
+	return h.queueLaneRelayDirective(event, route, agent, eventID, key, h.inboxRelayDirective("lane.event", event, route, eventID))
+}
+
+func (h *HubServer) queueLaneRelayDirective(event hubJobEventPayload, route reportRelayRoute, agent *hubAgent, eventID int64, key string, directive hubRelayInjectEvent) bool {
 	h.registerRelayAckEvent("lane.event", event, route.Machine, route.Pane, eventID)
-	if !agent.queueRelay(h.inboxRelayDirective("lane.event", event, route, eventID)) {
+	if !agent.queueRelay(directive) {
 		h.forgetRelayEvent(key)
 		h.forgetRelayAckEvent(eventID, event.JobID)
 		h.broadcastRelayUnrouted(event)
@@ -1383,11 +1396,8 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 }
 
 // replayUndeliveredRelayRows is the shared listing walk for the startup and
-// hello replays. It first collects the live unconfirmed marks (#1002), then
-// walks the undelivered pages: marker rows settle, marked rows get their one
-// labelled replay, and every other row takes the ordinary replay unchanged.
-// A mark scan failure aborts the walk rather than letting a marked row fall
-// through to the unbounded ordinary replay.
+// hello replays. Store-backed hubs convert legacy markers into obligations
+// before their origins can fall through to ordinary replay.
 func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source, warnText string) {
 	h.replayMu.RLock()
 	defer h.replayMu.RUnlock()
@@ -1418,9 +1428,15 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 			}
 			switch {
 			case isUnconfirmedMarkRecord(record):
-				h.settleUnconfirmedMarker(ctx, record)
+				if h.inbox == nil {
+					h.settleUnconfirmedMarker(ctx, record)
+				}
 			case marks[record.ID]:
-				h.replayMarkedUnconfirmed(ctx, record, source, digestMarks[record.ID])
+				if h.inbox == nil {
+					h.replayLegacyUnconfirmed(ctx, record, source, digestMarks[record.ID])
+				} else if reason := h.relayReplayRetireReason(record); reason != "" {
+					h.retireRelayReplay(record, reason)
+				}
 			default:
 				h.replayRelayEventCollecting(record, source, gap)
 			}
@@ -1465,6 +1481,9 @@ func (h *HubServer) replayRelayEventCollecting(record handoffkeepRelayEvent, sou
 	}
 	if reason := h.relayReplayRetireReason(record); reason != "" {
 		h.retireRelayReplay(record, reason)
+		return
+	}
+	if h.relayRetryIsManaged(relayEventDedupeKey(record.Kind, event), record.ID) {
 		return
 	}
 	if record.Attempts >= relayReplayMaxAttempts {

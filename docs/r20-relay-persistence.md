@@ -208,7 +208,20 @@ spends an attempt, the hub closes these rows. Each gets a `delivered_to` of
 Legacy `chat-N` rows, written before the operator chat was removed, retire
 at replay (`chat-terminal`) and are never injected.
 
-**An unproven pane submission is replayed at most once (#1002, #1034).** A
+**Store-backed retry.** An acknowledgement timeout or an unconfirmed node
+report schedules a delivery obligation. The maintenance sweep can retry while
+the node remains connected. It commits the spent attempt and the next check
+before queueing. A `lane.event` retry carries the existing duplicate-warning
+label and requires handoffkeep to show at least three attempts first. If
+handoffkeep cannot commit that ceiling, the hub queues no copy. A `job.*` retry
+has no label and its attempt update is best-effort. A retry leaves the original
+handoffkeep row undelivered so later delivery proof can still close it.
+
+The startup and node-registration walks convert legacy markers and defer
+scheduled copies to the reconciler. An owed origin keeps its legacy marker
+as a rollback breadcrumb.
+
+**Compatibility with the store disabled.** An unproven pane submission is replayed at most once (#1002, #1034). A
 `relay.unconfirmed` report that matches a live window still retires the
 window, but first writes a durable marker: a `lane.event` row on the
 `hub/unconfirmed` lane — a name that can match neither a real lane nor an
@@ -293,10 +306,6 @@ delivery (hk 4289, step T1: hk 6384). It lives in the hub store, beside
 `lane_inbox`, and shares the inbox item's `event_key` and `relay_id`. The
 handoffkeep row stays the record of the event and of its delivery.
 
-**In this step an obligation only records.** Nothing retries from it, nobody is
-notified, the hub writes nothing to handoffkeep for it, and the replay rules
-above are unchanged.
-
 Four tables, with the same columns on SQLite, Postgres (migration 0040) and
 MySQL (migrations 0033-0036):
 
@@ -350,8 +359,8 @@ holds applies:
   it too.
 - An inbox delivery record counts only once it is a minute old, because the hub
   writes it just before the handoffkeep write that confirms the row.
-- The pass only observes a digest release. Releasing the claims stays with the
-  replay.
+- An unconfirmed digest releases its remaining claims so the next inbox flush
+  can build a fresh digest.
 - handoffkeep folds a job's later round into the first round's row when the
   idempotency key matches. That row then says nothing about the later event, so
   only the inbox rule can close the later obligation.
@@ -363,9 +372,9 @@ a tenth of its age, at least a minute and at most an hour; an exhausted or
 missing one after 4 hours. A failed read ends the pass and is retried after a
 minute.
 
-Two limits of this step: the replay retires a marked row before it queues the
-labelled copy, so that obligation reads `exhausted` even if the copy is then
-confirmed; and a row retired before the hub had obligations gets none.
+An owed row with a scheduled fault uses its durable `spent` and `next_at` for
+the retry budget and backoff. A pre-upgrade row retired as
+`hub/replay-retired:unconfirmed` remains exhausted.
 
 ## The relay kind set
 

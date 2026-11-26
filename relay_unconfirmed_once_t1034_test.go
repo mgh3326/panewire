@@ -1,5 +1,8 @@
 package panewire
 
+// These cases pin the no-store compatibility replay. The store-backed cases
+// in delivery_obligation_retry_test.go exercise the replacement path.
+//
 // #1034: a marked row's one labelled replay is bounded by its durable
 // retire, not by the inject. The retire is written BEFORE the directive is
 // queued — a failed retire spends nothing and defers to the next trigger,
@@ -373,7 +376,7 @@ func TestT1034StalePageDoesNotInject(t *testing.T) {
 	rig.hub.expireRelayAck(relayPendingKey(eventID, directive.JobID))
 
 	// Walk A resumes on its stale page.
-	rig.hub.replayMarkedUnconfirmed(context.Background(), stale, relayReplaySourceStartup, false)
+	rig.hub.replayLegacyUnconfirmed(context.Background(), stale, relayReplaySourceStartup, false)
 	if injects := rig.t1034Labelled(eventID); len(injects) != 0 {
 		t.Fatalf("a stale listing page injected %d more labelled copies of a retired row, want 0", len(injects))
 	}
