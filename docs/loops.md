@@ -45,6 +45,7 @@ the first tick of the next date, then the bucket is dropped.
 Every pass ticks at its top, including passes that find nothing to do.
 `oldest_pending` is the oldest pending spawn's age on the spawn scan; other
 mechanisms report 0 until they observe backlog.
+For node rows, an empty `last_tick` is aged from the hub's first receipt of that process epoch.
 
 ## Silent error paths
 
