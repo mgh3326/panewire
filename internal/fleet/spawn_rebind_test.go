@@ -888,6 +888,49 @@ func TestTakeoverConflictRetryLostAnswerRereadsBeforeRefusing(t *testing.T) {
 	}
 }
 
+func TestTakeoverFailedRereadNoticeWarnsBindingMayHaveCommitted(t *testing.T) {
+	const ancestor = "ancestor-worker"
+	fx := newRebindFixture(t, "spawned", rebindParent)
+	fx.store.records[rebindParent]["parent_job"] = ancestor
+	fx.store.records[ancestor] = map[string]any{"job_id": ancestor, "parent_job": rebindParent}
+	calls := 0
+	fx.rebindOverride = func(body map[string]string) (int, string, bool) {
+		calls++
+		if calls == 1 {
+			fx.bound, fx.claimedBy = ancestor, "ancestor-label"
+			return http.StatusConflict, `{"error":"conflict","reason":"task moved"}`, true
+		}
+		fx.bound, fx.claimedBy = fx.s.Job, fx.s.Label
+		fx.getFail = true
+		return http.StatusServiceUnavailable, `{"error":"unavailable"}`, true
+	}
+	fx.s.Task = "42"
+	fx.s.Inherited = rebindParent
+	fx.a.Config.Hub = map[string]any{"hub_url": "https://hub.example.invalid"}
+	fx.a.Sleep = func(context.Context, time.Duration) error { return nil }
+	if err := fx.a.event(context.Background(), fx.s.Job, "job.spawned", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	fx.a.finishTaskTakeover(context.Background(), &fx.s,
+		client.Task{Lane: "task-lane", Refs: client.TaskRefs{JobID: rebindParent}},
+		"owner", "task-lane", "w:p1", "test-host")
+	if ev := fx.taskRebindEvent(t); ev["status"] != "inherited" {
+		t.Fatalf("event=%v", ev)
+	}
+	for _, call := range fx.f.Calls {
+		args := strings.Join(call.Args, " ")
+		if strings.Contains(args, "TASK_REBIND_FAILED") {
+			for _, want := range []string{"may already have committed", "handoffkeep tasks show 42", "before rebinding by hand"} {
+				if !strings.Contains(args, want) {
+					t.Fatalf("notice missing %q: %s", want, args)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("missing TASK_REBIND_FAILED notice")
+}
+
 func TestTakeoverConcurrentRebindLeavesForeignBinding(t *testing.T) {
 	fx := newRebindFixture(t, "spawned", rebindParent)
 	fx.rebindOverride = func(body map[string]string) (int, string, bool) {

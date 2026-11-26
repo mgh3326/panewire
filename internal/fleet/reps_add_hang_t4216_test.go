@@ -157,6 +157,8 @@ func TestRepAddNewOutcomeStillRecordsWithFreshOriginT4216(t *testing.T) {
 }
 
 func TestRepsAddConflictReturnsClearErrorOnceT4226(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "state")
+	t.Setenv("XDG_STATE_HOME", stateHome)
 	var calls atomic.Int32
 	var origin atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +184,7 @@ func TestRepsAddConflictReturnsClearErrorOnceT4226(t *testing.T) {
 	defer srv.Close()
 
 	store := &BenchStore{hk: &hkQuota{base: srv.URL, token: "test-token", client: &http.Client{Transport: http.DefaultTransport}}, now: time.Now, pendingPath: filepath.Join(t.TempDir(), "reps.json")}
-	a := &App{BenchStore: store, BenchCatalog: func(context.Context) ([]CatalogRow, error) { return nil, nil }}
+	a := &App{Home: t.TempDir(), StateDir: filepath.Join(stateHome, "panewire"), BenchStore: store, BenchCatalog: func(context.Context) ([]CatalogRow, error) { return nil, nil }}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	err := a.repsAdd(ctx, []string{
