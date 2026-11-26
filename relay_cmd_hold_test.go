@@ -13,8 +13,8 @@ func TestRelayLaneJobEndedAcceptsDottedJobID(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{
-		"00001-job.claim.json":   `{"kind":"job.claim"}`,
-		"00002-job.revoked.json": `{"kind":"job.revoked"}`,
+		"00001-job.claim.json":     `{"kind":"job.claim"}`,
+		"00002-job.completed.json": `{"kind":"job.completed"}`,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)

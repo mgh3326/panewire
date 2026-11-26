@@ -430,7 +430,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		// are acknowledged without re-POSTing.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
-		if route.jobEnded || (route.Machine == "" && !h.laneRegistered(event.OwnerLane) && h.laneJobEnded(event.OwnerLane)) {
+		if route.jobEnded || (route.Machine == "" && h.laneJobEnded(event.OwnerLane)) {
 			// No pane will ever take this text, so the sender's row says
 			// undeliverable now instead of queued (hk 4534).
 			h.recordInboxStage(key, laneInboxStageDropped, relayDroppedJobEnded, "", "")
@@ -794,11 +794,10 @@ func (h *HubServer) laneJobEnded(lane string) bool {
 }
 
 // relayRouteJobEndedLocked reports whether a route's pane can take no more lane
-// events: its job has completed and the pane is proven gone (jobPaneEndedLocked).
-// The route's job is checked first, preserving takeover routes whose lane label
-// still names a completed predecessor. A jobless route is matched to a lane job
-// only when both still name the same pane. A completed job whose pane is not
-// yet proven gone keeps its route (hk 6900).
+// events: its job has completed and the job's own agent no longer holds the pane
+// (jobPaneEndedLocked). The route's job is checked first, preserving takeover
+// routes whose lane label still names a completed predecessor. A jobless route is
+// matched to a lane job only when both still name the same pane.
 func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string) bool {
 	if route.Job != "" {
 		if job := h.jobs[route.Job]; job != nil {

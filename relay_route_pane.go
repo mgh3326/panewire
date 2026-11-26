@@ -1,51 +1,41 @@
 package panewire
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
-// A completed job keeps its pane until something ends the pane: a reap or
-// close, a pane.close the hub issued, a lost pane, or a pane the node no
-// longer lists. Completion alone does not end it. A worker's pane stays up
-// until its PR merges, and reviews, findings and design orders still reach it
-// (hk 6900). The contract is in docs/r21-lane-event.md.
+// A completed job keeps its lane route only while its pane is proven to be held
+// by the job's own agent (hk 6900). Completion alone does not keep it: a worker's
+// pane stays up until its PR merges, and reviews and orders still reach it. The
+// contract is in docs/r21-lane-event.md.
 
-// completedPaneProbeTTL bounds how often the relay path asks a node whether a
-// completed job's pane is still listed. A probe that finds the pane present, or
-// cannot be answered, is reused for this long.
-const completedPaneProbeTTL = time.Minute
-
-// jobPaneEndedLocked reports whether a completed job's pane is proven gone, so a
-// lane event on its route can never reach a pane. The caller holds h.mu.
+// jobPaneEndedLocked reports whether a lane event on a route to job can never
+// reach the job's pane. A completed job's pane is ended when a reap, close, lost
+// pane or pane.close recorded it gone, or when the latest probe did not find the
+// job's own agent on the route's pane. The caller holds h.mu.
 func jobPaneEndedLocked(job *hubJobRecord) bool {
-	return job != nil && job.Completed && job.PaneGone
+	return job != nil && job.Completed && (job.PaneGone || !job.paneAlive)
 }
 
-// laneRegistered reports whether the lanes file has a row for lane. A row whose
-// node has no live agent resolves to no route, but its pane may still live, so
-// the route-less drop (laneJobEnded) does not apply to it.
-func (h *HubServer) laneRegistered(lane string) bool {
-	_, ok := loadReportRelayRoutes(h.reportRelayPath)[lane]
-	return ok
+// paneHeldBy reports whether a probe found label as the occupant of pane. A
+// reused pane id, or the label listed on another pane, does not count.
+func paneHeldBy(probe heldProbe, pane, label string) bool {
+	return probe.state == heldPanePresent && pane != "" && label != "" && probe.row.PaneID == pane && probe.row.Name == label
 }
 
-// refreshCompletedRoutePane starts a pane probe for each completed job that a
-// lane.event on routes would be delivered to, while the job's pane is not yet
-// proven gone. The probe runs off the caller's goroutine: a node round trip can
-// wait seconds, and the caller may be the node's own read loop, which carries
-// the probe's reply. The caller must not hold h.mu. The event is decided on the
-// state already recorded; the next event after a probe finds the pane gone
-// gets job_ended.
+// refreshCompletedRoutePane probes the route's pane for each completed job a
+// lane.event on routes would be delivered to, and records whether the job's
+// agent still holds it. It runs before the caller takes h.mu, so the node round
+// trip never holds the lock. The probe is synchronous because its verdict decides
+// the event: a pane the job no longer holds must not receive it. The probe waits
+// on the node, so a lane.event relayed on that node's own read loop waits up to
+// spawnHeldPaneProbeWait and is then dropped (RISKS in the PR).
 func (h *HubServer) refreshCompletedRoutePane(kind string, event hubJobEventPayload, routes map[string]reportRelayRoute) {
 	if kind != "lane.event" {
 		return
 	}
 	route, ok := routes[event.OwnerLane]
-	if !ok || route.Sink || route.Machine == "" || route.Pane == "" {
+	if !ok || route.Sink {
 		return
 	}
-	now := h.now()
 	type candidate struct{ job, label string }
 	var todo []candidate
 	h.mu.Lock()
@@ -56,43 +46,34 @@ func (h *HubServer) refreshCompletedRoutePane(kind string, event hubJobEventPayl
 		if route.Job == "" && (job.AgentLabel != event.OwnerLane || job.Node != route.Machine || job.Pane != route.Pane) {
 			continue
 		}
-		if !job.Completed || job.PaneGone || job.paneProbing {
+		if !job.Completed || job.PaneGone {
 			continue
 		}
-		if !job.PaneProbedAt.IsZero() && now.Sub(job.PaneProbedAt) < completedPaneProbeTTL {
-			continue
-		}
-		job.paneProbing = true
+		// A verdict from an earlier event is never reused: until this probe answers,
+		// the route is ended.
+		job.paneAlive = false
 		todo = append(todo, candidate{job: id, label: job.AgentLabel})
 	}
 	h.mu.Unlock()
+	if route.Machine == "" || route.Pane == "" {
+		return
+	}
 	for _, c := range todo {
-		go h.probeCompletedRoutePane(c.job, route.Machine, route.Pane, c.label)
+		probe := h.probeRoutePane(route.Machine, route.Pane, c.label)
+		h.mu.Lock()
+		if rec := h.jobs[c.job]; rec != nil {
+			rec.paneAlive = paneHeldBy(probe, route.Pane, c.label) && rec.Completed && !rec.PaneGone
+		}
+		h.mu.Unlock()
 	}
 }
 
-// probeCompletedRoutePane asks machine's node whether pane (or label) is still
-// listed and records the answer on the job. Only an answer that the pane is
-// absent proves it gone. Anything else keeps the route, and the probe is retried
-// after completedPaneProbeTTL.
-func (h *HubServer) probeCompletedRoutePane(job, machine, pane, label string) {
-	var probe heldProbe
+// probeRoutePane asks machine's node for the pane the route names.
+func (h *HubServer) probeRoutePane(machine, pane, label string) heldProbe {
 	if h.routePaneProbe != nil {
-		probe = h.routePaneProbe(context.Background(), machine, pane, label)
-	} else {
-		probe = h.probeNodePanes(context.Background(), machine, pane, label)
+		return h.routePaneProbe(context.Background(), machine, pane, label)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	rec := h.jobs[job]
-	if rec == nil {
-		return
-	}
-	rec.paneProbing = false
-	rec.PaneProbedAt = h.now()
-	if probe.state == heldPaneAbsent && rec.Completed {
-		rec.PaneGone = true
-	}
+	return h.probeNodePanes(context.Background(), machine, pane, label)
 }
 
 // markJobPaneGone records that a reap of job on node closed its pane or found it

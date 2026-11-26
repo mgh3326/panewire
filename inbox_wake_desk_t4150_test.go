@@ -116,7 +116,7 @@ func TestInboxWakeDesignWithEndedJobRouteFallsBackToDesk(t *testing.T) {
 // pane is alive. The wake lands on the design pane, not the desk.
 func TestInboxWakeDesignCompletedJobPaneAliveKeepsDesignRoute(t *testing.T) {
 	r := newT3602Rig(t, "default")
-	r.h.routePaneProbe = unreachableRoutePaneProbe
+	r.h.routePaneProbe = t6900Occupant
 	routes := t4150BaseRoutes()
 	routes[t3602Design] = reportRelayRoute{Machine: "host-a", Pane: "w1:design", Job: "done-design-job"}
 	t4150Routes(t, r, routes)
