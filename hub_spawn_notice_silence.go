@@ -232,6 +232,9 @@ func (h *HubServer) ownerModeDecision(n spawnNotification, task hubSpawnTask, re
 	if mode == fleet.OwnerNotifyNever {
 		return ownerDecisionCount
 	}
+	if h.inbox.policy.spawnNoticeMustFix(spawnNoticeOutcomeCause(result)) {
+		return ownerDecisionDeliver
+	}
 	// final: only a failure that cannot be replayed, or a given-up request.
 	if !result.Retryable || spawnNoticeStatus(n.id) == "given_up" {
 		return ownerDecisionDeliver

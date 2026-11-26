@@ -268,6 +268,7 @@ func TestOwnerNotifyFinalSendsOnlyTerminalNotice_5360(t *testing.T) {
 	h, _ := s5360Hub(t, &now)
 	final := []string{fleet.OwnerNotifyArg, fleet.OwnerNotifyFinal}
 	s5360Spawn(t, h, "pw-5360-final-must", final, s5360Retryable("spawn_failed:workspace_unresolved"))
+	s5360Spawn(t, h, "pw-5360-final-retryable", final, s5360Retryable("checkout_refused:locked"))
 	success := hubSpawnOutcome{RC: 0, Host: "rpi", Pane: "w1:p9", Profile: "haiku", Model: "m"}
 	s5360Spawn(t, h, "pw-5360-final-spawned", final, success)
 	lane := success
@@ -279,8 +280,8 @@ func TestOwnerNotifyFinalSendsOnlyTerminalNotice_5360(t *testing.T) {
 	s5360Flush(t, h)
 
 	items := t4270Items(t, h, s5360Owner)
-	if len(items) != 2 {
-		t.Fatalf("final: owner items=%d, want the terminal failure and the given-up request only", len(items))
+	if len(items) != 3 {
+		t.Fatalf("final: owner items=%d, want the must-fix, terminal failure and given-up request", len(items))
 	}
 	for _, item := range items {
 		if strings.Contains(item.Event.Text, "SPAWNED") || strings.Contains(item.Event.Text, "LANE_UNREGISTERED") {
@@ -288,7 +289,7 @@ func TestOwnerNotifyFinalSendsOnlyTerminalNotice_5360(t *testing.T) {
 		}
 	}
 	if n := s5360OwnerSilenced(t, h, now); n != 3 {
-		t.Fatalf("final: silenced=%d, want 3 (must-fix, spawned, unregistered)", n)
+		t.Fatalf("final: silenced=%d, want 3 (other retryable, spawned, unregistered)", n)
 	}
 }
 

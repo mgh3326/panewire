@@ -1698,8 +1698,9 @@ the owner lane of that spawn, whatever the owner's lane class:
 - `never`: the owner gets none of the spawn's notices (`SPAWN_FAILED`,
   `SPAWNED`, `LANE_UNREGISTERED`, `job.completed`, `delivery-unconfirmed`).
   Each is recorded and counted, whatever its cause, must-fix included.
-- `final`: the owner gets only a terminal notice: a failure with `replay=no`,
-  or a given-up request. Every other notice is recorded and counted.
+- `final`: the owner gets a failure with `replay=no`, a given-up request, or a
+  retryable failure whose cause is on `relay.spawn_notice_must_fix`. Every other
+  notice is recorded and counted.
 - absent: the rules above decide.
 
 A `job.completed` withheld by a mode is filed in hk as `filtered:owner-notify:<event id>`:
