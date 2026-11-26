@@ -79,6 +79,28 @@ func TestObligationStoreContract(t *testing.T) {
 			}
 		}
 
+		// A repeated report preserves the pending retry and a stale snapshot
+		// cannot spend the same attempt again.
+		if err := s.flagObligationRetry(ctx, row(third, 3), obligationFaultUnconfirmed, "legacy-marker-3", now); err != nil {
+			t.Fatal(err)
+		}
+		retry, err := s.retryObligationForKey(ctx, third)
+		if err != nil || retry.nextAt != now.UnixMilli() || retry.fault != obligationFaultUnconfirmed {
+			t.Fatalf("scheduled retry=%+v err=%v", retry, err)
+		}
+		for _, want := range []bool{true, false} {
+			got, err := s.spendObligationRetry(ctx, retry, 1, now, now.Add(time.Minute))
+			if err != nil || got != want {
+				t.Fatalf("spend=%v err=%v want=%v", got, err, want)
+			}
+		}
+		if err := s.flagObligationRetry(ctx, row(third, 3), obligationFaultUnconfirmed, "", now); err != nil {
+			t.Fatal(err)
+		}
+		if o, err := s.retryObligationForKey(ctx, third); err != nil || o.spent != retry.spent+1 || o.labelled != 1 || o.nextAt != now.Add(time.Minute).UnixMilli() {
+			t.Fatalf("repeated report changed the attempt: %+v err=%v", o, err)
+		}
+
 		// Inbox evidence joins on the stored event key.
 		item, err := s.put(long, "lane-a", "lane.event", "interrupt", quietEvent("long", "body"), now, 0, 0)
 		if err != nil || !item.Fresh {

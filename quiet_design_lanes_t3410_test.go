@@ -319,7 +319,7 @@ func TestQuietRestartReplaySkipsAckedRowForEveryLane(t *testing.T) {
 		}
 		rowID := holdReceive(t, agent).EventID
 		if !h.markRelayEventUnconfirmed(relayPending{eventID: rowID, kind: "lane.event", event: e}) {
-			t.Fatalf("%s marker was not written", id)
+			t.Fatalf("%s retry was not scheduled", id)
 		}
 		return rowID
 	}
@@ -337,6 +337,7 @@ func TestQuietRestartReplaySkipsAckedRowForEveryLane(t *testing.T) {
 	h2, agent2 := quietHub(t, path, "default", hk, &now)
 	h2.replayUndeliveredRelayEvents(context.Background())
 	h2.replayUndeliveredLaneEvents(context.Background())
+	h2.reconcileObligations(t.Context())
 
 	var replayed []hubRelayInjectEvent
 	for {
@@ -351,7 +352,5 @@ func TestQuietRestartReplaySkipsAckedRowForEveryLane(t *testing.T) {
 	if len(replayed) != 1 || replayed[0].EventID != unconfirmedID || !strings.HasPrefix(replayed[0].Text, "[replayed after hub restart") {
 		t.Fatalf("restart replayed %+v, want only the unconfirmed row %d with the label", replayed, unconfirmedID)
 	}
-	if got := fake.deliveredToFor(ackedID); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedInboxRetireReason {
-		t.Fatalf("acked row delivered_to=%q, want the settled-inbox retire", got)
-	}
+	wantUnconfirmedSettlement(t, h2, fake, ackedID, obligationSettledInbox)
 }

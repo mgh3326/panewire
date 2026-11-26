@@ -191,6 +191,7 @@ func TestInboxRestartSuppressesCompletedAndReplaysUnconfirmedOnce(t *testing.T) 
 			}
 			h2.replayUndeliveredRelayEvents(context.Background())
 			h2.replayUndeliveredLaneEvents(context.Background())
+			h2.reconcileObligations(t.Context())
 			if completion == "unconfirmed" {
 				got := holdReceive(t, a2)
 				if !strings.HasPrefix(got.Text, "[replayed after hub restart") {
@@ -282,7 +283,7 @@ func TestInboxReadMustAckWaitsForAck(t *testing.T) {
 					t.Fatalf("read unacked pruned: n=%d err=%v", n, err)
 				}
 				h.replayRelayEvent(record, relayReplaySourceStartup)
-				h.replayMarkedUnconfirmed(context.Background(), record, relayReplaySourceStartup, false)
+				exerciseUnconfirmedPass(t, h, record)
 				if len(a.relays) != 0 {
 					t.Fatal("read must-ack item was re-injected")
 				}
@@ -295,7 +296,7 @@ func TestInboxReadMustAckWaitsForAck(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.replayRelayEvent(record, relayReplaySourceStartup)
-			h.replayMarkedUnconfirmed(context.Background(), record, relayReplaySourceStartup, false)
+			exerciseUnconfirmedPass(t, h, record)
 			if len(a.relays) != 0 {
 				t.Fatal("acked item was re-injected")
 			}

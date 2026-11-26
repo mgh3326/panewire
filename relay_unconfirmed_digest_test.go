@@ -34,7 +34,7 @@ func digestRow(t *testing.T, fake *fakeHandoffkeep, id int64) handoffkeepRelayEv
 }
 
 // unconfirmedDigestStart escalates two unread inbox items as one batch,
-// reports that batch's pane submission unproven (which writes the marker),
+// reports that batch's pane submission unproven (which schedules reconciliation),
 // and returns the rig with the first hub closed.
 func unconfirmedDigestStart(t *testing.T) *unconfirmedDigestRig {
 	t.Helper()
@@ -86,7 +86,7 @@ func unconfirmedDigestStartClass(t *testing.T, class, wantText string) *unconfir
 	}
 	rig.event = hubJobEventPayload{JobID: row.JobID, Epoch: 1, OwnerLane: row.OwnerLane, EventID: row.EventID, Text: row.Text}
 	if !h.markRelayEventUnconfirmed(relayPending{eventID: rig.batch, kind: "lane.event", event: rig.event}) {
-		t.Fatal("the unconfirmed marker was not written")
+		t.Fatal("the retry was not scheduled")
 	}
 	h.Close()
 	t.Cleanup(func() {
@@ -113,12 +113,7 @@ func TestUnconfirmedDigestIsNotReplayedAndStillUnreadItemsEscalateOnce(t *testin
 	if len(a.relays) != 0 {
 		t.Fatalf("the stale batch was injected: %q", (<-a.relays).Text)
 	}
-	if got := rig.fake.deliveredToFor(rig.batch); got != "hub/"+relayReplayRetiredPane+relayDigestNotReplayedRetireReason {
-		t.Fatalf("batch row delivered_to = %q", got)
-	}
-	if got := rig.fake.deliveredToFor(rig.markerRow(t)); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedMarkRetireReason {
-		t.Fatalf("marker delivered_to = %q", got)
-	}
+	wantUnconfirmedSettlement(t, h, rig.fake, rig.batch, relayDigestNotReplayedRetireReason)
 	h.flushInbox()
 	if len(a.relays) != 1 {
 		t.Fatalf("fresh escalations = %d, want exactly one", len(a.relays))
@@ -131,8 +126,8 @@ func TestUnconfirmedDigestIsNotReplayedAndStillUnreadItemsEscalateOnce(t *testin
 	h.replayUndeliveredRelayEvents(context.Background())
 	h.replayUndeliveredLaneEvents(context.Background())
 	h.flushInbox()
-	if len(a.relays) != 0 || rig.retiredWrites(rig.batch) != 1 {
-		t.Fatalf("second walk acted: injects=%d retire writes=%d", len(a.relays), rig.retiredWrites(rig.batch))
+	if len(a.relays) != 0 {
+		t.Fatalf("second walk injected %d copies", len(a.relays))
 	}
 }
 
@@ -153,9 +148,7 @@ func TestUnconfirmedDigestWithNothingUnreadEscalatesNothing(t *testing.T) {
 	if len(a.relays) != 0 {
 		t.Fatalf("nothing is unread but %q was injected", (<-a.relays).Text)
 	}
-	if got := rig.fake.deliveredToFor(rig.batch); got != "hub/"+relayReplayRetiredPane+relayDigestNotReplayedRetireReason {
-		t.Fatalf("batch row delivered_to = %q", got)
-	}
+	wantUnconfirmedSettlement(t, h, rig.fake, rig.batch, relayDigestNotReplayedRetireReason)
 }
 
 func TestIsDigestBatchNamesStoredBatchesNotHeldOrOrdinaryEvents(t *testing.T) {
@@ -204,15 +197,11 @@ func TestUnconfirmedDigestTheInboxDeliveredIsRetiredAsInboxDelivered(t *testing.
 	if len(a.relays) != 0 {
 		t.Fatalf("a digest the inbox shows delivered was injected: %q", (<-a.relays).Text)
 	}
-	if got := rig.fake.deliveredToFor(rig.batch); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedInboxRetireReason {
-		t.Fatalf("batch row delivered_to = %q", got)
-	}
+	wantUnconfirmedSettlement(t, h, rig.fake, rig.batch, relayUnconfirmedInboxRetireReason)
 }
 
-// With no inbox store open the batch table cannot be read, but the marker
-// written while a store was open says the row was a batch: the real walk
-// injects nothing and spends nothing, and a later run with the store retires
-// the row, releases the items and escalates them once.
+// The no-store replay cannot read the batch table. The handoffkeep ceiling
+// suppresses the copy until the store can release the claims.
 func TestUnconfirmedDigestWithNoInboxStoreIsDeferredUntilTheStoreReturns(t *testing.T) {
 	rig := unconfirmedDigestStart(t)
 	h, a := quietHub(t, "", "off", rig.hk, &rig.now)
@@ -227,13 +216,11 @@ func TestUnconfirmedDigestWithNoInboxStoreIsDeferredUntilTheStoreReturns(t *test
 	if got := rig.fake.deliveredToFor(rig.batch); got != "" {
 		t.Fatalf("the no-store walk spent the batch row: %q", got)
 	}
-	if got := rig.fake.deliveredToFor(rig.markerRow(t)); got != "" {
-		t.Fatalf("the marker retired with its row still pending: %q", got)
-	}
 	h2, a2 := rig.restart(t)
-	if len(a2.relays) != 0 || rig.fake.deliveredToFor(rig.batch) != "hub/"+relayReplayRetiredPane+relayDigestNotReplayedRetireReason {
+	if len(a2.relays) != 0 {
 		t.Fatal("a later run with the store did not retire the batch without a copy")
 	}
+	wantUnconfirmedSettlement(t, h2, rig.fake, rig.batch, obligationSettledDigest)
 	h2.flushInbox()
 	if len(a2.relays) != 1 || !strings.Contains((<-a2.relays).Text, "2 unread inbox items | lane lane-a") {
 		t.Fatal("items released by the later run were not escalated once")
@@ -256,9 +243,7 @@ func TestUnconfirmedInterruptDigestIsNotReplayedAndStillUnackedItemsGetOneFreshD
 	if len(a.relays) != 0 {
 		t.Fatalf("the stale digest was injected: %q", (<-a.relays).Text)
 	}
-	if got := rig.fake.deliveredToFor(rig.batch); got != "hub/"+relayReplayRetiredPane+relayDigestNotReplayedRetireReason {
-		t.Fatalf("digest row delivered_to = %q", got)
-	}
+	wantUnconfirmedSettlement(t, h, rig.fake, rig.batch, relayDigestNotReplayedRetireReason)
 	h.flushInbox()
 	if len(a.relays) != 1 {
 		t.Fatalf("fresh digests = %d, want exactly one", len(a.relays))
@@ -285,16 +270,73 @@ func TestUnconfirmedReplayOfProducerEventNamedLikeADigestIsStillReplayed(t *test
 	h.relayLaneEvent(event, a)
 	row := holdReceive(t, a).EventID
 	if !h.markRelayEventUnconfirmed(relayPending{eventID: row, kind: "lane.event", event: event}) {
-		t.Fatal("the unconfirmed marker was not written")
+		t.Fatal("the retry was not scheduled")
 	}
 	h.Close()
 	h2, a2 := quietHub(t, path, "default", client, &now)
 	h2.replayUndeliveredRelayEvents(context.Background())
 	h2.replayUndeliveredLaneEvents(context.Background())
+	h2.reconcileObligations(t.Context())
 	if len(a2.relays) != 1 {
 		t.Fatalf("injections = %d, want the one labelled replay", len(a2.relays))
 	}
-	if got := fake.deliveredToFor(row); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedRetireReason {
+	if got := fake.deliveredToFor(row); got != "" {
 		t.Fatalf("row delivered_to = %q", got)
+	}
+}
+
+func TestUnconfirmedStaleDigestReleasesClaims(t *testing.T) {
+	for _, mode := range []string{"scheduled", "legacy-marker"} {
+		t.Run(mode, func(t *testing.T) {
+			rig := unconfirmedDigestStart(t)
+			rig.fake.mu.Lock()
+			for _, row := range rig.fake.rows {
+				if row.ID == rig.batch {
+					row.ReceivedAt = rig.now.Format(time.RFC3339)
+				}
+			}
+			rig.fake.mu.Unlock()
+			if mode == "legacy-marker" {
+				markID := unconfirmedMarkEventID(rig.batch) + relayUnconfirmedDigestMarkSuffix
+				marker := t6384Event(relayUnconfirmedMarkLane, markID, "legacy batch mark")
+				_, _, err := rig.hk.appendEvent(t.Context(), handoffkeepRelayEventRequest{
+					Kind: "lane.event", JobID: marker.JobID, Epoch: 1, OwnerLane: marker.OwnerLane,
+					EventID: marker.EventID, Text: marker.Text,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			rig.now = rig.now.Add(relayReplayMaxAge + time.Hour)
+			h, agent := rig.restart(t)
+			if len(agent.relays) != 0 {
+				t.Fatal("the stale batch was injected")
+			}
+			h.flushInbox()
+			if len(agent.relays) != 1 {
+				t.Fatalf("fresh escalations = %d, want one after releasing the stale batch's claims", len(agent.relays))
+			}
+			wantUnconfirmedSettlement(t, h, rig.fake, rig.batch, obligationSettledDigest)
+		})
+	}
+}
+
+func TestUnconfirmedDigestCrossesAgeCutoffDuringReplay(t *testing.T) {
+	rig := unconfirmedDigestStart(t)
+	h, agent := quietHub(t, rig.path, "default", rig.hk, &rig.now)
+	record := digestRow(t, rig.fake, rig.batch)
+	record.ReceivedAt = rig.now.Add(-relayReplayMaxAge + time.Second).Format(time.RFC3339Nano)
+	before := rig.now
+	reads := 0
+	h.now = func() time.Time {
+		reads++
+		if reads == 1 {
+			return before
+		}
+		return before.Add(2 * time.Second)
+	}
+	h.replayRelayEvent(record, relayReplaySourceStartup)
+	if got := rig.fake.deliveredToFor(rig.batch); got != "" || len(agent.relays) != 0 {
+		t.Fatalf("managed batch was handled by ordinary replay: destination=%q queued=%d", got, len(agent.relays))
 	}
 }

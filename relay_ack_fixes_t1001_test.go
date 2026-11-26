@@ -59,7 +59,7 @@ func TestT1001MovedHoldDropRetiresWindow(t *testing.T) {
 	if !held {
 		t.Fatal("the window was not marked held")
 	}
-	dropped := rig.hub.consumeRelayDropped("host-a", relayDroppedPayload{JobID: directive.JobID, Pane: "w1:pB", Lane: t989Lane, OriginalEventID: directive.EventID, Reason: "ttl"})
+	_, dropped := rig.hub.consumeRelayDropped("host-a", relayDroppedPayload{JobID: directive.JobID, Pane: "w1:pB", Lane: t989Lane, OriginalEventID: directive.EventID, Reason: "ttl"})
 	rig.hub.mu.Lock()
 	_, stillPending := rig.hub.relayControl.relayPending[key]
 	rig.hub.mu.Unlock()

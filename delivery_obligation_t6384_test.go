@@ -448,21 +448,13 @@ func TestRetiredRowIsNotConfirmed(t *testing.T) {
 	rig.want(directive.EventID, obligationSettled, "stale")
 }
 
-// The labelled replay this build still sends retires its row first
-// (replay-retired:unconfirmed): that proves nothing, so the obligation is
-// exhausted and stays open. Killed by: settling every replay-retired reason.
+// A pre-upgrade labelled replay retired its row before queueing it. That
+// retirement proves nothing and the obligation stays open for confirmation.
 func TestLegacySpentCopyBecomesExhausted(t *testing.T) {
 	rig := newT6384Rig(t)
 	directive := rig.send("lane-a", "ev-spent")
-	t650Send(t, rig.hub, "host-a", rig.agent, "relay.unconfirmed", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, Reason: "maybe_in_pane", OriginalEventID: directive.EventID})
-	// The marked replay runs after a restart.
-	if err := rig.hub.Close(); err != nil {
+	if err := rig.client.markDelivered(t.Context(), directive.EventID, relayReplayRetiredMachine, relayReplayRetiredPane+relayUnconfirmedRetireReason); err != nil {
 		t.Fatal(err)
-	}
-	rig.start()
-	rig.hub.replayUndeliveredRelayEvents(context.Background())
-	if row := rig.row(directive.EventID); row.DeliveredTo != relayReplayRetiredMarker+relayUnconfirmedRetireReason {
-		t.Fatalf("fixture: the marked replay did not retire the row: %+v", row)
 	}
 	for _, wait := range []time.Duration{time.Minute, obligationParkRecheck + time.Minute} {
 		rig.pass(wait)

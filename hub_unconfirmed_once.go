@@ -1,19 +1,7 @@
 package panewire
 
-// #1002: a relay row whose pane submission could not be proven
-// (relay.unconfirmed) gets at most one labelled replay after a hub restart
-// and is then retired whatever that replay's outcome. The durable mark is a
-// separate marker row because the contract offers no column to set on an
-// existing row: the duplicate POST updates only attempts, and /delivered
-// would remove the row from the undelivered listing before its one replay.
-//
-// The marker is a lane.event row on the unroutable relayUnconfirmedMarkLane
-// with event_id "unconfirmed-mark-<row id>". While the marker is undelivered
-// the row it names is pending one labelled replay; the marked row itself
-// stays an ordinary undelivered row, so a late relay.delivered still closes
-// it under the real machine/pane and a node resend still re-injects it. The
-// replay retires the marked row with hub/replay-retired:unconfirmed and the
-// marker with hub/replay-retired:unconfirmed-mark.
+// Legacy handoffkeep marker decoding and the no-store compatibility replay.
+// Store-backed hubs schedule retries on delivery_obligations.
 
 import (
 	"context"
@@ -33,14 +21,6 @@ func isUnconfirmedMarkRecord(record handoffkeepRelayEvent) bool {
 
 func unconfirmedMarkEventID(rowID int64) string {
 	return relayUnconfirmedMarkEventPrefix + strconv.FormatInt(rowID, 10)
-}
-
-// unconfirmedDigestMarkEventID names the marker of a row that was an inbox
-// digest or escalation batch when it was marked. The fact travels on the
-// marker so a walk with no inbox store open can still tell the row must not
-// be replayed as an ordinary event.
-func unconfirmedDigestMarkEventID(rowID int64) string {
-	return unconfirmedMarkEventID(rowID) + relayUnconfirmedDigestMarkSuffix
 }
 
 func unconfirmedMarkIsDigest(eventID string) bool {
@@ -81,23 +61,24 @@ func relayUnconfirmedLabel(record handoffkeepRelayEvent) string {
 	return "[replayed after hub restart - first sent " + stamp + " - may be a duplicate, do not re-run] "
 }
 
-// markRelayEventUnconfirmed writes the durable marker for the row a live
-// ack window names, before the window itself is retired: a hub crash between
-// the two steps loses nothing — the mark is already durable, and the still-
-// live window simply marks idempotently on a repeated report. It reports
-// whether the window may be retired: true once the mark is durable and also
-// when there is nothing to mark (no durable row, an unknown row, an already
-// delivered row, or no store at all — the window's old outcome). Only a mark
-// that was needed and could not be written returns false, and the handler
-// then keeps the window so a repeated report — or the ack timeout — decides,
-// like any other live window (#1034).
 func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
-	return h.markRelayEventUnconfirmedContext(context.Background(), pending)
+	return h.scheduleRelayRetry(context.Background(), pending, obligationFaultUnconfirmed) != relayFaultFailed
 }
 
-func (h *HubServer) markRelayEventUnconfirmedContext(ctx context.Context, pending relayPending) bool {
+// scheduleRelayRetry records the fault before the live window can be removed.
+// A lookup or persistence failure keeps a node-reported window eligible for
+// a repeated report, acknowledgement or timeout.
+type relayFaultWrite uint8
+
+const (
+	relayFaultFailed relayFaultWrite = iota
+	relayFaultUnneeded
+	relayFaultScheduled
+)
+
+func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending, fault string) relayFaultWrite {
 	if h.handoffkeep == nil {
-		return true
+		return relayFaultUnneeded
 	}
 	eventID := pending.eventID
 	if eventID == 0 && pending.kind != "" {
@@ -118,7 +99,7 @@ func (h *HubServer) markRelayEventUnconfirmedContext(ctx context.Context, pendin
 		record, found, err := h.relayEventByTransportID(ctx, pending.event.JobID)
 		if err != nil {
 			h.logger.Warn("relay unconfirmed transport lookup failed", "job", pending.event.JobID, "error_class", hubHKReadErrorClass(err))
-			return false
+			return relayFaultFailed
 		}
 		if found {
 			eventID = record.ID
@@ -126,7 +107,7 @@ func (h *HubServer) markRelayEventUnconfirmedContext(ctx context.Context, pendin
 	}
 	if eventID == 0 {
 		h.logger.Warn("relay unconfirmed named no durable row", "job", pending.event.JobID, "kind", pending.kind, "machine", pending.machine, "pane", pending.pane)
-		return true
+		return relayFaultUnneeded
 	}
 	record, found, err := h.handoffkeep.relayEvent(ctx, eventID)
 	if err != nil {
@@ -134,30 +115,54 @@ func (h *HubServer) markRelayEventUnconfirmedContext(ctx context.Context, pendin
 		// was written: the window is kept for a repeated report, like a
 		// failed marker POST.
 		h.logger.Warn("relay unconfirmed mark could not be read", "event_id", eventID, "error_class", hubHKReadErrorClass(err))
-		return false
+		return relayFaultFailed
 	}
 	if !found {
 		h.logger.Warn("relay unconfirmed named an unknown durable row", "event_id", eventID)
-		return true
+		return relayFaultUnneeded
 	}
-	if record.DeliveredAt != "" {
-		// The row already closed — typically the second unconfirmed on a row
-		// the one labelled replay just retired. There is nothing to mark.
-		return true
+	if record.DeliveredAt != "" || (h.inbox != nil && pending.kind != "lane.event" && record.EventID != pending.event.EventID) {
+		return relayFaultUnneeded
+	}
+	if h.inbox != nil {
+		o := newDeliveryObligation{
+			key: relayEventDedupeKey(pending.kind, pending.event), relayID: record.ID,
+			kind: pending.kind, lane: pending.event.OwnerLane, machine: pending.machine, pane: pending.pane,
+			attempts: record.Attempts,
+		}
+		store := h.inbox.store
+		if err := store.flagObligationRetry(ctx, o, fault, "", h.now().UTC()); err != nil {
+			h.logger.Warn("relay retry could not be scheduled", "event_id", record.ID, "error", store.loggable("schedule retry", err))
+			return relayFaultFailed
+		}
+		if record.Kind == "lane.event" {
+			// Establish rollback protection before accepting a maybe-typed
+			// report. Seed spent first, while attempts still counts sends.
+			batch, err := store.isDigestBatch(record.OwnerLane, record.EventID)
+			if err != nil {
+				h.logger.Warn("relay unconfirmed batch lookup failed", "event_id", record.ID)
+				return relayFaultFailed
+			}
+			needsProtection := fault != obligationAckTimeout || batch
+			if !needsProtection {
+				tracked, err := store.retryObligationForKey(ctx, o.key)
+				if err != nil {
+					h.logger.Warn("relay retry fault could not be read", "event_id", record.ID, "error", store.loggable("retry fault", err))
+					return relayFaultFailed
+				}
+				// An earlier explicit report can have persisted its fault
+				// while handoffkeep refused the rollback protection.
+				needsProtection = tracked.state == obligationOwed && tracked.fault != obligationAckTimeout
+			}
+			if needsProtection {
+				if _, ok := h.bumpObligationAttempts(ctx, record, reportRelayRoute{Machine: pending.machine, Pane: pending.pane}, true); !ok {
+					return relayFaultFailed
+				}
+			}
+		}
+		return relayFaultScheduled
 	}
 	markID := unconfirmedMarkEventID(record.ID)
-	if h.inbox != nil && record.Kind == "lane.event" {
-		// An unreadable batch table cannot prove the mark unneeded or ordinary,
-		// so the window is kept like a failed marker POST.
-		isBatch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
-		if err != nil {
-			h.logger.Warn("relay unconfirmed batch lookup failed", "event_id", record.ID)
-			return false
-		}
-		if isBatch {
-			markID = unconfirmedDigestMarkEventID(record.ID)
-		}
-	}
 	mark := hubJobEventPayload{
 		JobID:     laneEventTransportID(relayUnconfirmedMarkLane, markID),
 		Epoch:     1,
@@ -167,10 +172,10 @@ func (h *HubServer) markRelayEventUnconfirmedContext(ctx context.Context, pendin
 	}
 	if _, _, persisted := h.persistRelayEventRecord(ctx, "lane.event", mark, reportRelayRoute{}); !persisted {
 		h.logger.Warn("relay unconfirmed mark was not persisted", "event_id", record.ID)
-		return false
+		return relayFaultFailed
 	}
 	h.logger.Info("relay row marked unconfirmed for one labelled replay", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "job", record.JobID)
-	return true
+	return relayFaultUnneeded
 }
 
 // unconfirmedMarkOrigins walks the undelivered listing once and returns the
@@ -191,6 +196,9 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (origins, digest
 			if isUnconfirmedMarkRecord(record) {
 				if origin := unconfirmedMarkOriginID(record.EventID); origin > 0 {
 					origins[origin] = true
+					if h.inbox != nil {
+						h.convertUnconfirmedMarker(ctx, record)
+					}
 					if unconfirmedMarkIsDigest(record.EventID) {
 						digests[origin] = true
 					}
@@ -206,7 +214,7 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (origins, digest
 	}
 }
 
-// replayMarkedUnconfirmed gives a marked row its one labelled replay. The
+// replayLegacyUnconfirmed gives a marked row its one labelled replay. The
 // gates ahead of the queue match replayRelayEvent exactly; the differences
 // are the label on the directive text and the write order at the end: the
 // durable retire is spent BEFORE any copy is queued, so a failed retire
@@ -215,11 +223,8 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (origins, digest
 // can never leave the row open for another labelled inject (#1034). The
 // rule is: no labelled copy is ever queued unless the durable retire for
 // that row has already succeeded.
-func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string, digestMark bool) {
-	if h.retireLegacyChatReplay(record) || h.retireUnconfirmedSettledInInbox(record) {
-		return
-	}
-	if h.retireUnconfirmedDigest(record, digestMark) {
+func (h *HubServer) replayLegacyUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string, digestMark bool) {
+	if h.retireLegacyChatReplay(record) || digestMark {
 		return
 	}
 	// An idle re-delivery is bounded by the time of its drop, not its receipt
@@ -318,69 +323,6 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	h.broadcastRelayReplayInjected(record, route, record.Attempts, source)
 }
 
-// retireUnconfirmedDigest spends no replay on an inbox digest or escalation
-// batch: its count was true only when it was made. It runs after the settled
-// check, which already retires a batch whose own inbox item the receiver has.
-// A row is a batch only when lane_inbox_batches names it for its lane; the
-// table is never pruned, and an event id alone proves nothing because a
-// producer may choose any id. With no inbox store the table cannot be read, so
-// the marker decides: a marker written for a batch (while a store was open)
-// defers the row without a copy, anything else is an ordinary row. The batch's
-// still-unread items are released before the row retires, so a crash between the two leaves at worst a fresh
-// escalation plus a retire the next restart repeats, never an item that no
-// batch will ever escalate. The next flush then escalates them through the
-// normal path with the current count. A failed lookup, release or retire
-// replays nothing and the next trigger tries again; chat rows are never
-// batches.
-func (h *HubServer) retireUnconfirmedDigest(record handoffkeepRelayEvent, digestMark bool) bool {
-	if h.inbox == nil {
-		// The marker, written while a store was open, says the row was a batch;
-		// without a store its items cannot be released, so nothing is spent and
-		// no copy is injected. A later run with the store retires and releases.
-		return digestMark && h.handoffkeep != nil && record.DeliveredAt == "" && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker)
-	}
-	if h.handoffkeep == nil || record.Kind != "lane.event" || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
-		return false
-	}
-	isBatch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
-	if err != nil {
-		h.logger.Warn("inbox batch lookup unavailable; unconfirmed replay deferred", "event_id", record.ID)
-		return true
-	}
-	if !isBatch {
-		return false
-	}
-	if err := h.inbox.store.releaseBatchClaims(record.EventID); err != nil {
-		h.logger.Warn("inbox batch claims were not released; unconfirmed replay deferred", "event_id", record.ID)
-		return true
-	}
-	h.retireRelayReplay(record, relayDigestNotReplayedRetireReason)
-	return true
-}
-
-// retireUnconfirmedSettledInInbox spends no labelled replay on a row whose
-// lane inbox item the receiver already has (delivered, read, acked or
-// superseded): the row is retired as inbox-delivered and the marker retires
-// with it on the same walk, because settleUnconfirmedMarker sees the origin
-// closed. An absent or still undelivered, unread item leaves the row to its
-// one labelled replay. A failed lookup or retire replays nothing; the next
-// trigger tries again. Chat rows keep the chat store as their authority.
-func (h *HubServer) retireUnconfirmedSettledInInbox(record handoffkeepRelayEvent) bool {
-	if h.inbox == nil || h.handoffkeep == nil || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
-		return false
-	}
-	settled, err := h.inbox.store.settled(relayEventDedupeKey(record.Kind, relayEventFromRecord(record)))
-	if err != nil {
-		h.logger.Warn("inbox evidence unavailable; unconfirmed replay deferred", "event_id", record.ID)
-		return true
-	}
-	if !settled {
-		return false
-	}
-	h.retireRelayReplay(record, relayUnconfirmedInboxRetireReason)
-	return true
-}
-
 // settleUnconfirmedMarker keeps a marker alive only while the row it names
 // is still undelivered and replayable. Once the original row is delivered,
 // exhausted, or gone, the mark has no work left and retires with the other
@@ -397,4 +339,51 @@ func (h *HubServer) settleUnconfirmedMarker(ctx context.Context, marker handoffk
 		}
 	}
 	h.retireRelayReplay(marker, relayUnconfirmedMarkRetireReason)
+}
+
+// convertUnconfirmedMarker records the origin's retry without closing an owed
+// marker. An older binary can still recognise the marker after a rollback.
+func (h *HubServer) convertUnconfirmedMarker(ctx context.Context, marker handoffkeepRelayEvent) {
+	origin := unconfirmedMarkOriginID(marker.EventID)
+	if origin == 0 {
+		return
+	}
+	record, found, err := h.handoffkeep.relayEvent(ctx, origin)
+	if err != nil || !found {
+		return
+	}
+	event := relayEventFromRecord(record)
+	if event.OwnerLane == "" || event.JobID == "" || isUnconfirmedMarkRecord(record) {
+		return
+	}
+	o := newDeliveryObligation{key: relayEventDedupeKey(record.Kind, event), relayID: record.ID, kind: record.Kind, lane: record.OwnerLane, attempts: record.Attempts}
+	store := h.inbox.store
+	now := h.now().UTC()
+	if record.DeliveredAt == "" {
+		err = store.flagObligationRetry(ctx, o, obligationFaultUnconfirmed, marker.EventID, now)
+	} else {
+		err = h.convertDeliveredMarker(ctx, o, record, marker, now)
+	}
+	if err != nil {
+		h.logger.Warn("legacy unconfirmed marker could not be converted", "event_id", origin, "error", store.loggable("convert marker", err))
+	}
+}
+
+func (h *HubServer) convertDeliveredMarker(ctx context.Context, newObligation newDeliveryObligation, record, marker handoffkeepRelayEvent, now time.Time) error {
+	store := h.inbox.store
+	if record.DeliveredTo == relayReplayRetiredMarker+relayUnconfirmedRetireReason {
+		newObligation.attempts = max(newObligation.attempts, 1)
+	}
+	if err := store.createObligation(ctx, newObligation, now, now); err != nil {
+		return err
+	}
+	o, err := store.retryObligationForKey(ctx, newObligation.key)
+	if err != nil {
+		return err
+	}
+	if err := h.classifyObligation(ctx, o, record, now); err != nil {
+		return err
+	}
+	h.retireRelayReplay(marker, relayUnconfirmedMarkRetireReason)
+	return nil
 }

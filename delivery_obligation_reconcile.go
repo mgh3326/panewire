@@ -4,11 +4,12 @@ package panewire
 // docs/r20-relay-persistence.md, "Delivery obligations"). The relay path
 // creates an obligation once handoffkeep holds the row. A pass that Sweep
 // starts adopts the undelivered rows that have none, then closes obligations
-// from stored facts. It types nothing, retries nothing, notifies nobody and
-// writes nothing to handoffkeep.
+// from stored facts and retries scheduled unconfirmed deliveries.
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -34,8 +35,9 @@ const (
 	obligationAdoptPageSize = handoffkeepReplayLimit
 	// obligationClassifyLimit caps the obligations one pass reads, and
 	// obligationPassBudget the time it takes.
-	obligationClassifyLimit = 50
-	obligationPassBudget    = 30 * time.Second
+	obligationClassifyLimit  = 50
+	obligationIdleProofLimit = 10
+	obligationPassBudget     = 30 * time.Second
 
 	// obligationFaultUnconfirmed marks a row whose one labelled replay was
 	// spent: handoffkeep closed it without proof that a pane showed it.
@@ -114,8 +116,9 @@ func (h *HubServer) recordObligation(key, kind string, event hubJobEventPayload,
 type obligationSweep struct {
 	// mu is held for a run's whole life, so close takes it to wait the run
 	// out; closing then stops every later start.
-	mu      sync.Mutex
-	closing bool
+	mu        sync.Mutex
+	closing   bool
+	idleAfter int64
 }
 
 func (s *obligationSweep) close() {
@@ -125,7 +128,7 @@ func (s *obligationSweep) close() {
 }
 
 // startObligationReconcile runs one pass in the background unless one is
-// running. It takes no replay lock: it changes only the obligation tables.
+// running. The pass keeps handoffkeep I/O outside the replay lock.
 func (h *HubServer) startObligationReconcile() {
 	if h.inbox == nil || h.handoffkeep == nil || !h.obligations.mu.TryLock() {
 		return
@@ -213,39 +216,83 @@ func adoptableObligation(record handoffkeepRelayEvent) (newDeliveryObligation, b
 	return newDeliveryObligation{key: relayEventDedupeKey(record.Kind, event), relayID: record.ID, kind: record.Kind, lane: record.OwnerLane, attempts: record.Attempts}, true
 }
 
-// classifyObligations reads the due obligations' rows and closes what stored
-// facts close. A failed handoffkeep read ends the pass and changes no state:
-// that obligation is read again later.
+// Idle proof reads have their own cursor and never change send deadlines.
 func (h *HubServer) classifyObligations(ctx context.Context) {
 	store := h.inbox.store
-	due, err := store.dueObligations(ctx, h.now().UTC(), obligationClassifyLimit)
+	h.mu.Lock()
+	idle := maps.Clone(h.relayControl.workingExpired)
+	h.mu.Unlock()
+
+	budget := obligationClassifyLimit
+	if len(idle) != 0 {
+		ids := slices.Sorted(maps.Keys(idle))
+		start, found := slices.BinarySearch(ids, h.obligations.idleAfter)
+		if found {
+			start++
+		}
+		count := min(obligationIdleProofLimit, len(ids))
+		budget -= count
+		selected := make([]int64, 0, count)
+		for i := range count {
+			selected = append(selected, ids[(start+i)%len(ids)])
+		}
+		rows, err := store.openObligationsByRelayID(ctx, selected)
+		if err != nil {
+			h.logger.Warn("idle delivery obligations were not read", "error", store.loggable("idle proof", err))
+		}
+		for _, id := range selected {
+			if ctx.Err() != nil {
+				return
+			}
+			h.obligations.idleAfter = id
+			if o, ok := rows[id]; ok {
+				proofCtx, cancel := context.WithTimeout(ctx, obligationPassBudget/(2*obligationIdleProofLimit))
+				h.readObligationProof(proofCtx, o, true)
+				cancel()
+			}
+		}
+	}
+	due, err := store.dueObligations(ctx, h.now().UTC(), budget+len(idle))
 	if err != nil {
 		h.logger.Warn("due delivery obligations were not read", "error", store.loggable("due obligations", err))
 		return
 	}
 	for _, o := range due {
-		record, found, readErr := h.handoffkeep.relayEvent(ctx, o.relayID)
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || budget == 0 {
 			return
 		}
-		now := h.now().UTC()
-		switch {
-		case readErr != nil:
-			h.logger.Warn("delivery obligation row could not be read", "event_id", o.relayID)
-			err = store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
-		case !found:
-			// Absence proves nothing about delivery, so the row stays open.
-			h.logger.Warn("delivery obligation row is not in handoffkeep", "event_id", o.relayID, "obligation", o.id)
-			err = store.deferObligation(ctx, o.id, now, now.Add(obligationParkRecheck))
-		default:
-			err = h.classifyObligation(ctx, o, record, now)
+		if _, owned := idle[o.relayID]; owned {
+			continue
 		}
-		if err != nil {
-			h.logger.Warn("delivery obligation was not classified", "event_id", o.relayID, "error", store.loggable("classify", err))
+		budget--
+		h.readObligationProof(ctx, o, false)
+	}
+}
+
+func (h *HubServer) readObligationProof(ctx context.Context, o openObligation, idleOnly bool) {
+	store := h.inbox.store
+	record, found, readErr := h.handoffkeep.relayEvent(ctx, o.relayID)
+	if ctx.Err() != nil {
+		return
+	}
+	now := h.now().UTC()
+	var err error
+	switch {
+	case readErr != nil:
+		h.logger.Warn("delivery obligation row could not be read", "event_id", o.relayID)
+		if !idleOnly {
+			err = store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
 		}
-		if readErr != nil {
-			return
+	case !found:
+		h.logger.Warn("delivery obligation row is not in handoffkeep", "event_id", o.relayID, "obligation", o.id)
+		if !idleOnly {
+			err = store.deferObservedObligation(ctx, o, now, now.Add(obligationParkRecheck))
 		}
+	default:
+		err = h.classifyObservedObligation(ctx, o, record, now, idleOnly)
+	}
+	if err != nil {
+		h.logger.Warn("delivery obligation was not classified", "event_id", o.relayID, "error", store.loggable("classify", err))
 	}
 }
 
@@ -257,6 +304,10 @@ func (h *HubServer) classifyObligations(ctx context.Context) {
 // event: handoffkeep folds a job's later round into the first round's row,
 // whose delivery says nothing about the later event.
 func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, record handoffkeepRelayEvent, now time.Time) error {
+	return h.classifyObservedObligation(ctx, o, record, now, false)
+}
+
+func (h *HubServer) classifyObservedObligation(ctx context.Context, o openObligation, record handoffkeepRelayEvent, now time.Time, idleOnly bool) error {
 	store := h.inbox.store
 	own := store.tracks(o, relayEventDedupeKey(record.Kind, relayEventFromRecord(record)))
 	if own && confirmedInHK(record) {
@@ -284,9 +335,19 @@ func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, re
 			return store.closeObligation(ctx, o.id, obligationSettled, obligationSettledDigest, now)
 		}
 	}
+	h.mu.Lock()
+	_, waitingForIdle := h.relayControl.workingExpired[o.relayID]
+	h.mu.Unlock()
+	if idleOnly || waitingForIdle {
+		return nil
+	}
+	if own && o.state == obligationOwed && o.fault != "" {
+		_, err := h.retryObligation(ctx, o, record, now, obligationRetrySource, nil)
+		return err
+	}
 	wait := obligationRecheck(now.Sub(time.UnixMilli(o.createdAt)))
 	if o.state != obligationOwed {
 		wait = obligationParkRecheck
 	}
-	return store.deferObligation(ctx, o.id, now, now.Add(wait))
+	return store.deferObservedObligation(ctx, o, now, now.Add(wait))
 }

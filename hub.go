@@ -1803,12 +1803,23 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 		}
 		if message.Kind == "relay.dropped" {
 			dropped, valid := decodeRelayDroppedPayload(message.Payload)
-			if !valid || !h.consumeRelayDropped(machineID, dropped) {
+			if !valid {
 				h.countUnknownMessage()
 				return
 			}
+			pending, accepted := h.consumeRelayDropped(machineID, dropped)
+			if !accepted {
+				h.countUnknownMessage()
+				return
+			}
+
 			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
+			if pending.dropReason != "" {
+				go h.expireRelayAckWindow(relayPendingKey(dropped.OriginalEventID, dropped.JobID), pending.armToken)
+			} else if pending.idleWake.Pane != "" {
+				go h.redeliverWorkingExpiredOnIdle(machineID, pending.idleWake)
+			}
 			h.escalateUnconfirmedRelayContext(ctx, machineID, dropped)
 		}
 		if message.Kind == "job.revocation.ack" {
@@ -1852,29 +1863,40 @@ func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string,
 		return
 	}
 	if message.Kind == "relay.unconfirmed" {
-		// The durable mark must land before the live window is retired
-		// (#1002): a crash between the two cannot lose it, and a repeated
-		// report simply collides with the marker row already written. When
-		// the mark write fails the window is kept instead of consumed
-		// (#1034): it still ends by ack, a repeated report, or the ack
-		// timeout, like any other live window — consuming it here would
-		// silently demote the row to the unlabelled ordinary replay.
+		// Persist the retry before retiring the live acknowledgement window.
 		key, pending, acknowledged := h.peekRelayPending(machineID, ack)
 		if !acknowledged {
 			h.logger.Warn("relay unconfirmed report matched no live window", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "reason", ack.Reason)
 			h.countUnknownMessage()
 			return
 		}
-		if !h.markRelayEventUnconfirmedContext(ctx, pending) {
+		fault := obligationFaultUnconfirmed
+		rearm := false
+		if ack.Reason == relayDroppedWorkingExpired {
+			fault = relayDroppedWorkingExpired
+			if h.inbox != nil {
+				rearm = h.retainWorkingExpiredReason(key, pending)
+			}
+		}
+		write := h.scheduleRelayRetry(ctx, pending, fault)
+		if write == relayFaultFailed {
+			if rearm {
+				h.armRelayAckEvent(pending.eventID, pending.event.JobID)
+			}
 			return
 		}
-		h.consumeRelayPending(key)
-		h.rememberWorkingExpired(pending, ack)
+		wake, finished := h.finishUnconfirmedWindow(key, pending, ack, write)
+		if !finished {
+			return
+		}
 		h.observeRelayUnconfirmed(pending, ack)
 		h.recordInboxStage(relayEventDedupeKey(pending.kind, pending.event), laneInboxStageUnconfirmed, ack.Reason, machineID, pending.pane)
 		// Logging it keeps a dropped-ack diagnosis greppable.
 		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)
 		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})
+		if wake.Pane != "" {
+			go h.redeliverWorkingExpiredOnIdle(pending.machine, wake)
+		}
 		return
 	}
 	pending, acknowledged := h.acknowledgeRelayPending(machineID, ack)

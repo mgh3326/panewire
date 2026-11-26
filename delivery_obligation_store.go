@@ -193,9 +193,11 @@ func (s *laneInboxStore) saveAdoptCursor(parent context.Context, afterID, wrappe
 type openObligation struct {
 	id, relayID int64
 	// storedKey is the event_key column's bytes, in the dialect's form.
-	storedKey []byte
-	state     string
-	createdAt int64
+	storedKey                     []byte
+	state                         string
+	createdAt, nextAt             int64
+	fault                         string
+	spent, labelled, attemptsSeen int
 }
 
 // tracks reports whether the obligation is the one for the hub key. A key is
@@ -209,7 +211,7 @@ func (s *laneInboxStore) tracks(o openObligation, key string) bool {
 func (s *laneInboxStore) dueObligations(parent context.Context, now time.Time, limit int) ([]openObligation, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,relay_id,event_key,state,created_at FROM delivery_obligations WHERE `+obligationOpen+` AND next_at<=? ORDER BY next_at,id LIMIT ?`), now.UnixMilli(), limit)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,relay_id,event_key,state,created_at,next_at,fault,spent,labelled,attempts_seen FROM delivery_obligations WHERE `+obligationOpen+` AND next_at<=? ORDER BY next_at,id LIMIT ?`), now.UnixMilli(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -217,12 +219,37 @@ func (s *laneInboxStore) dueObligations(parent context.Context, now time.Time, l
 	var due []openObligation
 	for rows.Next() {
 		var o openObligation
-		if err := rows.Scan(&o.id, &o.relayID, &o.storedKey, &o.state, &o.createdAt); err != nil {
+		if err := rows.Scan(&o.id, &o.relayID, &o.storedKey, &o.state, &o.createdAt, &o.nextAt, &o.fault, &o.spent, &o.labelled, &o.attemptsSeen); err != nil {
 			return nil, err
 		}
 		due = append(due, o)
 	}
 	return due, rows.Err()
+}
+
+// openObligationsByRelayID reads idle proof candidates independently of next_at.
+func (s *laneInboxStore) openObligationsByRelayID(parent context.Context, ids []int64) (map[int64]openObligation, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,relay_id,event_key,state,created_at,next_at,fault,spent,labelled,attempts_seen FROM delivery_obligations WHERE `+obligationOpen+` AND kind='lane.event' AND relay_id IN (`+marks+`)`), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[int64]openObligation)
+	for rows.Next() {
+		var o openObligation
+		if err := rows.Scan(&o.id, &o.relayID, &o.storedKey, &o.state, &o.createdAt, &o.nextAt, &o.fault, &o.spent, &o.labelled, &o.attemptsSeen); err != nil {
+			return nil, err
+		}
+		result[o.relayID] = o
+	}
+	return result, rows.Err()
 }
 
 // closeObligation ends an open obligation as confirmed, or as settled for
@@ -249,6 +276,17 @@ func (s *laneInboxStore) deferObligation(parent context.Context, id int64, now, 
 	ctx, done := s.op(parent)
 	defer done()
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET next_at=?,updated_at=? WHERE id=? AND `+obligationOpen), due.UnixMilli(), now.UnixMilli(), id)
+	return err
+}
+
+// deferObservedObligation updates the schedule only if it still belongs to
+// the snapshot the caller classified.
+func (s *laneInboxStore) deferObservedObligation(parent context.Context, o openObligation, now, due time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET next_at=?,updated_at=?
+		WHERE id=? AND state=? AND fault=? AND spent=? AND labelled=? AND next_at=? AND `+obligationOpen),
+		due.UnixMilli(), now.UnixMilli(), o.id, o.state, o.fault, o.spent, o.labelled, o.nextAt)
 	return err
 }
 

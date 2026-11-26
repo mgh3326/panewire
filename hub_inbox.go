@@ -492,6 +492,10 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 			return true
 		}
 	}
+	return h.replayInboxAfterAgeGate(record)
+}
+
+func (h *HubServer) replayInboxAfterAgeGate(record handoffkeepRelayEvent) bool {
 	if h.inbox == nil {
 		return false
 	}
