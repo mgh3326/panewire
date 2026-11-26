@@ -881,11 +881,15 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	for _, successor := range successors {
 		// The ledger counts only successors whose permanent pointer prerequisites
 		// still hold, read before the pointer is written.
-		pending := h.quotaSuccessorPending(ctx, app, successor)
-		if pending {
+		state, site, readErr := h.quotaSuccessorPending(ctx, app, successor)
+		switch state {
+		case quotaSuccessorPending:
 			h.loopNoteMade(loopQuotaLadder, successor.Job)
-		} else {
+		case quotaSuccessorImpossibleState:
 			h.loopNoteDoneIfMade(loopQuotaLadder, successor.Job)
+		case quotaSuccessorUnknownState:
+			h.loopNoteSilentError(loopQuotaLadder, site, readErr)
+			continue
 		}
 		// A successor that is placed or was sent to a node, at any age: a restart
 		// between the claim and the pointer is repaired well inside the watcher's
@@ -906,8 +910,17 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 	return written
 }
 
+type quotaSuccessorPendingState uint8
+
+const (
+	quotaSuccessorImpossibleState quotaSuccessorPendingState = iota
+	quotaSuccessorPending
+	quotaSuccessorUnknownState
+)
+
 // quotaSuccessorPending reports whether a quota successor can still be settled
-// by the reconcile pass for the quota_ladder ledger.
+// by the reconcile pass for the quota_ladder ledger. It returns unknown when a
+// prerequisite read fails transiently, so that pass leaves made/done unchanged.
 //
 // Permanent pointer prerequisites are checked here, matching
 // finishQuotaReplacement. A present or unknown predecessor pane is deliberately
@@ -919,36 +932,54 @@ func (h *HubServer) reconcileQuotaReplacements(ctx context.Context) int {
 //   - Ended unsent: the operation status is failed, refused, given_up or
 //     cancelled (the terminal statuses other than succeeded, spawnTerminalStatuses).
 //     Not pending, and not read.
-//   - Impossible pointer: the holder is missing, not succeeded, not a reviewer,
-//     or fails quotaLineageHolds; or the predecessor record is missing,
-//     unreadable, no longer claimed/spawned, or has an invalid pool. Not pending.
+//   - Impossible pointer: the holder is confirmed missing, not succeeded, not
+//     a reviewer, or fails quotaLineageHolds; or the predecessor record is
+//     confirmed missing, no longer claimed/spawned, or has an invalid pool.
+//     Not pending.
+//   - Unknown: either prerequisite read failed for a reason other than a
+//     confirmed missing holder or predecessor. The ledger is unchanged.
 //   - Eligible pointer: all permanent prerequisites still hold. Pending until
 //     the pointer is written or a later pass observes an impossible prerequisite.
 //
 // It reads the predecessor's record with the app the pass already holds and
 // changes no replacement state.
-func (h *HubServer) quotaSuccessorPending(ctx context.Context, app *fleet.App, successor hubSpawnTask) bool {
+func (h *HubServer) quotaSuccessorPending(ctx context.Context, app *fleet.App, successor hubSpawnTask) (quotaSuccessorPendingState, string, error) {
 	switch successor.Status {
 	case "failed", "refused", "given_up", "cancelled":
-		return false
+		return quotaSuccessorImpossibleState, "", nil
 	}
 	holder, err := h.inbox.store.latestSpawnForJob(ctx, successor.ReplacedFrom)
-	if err != nil || holder.Status != "succeeded" || !quotaLineageHolds(successor, holder, successor.ReplacedFrom) {
-		return false
+	if errors.Is(err, sql.ErrNoRows) {
+		h.loopClearSilent("hub_quota_replace.go:latestSpawnForJob")
+		return quotaSuccessorImpossibleState, "", nil
+	}
+	if err != nil {
+		return quotaSuccessorUnknownState, "hub_quota_replace.go:latestSpawnForJob", err
+	}
+	h.loopClearSilent("hub_quota_replace.go:latestSpawnForJob")
+	if holder.Status != "succeeded" || !quotaLineageHolds(successor, holder, successor.ReplacedFrom) {
+		return quotaSuccessorImpossibleState, "", nil
 	}
 	prior, err := fleet.ValidateSubmission(holder.Request)
 	if err != nil || prior.Role != "reviewer" {
-		return false
+		return quotaSuccessorImpossibleState, "", nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	record, exists, err := app.ExistingJob(readCtx, successor.ReplacedFrom)
 	cancel()
-	if err != nil || !exists {
-		return false
+	if err != nil {
+		return quotaSuccessorUnknownState, "hub_quota_replace.go:ExistingJob", err
+	}
+	h.loopClearSilent("hub_quota_replace.go:ExistingJob")
+	if !exists {
+		return quotaSuccessorImpossibleState, "", nil
 	}
 	state, _ := record["state"].(string)
 	pool, _ := record["pool"].(string)
-	return (state == "claimed" || state == "spawned") && spawnargs.ValuePattern.MatchString(pool)
+	if (state == "claimed" || state == "spawned") && spawnargs.ValuePattern.MatchString(pool) {
+		return quotaSuccessorPending, "", nil
+	}
+	return quotaSuccessorImpossibleState, "", nil
 }
 
 // quotaSuccessorSent reports whether a claimed successor's snapshot is placed or
