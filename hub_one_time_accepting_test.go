@@ -129,6 +129,30 @@ func TestSuppressedLoginNeedKeepsClearAfterStaleSighting(t *testing.T) {
 	}
 }
 
+func TestSuppressedToldLoginNeedKeepsClearAfterStaleSighting(t *testing.T) {
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	transport := oneTimeSentry(t, h)
+	start := time.Date(2026, 11, 27, 3, 0, 0, 0, time.UTC)
+	key := oneTimeActionKey{machine: "oci", kind: "claude", need: oneTimeLoginMissing}
+	readiness := func(at time.Time, login string) *fleet.Readiness {
+		return readinessWith(at, "claude", fleet.HarnessReadiness{Installed: true, Login: login})
+	}
+	h.noteReadinessActions("oci", readiness(start, fleet.ReadinessLoginMissing), start)
+	if got := oneTimeMessages(t, h, transport); len(got) != 1 {
+		t.Fatalf("initial notice count = %d, want one", len(got))
+	}
+	setAcceptingOverrideForTest(h, "oci", "off")
+	cleanAt := start.Add(time.Minute)
+	h.noteReadinessActions("oci", readiness(cleanAt, fleet.ReadinessLoginPresent), cleanAt)
+	settleOneTimeNotices(t, h)
+	staleAt := start.Add(30 * time.Second)
+	h.recordSuppressedLoginNeed(key, staleAt)
+	state, ok := h.oneTimeStateOf(key)
+	if !ok || !state.GoneSince.Equal(cleanAt) {
+		t.Fatalf("stale suppressed sighting restarted a told episode's clear: %+v, present=%t", state, ok)
+	}
+}
+
 func TestOneTimeLoginSightedAtSurvivesHubRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	first := newOneTimeHub(t, path)
