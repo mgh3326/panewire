@@ -222,12 +222,15 @@ type grafanaRuleGroup struct {
 	FolderUID string `json:"folderUid"`
 	Interval  int    `json:"interval"`
 	Rules     []struct {
-		UID       string `json:"uid"`
-		Title     string `json:"title"`
-		Condition string `json:"condition"`
-		FolderUID string `json:"folderUID"`
-		RuleGroup string `json:"ruleGroup"`
-		Data      []struct {
+		UID                  string `json:"uid"`
+		Title                string `json:"title"`
+		Condition            string `json:"condition"`
+		FolderUID            string `json:"folderUID"`
+		RuleGroup            string `json:"ruleGroup"`
+		NotificationSettings *struct {
+			Receiver string `json:"receiver"`
+		} `json:"notification_settings"`
+		Data []struct {
 			RefID         string         `json:"refId"`
 			DatasourceUID string         `json:"datasourceUid"`
 			Model         map[string]any `json:"model"`
@@ -250,6 +253,15 @@ func TestGrafanaAlertRulesAreValid(t *testing.T) {
 	titles := map[string]bool{}
 	for _, rule := range group.Rules {
 		titles[rule.Title] = true
+		// Only fleet-review-missing routes to the "empty" receiver (dashboard
+		// only); every other rule must keep its routing, with no override.
+		if rule.Title == "Review missing" {
+			if rule.NotificationSettings == nil || rule.NotificationSettings.Receiver != "empty" {
+				t.Fatalf("rule %q must notify the empty receiver", rule.Title)
+			}
+		} else if rule.NotificationSettings != nil {
+			t.Fatalf("rule %q must keep its routing; it has notification_settings %+v", rule.Title, *rule.NotificationSettings)
+		}
 		if rule.UID == "" || rule.Condition != "C" || rule.FolderUID != group.FolderUID || rule.RuleGroup != group.Title || len(rule.Data) != 2 {
 			t.Fatalf("rule %q is incomplete", rule.Title)
 		}
@@ -344,6 +356,10 @@ func TestGrafanaApplySendsIdempotentRequests(t *testing.T) {
 			w.WriteHeader(http.StatusConflict) // the folder already exists
 			return
 		}
+		if r.URL.Path == "/api/v1/provisioning/policies" {
+			_, _ = w.Write([]byte(`{"receiver":"grafana-default-email","routes":[{"receiver":"empty"}]}`))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -356,7 +372,10 @@ func TestGrafanaApplySendsIdempotentRequests(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	rules := seen["PUT /api/v1/provisioning/folder/fleet-observability/rule-groups/fleet-observability"]
-	if len(seen) != 4 || !strings.HasPrefix(seen["GET /api/datasources"], "Bearer fake-token-0123\n") || !strings.HasPrefix(rules, "Bearer fake-token-0123\n") || !strings.Contains(rules, `"datasourceUid": "loki-uid-1"`) {
+	if strings.Contains(string(output), "no receiver") {
+		t.Fatalf("apply warned about a policy that has the empty receiver:\n%s", output)
+	}
+	if len(seen) != 5 || !strings.HasPrefix(seen["GET /api/datasources"], "Bearer fake-token-0123\n") || !strings.HasPrefix(rules, "Bearer fake-token-0123\n") || !strings.Contains(rules, `"datasourceUid": "loki-uid-1"`) {
 		t.Fatalf("requests: %v", seen)
 	}
 	if strings.Contains(string(output), "fake-token-0123") {

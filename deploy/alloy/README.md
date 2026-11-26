@@ -320,8 +320,14 @@ following steps, in this order:
    1. Run `./apply.sh --dry-run` and review the output.
    2. Run it again with `GRAFANA_CLOUD_URL` and `GRAFANA_CLOUD_SA_TOKEN`
       set. The script looks up the Loki data source uid itself.
-   3. Give the stack's default notification policy a contact point. The rules
-      carry `team=fleet` for routing.
+   3. Check the stack's notification policy (a desk step; the policy tree is
+      not in this repo). The fleet rules go to `fleet-alerts-discord` by their
+      folder (`grafana_folder = "Fleet observability"`) and by
+      `severity=critical, system=broker-edge`. The `team=fleet` label is only a
+      label on the rules and routes nothing. Precondition: the policy root
+      receiver, or some route, must be `empty`, because `fleet-review-missing`
+      sends to it (see `deploy/grafana/README.md`, Precondition). `apply.sh`
+      warns when it is missing.
 
 ### Deploying the machine-id `host` label (desk)
 

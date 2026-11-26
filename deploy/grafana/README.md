@@ -37,7 +37,7 @@ The rule group has these rules:
 | Rule | Fires when |
 | --- | --- |
 | Repeated spawn refusals | `request_id`가 있는 hub coordinator `spawn` 기록에서 같은 사유의 거절이 30분 동안 3건 초과일 때 발생합니다. |
-| Review missing | No reviewer produced a pass within 1 h. |
+| Review missing | No reviewer produced a pass within 1 h. Dashboard only: the rule keeps evaluating, but its notification goes to the `empty` receiver, so it never reaches Discord (operator 544 A). Lost reviews are re-run automatically, and Discord stays for down, money and order alerts (decision 169). |
 | Reviewer failing repeatedly | The same reviewer on the same fleet host fails 3 or more times within 2 h. |
 | Quota observation stale | A refusing quota observation is older than 30 min (`age_min`). |
 | Fleet events pipeline silent | No fleet event reached Loki in 6 h. |
@@ -58,6 +58,16 @@ a writer bug) would leave all of them OK forever. The fifth rule catches that
 case with `absent_over_time`, which returns a value only when nothing arrived.
 Grouping labels that a line lacks become `unspecified`, never an empty
 string.
+
+Precondition: the stack's notification policy tree must have a receiver named
+`empty`. `fleet-review-missing` sets `notification_settings.receiver: "empty"`
+so it evaluates without notifying Discord. A missing `empty` makes Grafana
+reject the group PUT, and then none of the five rules is updated. The receiver
+lives in the policy tree, which is not in this repo; check it before applying.
+On the stack as read 2026-11-27 (brief fact, not re-read in this change), the
+notification policy root receiver is `empty` with no integrations. Without a
+live read, the warning in `apply.sh` (below) is the check. The policy tree is
+also outside `apply.sh`, so only the desk can change it.
 
 ```sh
 ./apply.sh --dry-run    # prints each request and body; reads no credentials

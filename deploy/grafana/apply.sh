@@ -66,6 +66,25 @@ if [ "$dry" -eq 0 ]; then
   esac
 fi
 
+# fleet-review-missing sends its notifications to the receiver "empty", which
+# must exist in the stack's notification policy tree, or the group PUT is
+# rejected (deploy/grafana/README.md, "Precondition"). A read only: it warns
+# and never stops the apply, and the dry run does not make this request.
+if [ "$dry" -eq 0 ]; then
+  curl -sS -H "@$headers" "$url/api/v1/provisioning/policies" 2>/dev/null | python3 -c '
+import json, sys
+def receivers(node):
+    yield node.get("receiver", "")
+    for child in node.get("routes") or []:
+        yield from receivers(child)
+try:
+    found = "empty" in set(receivers(json.load(sys.stdin)))
+except ValueError:
+    found = False
+sys.exit(0 if found else 1)
+' || echo "warning: the notification policy has no receiver \"empty\"; the fleet-review-missing rule will be rejected (deploy/grafana/README.md, Precondition)" >&2
+fi
+
 folder_body='{"uid":"'"$folder_uid"'","title":"Fleet observability"}'
 dashboard_body=$(printf '{"folderUid":"%s","overwrite":true,"message":"deploy/grafana/apply.sh","dashboard":' "$folder_uid"; cat "$here/fleet-dashboard.json"; printf '}')
 rules_body=$(sed "s|\${LOKI_DATASOURCE_UID}|$uid|g" "$here/fleet-alert-rules.json")
