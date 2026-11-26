@@ -254,6 +254,17 @@ func (s *laneInboxStore) deferObligation(parent context.Context, id int64, now, 
 	return err
 }
 
+// deferObservedObligation updates the schedule only if it still belongs to
+// the snapshot the caller classified.
+func (s *laneInboxStore) deferObservedObligation(parent context.Context, o openObligation, now, due time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET next_at=?,updated_at=?
+		WHERE id=? AND state=? AND fault=? AND spent=? AND labelled=? AND next_at=? AND `+obligationOpen),
+		due.UnixMilli(), now.UnixMilli(), o.id, o.state, o.fault, o.spent, o.labelled, o.nextAt)
+	return err
+}
+
 // obligationInboxSettled reports whether the receiver already has the
 // obligation's inbox item (laneInboxSettled). An item whose delivery was
 // recorded at or after deliveredBefore does not count yet: the hub records it

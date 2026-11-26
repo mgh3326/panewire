@@ -45,12 +45,6 @@ type workingExpiredRow struct {
 // rememberWorkingExpired records a row the node dropped as
 // working_wait_expired once its unconfirmed mark is durable. Only lane.event
 // rows are remembered: they are the rows the marked replay re-delivers.
-func (h *HubServer) rememberWorkingExpired(pending relayPending, ack relayAckPayload) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.rememberWorkingExpiredLocked(pending, ack)
-}
-
 func (h *HubServer) rememberWorkingExpiredLocked(pending relayPending, ack relayAckPayload) {
 	if ack.Reason != relayDroppedWorkingExpired || pending.kind != "lane.event" || pending.event.OwnerLane == "" {
 		return
@@ -128,8 +122,10 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 	}()
 	// restore puts the row and the pane's previous wake back when this wake
 	// spent nothing, so a later wake (or a retry of this one) tries again.
-	restore := func(why string) {
-		row.tries++
+	restore := func(why string, failed bool) {
+		if failed {
+			row.tries++
+		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if h.relayControl.idleRedelivered[paneKey] == wake {
@@ -150,18 +146,10 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 	ctx := context.Background()
 	record, found, err := h.handoffkeep.relayEvent(ctx, pick)
 	if err != nil {
-		restore("row_read_failed")
+		restore("row_read_failed", true)
 		return
 	}
 	if !found {
-		return
-	}
-	// The idle path also replays a row; serialize it with registration just
-	// like the startup and hello walks, and retry after the report arrives.
-	h.replayMu.RLock()
-	defer h.replayMu.RUnlock()
-	if h.replayAwaitsAppliedReport(record) {
-		restore("applied_report_pending")
 		return
 	}
 	key := relayEventDedupeKey(record.Kind, relayEventFromRecord(record))
@@ -170,16 +158,29 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 		store := h.inbox.store
 		o, err := store.retryObligationForKey(ctx, key)
 		if err != nil {
-			restore("obligation_read_failed")
+			restore("obligation_read_failed", true)
 			return
 		}
 		if o.state != obligationOwed || o.labelled > 0 || record.DeliveredAt != "" {
 			return
 		}
-		finished, err := h.retryObligation(ctx, o, record, h.now().UTC(), relayReplaySourceIdle)
-		if err != nil || !finished {
-			restore("obligation_retry_deferred")
+		now := h.now().UTC()
+		if o.spent > o.attemptsSeen && o.nextAt > now.UnixMilli() {
+			restore("obligation_retry_not_due", false)
+			return
 		}
+		finished, err := h.retryObligation(ctx, o, record, now, relayReplaySourceIdle)
+		if err != nil || !finished {
+			restore("obligation_retry_deferred", true)
+		}
+		return
+	}
+	// The idle path also replays a row; serialize it with registration just
+	// like the startup and hello walks, and retry after the report arrives.
+	h.replayMu.RLock()
+	defer h.replayMu.RUnlock()
+	if h.replayAwaitsAppliedReport(record) {
+		restore("applied_report_pending", true)
 		return
 	}
 	// The original send's injection claim outlives the node's drop: nothing
@@ -199,9 +200,9 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 	after, found, err := h.handoffkeep.relayEvent(ctx, pick)
 	switch {
 	case err != nil:
-		restore("row_reread_failed")
+		restore("row_reread_failed", true)
 	case found && after.DeliveredAt == "" && !strings.HasPrefix(after.DeliveredTo, relayReplayRetiredMarker):
-		restore("row_not_spent")
+		restore("row_not_spent", true)
 	}
 }
 

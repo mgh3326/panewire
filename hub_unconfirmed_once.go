@@ -62,15 +62,23 @@ func relayUnconfirmedLabel(record handoffkeepRelayEvent) string {
 }
 
 func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
-	return h.scheduleRelayRetry(context.Background(), pending, obligationFaultUnconfirmed)
+	return h.scheduleRelayRetry(context.Background(), pending, obligationFaultUnconfirmed) != relayFaultFailed
 }
 
 // scheduleRelayRetry records the fault before the live window can be removed.
 // A lookup or persistence failure keeps a node-reported window eligible for
 // a repeated report, acknowledgement or timeout.
-func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending, fault string) bool {
+type relayFaultWrite uint8
+
+const (
+	relayFaultFailed relayFaultWrite = iota
+	relayFaultUnneeded
+	relayFaultScheduled
+)
+
+func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending, fault string) relayFaultWrite {
 	if h.handoffkeep == nil {
-		return true
+		return relayFaultUnneeded
 	}
 	eventID := pending.eventID
 	if eventID == 0 && pending.kind != "" {
@@ -91,7 +99,7 @@ func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending
 		record, found, err := h.relayEventByTransportID(ctx, pending.event.JobID)
 		if err != nil {
 			h.logger.Warn("relay unconfirmed transport lookup failed", "job", pending.event.JobID, "error_class", hubHKReadErrorClass(err))
-			return false
+			return relayFaultFailed
 		}
 		if found {
 			eventID = record.ID
@@ -99,7 +107,7 @@ func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending
 	}
 	if eventID == 0 {
 		h.logger.Warn("relay unconfirmed named no durable row", "job", pending.event.JobID, "kind", pending.kind, "machine", pending.machine, "pane", pending.pane)
-		return true
+		return relayFaultUnneeded
 	}
 	record, found, err := h.handoffkeep.relayEvent(ctx, eventID)
 	if err != nil {
@@ -107,14 +115,14 @@ func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending
 		// was written: the window is kept for a repeated report, like a
 		// failed marker POST.
 		h.logger.Warn("relay unconfirmed mark could not be read", "event_id", eventID, "error_class", hubHKReadErrorClass(err))
-		return false
+		return relayFaultFailed
 	}
 	if !found {
 		h.logger.Warn("relay unconfirmed named an unknown durable row", "event_id", eventID)
-		return true
+		return relayFaultUnneeded
 	}
-	if record.DeliveredAt != "" {
-		return true
+	if record.DeliveredAt != "" || (h.inbox != nil && pending.kind != "lane.event" && record.EventID != pending.event.EventID) {
+		return relayFaultUnneeded
 	}
 	if h.inbox != nil {
 		o := newDeliveryObligation{
@@ -125,7 +133,7 @@ func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending
 		store := h.inbox.store
 		if err := store.flagObligationRetry(ctx, o, fault, "", h.now().UTC()); err != nil {
 			h.logger.Warn("relay retry could not be scheduled", "event_id", record.ID, "error", store.loggable("schedule retry", err))
-			return false
+			return relayFaultFailed
 		}
 		if record.Kind == "lane.event" {
 			// Establish rollback protection before accepting a maybe-typed
@@ -133,14 +141,14 @@ func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending
 			batch, err := store.isDigestBatch(record.OwnerLane, record.EventID)
 			if err != nil {
 				h.logger.Warn("relay unconfirmed batch lookup failed", "event_id", record.ID)
-				return false
+				return relayFaultFailed
 			}
 			needsProtection := fault != obligationAckTimeout || batch
 			if !needsProtection {
 				tracked, err := store.retryObligationForKey(ctx, o.key)
 				if err != nil {
 					h.logger.Warn("relay retry fault could not be read", "event_id", record.ID, "error", store.loggable("retry fault", err))
-					return false
+					return relayFaultFailed
 				}
 				// An earlier explicit report can have persisted its fault
 				// while handoffkeep refused the rollback protection.
@@ -148,11 +156,11 @@ func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending
 			}
 			if needsProtection {
 				if _, ok := h.bumpObligationAttempts(ctx, record, reportRelayRoute{Machine: pending.machine, Pane: pending.pane}, true); !ok {
-					return false
+					return relayFaultFailed
 				}
 			}
 		}
-		return true
+		return relayFaultScheduled
 	}
 	markID := unconfirmedMarkEventID(record.ID)
 	mark := hubJobEventPayload{
@@ -164,10 +172,10 @@ func (h *HubServer) scheduleRelayRetry(ctx context.Context, pending relayPending
 	}
 	if _, _, persisted := h.persistRelayEventRecord(ctx, "lane.event", mark, reportRelayRoute{}); !persisted {
 		h.logger.Warn("relay unconfirmed mark was not persisted", "event_id", record.ID)
-		return false
+		return relayFaultFailed
 	}
 	h.logger.Info("relay row marked unconfirmed for one labelled replay", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "job", record.JobID)
-	return true
+	return relayFaultUnneeded
 }
 
 // unconfirmedMarkOrigins walks the undelivered listing once and returns the

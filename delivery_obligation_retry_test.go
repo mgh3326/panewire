@@ -2,7 +2,11 @@ package panewire
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -367,5 +371,147 @@ func TestT1034RetryChecksAppliedGateAtQueueTime(t *testing.T) {
 	}
 	if o := rig.obligation(directive.EventID); o.Spent != 2 {
 		t.Fatalf("the registration did not change during the spend: %+v", o)
+	}
+}
+
+func TestT1034IdleSweepPreservesCommittedRetrySchedule(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "idle-snapshot")
+	t650Send(t, rig.hub, "host-a", rig.agent, "relay.unconfirmed", relayAckPayload{
+		JobID: d.JobID, OriginalEventID: d.EventID, Pane: d.Pane, Reason: relayDroppedWorkingExpired,
+	})
+	record := rig.row(d.EventID)
+	key := relayEventDedupeKey(record.Kind, relayEventFromRecord(record))
+	store := rig.hub.inbox.store
+	o, err := store.retryObligationForKey(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := rig.clock.Now()
+	next := now.Add(time.Minute)
+	if spent, err := store.spendObligationRetry(t.Context(), o, 1, now, next); err != nil || !spent {
+		t.Fatalf("spent=%v err=%v", spent, err)
+	}
+	// Sweep sampled this row before the idle wake spent the attempt.
+	if err := rig.hub.classifyObligation(t.Context(), o, record, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.deferUnqueuedLabel(t.Context(), o.id, o.spent+1, next, now.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.retryObligationForKey(t.Context(), key)
+	if err != nil || got.labelled != 0 || got.nextAt != now.Add(5*time.Minute).UnixMilli() {
+		t.Fatalf("stale sweep prevented label release: %+v err=%v", got, err)
+	}
+	wake := idleWakeRouteRequest{Pane: d.Pane, EventID: "idle:w1:session:1", StateChangeSeq: 1}
+	rig.hub.redeliverWorkingExpiredOnIdle("host-a", wake)
+	if spent := rig.obligation(d.EventID).Spent; spent != o.spent+1 || len(rig.agent.relays) != 0 {
+		t.Fatalf("an early wake bypassed the retry deadline: spent=%d queued=%d", spent, len(rig.agent.relays))
+	}
+	rig.clock.advance(5 * time.Minute)
+	rig.hub.redeliverWorkingExpiredOnIdle("host-a", wake)
+	rig.injected()
+}
+
+func TestT1034TransientFinalReadLeavesLabelAvailable(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "final-read-outage")
+	reportUnconfirmedRetry(t, rig, d)
+	client := *rig.client.client
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	var reads atomic.Int32
+	client.Transport = hubRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Path == "/v1/relay/events" &&
+			req.URL.Query().Get("after_id") == strconv.FormatInt(d.EventID-1, 10) {
+			if reads.Add(1) == 2 {
+				return nil, errors.New("fixture final lookup failed")
+			}
+		}
+		return base.RoundTrip(req)
+	})
+	rig.client.client = &client
+	rig.hub.classifyObligations(t.Context())
+	if reads.Load() != 2 || len(rig.agent.relays) != 0 {
+		t.Fatalf("reads=%d queued=%d", reads.Load(), len(rig.agent.relays))
+	}
+	rig.pass(time.Minute)
+	if copy := rig.injected(); copy.EventID != d.EventID {
+		t.Fatalf("wrong row retried: %+v", copy)
+	}
+}
+
+func TestT1034ObservedDeferralDoesNotOverwriteFirstFault(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "fault-during-poll")
+	record := rig.row(d.EventID)
+	store := rig.hub.inbox.store
+	key := relayEventDedupeKey(record.Kind, relayEventFromRecord(record))
+	o, err := store.retryObligationForKey(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.clock.advance(obligationFirstCheck)
+	reportUnconfirmedRetry(t, rig, d)
+	now := rig.clock.Now()
+	if err := rig.hub.classifyObligation(t.Context(), o, record, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := rig.obligation(d.EventID); got.NextAt != now.UnixMilli() {
+		t.Fatalf("first fault lost its immediate schedule: %+v", got)
+	}
+}
+
+func TestT1034UnconfirmedDoesNotConsumeReplacementWindow(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "replacement-window")
+	key := relayPendingKey(d.EventID, d.JobID)
+	rig.fake.mu.Lock()
+	rig.fake.observe = func(method, path string) {
+		if method != "POST" || path != "/v1/relay/events" {
+			return
+		}
+		rig.hub.mu.Lock()
+		defer rig.hub.mu.Unlock()
+		pending := rig.hub.relayControl.relayPending[key]
+		delete(rig.hub.relayControl.relayPending, key)
+		rig.hub.registerRelayAckEventLocked(pending.kind, pending.event, pending.machine, pending.pane, pending.eventID)
+	}
+	rig.fake.mu.Unlock()
+	reportUnconfirmedRetry(t, rig, d)
+	rig.hub.mu.Lock()
+	_, ok := rig.hub.relayControl.relayPending[key]
+	rig.hub.mu.Unlock()
+	if !ok {
+		t.Fatal("the old report consumed the replacement window")
+	}
+}
+
+func TestT1034FoldedJobFaultPreservesProducerClaim(t *testing.T) {
+	for _, mode := range []string{"report", "timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			rig := newT6384Rig(t)
+			round := hubJobEventPayload{JobID: "job-folded", Epoch: 1, OwnerLane: "worker-a", Question: "round one?", ReportPath: "r.md", EventID: "round-1"}
+			rig.hub.relayJobEventFrom("host-a", "job.escalate", round)
+			first := rig.injected()
+			rig.delivered(first)
+			round.Question, round.EventID = "round two?", "round-2"
+			rig.hub.relayJobEventFrom("host-a", "job.escalate", round)
+			second := rig.injected()
+			if second.EventID != first.EventID {
+				t.Fatal("fixture did not fold the second round")
+			}
+			if mode == "report" {
+				reportUnconfirmedRetry(t, rig, second)
+			} else {
+				rig.hub.expireRelayAck(relayPendingKey(second.EventID, second.JobID))
+			}
+			rig.hub.relayJobEventFrom("host-a", "job.escalate", round)
+			if len(rig.agent.relays) != 0 {
+				t.Fatal("producer resend injected the folded round twice")
+			}
+		})
 	}
 }

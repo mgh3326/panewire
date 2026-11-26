@@ -93,7 +93,7 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	event := relayEventFromRecord(record)
 	if record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || event.OwnerLane == "" || event.JobID == "" ||
 		h.replayAwaitsAppliedReport(record) {
-		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
+		return false, store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
 	}
 	if h.retireLegacyChatReplay(record) {
 		return false, nil
@@ -118,12 +118,12 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 
 	// A digest must release its claims even when its original body aged out.
 	if h.relayReplayRetireReasonAged(record, source != relayReplaySourceIdle) != "" {
-		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
+		return false, store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
 	}
 
 	// Re-evaluate the current inbox policy before routing a saved body.
 	if h.replayInboxAged(record, false) {
-		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
+		return false, store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
 	}
 
 	if o.spent >= relayReplayMaxAttempts || (o.fault != obligationAckTimeout && (o.labelled > 0 || (record.Kind != "lane.event" && o.spent > o.attemptsSeen))) {
@@ -133,7 +133,7 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	route, agent, routed := h.resolveRelayRoute(record.Kind, event)
 	if !routed || route.Sink {
 		h.announceUnroutedReplay(record.ID, event)
-		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
+		return false, store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
 	}
 	key := relayEventDedupeKey(record.Kind, event)
 	h.mu.Lock()
@@ -146,7 +146,7 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	}
 	h.mu.Unlock()
 	if claimed || !available {
-		return false, store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
+		return false, store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
 	}
 	queued := false
 	defer func() {
@@ -175,6 +175,9 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	}
 	// A late ack may have landed while the attempt was being committed.
 	latest, found, err := h.handoffkeep.relayEvent(ctx, record.ID)
+	if (err != nil || !found) && labelled != 0 {
+		return false, errors.Join(err, store.deferUnqueuedLabel(context.WithoutCancel(ctx), o.id, o.spent+1, next, now.Add(obligationRecheckMin)))
+	}
 	if err != nil || !found || latest.DeliveredAt != "" || strings.HasPrefix(latest.DeliveredTo, relayReplayRetiredMarker) {
 		return true, err
 	}
@@ -187,16 +190,11 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 			label = relayIdleRedeliveryLabel(record)
 		}
 		directive.Text = label + directive.Text
-		// Node registration and appliedPending updates also hold h.mu.
-		// Bind the gate to the actual agent through the queue write.
-		h.mu.Lock()
-		if !h.retryLaneAgentReadyLocked(route.Machine, agent) {
-			h.mu.Unlock()
-			return false, store.deferUnqueuedLabel(ctx, o.id, o.spent+1, next, now.Add(obligationRecheckMin))
+		var current bool
+		queued, current = h.queueObligationLaneRetry(ctx, record.ID, event, route, agent, directive)
+		if !current {
+			return false, store.deferUnqueuedLabel(context.WithoutCancel(ctx), o.id, o.spent+1, next, now.Add(obligationRecheckMin))
 		}
-		h.registerRelayAckEventLocked(record.Kind, event, route.Machine, route.Pane, record.ID)
-		queued = agent.queueRelay(directive)
-		h.mu.Unlock()
 		if queued {
 			h.armRelayAckEvent(record.ID, event.JobID)
 		} else {
@@ -208,6 +206,19 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 		h.broadcastRelayReplayInjected(record, route, attempts, source)
 	}
 	return true, nil
+}
+
+// The replay lock covers only validation and the nonblocking queue write.
+func (h *HubServer) queueObligationLaneRetry(ctx context.Context, id int64, event hubJobEventPayload, route reportRelayRoute, agent *hubAgent, directive hubRelayInjectEvent) (queued, current bool) {
+	h.replayMu.RLock()
+	defer h.replayMu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if ctx.Err() != nil || !h.retryLaneAgentReadyLocked(route.Machine, agent) {
+		return false, false
+	}
+	h.registerRelayAckEventLocked("lane.event", event, route.Machine, route.Pane, id)
+	return agent.queueRelay(directive), true
 }
 
 func (h *HubServer) retryLaneAgentReadyLocked(machine string, agent *hubAgent) bool {

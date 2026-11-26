@@ -8,6 +8,8 @@ package panewire
 
 import (
 	"context"
+	"maps"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -217,10 +219,23 @@ func adoptableObligation(record handoffkeepRelayEvent) (newDeliveryObligation, b
 // that obligation is read again later.
 func (h *HubServer) classifyObligations(ctx context.Context) {
 	store := h.inbox.store
-	due, err := store.dueObligations(ctx, h.now().UTC(), obligationClassifyLimit)
+	h.mu.Lock()
+	waitingForIdle := maps.Clone(h.relayControl.workingExpired)
+	h.mu.Unlock()
+	// Idle-owned rows keep their due time. Leave room in the bounded pass
+	// for other rows even when many idle-owned rows are already due.
+	due, err := store.dueObligations(ctx, h.now().UTC(), obligationClassifyLimit+len(waitingForIdle))
 	if err != nil {
 		h.logger.Warn("due delivery obligations were not read", "error", store.loggable("due obligations", err))
 		return
+	}
+	if len(due) > obligationClassifyLimit {
+		sort.SliceStable(due, func(i, j int) bool {
+			_, left := waitingForIdle[due[i].relayID]
+			_, right := waitingForIdle[due[j].relayID]
+			return !left && right
+		})
+		due = due[:obligationClassifyLimit]
 	}
 	for _, o := range due {
 		record, found, readErr := h.handoffkeep.relayEvent(ctx, o.relayID)
@@ -228,14 +243,20 @@ func (h *HubServer) classifyObligations(ctx context.Context) {
 			return
 		}
 		now := h.now().UTC()
+		_, idleOwned := waitingForIdle[o.relayID]
+		err = nil
 		switch {
 		case readErr != nil:
 			h.logger.Warn("delivery obligation row could not be read", "event_id", o.relayID)
-			err = store.deferObligation(ctx, o.id, now, now.Add(obligationRecheckMin))
+			if !idleOwned {
+				err = store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
+			}
 		case !found:
 			// Absence proves nothing about delivery, so the row stays open.
 			h.logger.Warn("delivery obligation row is not in handoffkeep", "event_id", o.relayID, "obligation", o.id)
-			err = store.deferObligation(ctx, o.id, now, now.Add(obligationParkRecheck))
+			if !idleOwned {
+				err = store.deferObservedObligation(ctx, o, now, now.Add(obligationParkRecheck))
+			}
 		default:
 			err = h.classifyObligation(ctx, o, record, now)
 		}
@@ -286,7 +307,10 @@ func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, re
 	h.mu.Lock()
 	_, waitingForIdle := h.relayControl.workingExpired[o.relayID]
 	h.mu.Unlock()
-	if own && o.state == obligationOwed && o.fault != "" && !waitingForIdle {
+	if waitingForIdle {
+		return nil
+	}
+	if own && o.state == obligationOwed && o.fault != "" {
 		_, err := h.retryObligation(ctx, o, record, now, obligationRetrySource)
 		return err
 	}
@@ -294,5 +318,5 @@ func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, re
 	if o.state != obligationOwed {
 		wait = obligationParkRecheck
 	}
-	return store.deferObligation(ctx, o.id, now, now.Add(wait))
+	return store.deferObservedObligation(ctx, o, now, now.Add(wait))
 }

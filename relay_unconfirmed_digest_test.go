@@ -320,3 +320,23 @@ func TestUnconfirmedStaleDigestReleasesClaims(t *testing.T) {
 		})
 	}
 }
+
+func TestUnconfirmedDigestCrossesAgeCutoffDuringReplay(t *testing.T) {
+	rig := unconfirmedDigestStart(t)
+	h, agent := quietHub(t, rig.path, "default", rig.hk, &rig.now)
+	record := digestRow(t, rig.fake, rig.batch)
+	record.ReceivedAt = rig.now.Add(-relayReplayMaxAge + time.Second).Format(time.RFC3339Nano)
+	before := rig.now
+	reads := 0
+	h.now = func() time.Time {
+		reads++
+		if reads == 1 {
+			return before
+		}
+		return before.Add(2 * time.Second)
+	}
+	h.replayRelayEvent(record, relayReplaySourceStartup)
+	if got := rig.fake.deliveredToFor(rig.batch); got != "" || len(agent.relays) != 0 {
+		t.Fatalf("managed batch was handled by ordinary replay: destination=%q queued=%d", got, len(agent.relays))
+	}
+}

@@ -21,6 +21,7 @@ type relayPending struct {
 	kind       string
 	event      hubJobEventPayload
 	armToken   *byte
+	windowID   *byte
 	dropReason string
 	held       bool
 }
@@ -59,7 +60,7 @@ func (h *HubServer) registerRelayAckEvent(kind string, event hubJobEventPayload,
 func (h *HubServer) registerRelayAckEventLocked(kind string, event hubJobEventPayload, machine, pane string, eventID int64) {
 	key := relayPendingKey(eventID, event.JobID)
 	if _, exists := h.relayControl.relayPending[key]; !exists {
-		h.relayControl.relayPending[key] = relayPending{machine: machine, pane: pane, eventID: eventID, kind: kind, event: event}
+		h.relayControl.relayPending[key] = relayPending{machine: machine, pane: pane, eventID: eventID, kind: kind, event: event, windowID: new(byte)}
 	}
 }
 
@@ -139,7 +140,7 @@ func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 			h.mu.Unlock()
 			return
 		}
-		if !scheduled {
+		if scheduled == relayFaultFailed {
 			timeout := h.relayControl.relayAckTimeout
 			h.mu.Unlock()
 			if h.closeCtx.Err() == nil {
@@ -150,11 +151,15 @@ func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 		delete(h.relayControl.relayPending, key)
 		if pending.dropReason != "" {
 			h.rememberWorkingExpiredLocked(pending, relayAckPayload{Reason: pending.dropReason})
-			delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
+			if scheduled == relayFaultScheduled {
+				delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
+			}
 			h.mu.Unlock()
 			return
 		}
-		delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
+		if scheduled == relayFaultScheduled {
+			delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
+		}
 	}
 
 	broadcast := h.relayControl.rememberRelayTimeout(key)
@@ -243,9 +248,18 @@ func (h *HubServer) peekRelayPending(machineID string, ack relayAckPayload) (str
 	return h.findRelayPendingLocked(machineID, ack)
 }
 
-// consumeRelayPending retires a window after the caller persists the fault.
-func (h *HubServer) consumeRelayPending(key string) {
+// finishUnconfirmedWindow only retires the same injection the report observed.
+func (h *HubServer) finishUnconfirmedWindow(key string, pending relayPending, ack relayAckPayload, write relayFaultWrite) bool {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	current, exists := h.relayControl.relayPending[key]
+	if !exists || current.windowID != pending.windowID {
+		return false
+	}
+	h.rememberWorkingExpiredLocked(pending, ack)
 	delete(h.relayControl.relayPending, key)
-	h.mu.Unlock()
+	if write == relayFaultScheduled {
+		delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
+	}
+	return true
 }

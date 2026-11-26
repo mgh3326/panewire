@@ -1468,7 +1468,7 @@ func (h *HubServer) replayRelayEventCollecting(record handoffkeepRelayEvent, sou
 	}
 	event := relayEventFromRecord(record)
 	managed := h.relayRetryIsManaged(relayEventDedupeKey(record.Kind, event), record.ID)
-	if managed && h.relayReplayRetireReason(record) != "" && h.replayDefersUnconfirmedBatch(record) {
+	if managed && h.replayDefersUnconfirmedBatch(record) {
 		return
 	}
 	if h.replayInbox(record) {

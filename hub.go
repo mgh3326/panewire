@@ -1863,13 +1863,9 @@ func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string,
 		if ack.Reason == relayDroppedWorkingExpired {
 			fault = relayDroppedWorkingExpired
 		}
-		if !h.scheduleRelayRetry(ctx, pending, fault) {
+		write := h.scheduleRelayRetry(ctx, pending, fault)
+		if write == relayFaultFailed || !h.finishUnconfirmedWindow(key, pending, ack, write) {
 			return
-		}
-		h.rememberWorkingExpired(pending, ack)
-		h.consumeRelayPending(key)
-		if h.inbox != nil {
-			h.forgetRelayEvent(relayEventDedupeKey(pending.kind, pending.event))
 		}
 		h.observeRelayUnconfirmed(pending, ack)
 		h.recordInboxStage(relayEventDedupeKey(pending.kind, pending.event), laneInboxStageUnconfirmed, ack.Reason, machineID, pending.pane)
