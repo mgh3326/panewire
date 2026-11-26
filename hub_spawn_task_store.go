@@ -271,6 +271,10 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 		if err := s.backfillSpawnBoundMachines(s.life); err != nil {
 			return err
 		}
+		// Before the hub takes an idle wake (hk 6820).
+		if err := s.markEarlierObligationCopies(s.life); err != nil {
+			return err
+		}
 		if err := s.reconcileSpawnQueue(ctx); err != nil {
 			return err
 		}
@@ -404,6 +408,11 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// Rows bound before bound_machine and exclusive existed get them once
 	// (hk 6433), before the coordinator reads them.
 	if err := s.backfillSpawnBoundMachines(s.life); err != nil {
+		return err
+	}
+	// Before the hub takes an idle wake (hk 6820). It records a later
+	// user_version than the two backfills above, so it follows them.
+	if err := s.markEarlierObligationCopies(s.life); err != nil {
 		return err
 	}
 	// And at every start, the columns of the attempts in flight are repaired

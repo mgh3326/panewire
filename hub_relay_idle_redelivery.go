@@ -3,231 +3,96 @@ package panewire
 // Contract: docs/relay-harness-delivery.md (workingUnprovable).
 //
 // hk 3411: a row a node dropped as working_wait_expired was never typed: the
-// pane was still working when the hold ended. Its durable row stays
-// undelivered with an unconfirmed mark, and before this change only a hub
-// restart or a node hello replayed it. The hub now remembers such a row when
-// its mark lands and re-delivers it the next time the idle-wake observer
-// reports its pane idle: one row per idle wake, oldest first, through the
-// marked row's one labelled replay, so each row is re-delivered at most once.
-// The memory is not durable; a hub restart replays every marked row anyway.
+// pane was still working when the hold ended. When the idle-wake observer
+// reports that pane idle, the hub asks for one such row again: one row per idle
+// wake, oldest first. A hub with an inbox store records the request on the
+// row's delivery obligation and the next pass queues the copy (hk 6820,
+// delivery_obligation_revive.go). A hub without one keeps the rows in memory
+// (hub_relay_idle_legacy.go).
 
-import (
-	"context"
-	"strings"
-	"time"
-)
+import "strings"
 
-const (
-	// relayReplaySourceIdle names the idle-wake re-delivery in replay logs and
-	// broadcasts, beside relayReplaySourceStartup and relayReplaySourceHello.
-	relayReplaySourceIdle = "idle"
-	// relayWorkingExpiredMaxRows bounds the rows the hub remembers. Past it a
-	// new row is left to the restart and hello replays.
-	relayWorkingExpiredMaxRows = 4096
-	// relayWorkingExpiredMaxTries bounds the idle wakes one row may use without
-	// being spent. A row that stays open past it (exhausted, unroutable) would
-	// otherwise be picked first at every wake and starve the rows behind it;
-	// it is left to the restart and hello replays.
-	relayWorkingExpiredMaxTries = 3
-)
-
-// workingExpiredRow is one remembered row: its lane, when the node dropped it,
-// and how many idle wakes tried it without the replay spending it. The drop
-// time bounds the re-delivery's age: the row's receipt can be up to
-// relay.cmd_hold_max older, since the node held it that long.
-type workingExpiredRow struct {
-	lane       string
-	droppedAt  time.Time
-	tries      int
-	retryToken *byte
-	idleWake   idleWakeRouteRequest
-}
-
-// rememberWorkingExpired records a row the node dropped as
-// working_wait_expired once its unconfirmed mark is durable. Only lane.event
-// rows are remembered: they are the rows the marked replay re-delivers.
-func (h *HubServer) rememberWorkingExpiredLocked(pending relayPending, ack relayAckPayload) {
-	if ack.Reason != relayDroppedWorkingExpired || pending.kind != "lane.event" || pending.event.OwnerLane == "" {
-		return
-	}
-	id := pending.eventID
-	if id == 0 {
-		id = ack.OriginalEventID
-	}
-	if id < 1 {
-		return
-	}
-	if h.relayControl.workingExpired == nil {
-		h.relayControl.workingExpired = make(map[int64]workingExpiredRow)
-	}
-	if len(h.relayControl.workingExpired) >= relayWorkingExpiredMaxRows {
-		return
-	}
-	h.relayControl.workingExpired[id] = workingExpiredRow{lane: pending.event.OwnerLane, droppedAt: h.now().UTC()}
-}
+// relayReplaySourceIdle names the idle-wake re-delivery in replay logs and
+// broadcasts, beside relayReplaySourceStartup and relayReplaySourceHello.
+const relayReplaySourceIdle = "idle"
 
 // redeliverWorkingExpiredOnIdle runs on an idle-wake route request: the pane
-// has settled idle or done. It re-delivers the oldest remembered row whose
-// lane routes to that pane, once. Only a wake newer than the last one that
-// re-delivered a row for the pane re-delivers another, so a retried request
-// for an idle wake already used, or for an older one, re-delivers nothing and
-// two rows are never typed into one idle turn: the node types the row, the
-// pane works, and its next idle wake brings the next row.
+// has settled idle or done. A row whose working expiry is still being written
+// keeps the wake on its ack window, and the write runs it again.
 func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWakeRouteRequest) {
-	h.mu.Lock()
-	if h.inbox != nil {
-		wake := idleRedeliveryWakeOf(request)
-		for key, pending := range h.relayControl.relayPending {
-			if pending.dropReason != relayDroppedWorkingExpired || pending.machine != machine || pending.pane != request.Pane {
-				continue
-			}
-			if pending.idleWake.Pane == "" || wake.newerThan(idleRedeliveryWakeOf(pending.idleWake)) {
-				pending.idleWake = request
-				h.relayControl.relayPending[key] = pending
-			}
-		}
-	}
-	remembered := len(h.relayControl.workingExpired)
-	h.mu.Unlock()
-	if remembered == 0 || h.handoffkeep == nil {
+	if h.inbox == nil {
+		h.redeliverLegacyWorkingExpiredOnIdle(machine, request)
 		return
 	}
+	wake := idleRedeliveryWakeOf(request)
+	h.mu.Lock()
+	for key, pending := range h.relayControl.relayPending {
+		if pending.dropReason != relayDroppedWorkingExpired || pending.machine != machine || pending.pane != request.Pane {
+			continue
+		}
+		if pending.idleWake.Pane == "" || wake.newerThan(idleRedeliveryWakeOf(pending.idleWake)) {
+			pending.idleWake = request
+			h.relayControl.relayPending[key] = pending
+		}
+	}
+	h.mu.Unlock()
+	h.requestWorkingExpiredRevive(machine, request)
+}
+
+// requestWorkingExpiredRevive asks for the revived copy of the oldest
+// working-expired row among the lanes routed to the pane. Only a wake newer
+// than the last one that asked for a row of the pane asks for another, so a
+// retried request for a wake already used, or for an older one, asks for
+// nothing. A wake that finds no row is not used up.
+func (h *HubServer) requestWorkingExpiredRevive(machine string, request idleWakeRouteRequest) {
+	if h.handoffkeep == nil {
+		return
+	}
+	// One request at a time: a second run of the same wake must see whether the
+	// first used it.
+	h.obligations.reviveMu.Lock()
+	defer h.obligations.reviveMu.Unlock()
 	routes, err := loadReportRelayRoutesResult(h.reportRelayPath)
 	if err != nil {
 		return
 	}
+	var lanes []string
+	for lane, route := range routes {
+		if !route.Sink && route.Machine == machine && route.Pane == request.Pane {
+			lanes = append(lanes, lane)
+		}
+	}
+	if len(lanes) == 0 {
+		return
+	}
 	paneKey := machine + "\x00" + request.Pane
-	h.mu.Lock()
-	var pick int64
-	for id, row := range h.relayControl.workingExpired {
-		route, ok := routes[row.lane]
-		if row.retryToken == nil && ok && !route.Sink && route.Machine == machine && route.Pane == request.Pane && (pick == 0 || id < pick) {
-			pick = id
-		}
-	}
 	wake := idleRedeliveryWakeOf(request)
+	h.mu.Lock()
 	previous, seen := h.relayControl.idleRedelivered[paneKey]
-	if pick == 0 || seen && !wake.newerThan(previous) {
-		h.mu.Unlock()
+	h.mu.Unlock()
+	if seen && !wake.newerThan(previous) {
 		return
 	}
-	row := h.relayControl.workingExpired[pick]
-	if h.now().UTC().Sub(row.droppedAt) > relayReplayMaxAge {
-		delete(h.relayControl.workingExpired, pick)
-		// As old as the replay window allows: the restart replay retires it.
-		h.mu.Unlock()
+	store := h.inbox.store
+	marked, err := store.requestObligationRevive(h.closeCtx, lanes, h.now().UTC())
+	if err != nil {
+		h.logger.Warn("idle re-delivery was not requested; the next idle wake asks again", "machine", machine, "pane", request.Pane, "error", store.loggable("revive request", err))
 		return
 	}
-	if h.inbox != nil {
-		if row.idleWake.Pane == "" || wake.newerThan(idleRedeliveryWakeOf(row.idleWake)) {
-			row.idleWake = request
-			h.relayControl.workingExpired[pick] = row
-		}
-		if _, held := h.relayHeld[pick]; held {
-			// The terminal drop dispatches this wake after clearing the lease.
-			h.mu.Unlock()
-			return
-		}
+	if !marked {
+		return
 	}
+	h.rememberIdleRedeliveryWake(paneKey, wake)
+	h.startObligationReconcile()
+}
+
+func (h *HubServer) rememberIdleRedeliveryWake(paneKey string, wake idleRedeliveryWake) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.relayControl.idleRedelivered == nil {
 		h.relayControl.idleRedelivered = make(map[string]idleRedeliveryWake)
 	}
 	h.relayControl.idleRedelivered[paneKey] = wake
-	token := new(byte)
-	row.retryToken = token
-	h.relayControl.workingExpired[pick] = row
-	h.mu.Unlock()
-	defer func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if h.relayControl.workingExpired[pick].retryToken == token {
-			delete(h.relayControl.workingExpired, pick)
-		}
-	}()
-	// restore puts the row and the pane's previous wake back when this wake
-	// spent nothing, so a later wake (or a retry of this one) tries again.
-	restore := func(why string, failed bool) {
-		if failed {
-			row.tries++
-		}
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if h.relayControl.idleRedelivered[paneKey] == wake {
-			if seen {
-				h.relayControl.idleRedelivered[paneKey] = previous
-			} else {
-				delete(h.relayControl.idleRedelivered, paneKey)
-			}
-		}
-		if row.tries >= relayWorkingExpiredMaxTries {
-			h.logger.Warn("idle re-delivery gave up; left to the restart replay", "event_id", pick, "why", why)
-			return
-		}
-		h.logger.Warn("idle re-delivery will retry at the next idle wake", "event_id", pick, "why", why)
-		row.retryToken = nil
-		h.relayControl.workingExpired[pick] = row
-	}
-	ctx := context.Background()
-	record, found, err := h.handoffkeep.relayEvent(ctx, pick)
-	if err != nil {
-		restore("row_read_failed", true)
-		return
-	}
-	if !found {
-		return
-	}
-	key := relayEventDedupeKey(record.Kind, relayEventFromRecord(record))
-
-	if h.inbox != nil {
-		store := h.inbox.store
-		o, err := store.retryObligationForKey(ctx, key)
-		if err != nil {
-			restore("obligation_read_failed", true)
-			return
-		}
-		if o.state != obligationOwed || o.labelled > 0 || record.DeliveredAt != "" {
-			return
-		}
-		now := h.now().UTC()
-		if o.spent > o.attemptsSeen && o.nextAt > now.UnixMilli() {
-			restore("obligation_retry_not_due", false)
-			return
-		}
-		finished, err := h.retryObligation(ctx, o, record, now, relayReplaySourceIdle, token)
-		if err != nil || !finished {
-			restore("obligation_retry_deferred", true)
-		}
-		return
-	}
-	// The idle path also replays a row; serialize it with registration just
-	// like the startup and hello walks, and retry after the report arrives.
-	h.replayMu.RLock()
-	defer h.replayMu.RUnlock()
-	if h.replayAwaitsAppliedReport(record) {
-		restore("applied_report_pending", true)
-		return
-	}
-	// The original send's injection claim outlives the node's drop: nothing
-	// releases it until a restart. That send is over, so its claim is released
-	// here and the replay takes it again; a claim another row holds stays.
-	h.mu.Lock()
-	if h.relayDedupe[key] == record.ID {
-		delete(h.relayDedupe, key)
-	}
-	h.mu.Unlock()
-	h.replayLegacyUnconfirmed(ctx, record, relayReplaySourceIdle, false)
-	// The replay reports nothing back. It spends a row by closing it (the
-	// retire it writes before anything is queued, or a delivery), so a row
-	// still open afterwards was not spent: a failed retire, a failed re-read,
-	// a deferred inbox lookup. An unreadable row cannot be proven spent; the
-	// next try re-reads it before it queues anything.
-	after, found, err := h.handoffkeep.relayEvent(ctx, pick)
-	switch {
-	case err != nil:
-		restore("row_reread_failed", true)
-	case found && after.DeliveredAt == "" && !strings.HasPrefix(after.DeliveredTo, relayReplayRetiredMarker):
-		restore("row_not_spent", true)
-	}
 }
 
 // idleRedeliveryWake orders the idle wakes of one pane: the node's sequence

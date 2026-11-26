@@ -1031,6 +1031,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 			}
 			config.Logger.Info("hub backfilled the drain columns of bound spawn operations", "rows", rows, "batches", len(batches))
 		}
+		if marked := inbox.store.earlierCopiesMarked; marked > 0 {
+			config.Logger.Info("hub marked the working-expired copies an earlier build made as revived", "rows", marked)
+		}
 		if repaired := inbox.store.spawnBoundRepaired; repaired > 0 {
 			config.Logger.Info("hub repaired the drain columns of spawn operations in flight", "rows", repaired)
 		}
@@ -1819,10 +1822,9 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 
 			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
+			h.noteObligationDrop(ctx, machineID, dropped)
 			if pending.dropReason != "" {
 				go h.expireRelayAckWindow(relayPendingKey(dropped.OriginalEventID, dropped.JobID), pending.armToken)
-			} else if pending.idleWake.Pane != "" {
-				go h.redeliverWorkingExpiredOnIdle(machineID, pending.idleWake)
 			}
 			h.escalateUnconfirmedRelayContext(ctx, machineID, dropped)
 		}
@@ -1874,15 +1876,11 @@ func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string,
 			h.countUnknownMessage()
 			return
 		}
-		fault := obligationFaultUnconfirmed
 		rearm := false
-		if ack.Reason == relayDroppedWorkingExpired {
-			fault = relayDroppedWorkingExpired
-			if h.inbox != nil {
-				rearm = h.retainWorkingExpiredReason(key, pending)
-			}
+		if ack.Reason == relayDroppedWorkingExpired && h.inbox != nil {
+			rearm = h.retainWorkingExpiredReason(key, pending)
 		}
-		write := h.scheduleRelayRetry(ctx, pending, fault)
+		write := h.scheduleRelayRetry(ctx, pending, obligationFaultFor(ack.Reason))
 		if write == relayFaultFailed {
 			if rearm {
 				h.armRelayAckEvent(pending.eventID, pending.event.JobID)

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -196,6 +197,10 @@ func copyHubStore(ctx context.Context, from, to, selection string, verify, repla
 	if !backfilled {
 		return errStoreCopySourceSpawnBoundNotBackfilled
 	}
+	earlierCopiesMarked, err := storeCopySourceEarlierCopiesMarked(ctx, src)
+	if err != nil {
+		return err
+	}
 	var fenceExists bool
 	if dst.dialect == dialectPostgres {
 		err = dst.db.QueryRowContext(ctx, `SELECT to_regclass('supersede_fence') IS NOT NULL`).Scan(&fenceExists)
@@ -281,6 +286,12 @@ func copyHubStore(ctx context.Context, from, to, selection string, verify, repla
 	}
 	if verify {
 		return nil
+	}
+	// Copied obligations bring the source's record of that marking (hk 6820).
+	if slices.ContainsFunc(tables, func(table storeCopyTable) bool { return table.name == "delivery_obligations" }) {
+		if err = copyEarlierObligationCopiesRecord(ctx, target, earlierCopiesMarked); err != nil {
+			return hubDatabaseError("copy the obligation marking record", err)
+		}
 	}
 	highWater, err := storeCopyHighWater(ctx, source, src, tables)
 	if err != nil {

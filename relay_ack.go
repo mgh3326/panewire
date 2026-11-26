@@ -23,8 +23,11 @@ type relayPending struct {
 	armToken   *byte
 	windowID   *byte
 	dropReason string
-	idleWake   idleWakeRouteRequest
-	held       bool
+	// dropHarness is the harness that drop named; it decides what some drop
+	// reasons prove (obligationDropFault).
+	dropHarness string
+	idleWake    idleWakeRouteRequest
+	held        bool
 }
 
 func relayPendingKey(eventID int64, jobID string) string {
@@ -129,10 +132,7 @@ func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 		h.mu.Unlock()
 		fault := obligationAckTimeout
 		if pending.dropReason != "" {
-			fault = obligationFaultUnconfirmed
-			if pending.dropReason == relayDroppedWorkingExpired {
-				fault = relayDroppedWorkingExpired
-			}
+			fault = obligationDropFault(pending.dropReason, pending.dropHarness)
 		}
 		scheduled := h.scheduleRelayRetry(h.closeCtx, pending, fault)
 		h.mu.Lock()
@@ -151,7 +151,6 @@ func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 		}
 		delete(h.relayControl.relayPending, key)
 		if pending.dropReason != "" {
-			h.rememberWorkingExpiredLocked(pending, relayAckPayload{Reason: pending.dropReason})
 			if scheduled == relayFaultScheduled {
 				delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
 			}
@@ -277,7 +276,7 @@ func (h *HubServer) finishUnconfirmedWindow(key string, pending relayPending, ac
 		h.mu.Unlock()
 		return idleWakeRouteRequest{}, false
 	}
-	h.rememberWorkingExpiredLocked(pending, ack)
+	h.rememberLegacyIdleRowLocked(pending, ack)
 	delete(h.relayControl.relayPending, key)
 	if write == relayFaultScheduled {
 		delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))

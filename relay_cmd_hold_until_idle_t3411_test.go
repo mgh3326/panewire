@@ -350,11 +350,46 @@ func t3411WorkerRelays(rig *t3276Rig) []hubRelayInjectEvent {
 	}
 }
 
+// t3411OnBothHubs runs an idle re-delivery acceptance on a hub that remembers
+// working-expired rows in memory and on one that records the revive on a
+// delivery obligation (hk 6820).
+func t3411OnBothHubs(t *testing.T, run func(t *testing.T, rig *t3276Rig)) {
+	t.Run("memory", func(t *testing.T) { run(t, t3276Start(t)) })
+	t.Run("obligations", func(t *testing.T) {
+		run(t, t3276StartOn(t, func(lanes string, client *handoffkeepRelayClient) *HubServer {
+			hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node", "host-b": "other"},
+				ReportRelayPath: r20LanesFile(t, lanes), DeliveryPolicyPath: "default", InboxStorePath: freshLaneInboxFile(t), handoffkeep: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = hub.Close() })
+			return hub
+		}))
+	})
+}
+
+// t3411Redelivered waits for the hub to queue a re-delivery. On a hub with
+// obligations a wake can land while a pass runs, so it starts the next one, as
+// Sweep would.
+func t3411Redelivered(t *testing.T, rig *t3276Rig, label string) []hubRelayInjectEvent {
+	t.Helper()
+	var out []hubRelayInjectEvent
+	eventually(t, 3*time.Second, label, func() bool {
+		rig.hub.startObligationReconcile()
+		out = append(out, t3411WorkerRelays(rig)...)
+		return len(out) > 0
+	})
+	return out
+}
+
 // Acceptance (f): rows a node dropped as working_wait_expired (here through a
 // ceiling already passed) are re-delivered at the pane's next idle wake:
 // oldest first, one per idle wake, once each, and typed into the idle pane.
 func TestCmdWorkingExpiredRowRedeliveredOnIdle_t3411(t *testing.T) {
-	rig := t3276Start(t)
+	t3411OnBothHubs(t, t3411RedeliveredOnIdle)
+}
+
+func t3411RedeliveredOnIdle(t *testing.T, rig *t3276Rig) {
 	rig.node.relayControl.cmdHoldMax = time.Nanosecond
 	pane := t3384Install(t, "cmd", "working")
 	held := t3384Hold(t, rig, relayDeliverDirective, relayDeliverDirective)
@@ -370,11 +405,7 @@ func TestCmdWorkingExpiredRowRedeliveredOnIdle_t3411(t *testing.T) {
 	var nonces []string
 	for turn, directive := range held {
 		t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(uint64(turn+1)))
-		var redelivered []hubRelayInjectEvent
-		eventually(t, 3*time.Second, "the idle re-delivery", func() bool {
-			redelivered = append(redelivered, t3411WorkerRelays(rig)...)
-			return len(redelivered) > 0
-		})
+		redelivered := t3411Redelivered(t, rig, "the idle re-delivery")
 		// A window that proves the same idle wake queues no second row.
 		time.Sleep(200 * time.Millisecond)
 		redelivered = append(redelivered, t3411WorkerRelays(rig)...)
@@ -416,7 +447,10 @@ func TestCmdWorkingExpiredRowRedeliveredOnIdle_t3411(t *testing.T) {
 // nothing, even with another dropped row still waiting: only a later idle turn
 // may bring the next row.
 func TestCmdIdleRedeliveryIgnoresOlderWakeRetry_t3411(t *testing.T) {
-	rig := t3276Start(t)
+	t3411OnBothHubs(t, t3411IgnoresOlderWakeRetry)
+}
+
+func t3411IgnoresOlderWakeRetry(t *testing.T, rig *t3276Rig) {
 	rig.node.relayControl.cmdHoldMax = time.Nanosecond
 	pane := t3384Install(t, "cmd", "working")
 	held := t3384Hold(t, rig, relayDeliverDirective, relayDeliverDirective, relayDeliverDirective)
@@ -428,11 +462,7 @@ func TestCmdIdleRedeliveryIgnoresOlderWakeRetry_t3411(t *testing.T) {
 
 	for turn, seq := range []uint64{1, 2} {
 		t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(seq))
-		var redelivered []hubRelayInjectEvent
-		eventually(t, 3*time.Second, "the idle re-delivery", func() bool {
-			redelivered = append(redelivered, t3411WorkerRelays(rig)...)
-			return len(redelivered) > 0
-		})
+		redelivered := t3411Redelivered(t, rig, "the idle re-delivery")
 		if len(redelivered) != 1 || redelivered[0].EventID != held[turn].EventID {
 			t.Fatalf("idle wake %d re-delivered %+v, want only row %d", seq, redelivered, held[turn].EventID)
 		}
@@ -446,11 +476,7 @@ func TestCmdIdleRedeliveryIgnoresOlderWakeRetry_t3411(t *testing.T) {
 	}
 
 	t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(3))
-	var third []hubRelayInjectEvent
-	eventually(t, 3*time.Second, "the third row at the next idle wake", func() bool {
-		third = append(third, t3411WorkerRelays(rig)...)
-		return len(third) > 0
-	})
+	third := t3411Redelivered(t, rig, "the third row at the next idle wake")
 	if len(third) != 1 || third[0].EventID != held[2].EventID {
 		t.Fatalf("idle wake 3 re-delivered %+v, want only row %d", third, held[2].EventID)
 	}
@@ -490,7 +516,7 @@ func TestCmdIdleRedeliveryRetriesUnspentRow_t3411(t *testing.T) {
 	eventually(t, 3*time.Second, "the failed re-delivery to put the row back", func() bool {
 		rig.hub.mu.Lock()
 		defer rig.hub.mu.Unlock()
-		_, kept := rig.hub.relayControl.workingExpired[held[0].EventID]
+		_, kept := rig.hub.relayControl.legacyIdle[held[0].EventID]
 		return kept
 	})
 	if got := t3411WorkerRelays(rig); len(got) != 0 {
@@ -550,7 +576,10 @@ func TestCmdHoldDroppedWhenJobEndedBeforeIdle_t3411(t *testing.T) {
 // window ago. Its idle re-delivery is bounded by the drop, not the receipt, so
 // it still reaches the pane instead of being retired as stale.
 func TestCmdIdleRedeliveryOfRowHeldToCeiling_t3411(t *testing.T) {
-	rig := t3276Start(t)
+	t3411OnBothHubs(t, t3411RowHeldToCeiling)
+}
+
+func t3411RowHeldToCeiling(t *testing.T, rig *t3276Rig) {
 	rig.node.relayControl.cmdHoldMax = time.Nanosecond
 	pane := t3384Install(t, "cmd", "working")
 	held := t3384Hold(t, rig, relayDeliverDirective)
@@ -568,11 +597,7 @@ func TestCmdIdleRedeliveryOfRowHeldToCeiling_t3411(t *testing.T) {
 	pane.setStatus(t, "idle")
 
 	t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(1))
-	var redelivered []hubRelayInjectEvent
-	eventually(t, 3*time.Second, "the idle re-delivery of the old row", func() bool {
-		redelivered = append(redelivered, t3411WorkerRelays(rig)...)
-		return len(redelivered) > 0
-	})
+	redelivered := t3411Redelivered(t, rig, "the idle re-delivery of the old row")
 	if len(redelivered) != 1 || redelivered[0].EventID != held[0].EventID {
 		t.Fatalf("re-delivered %+v, want row %d", redelivered, held[0].EventID)
 	}

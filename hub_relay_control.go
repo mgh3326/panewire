@@ -18,11 +18,12 @@ type hubRelayControlState struct {
 	relayOutcomeOrder      lruIndex[string]
 	acceptingOverride      map[string]acceptingOverride
 	acceptingOverridesPath string
-	// workingExpired maps a durable row a node dropped as working_wait_expired
-	// to its lane, until an idle wake re-delivers it; idleRedelivered holds
-	// the newest idle wake that re-delivered a row per machine and pane (hk
-	// 3411, hub_relay_idle_redelivery.go). Both are guarded by HubServer.mu.
-	workingExpired  map[int64]workingExpiredRow
+	// idleRedelivered holds the newest idle wake that asked for a
+	// working_wait_expired row per machine and pane (hk 3411,
+	// hub_relay_idle_redelivery.go). legacyIdle remembers those rows on a hub
+	// with no inbox store, which has no obligations to hold them
+	// (hub_relay_idle_legacy.go). Both are guarded by HubServer.mu.
+	legacyIdle      map[int64]legacyIdleRow
 	idleRedelivered map[string]idleRedeliveryWake
 }
 

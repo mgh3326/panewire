@@ -218,6 +218,12 @@ type t3276Rig struct {
 
 func t3276Start(t *testing.T) *t3276Rig {
 	t.Helper()
+	return t3276StartOn(t, func(lanes string, client *handoffkeepRelayClient) *HubServer { return r20Hub(t, lanes, client, nil) })
+}
+
+// t3276StartOn is t3276Start over the hub newHub builds.
+func t3276StartOn(t *testing.T, newHub func(lanes string, client *handoffkeepRelayClient) *HubServer) *t3276Rig {
+	t.Helper()
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	t.Cleanup(closeServer)
 	lanes, _ := json.Marshal(map[string]any{"lanes": map[string]reportRelayRoute{
@@ -225,7 +231,7 @@ func t3276Start(t *testing.T) *t3276Rig {
 		t3276Design: {Machine: "host-a", Pane: "w1:pD"},
 		t3276Lone:   {Machine: "host-a", Pane: "w1:pL"},
 	}})
-	hub := r20Hub(t, string(lanes), client, nil)
+	hub := newHub(string(lanes), client)
 	hub.relayControl.relayAckTimeout = time.Hour
 	rig := &t3276Rig{t: t, hub: hub, fake: fake, events: make(chan hubClientEvent, 64)}
 	rig.dest = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}

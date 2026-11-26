@@ -203,16 +203,21 @@ spends an attempt, the hub closes these rows. Each gets a `delivered_to` of
 - an idle-wake whose `changed_at` is more than 30 minutes old (`stale`);
 - any other row whose handoffkeep `received_at` is more than 24 hours old,
   which is the node outbox's own default bound (`stale`). A row with no
-  `received_at` is never aged out.
+  `received_at` is never aged out. A row whose delivery obligation says
+  `working_wait_expired` is aged from that drop instead: it is not retired
+  while its [revived copy](#faults-and-copies) may still be asked for.
 
 Legacy `chat-N` rows, written before the operator chat was removed, retire
 at replay (`chat-terminal`) and are never injected.
 
-**Store-backed retry.** An acknowledgement timeout or an unconfirmed node
-report schedules a delivery obligation. The maintenance sweep can retry while
-the node remains connected. It commits the spent attempt and the next check
-before queueing. A `lane.event` retry carries the existing duplicate-warning
-label and requires handoffkeep to show at least three attempts first. If
+**Store-backed retry.** An acknowledgement timeout, an unconfirmed node report
+or a node's drop records a fault on the delivery obligation, and the fault
+decides what copy is still owed ([Faults and copies](#faults-and-copies)). The
+maintenance sweep can retry while the node remains connected. It commits the
+spent attempt and the next check before queueing. A `lane.event` retry carries
+the existing duplicate-warning label (a revived working-expired row carries the
+idle re-delivery label) and requires handoffkeep to show at least three attempts
+first. If
 handoffkeep cannot commit that ceiling, the hub queues no copy. A `job.*` retry
 has no label and its attempt update is best-effort. A retry leaves the original
 handoffkeep row undelivered so later delivery proof can still close it.
@@ -369,12 +374,62 @@ holds applies:
 
 A new obligation is first read after 30 seconds. An owed one is read again after
 a tenth of its age, at least a minute and at most an hour; an exhausted or
-missing one after 4 hours. A failed read ends the pass and is retried after a
-minute.
+missing one after 4 hours. A failed read is retried after a minute. A requested
+revive is read by the next pass, ahead of the other due rows.
 
 An owed row with a scheduled fault uses its durable `spent` and `next_at` for
 the retry budget and backoff. A pre-upgrade row retired as
 `hub/replay-retired:unconfirmed` remains exhausted.
+
+### Faults and copies
+
+The budget is `spent` reaching 3, counted from handoffkeep's `attempts` when the
+first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
+
+| `fault` | Recorded from | What the pane may hold | Copies still owed |
+|---|---|---|---|
+| `ack_timeout` | no report inside the ack window | unknown | to the budget |
+| `pane_read_failed` | the drop after a failed pre-send read | nothing | to the budget |
+| `inject_failed_max_attempts` | the drop of a harness named and not devin | nothing | to the budget |
+| `unrouted` | a pass that found no route for a row with one of the three faults above | nothing was queued | no spend; to the budget once the route returns |
+| `working_wait_expired` | the report or drop | nothing | no budget copy; one revived copy at an idle wake |
+| `maybe_in_pane`, `delivery_uncertain_check_pane` | the report or drop; also an `inject_failed_max_attempts` drop from devin or naming no harness | maybe the text | one labelled copy, ever |
+| `pane_read_unproven` | a `maybe_in_pane presend:unproven:read_failed` report, until its drop says which | maybe the text | as above; the drop makes it `pane_read_failed` or `delivery_uncertain_check_pane` |
+| `prompt_unproven` | a `prompt_failed` report, until a drop settles it | maybe the text (devin may type part of a rejected send) | as above, once the node no longer holds the row |
+| `unproven` | any other node reason | maybe the text | one labelled copy, ever |
+| `unconfirmed` | a legacy marker or a retired labelled replay | maybe the text | one labelled copy, ever |
+| `job_ended` | the drop | the lane's job ended | none; the row stays open in handoffkeep |
+
+- A recorded fault changes only toward what is known. A timeout, `unrouted` and
+  `unconfirmed` replace only a timeout or `unrouted`. Among the safe faults and
+  the working expiry the latest wins. A maybe-typed fault replaces those and is
+  never replaced by them. `job_ended` replaces any fault.
+- A node's drop is applied to the obligation even when its report already ended
+  the ack window, so a working expiry after a held retry is learned.
+- A `prompt_failed` report names no harness. A later drop from a harness named
+  and not devin settles it: a safe fault or a working expiry takes its place.
+  A drop from devin, or naming no harness, leaves it maybe typed. While the
+  node still holds the row, a pass does not end it for this fault.
+- A `job.*` copy carries no label and has no revive: the three safe faults retry
+  to the budget, `job_ended` never, and any other gets one copy.
+- An idle wake sets `revive_requested` on one row. The pass takes the revive
+  first, ahead of the budget: it commits `revived`, raises handoffkeep's
+  attempts to the ceiling and queues one copy. A copy that was not queued gives
+  the revive back. A maybe-typed or `job_ended` row never revives, and neither
+  does a drop older than 24 hours.
+- A build before the revive counted its idle copy in `labelled` alone and kept
+  `working_wait_expired` when that copy failed. The first start of a build with
+  the revive marks every labelled `working_wait_expired` row `revived`, once per
+  store (`PRAGMA user_version` 3 on SQLite, a `panewire_schema_migrations` row
+  elsewhere). Rows labelled after that start keep their revive.
+  `hub store-copy` of `delivery_obligations` carries that record: the target
+  holds it exactly when the source does.
+- A row with no route spends nothing, writes no design-lane notice and is
+  announced `relay.unrouted` once per process. A `lane.event` is retired as
+  `lane_gone` only when it is an idle-wake report (above), never because its own
+  pane vanished.
+- Exhausted is not settled: the obligation and the handoffkeep row stay open,
+  and a late delivery still confirms them.
 
 ## The relay kind set
 
