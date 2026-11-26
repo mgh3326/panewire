@@ -98,15 +98,46 @@ func TestInboxWakeDesignWithEndedJobRouteFallsBackToDesk(t *testing.T) {
 	t4150Routes(t, r, routes)
 	t4150Snapshot(t, r, "w1:design", "w1:desk")
 	r.h.mu.Lock()
+	// A completed job ends its design route once its pane is proven gone, here
+	// by a recorded reap (hk 6900). Completion alone keeps the route.
 	r.h.jobs["ended-design-job"] = &hubJobRecord{
 		HubActiveJob: HubActiveJob{JobID: "ended-design-job", AgentLabel: t3602Design, Pane: "w1:design"},
 		Node:         "host-a",
 		Completed:    true,
+		PaneGone:     true,
 	}
 	r.h.mu.Unlock()
 	got := t4150Event(t, r, t3602Design)
 	t3602OneWake(t, got, "w1:desk", t4150DeskWake(t3602Design, 1, "order"))
 	t4150DeskEvent(t, r, t3602Design, false)
+}
+
+// hk 6900: a design route whose bound job completed keeps its pane while the
+// pane is alive. The wake lands on the design pane, not the desk.
+func TestInboxWakeDesignCompletedJobPaneAliveKeepsDesignRoute(t *testing.T) {
+	r := newT3602Rig(t, "default")
+	routes := t4150BaseRoutes()
+	routes[t3602Design] = reportRelayRoute{Machine: "host-a", Pane: "w1:design", Job: "done-design-job"}
+	t4150Routes(t, r, routes)
+	t4150Snapshot(t, r, "w1:design", "w1:desk")
+	// The design agent holds its pane in the node's latest snapshot.
+	r.h.mu.Lock()
+	r.h.nodes["host-a"].sessionSnapshot = t6900Snapshot(r.h.now(), HubSession{PaneID: "w1:design", Label: t3602Design}, HubSession{PaneID: "w1:desk", Label: deskPolicyLane})
+	r.h.mu.Unlock()
+	r.h.mu.Lock()
+	r.h.jobs["done-design-job"] = &hubJobRecord{
+		HubActiveJob: HubActiveJob{JobID: "done-design-job", AgentLabel: t3602Design, Pane: "w1:design"},
+		Node:         "host-a",
+		Completed:    true,
+	}
+	r.h.mu.Unlock()
+	got := t4150Event(t, r, t3602Design)
+	t3602OneWake(t, got, "w1:design", t3602Wake(t3602Design, 1, "order"))
+	for _, ev := range r.wakeEvents() {
+		if ev.Reason == "desk_fallback" {
+			t.Fatalf("a completed job with a live pane was diverted to the desk: %+v", ev)
+		}
+	}
 }
 
 func TestInboxWakeDesignWithoutRowKeepsUnroutableLiveJobOwed(t *testing.T) {

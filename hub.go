@@ -327,7 +327,11 @@ type hubJobRecord struct {
 	Completed bool
 	// LostSettled is set with Completed when the node's final job.lost ended
 	// the job (its hk record is lost). Role admission reads it (hk 5351).
-	LostSettled   bool
+	LostSettled bool
+	// PaneGone is set once a reap, close, pane.close the hub issued or lost pane
+	// recorded the job's pane gone. Completion alone never sets it. In memory
+	// only (relay_route_pane.go).
+	PaneGone      bool
 	Reassigning   bool
 	FencedNodes   map[string]uint64
 	Reassignments []hubJobReassignment

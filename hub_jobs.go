@@ -505,6 +505,7 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 	}
 	alreadyClosed := job.Completed
 	job.Completed, job.Orphaned, job.LastSeen = true, false, received
+	job.PaneGone = true // a close is the recorded end of the job (relay_route_pane.go)
 	if !alreadyClosed {
 		// handleAgentMessage already broadcasts the raw node event, so only
 		// the console feed entry is recorded here — and only on the first
@@ -535,6 +536,7 @@ func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, r
 	}
 	alreadyClosed := job.Completed
 	job.Completed, job.LostSettled, job.Orphaned, job.LastSeen = true, true, false, received
+	job.PaneGone = true // a lost job has no pane left (hubJobEndKind)
 	if !alreadyClosed {
 		h.recordUIEventWithJobLocked("job", "lost", machineID, event.JobID, received)
 	}

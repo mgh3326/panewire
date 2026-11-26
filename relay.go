@@ -790,13 +790,15 @@ func (h *HubServer) laneJobEnded(lane string) bool {
 	return h.laneJobEndedLocked(lane)
 }
 
-// relayRouteJobEndedLocked checks the route's job first, preserving takeover
-// routes whose lane label still names a completed predecessor. A jobless route
-// is matched to a completed lane job only when both still name the same pane.
+// relayRouteJobEndedLocked reports whether a route's pane can take no more lane
+// events: its job has completed and the job's own agent no longer holds the pane
+// (jobPaneEndedLocked). The route's job is checked first, preserving takeover
+// routes whose lane label still names a completed predecessor. A jobless route is
+// matched to a lane job only when both still name the same pane.
 func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string) bool {
 	if route.Job != "" {
 		if job := h.jobs[route.Job]; job != nil {
-			return job.Completed
+			return h.jobPaneEndedLocked(job, route)
 		}
 		return false
 	}
@@ -805,7 +807,7 @@ func (h *HubServer) relayRouteJobEndedLocked(route reportRelayRoute, lane string
 		if job.AgentLabel != lane || job.Node != route.Machine || job.Pane != route.Pane {
 			continue
 		}
-		if !job.Completed {
+		if !h.jobPaneEndedLocked(job, route) {
 			return false
 		}
 		ended = true

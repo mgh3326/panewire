@@ -221,6 +221,8 @@ func (h *HubServer) handleJobReap(writer http.ResponseWriter, request *http.Requ
 	answer := hubJobReapResult{Lane: body.Lane, Job: body.Job, Machine: node, Pane: reaped.Pane, Outcome: reaped.Outcome}
 	switch reaped.Outcome {
 	case nodeJobReapClosed, nodeJobReapPaneGone:
+		// The reap is the recorded end of this job's pane (relay_route_pane.go).
+		h.markJobPaneGone(node, body.Job)
 		if reaped.Pane != "" {
 			answer.Released = h.releasePaneLanes(node, reaped.Pane, commandStart)
 		}
