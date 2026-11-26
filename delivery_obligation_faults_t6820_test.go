@@ -645,7 +645,7 @@ func TestObligationFaultClasses(t *testing.T) {
 // backend: which fault replaces which, one request, one claim, a release.
 // Killed by: a dialect that reads the new fault inside the same UPDATE; a claim
 // that is not a compare-and-swap.
-func TestObligationFaultStoreContract(t *testing.T) {
+func TestObligationStoreContractFaults(t *testing.T) {
 	for _, backend := range laneInboxBackends() {
 		t.Run(backend.name, func(t *testing.T) {
 			s := backend.fresh(t)()
