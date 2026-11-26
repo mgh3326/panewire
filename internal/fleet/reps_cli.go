@@ -145,6 +145,9 @@ func (a *App) repsAdd(ctx context.Context, args []string, out io.Writer) error {
 	if bools["dry-run"] {
 		return writeJSON(out, r)
 	}
+	if a.repsPath() == "" {
+		return fail(exitConfig, "manual rep writes require an absolute HOME or XDG_STATE_HOME for local pending state")
+	}
 	store, err := a.benchStore()
 	if err != nil {
 		return fail(exitConfig, "%v", err)
