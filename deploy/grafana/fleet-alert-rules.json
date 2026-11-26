@@ -124,6 +124,9 @@
         "summary": "No reviewer produced a pass for {{ $labels.job }} ({{ $labels.reason }}); the PR gate stays review_missing.",
         "dashboard": "fleet-observability"
       },
+      "notification_settings": {
+        "receiver": "empty"
+      },
       "isPaused": false,
       "folderUID": "fleet-observability",
       "ruleGroup": "fleet-observability",

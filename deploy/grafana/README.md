@@ -37,7 +37,7 @@ The rule group has these rules:
 | Rule | Fires when |
 | --- | --- |
 | Repeated spawn refusals | `request_id`가 있는 hub coordinator `spawn` 기록에서 같은 사유의 거절이 30분 동안 3건 초과일 때 발생합니다. |
-| Review missing | No reviewer produced a pass within 1 h. |
+| Review missing | No reviewer produced a pass within 1 h. Dashboard only: the rule keeps evaluating, but its notification goes to the `empty` receiver, so it never reaches Discord (operator 544 A). Lost reviews are re-run automatically, and Discord stays for down, money and order alerts (decision 169). |
 | Reviewer failing repeatedly | The same reviewer on the same fleet host fails 3 or more times within 2 h. |
 | Quota observation stale | A refusing quota observation is older than 30 min (`age_min`). |
 | Fleet events pipeline silent | No fleet event reached Loki in 6 h. |
