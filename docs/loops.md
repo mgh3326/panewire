@@ -227,6 +227,11 @@ node has been seen longer than three intervals. A known machine with no
 heartbeat at all on a closed date gets one `no_report` line when that date's
 row is written, and no row.
 
+The hub identifies a process by its reported epoch. If two processes share a
+machine id and alternate reports, each epoch can repeatedly appear new and
+reset the never-ticked grace period; node loop reports assume one active
+process per machine id.
+
 ### Daily kept-worktree revisit
 
 Once a day the node runs the `node sweep-checkouts` logic itself (hk 5091)
