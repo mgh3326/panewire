@@ -196,7 +196,7 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 		return releaseLabel(obligationRecheckMin, err)
 	}
 	if err != nil || !found {
-		return true, err
+		return false, errors.Join(err, store.releaseUnqueuedJobRetry(context.WithoutCancel(ctx), o, next, h.now().UTC().Add(obligationRecheckMin)))
 	}
 	if latest.DeliveredAt != "" || strings.HasPrefix(latest.DeliveredTo, relayReplayRetiredMarker) {
 		return true, h.classifyObservedObligation(ctx, o, latest, now, true)
@@ -297,5 +297,16 @@ func (s *laneInboxStore) deferUnqueuedLabel(parent context.Context, id int64, sp
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
 		SET labelled=labelled-1,next_at=? WHERE id=? AND state='owed' AND spent=? AND next_at=?`),
 		due.UnixMilli(), id, spent, next.UnixMilli())
+	return err
+}
+
+// releaseUnqueuedJobRetry returns the one-copy allowance when the final proof
+// read failed before queueing. The handoffkeep attempt counter stays a mirror.
+func (s *laneInboxStore) releaseUnqueuedJobRetry(parent context.Context, o openObligation, next, due time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET spent=spent-1,next_at=?
+		WHERE id=? AND state='owed' AND fault=? AND spent=? AND labelled=? AND next_at=?`),
+		due.UnixMilli(), o.id, o.fault, o.spent+1, o.labelled, next.UnixMilli())
 	return err
 }

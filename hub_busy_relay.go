@@ -150,7 +150,8 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayload) (relayPending, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if held, exists := h.relayHeld[dropped.OriginalEventID]; exists && (held.Machine != machine || held.Pane != dropped.Pane) {
+	held, wasHeld := h.relayHeld[dropped.OriginalEventID]
+	if wasHeld && (held.Machine != machine || held.Pane != dropped.Pane) {
 		return relayPending{}, false
 	}
 	key := relayPendingKey(dropped.OriginalEventID, dropped.JobID)
@@ -170,6 +171,9 @@ func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayl
 		h.relayControl.relayPending[key] = pending
 	} else {
 		h.cancelRelayPendingLocked(dropped.OriginalEventID, dropped.JobID)
+		if wasHeld && !exists && dropped.Reason == relayDroppedWorkingExpired {
+			pending.idleWake = h.relayControl.workingExpired[dropped.OriginalEventID].idleWake
+		}
 	}
 	return pending, true
 }

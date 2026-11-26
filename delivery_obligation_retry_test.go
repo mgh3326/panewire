@@ -713,3 +713,81 @@ func TestT1034FailedWorkingReportKeepsItsFaultForExpiry(t *testing.T) {
 	})
 	rig.injected()
 }
+
+func TestT1034JobFinalReadFailurePreservesRetryAcrossRestart(t *testing.T) {
+	rig := newT6384Rig(t)
+	event := hubJobEventPayload{JobID: "job-final-read", Epoch: 1, OwnerLane: "worker-a",
+		EventID: "job-final-read-event", Question: "please decide?", ReportPath: "report.md"}
+	rig.hub.relayJobEventFrom("host-a", "job.escalate", event)
+	d := rig.injected()
+	reportUnconfirmedRetry(t, rig, d)
+
+	oldClient := rig.client.client
+	client := *oldClient
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	var reads atomic.Int32
+	client.Transport = hubRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Path == "/v1/relay/events" &&
+			req.URL.Query().Get("after_id") == strconv.FormatInt(d.EventID-1, 10) && reads.Add(1) == 2 {
+			return nil, errors.New("fixture final job lookup failed")
+		}
+		return base.RoundTrip(req)
+	})
+	rig.client.client = &client
+	rig.hub.classifyObligations(t.Context())
+	rig.client.client = oldClient
+	if reads.Load() != 2 || len(rig.agent.relays) != 0 {
+		t.Fatalf("reads=%d queued=%d before recovery", reads.Load(), len(rig.agent.relays))
+	}
+	if err := rig.hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig.start()
+	rig.hub.replayUndeliveredRelayEvents(t.Context())
+	rig.pass(time.Minute)
+	if copy := rig.injected(); copy.EventID != d.EventID || copy.Text != d.Text {
+		t.Fatalf("retry changed the job report: %+v", copy)
+	}
+}
+
+func TestT1034DropRedispatchesWakeBlockedByHeldProjection(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "held-projection-clears")
+	rig.hub.mu.Lock()
+	rig.hub.relayHeld[d.EventID] = hubRelayHeldProjection{
+		ID: d.EventID, JobID: d.JobID, Lane: "lane-a", Machine: "host-a", Pane: d.Pane,
+	}
+	rig.hub.mu.Unlock()
+	wake := idleWakeRouteRequest{Pane: d.Pane, EventID: "idle:w1:session:1", StateChangeSeq: 1}
+	var once atomic.Bool
+	rig.fake.mu.Lock()
+	rig.fake.observe = func(method, path string) {
+		if method == "POST" && path == "/v1/relay/events" && once.CompareAndSwap(false, true) {
+			rig.hub.redeliverWorkingExpiredOnIdle("host-a", wake)
+		}
+	}
+	rig.fake.mu.Unlock()
+	t650Send(t, rig.hub, "host-a", rig.agent, "relay.unconfirmed", relayAckPayload{
+		JobID: d.JobID, OriginalEventID: d.EventID, Pane: d.Pane, Reason: relayDroppedWorkingExpired,
+	})
+	// Run the saved wake while the old lease is still projected, regardless
+	// of when the report handler's goroutine is scheduled.
+	rig.hub.redeliverWorkingExpiredOnIdle("host-a", wake)
+	if !once.Load() || len(rig.agent.relays) != 0 {
+		t.Fatal("the wake was not observed during persistence, or queued while held")
+	}
+	drop := relayDroppedPayload{JobID: d.JobID, OriginalEventID: d.EventID, Pane: d.Pane,
+		Lane: "lane-a", Reason: relayDroppedWorkingExpired}
+	t650Send(t, rig.hub, "host-a", rig.agent, "relay.dropped", drop)
+	eventually(t, 2*time.Second, "terminal drop dispatches the saved wake", func() bool { return len(rig.agent.relays) == 1 })
+	if copy := rig.injected(); !strings.HasPrefix(copy.Text, relayIdleRedeliveryLabel(rig.row(d.EventID))) {
+		t.Fatalf("idle retry=%q", copy.Text)
+	}
+	t650Send(t, rig.hub, "host-a", rig.agent, "relay.dropped", drop)
+	if len(rig.agent.relays) != 0 {
+		t.Fatal("duplicate drop queued another copy")
+	}
+}

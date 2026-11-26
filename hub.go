@@ -1817,6 +1817,8 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			h.observeRelayDropped(machineID, dropped)
 			if pending.dropReason != "" {
 				go h.expireRelayAckWindow(relayPendingKey(dropped.OriginalEventID, dropped.JobID), pending.armToken)
+			} else if pending.idleWake.Pane != "" {
+				go h.redeliverWorkingExpiredOnIdle(machineID, pending.idleWake)
 			}
 			h.escalateUnconfirmedRelayContext(ctx, machineID, dropped)
 		}

@@ -40,6 +40,7 @@ type workingExpiredRow struct {
 	droppedAt  time.Time
 	tries      int
 	retryToken *byte
+	idleWake   idleWakeRouteRequest
 }
 
 // rememberWorkingExpired records a row the node dropped as
@@ -116,6 +117,17 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 		// As old as the replay window allows: the restart replay retires it.
 		h.mu.Unlock()
 		return
+	}
+	if h.inbox != nil {
+		if row.idleWake.Pane == "" || wake.newerThan(idleRedeliveryWakeOf(row.idleWake)) {
+			row.idleWake = request
+			h.relayControl.workingExpired[pick] = row
+		}
+		if _, held := h.relayHeld[pick]; held {
+			// The terminal drop dispatches this wake after clearing the lease.
+			h.mu.Unlock()
+			return
+		}
 	}
 	if h.relayControl.idleRedelivered == nil {
 		h.relayControl.idleRedelivered = make(map[string]idleRedeliveryWake)
