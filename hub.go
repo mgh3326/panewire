@@ -1812,11 +1812,12 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 				h.countUnknownMessage()
 				return
 			}
+
+			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
+			h.observeRelayDropped(machineID, dropped)
 			if pending.dropReason != "" {
 				go h.expireRelayAckWindow(relayPendingKey(dropped.OriginalEventID, dropped.JobID), pending.armToken)
 			}
-			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
-			h.observeRelayDropped(machineID, dropped)
 			h.escalateUnconfirmedRelayContext(ctx, machineID, dropped)
 		}
 		if message.Kind == "job.revocation.ack" {
@@ -1868,11 +1869,22 @@ func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string,
 			return
 		}
 		fault := obligationFaultUnconfirmed
+		rearm := false
 		if ack.Reason == relayDroppedWorkingExpired {
 			fault = relayDroppedWorkingExpired
+			if h.inbox != nil {
+				rearm = h.retainWorkingExpiredReason(key, pending)
+			}
 		}
 		write := h.scheduleRelayRetry(ctx, pending, fault)
-		if write == relayFaultFailed || !h.finishUnconfirmedWindow(key, pending, ack, write) {
+		if write == relayFaultFailed {
+			if rearm {
+				h.armRelayAckEvent(pending.eventID, pending.event.JobID)
+			}
+			return
+		}
+		wake, finished := h.finishUnconfirmedWindow(key, pending, ack, write)
+		if !finished {
 			return
 		}
 		h.observeRelayUnconfirmed(pending, ack)
@@ -1880,6 +1892,9 @@ func (h *HubServer) handleRelayAckContext(ctx context.Context, machineID string,
 		// Logging it keeps a dropped-ack diagnosis greppable.
 		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)
 		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})
+		if wake.Pane != "" {
+			go h.redeliverWorkingExpiredOnIdle(pending.machine, wake)
+		}
 		return
 	}
 	pending, acknowledged := h.acknowledgeRelayPending(machineID, ack)

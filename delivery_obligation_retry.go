@@ -126,6 +126,10 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 		return false, store.deferObservedObligation(ctx, o, now, now.Add(obligationRecheckMin))
 	}
 
+	if o.spent >= relayReplayMaxAttempts || (o.fault != obligationAckTimeout && (o.labelled > 0 || (record.Kind != "lane.event" && o.spent > o.attemptsSeen))) {
+		return true, store.exhaustObligation(ctx, o.id, o.fault, now, now.Add(obligationParkRecheck))
+	}
+
 	route, agent, routed := h.resolveRelayRoute(record.Kind, event)
 	if !routed || route.Sink {
 		h.announceUnroutedReplay(record.ID, event)
@@ -162,9 +166,6 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 			h.mu.Unlock()
 		}
 	}()
-	if o.spent >= relayReplayMaxAttempts || (o.fault != obligationAckTimeout && (o.labelled > 0 || (record.Kind != "lane.event" && o.spent > o.attemptsSeen))) {
-		return true, store.exhaustObligation(ctx, o.id, o.fault, now, now.Add(obligationParkRecheck))
-	}
 
 	if h.refuseInboxOnlyBody(record.Kind, event, record.ID, key) {
 		releaseClaim = false // The inbox-only path already released it.

@@ -74,6 +74,18 @@ func (h *HubServer) rememberWorkingExpiredLocked(pending relayPending, ack relay
 // pane works, and its next idle wake brings the next row.
 func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWakeRouteRequest) {
 	h.mu.Lock()
+	if h.inbox != nil {
+		wake := idleRedeliveryWakeOf(request)
+		for key, pending := range h.relayControl.relayPending {
+			if pending.dropReason != relayDroppedWorkingExpired || pending.machine != machine || pending.pane != request.Pane {
+				continue
+			}
+			if pending.idleWake.Pane == "" || wake.newerThan(idleRedeliveryWakeOf(pending.idleWake)) {
+				pending.idleWake = request
+				h.relayControl.relayPending[key] = pending
+			}
+		}
+	}
 	remembered := len(h.relayControl.workingExpired)
 	h.mu.Unlock()
 	if remembered == 0 || h.handoffkeep == nil {

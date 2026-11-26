@@ -664,3 +664,52 @@ func TestT1034RetryClaimRespectsNewIdleOwner(t *testing.T) {
 		t.Fatalf("idle copy=%q", copy.Text)
 	}
 }
+
+func TestT1034DropPersistenceRetainsIdleWake(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "pending-drop-wake")
+	pending, ok := rig.hub.consumeRelayDropped("host-a", relayDroppedPayload{
+		JobID: d.JobID, OriginalEventID: d.EventID, Pane: d.Pane, Lane: "lane-a", Reason: relayDroppedWorkingExpired,
+	})
+	if !ok {
+		t.Fatal("drop rejected")
+	}
+	wake := idleWakeRouteRequest{Pane: d.Pane, EventID: "idle:w1:session:1", StateChangeSeq: 1}
+	rig.hub.redeliverWorkingExpiredOnIdle("host-a", wake)
+	if len(rig.agent.relays) != 0 {
+		t.Fatal("queued before fault persistence")
+	}
+	rig.hub.expireRelayAckWindow(relayPendingKey(d.EventID, d.JobID), pending.armToken)
+	eventually(t, 2*time.Second, "retained wake queued one retry", func() bool { return len(rig.agent.relays) == 1 })
+	if got := rig.injected(); !strings.HasPrefix(got.Text, relayIdleRedeliveryLabel(rig.row(d.EventID))) {
+		t.Fatalf("idle copy=%q", got.Text)
+	}
+	rig.hub.redeliverWorkingExpiredOnIdle("host-a", wake)
+	if len(rig.agent.relays) != 0 {
+		t.Fatal("the same idle turn queued twice")
+	}
+}
+
+func TestT1034FailedWorkingReportKeepsItsFaultForExpiry(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "working-fault-write-recovery")
+	store := rig.hub.inbox.store
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_working_fault BEFORE UPDATE OF fault ON delivery_obligations BEGIN SELECT RAISE(FAIL, 'fixture store outage'); END`); err != nil {
+		t.Fatal(err)
+	}
+	t650Send(t, rig.hub, "host-a", rig.agent, "relay.unconfirmed", relayAckPayload{
+		JobID: d.JobID, OriginalEventID: d.EventID, Pane: d.Pane, Reason: relayDroppedWorkingExpired,
+	})
+	if _, err := store.db.Exec("DROP TRIGGER reject_working_fault"); err != nil {
+		t.Fatal(err)
+	}
+	rig.hub.expireRelayAck(relayPendingKey(d.EventID, d.JobID))
+	rig.pass(0)
+	if o := rig.obligation(d.EventID); o.Fault != relayDroppedWorkingExpired || len(rig.agent.relays) != 0 {
+		t.Fatalf("expiry lost working fault: obligation=%+v queued=%d", o, len(rig.agent.relays))
+	}
+	rig.hub.redeliverWorkingExpiredOnIdle("host-a", idleWakeRouteRequest{
+		Pane: d.Pane, EventID: "idle:w1:session:1", StateChangeSeq: 1,
+	})
+	rig.injected()
+}

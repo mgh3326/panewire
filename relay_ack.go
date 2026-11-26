@@ -23,6 +23,7 @@ type relayPending struct {
 	armToken   *byte
 	windowID   *byte
 	dropReason string
+	idleWake   idleWakeRouteRequest
 	held       bool
 }
 
@@ -155,6 +156,9 @@ func (h *HubServer) expireRelayAckWindow(key string, token *byte) {
 				delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
 			}
 			h.mu.Unlock()
+			if scheduled == relayFaultScheduled && current.idleWake.Pane != "" {
+				go h.redeliverWorkingExpiredOnIdle(pending.machine, current.idleWake)
+			}
 			return
 		}
 		if scheduled == relayFaultScheduled {
@@ -248,18 +252,39 @@ func (h *HubServer) peekRelayPending(machineID string, ack relayAckPayload) (str
 	return h.findRelayPendingLocked(machineID, ack)
 }
 
-// finishUnconfirmedWindow only retires the same injection the report observed.
-func (h *HubServer) finishUnconfirmedWindow(key string, pending relayPending, ack relayAckPayload, write relayFaultWrite) bool {
+// retainWorkingExpiredReason gives expiry the explicit fault if the report's
+// first write fails. Replacing the arm invalidates a timer already in flight.
+func (h *HubServer) retainWorkingExpiredReason(key string, pending relayPending) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	current, exists := h.relayControl.relayPending[key]
-	if !exists || current.windowID != pending.windowID {
+	if !exists || current.windowID != pending.windowID || current.dropReason != "" {
 		return false
+	}
+	current.dropReason = relayDroppedWorkingExpired
+	current.armToken = nil
+	current.held = false
+	h.relayControl.relayPending[key] = current
+	return true
+}
+
+// finishUnconfirmedWindow only retires the same injection the report observed.
+func (h *HubServer) finishUnconfirmedWindow(key string, pending relayPending, ack relayAckPayload, write relayFaultWrite) (idleWakeRouteRequest, bool) {
+	h.mu.Lock()
+
+	current, exists := h.relayControl.relayPending[key]
+	if !exists || current.windowID != pending.windowID {
+		h.mu.Unlock()
+		return idleWakeRouteRequest{}, false
 	}
 	h.rememberWorkingExpiredLocked(pending, ack)
 	delete(h.relayControl.relayPending, key)
 	if write == relayFaultScheduled {
 		delete(h.relayDedupe, relayEventDedupeKey(pending.kind, pending.event))
 	}
-	return true
+	h.mu.Unlock()
+	if write == relayFaultScheduled {
+		return current.idleWake, true
+	}
+	return idleWakeRouteRequest{}, true
 }
