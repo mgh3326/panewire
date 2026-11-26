@@ -130,18 +130,31 @@ The proof only reads herdr; nothing is written back to it. The job-ended and
 lease gates apply as before, and a stale pane's row is typed instead of dropped
 at the `relay.cmd_hold_max` ceiling.
 
-A row dropped as `working_wait_expired` was never typed. The hub remembers it
-when its unconfirmed mark lands and re-delivers it when the idle-wake observer
-next reports the pane idle: the oldest such row per idle wake, so one row per
-inject, as the row's one labelled replay, so at most once. A wake that spends
-nothing (a failed read or retire) keeps the row for the next wake, up to three
-wakes. Its age is counted from the drop, not the receipt, since the node held it
-up to `relay.cmd_hold_max`: a row dropped more than the replay window (24h) ago
-is left to the restart replay. Its text starts with
-`[held while this pane was working - first sent <KST time> - delivered now that
-it is idle]`. The memory is not durable; after a hub restart the startup replay
-gives every marked row its one labelled replay instead (#1002). Every other
-harness is typed at once as before.
+A row dropped as `working_wait_expired` was never typed. It gets no budget
+retry. When the idle-wake observer next reports the pane idle, the hub asks for
+the oldest such `lane.event` row of the lanes routed to that pane: one row per
+idle wake, so one row per inject. A retried or older wake asks for nothing. The
+request is stored on the row's delivery obligation (`revive_requested`), and the
+next maintenance pass queues the copy, so a hub restart between the wake and the
+copy loses neither. Each obligation gets this revived copy once (`revived`),
+whatever its retry budget has spent, and never when its fault says the text may
+be in the pane. A copy the hub could not queue (full queue, unrecorded attempt,
+replaced connection) gives the revive back for a later pass. While a request is
+untaken, no other row of the pane is asked for during five minutes. The row's
+age is counted from the drop, not the receipt, since the node held it up to
+`relay.cmd_hold_max`: a row dropped more than the replay window (24h) ago is not
+revived, and until then the startup and node-registration walks leave it open.
+Its text starts with `[held while this pane was working - first sent <KST time> -
+delivered now that it is idle]`. The per-fault table is in
+[R20, "Faults and copies"](r20-relay-persistence.md#faults-and-copies).
+
+A hub without an inbox store (`--delivery-policy off`, or no store) keeps no
+obligations. It remembers the row in memory when its unconfirmed mark lands and
+re-delivers it at the next idle wake through the marked row's one labelled
+replay. A wake that spends nothing (a failed read or retire) keeps the row for
+the next wake, up to three wakes. That memory is not durable; after a restart
+the startup replay gives every marked row its one labelled replay instead
+(#1002). Every other harness is typed at once as before.
 
 A pane-transport harness (cmd) is never sent a batch (hk 3384). Its return gate
 reads the composer after the text lands, and a batch wrapped over several

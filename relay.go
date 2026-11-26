@@ -1434,8 +1434,11 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 			case marks[record.ID]:
 				if h.inbox == nil {
 					h.replayLegacyUnconfirmed(ctx, record, source, digestMarks[record.ID])
-				} else if reason := h.relayReplayRetireReason(record); reason != "" && !h.replayDefersUnconfirmedBatch(record) {
-					h.retireRelayReplay(record, reason)
+				} else {
+					_, heldForIdle := h.relayRetryOwner(relayEventDedupeKey(record.Kind, relayEventFromRecord(record)), record.ID)
+					if reason := h.relayReplayRetireReasonAged(record, !heldForIdle); reason != "" && !h.replayDefersUnconfirmedBatch(record) {
+						h.retireRelayReplay(record, reason)
+					}
 				}
 			default:
 				h.replayRelayEventCollecting(record, source, gap)
@@ -1467,11 +1470,11 @@ func (h *HubServer) replayRelayEventCollecting(record handoffkeepRelayEvent, sou
 		return
 	}
 	event := relayEventFromRecord(record)
-	managed := h.relayRetryIsManaged(relayEventDedupeKey(record.Kind, event), record.ID)
+	managed, heldForIdle := h.relayRetryOwner(relayEventDedupeKey(record.Kind, event), record.ID)
 	if managed && h.replayDefersUnconfirmedBatch(record) {
 		return
 	}
-	if h.replayInbox(record) {
+	if h.replayInboxAged(record, !heldForIdle) {
 		return
 	}
 	if event.OwnerLane == "" || event.JobID == "" {
@@ -1486,7 +1489,7 @@ func (h *HubServer) replayRelayEventCollecting(record handoffkeepRelayEvent, sou
 	if strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
 		return
 	}
-	if reason := h.relayReplayRetireReason(record); reason != "" {
+	if reason := h.relayReplayRetireReasonAged(record, !heldForIdle); reason != "" {
 		h.retireRelayReplay(record, reason)
 		return
 	}
