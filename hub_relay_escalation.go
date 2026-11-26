@@ -213,14 +213,31 @@ func unconfirmedEscalationText(record handoffkeepRelayEvent, dropped relayDroppe
 func (h *HubServer) unconfirmedNoticeMoot(lane string) string {
 	known := false
 	var live []string
+	route, routed := loadReportRelayRoutes(h.reportRelayPath)[lane]
+	// A takeover keeps the lane name while replacing its worker. Once the
+	// report-relay row carries job identity, that binding is authoritative;
+	// the predecessor's AgentLabel still names the lane but no longer names
+	// the job that can act on an unconfirmed notice.
+	routeBound := routed && (route.Job != "" || route.TakenOverFrom != "")
 	h.mu.Lock()
-	for id, job := range h.jobs {
-		if job.AgentLabel != lane {
-			continue
+	if routeBound {
+		if route.Job != "" {
+			if job := h.jobs[route.Job]; job != nil {
+				known = true
+				if !job.Completed && !job.Orphaned {
+					live = append(live, route.Job)
+				}
+			}
 		}
-		known = true
-		if !job.Completed && !job.Orphaned {
-			live = append(live, id)
+	} else {
+		for id, job := range h.jobs {
+			if job.AgentLabel != lane {
+				continue
+			}
+			known = true
+			if !job.Completed && !job.Orphaned {
+				live = append(live, id)
+			}
 		}
 	}
 	h.mu.Unlock()
