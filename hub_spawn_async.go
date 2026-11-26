@@ -958,7 +958,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		if spawnClaimedAnswer(task, err) || len(quotaFullExcluded(task, h.now(), err, currentCandidates())) != 0 {
 			return false
 		}
-		return spawnParkReason(fleet.ErrorCode(err), err.Error()) != ""
+		return spawnParkReasonFor(fleet.ErrorCode(err), err.Error(), currentCandidates()) != ""
 	}
 	app.Parks = parks
 	wakeBefore := h.spawnWakeSnapshot()
@@ -994,7 +994,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	// No candidate can take it now: a request with a limit is parked, not
 	// ended, and is placed again on an event or its next check (hk 4661).
 	if !claimedAnswer && len(quotaRefused) == 0 && parks(err) {
-		if reason := spawnParkReason(fleet.ErrorCode(err), err.Error()); reason != "" {
+		if reason := spawnParkReasonFor(fleet.ErrorCode(err), err.Error(), currentCandidates()); reason != "" {
 			// A recognised no-candidate refusal never ends the request: a
 			// failed or ambiguous park write leaves it accepted for the next
 			// pass to park again.

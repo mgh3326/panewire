@@ -85,6 +85,7 @@ var spawnParkWakes = map[string]string{
 	spawnParkHostFull:         "a node connecting or a job leaving a node's active set",
 	spawnParkNoEligibleHost:   "a node connecting with a profile that passes the role rules",
 	spawnParkNodeDisconnected: "the node reconnecting",
+	spawnParkBranchInUse:      "its timer, once the holding worktree ends",
 }
 
 // spawnParkUnpark names what wakes a parked request, for every reason in the
@@ -121,9 +122,34 @@ func spawnParkNoticeEvent(task hubSpawnTask) hubJobEventPayload {
 // spawnParkNoticeText is what the owner lane reads: reason, since when, the
 // next look, and what would unpark it.
 func spawnParkNoticeText(task hubSpawnTask) string {
-	return fmt.Sprintf("[panewire] SPAWN_PARKED %s request=%s reason=%s parked_since=%s next_check_at=%s unpark=%s",
+	line := fmt.Sprintf("[panewire] SPAWN_PARKED %s request=%s reason=%s parked_since=%s next_check_at=%s unpark=%s",
 		task.Job, task.Request.RequestID, task.ParkReason, task.ParkSince.UTC().Format(time.RFC3339),
 		task.NextCheck.UTC().Format(time.RFC3339), spawnParkUnpark(task.ParkReason))
+	if holder := spawnParkHolder(task); holder != "" {
+		line += " holder=" + holder
+	}
+	return line
+}
+
+// spawnParkHolder is the worktree the owner must look at for a branch_in_use
+// park: the one the latest refusal named (hk 6702). It is empty for any other
+// park, or when no refusal named a worktree. The status API does not carry it:
+// the status handler keeps a node's paths out of its reads (hub_spawn_async.go,
+// "Never expose the persisted brief...").
+func spawnParkHolder(task hubSpawnTask) string {
+	if !strings.Contains(","+task.ParkReason+",", ","+spawnParkBranchInUse+",") {
+		return ""
+	}
+	for i := len(task.Exclusions) - 1; i >= 0; i-- {
+		reason := task.Exclusions[i].Reason
+		if !strings.HasPrefix(reason, "checkout_refused:"+nodePrepareBranchInUse) {
+			continue
+		}
+		if _, worktree, ok := strings.Cut(reason, "worktree="); ok {
+			return utf8PrefixWithin(strings.TrimSpace(fleetEventRedact(worktree)), 256)
+		}
+	}
+	return ""
 }
 
 // checkParkedSpawnNotices judges one sweep of parked requests, rate-limited to
