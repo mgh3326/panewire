@@ -146,7 +146,11 @@ func spawnParkHolder(task hubSpawnTask) string {
 			continue
 		}
 		if _, worktree, ok := strings.Cut(reason, "worktree="); ok {
-			return utf8PrefixWithin(strings.TrimSpace(fleetEventRedact(worktree)), 256)
+			parts := strings.Split(strings.TrimSpace(worktree), "/")
+			for i, part := range parts {
+				parts[i] = fleetEventRedact(part)
+			}
+			return utf8PrefixWithin(strings.Join(parts, "/"), 256)
 		}
 	}
 	return ""
