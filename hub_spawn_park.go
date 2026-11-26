@@ -8,6 +8,8 @@ import (
 	"math/rand/v2"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // Parked requests and the re-placement back-off of the spawn queue (hk 4661;
@@ -28,6 +30,11 @@ const (
 	// timer-only: an event that wakes quota parks must not start the request on
 	// another pool before the wait it chose has run.
 	spawnParkQuotaReset = "quota_reset"
+	// spawnParkBranchInUse holds a request whose every tried host refused the
+	// successor branch as held by another worktree of its clone (hk 6702). The
+	// holder ends by itself only when it is a finished predecessor's clean
+	// checkout; otherwise a person frees the branch, so it is timer-only.
+	spawnParkBranchInUse = "branch_in_use"
 )
 
 // The hub's spawn-queue defaults (design §9a, unmeasured). placement.json
@@ -132,6 +139,7 @@ func spawnParkReason(rc int, text string) string {
 			{spawnParkNodeDisconnected, []string{"disconnected"}},
 			{spawnParkQuota, []string{"quota"}},
 			{spawnParkLaunchBackoff, []string{"launch_backoff"}},
+			{spawnParkBranchInUse, []string{"checkout_refused:branch_in_use"}},
 		} {
 			for _, token := range c.tokens {
 				if strings.Contains(text, token) {
@@ -158,6 +166,69 @@ func spawnParkReason(rc int, text string) string {
 		return spawnParkNoEligibleHost
 	}
 	return ""
+}
+
+// spawnParkReasonFor names the park reason of a placement refusal (hk 6702).
+// A rc 80 "no remote candidate completed" refusal with the pass's candidate
+// records reads each tried host's own refusal code, and never a word of the
+// error text, where a host name, a profile label or a note can carry a reason
+// no host gave. Any other refusal, and a pass that recorded no candidates, is
+// read as spawnParkReason reads it.
+func spawnParkReasonFor(rc int, text string, tried []fleet.PlacementCandidateRecord) string {
+	// A mock lane's refusal is never parked, whichever record carries it.
+	if rc != 80 || len(tried) == 0 || !strings.Contains(text, "no remote candidate completed") || strings.Contains(text, "mock_lane_remote_refused") {
+		return spawnParkReason(rc, text)
+	}
+	return spawnParkReasonOfRefusals(tried)
+}
+
+// spawnParkRefusalCodes maps the refusal codes a candidate record can carry to
+// the park reason each names. A code is matched by its prefix after the hub's
+// "hub_" mark is dropped, so a worktree path or a retry suffix after the code
+// names nothing.
+var spawnParkRefusalCodes = []struct {
+	reason   string
+	prefixes []string
+}{
+	{spawnParkHostFull, []string{"task_slots_full", "active_jobs_max", "lanes_full"}},
+	{spawnParkNodeDisconnected, []string{"disconnected"}},
+	{spawnParkQuota, []string{"quota"}},
+	{spawnParkLaunchBackoff, []string{"launch_backoff"}},
+	{spawnParkBranchInUse, []string{"checkout_refused:branch_in_use"}},
+}
+
+// spawnParkReasonOfRefusals names the park reasons the tried hosts' refusal
+// codes give, in spawnParkRefusalCodes order. A host that is not a candidate
+// (not_accepting, excluded_host) names nothing, and a mock lane is never
+// parked. With no named refusal the request has no candidate to wait for.
+func spawnParkReasonOfRefusals(tried []fleet.PlacementCandidateRecord) string {
+	named := make([]bool, len(spawnParkRefusalCodes))
+	for _, candidate := range tried {
+		if candidate.Outcome == "chosen" {
+			continue
+		}
+		code := strings.TrimPrefix(candidate.Reason, "hub_")
+		if strings.HasPrefix(code, "mock_lane_remote_refused") {
+			return ""
+		}
+		for i, row := range spawnParkRefusalCodes {
+			for _, prefix := range row.prefixes {
+				if strings.HasPrefix(code, prefix) {
+					named[i] = true
+				}
+			}
+		}
+	}
+	var reasons []string
+	for i, row := range spawnParkRefusalCodes {
+		if named[i] {
+			reasons = append(reasons, row.reason)
+		}
+	}
+	if len(reasons) == 0 {
+		return spawnParkNoEligibleHost
+	}
+	return strings.Join(reasons, ",")
 }
 
 // spawnParkPrimary is the reason the status API shows: the first named.
@@ -226,10 +297,10 @@ func (h *HubServer) noteSpawnWake(reasons ...string) {
 
 // markSpawnWakeLocked notes reason pending under spawnWakeMu, counting it as
 // an event when event is set; the pending set and the counts change
-// together, so a park can never miss a drained wake. launch_backoff and
-// quota_reset are timer-only: no event wakes them.
+// together, so a park can never miss a drained wake. launch_backoff,
+// quota_reset and branch_in_use are timer-only: no event wakes them.
 func (h *HubServer) markSpawnWakeLocked(event bool, reason string) {
-	if reason == spawnParkLaunchBackoff || reason == spawnParkQuotaReset {
+	if reason == spawnParkLaunchBackoff || reason == spawnParkQuotaReset || reason == spawnParkBranchInUse {
 		return
 	}
 	if h.spawnWakes == nil {

@@ -262,13 +262,17 @@ owner notice for a long-parked request is [Parked notice](#parked-notice).
 
 **Parked, not ended.** When placement finds no candidate for a request that
 has a limit (`expires_ms>0`), the request is parked instead of ending
-`retryable`. The refusal is read by `spawnParkReason` (`hub_spawn_park.go`):
+`retryable`. The refusal is read by `spawnParkReasonFor` (`hub_spawn_park.go`):
+a rc 80 `no remote candidate completed` refusal names the reasons its tried
+hosts' own refusal codes give, and any other refusal is read from its text by
+`spawnParkReason`, as is a pass that recorded no candidates.
 
 | Placement refusal | `reason` | Woken early by |
 |---|---|---|
 | `launch_backoff` named, or the request's own back-off (below) | `launch_backoff` | its timer only |
 | every eligible candidate is in a pool at its concurrency cap | `pool_cap` | a job leaving a node's active set |
-| `QUOTA_*`, `quota_exhausted`, `quota_unconfirmed`, rc 86/87/89 | `quota` | a finished quota refresh |
+| `QUOTA_*`, `quota_exhausted`, `quota_unconfirmed`, rc 86/87/89; rc 80 with a tried host whose code is `quota…` | `quota` | a finished quota refresh |
+| rc 80 with a tried host whose code is `checkout_refused:branch_in_use`, the rest not accepting or excluded (hk 6702) | `branch_in_use` | its timer only: the holding worktree may end |
 | a node did not connect / is not connected (`hub_node_unavailable`) | `node_disconnected` | a node connect |
 | rc 81: no awake host admitted / no host admitted / no candidate accepted | `host_full` | a node connect, a job leaving a node |
 | `role_no_candidate` (no profile passes), `NO_ELIGIBLE_HOST` | `no_eligible_host` | a node connect |
@@ -294,10 +298,14 @@ tick is in memory, the batch's rows are read because the woken rows kick the
 scan, hk 5302),
 however often the coordinator is kicked meanwhile. An event noted for a
 park's reason while its placement ran is noted again once the park lands, so
-a drained wake is never lost; `launch_backoff` is never event-woken. A
-refusal with several blockers (rc 80 `no remote candidate completed` with
-mixed tried notes) stores every reason (`host_full,quota`) and wakes on any;
-the status API shows the first. A mock lane's rc 80 is not parked. A parked,
+a drained wake is never lost; `launch_backoff` and `branch_in_use` are never
+event-woken. A refusal with several blockers (rc 80 `no remote candidate
+completed` with mixed tried hosts) stores every reason (`host_full,quota`) and
+wakes on any; the status API shows the first. For rc 80 each reason is named
+only by a tried host's own record (`task_slots_full`, `active_jobs_max`,
+`lanes_full`, `disconnected`, `quota…`, `launch_backoff`,
+`checkout_refused:branch_in_use`). A host name, a profile label or a note in
+the error text names nothing (hk 6702). A mock lane's rc 80 is not parked. A parked,
 unbound row holds no pool slot (`liveSpawns`), a claimed-harness retry is not
 backed off (hk holds its claim on that host), and a parked pass emits no
 terminal refusal event. The first cleanup-confirmed refusal after the hk job
@@ -411,7 +419,10 @@ line:
 
 `[panewire] SPAWN_PARKED <job> request=<id> reason=quota parked_since=… next_check_at=… unpark=…`
 
-`unpark` is the wake of every reason in the stored set (the table above).
+`unpark` is the wake of every reason in the stored set (the table above). A
+`branch_in_use` park appends ` holder=<worktree>`, the worktree the latest
+refusal named (hk 6702). The status API does not carry that path: it keeps a
+node's paths out of status reads.
 Urgency is the request's own decision, exactly as placement read it at submit:
 an `--urgency` flag the submitter passed wins (`urgent` tells, `normal` stays
 quiet), and only a request without one asks its bound hk task's priority
