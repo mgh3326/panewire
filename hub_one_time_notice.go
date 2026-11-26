@@ -293,9 +293,14 @@ func (h *HubServer) recordSuppressedLoginNeed(key oneTimeActionKey, at time.Time
 	if at.After(state.SightedAt) {
 		state.SightedAt = at
 	}
-	if ok && !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() {
-		state.GoneSince = time.Time{}
-	} else {
+	switch {
+	case ok && !state.ToldAt.IsZero() && state.ConfirmedAt.IsZero():
+		if !state.GoneSince.IsZero() && !staleLoginSighting(key, state, at) {
+			state.GoneSince = time.Time{}
+		}
+	case ok && state.ToldAt.IsZero() && state.ConfirmedAt.IsZero() && (state.GoneSince.IsZero() || staleLoginSighting(key, state, at)):
+		// A delayed report cannot undo a clean report that arrived later.
+	default:
 		state.ToldAt, state.GoneSince, state.ConfirmedAt = time.Time{}, time.Time{}, time.Time{}
 	}
 	if err := h.saveOneTimeLocked(key, state); err != nil {

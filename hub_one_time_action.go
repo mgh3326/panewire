@@ -195,6 +195,9 @@ func (h *HubServer) clearOneTimeActions(machine string, report *fleet.Readiness)
 			next.GoneSince = time.Time{}
 			next.ConfirmedAt = time.Time{}
 		case shows && !state.GoneSince.IsZero():
+			if staleLoginSighting(key, state, report.CheckedAt) {
+				continue
+			}
 			next.GoneSince = time.Time{}
 		case shows:
 			continue

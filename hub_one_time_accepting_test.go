@@ -95,6 +95,40 @@ func TestOneTimeLoginNeedIgnoresCleanReportOlderThanLatestSighting(t *testing.T)
 	}
 }
 
+func TestSuppressedLoginNeedKeepsClearAfterStaleSighting(t *testing.T) {
+	h, _, _ := spawnNotifyHubLane(t, "", "operator-desk")
+	start := time.Date(2026, 11, 27, 3, 0, 0, 0, time.UTC)
+	cycle := oneTimeActionClearCycle
+	key := oneTimeActionKey{machine: "oci", kind: "claude", need: oneTimeLoginMissing}
+	readiness := func(at time.Time, login string) *fleet.Readiness {
+		return readinessWith(at, "claude", fleet.HarnessReadiness{Installed: true, Login: login})
+	}
+	setAcceptingOverrideForTest(h, "oci", "off")
+	h.noteReadinessActions("oci", readiness(start, fleet.ReadinessLoginMissing), start)
+	cleanAt := start.Add(time.Minute)
+	h.noteReadinessActions("oci", readiness(cleanAt, fleet.ReadinessLoginPresent), cleanAt)
+	settleOneTimeNotices(t, h)
+	// A delayed missing report older than cleanAt must not restart the clear.
+	staleAt := start.Add(30 * time.Second)
+	h.recordSuppressedLoginNeed(key, staleAt)
+	state, ok := h.oneTimeStateOf(key)
+	if !ok || !state.GoneSince.Equal(cleanAt) {
+		t.Fatalf("stale suppressed sighting changed the clear boundary: %+v, present=%t", state, ok)
+	}
+	h.noteReadinessActions("oci", readiness(staleAt, fleet.ReadinessLoginMissing), cleanAt.Add(time.Second))
+	h.noteReadinessActions("oci", readiness(cleanAt.Add(cycle), fleet.ReadinessLoginPresent), cleanAt.Add(cycle))
+	settleOneTimeNotices(t, h)
+	if got := h.oneTimeActionKeysForMachine("oci"); len(got) != 0 {
+		state, _ := h.oneTimeStateOf(key)
+		t.Fatalf("clean cycle did not clear the suppressed login need: %v state=%+v", got, state)
+	}
+	h.loginNeedMu.Lock()
+	defer h.loginNeedMu.Unlock()
+	if got := h.loginNeeds["oci"]; len(got) != 0 {
+		t.Fatalf("placement still sees cleared login need: %v", got)
+	}
+}
+
 func TestOneTimeLoginSightedAtSurvivesHubRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	first := newOneTimeHub(t, path)
