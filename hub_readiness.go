@@ -223,8 +223,14 @@ func (h *HubServer) refreshLoginNeedsLocked() {
 // table is in docs/placement.md, "Launch-failure backoff". A reason may carry
 // the engine's code after a colon, as spawn_failed:<code>.
 func launchFailureReason(reason string) bool {
-	switch code, _, _ := strings.Cut(reason, ":"); code {
-	case "spawn_failed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable":
+	code, detail, _ := strings.Cut(reason, ":")
+	switch code {
+	case "spawn_failed":
+		engineCode, _, _ := strings.Cut(detail, ":")
+		// A parent lookup can fail before the harness starts; benching its
+		// (host, kind) would block unrelated requests that do not need that job.
+		return engineCode != "parent_unreadable"
+	case "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable":
 		return true
 	default:
 		return false

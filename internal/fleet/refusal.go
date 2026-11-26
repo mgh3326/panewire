@@ -133,6 +133,9 @@ var spawnRefusals = []spawnRefusal{
 	// NO_ELIGIBLE_HOST with every candidate dropped for an unmapped repo: the
 	// repair is the node's cwd_map or work root, not the quota account.
 	{match: "no node maps repo", code: "placement", hint: "Add the repository to that node's spawn.json.cwd_map, or give the node a work root so it can clone the checkout, then retry."},
+	// The parent id and hk error follow this prefix, so classify it before
+	// their words can match a broader refusal such as "brief" or "workspace".
+	{match: "parent metadata unreadable", code: "parent_unreadable", hint: "Check handoffkeep reachability from the executing host and restore access there before retrying; hk is unreachable from that host."},
 	// hk 6434: the refusal names a path and the word "workspace", which the
 	// broader rows below would claim.
 	{match: workspaceLockRootUnsafe, code: workspaceLockRootUnsafe, hint: "Remove the directory the refusal names, as its owner or root, on the executing host (docs/config.md, Host aliases and workspaces), then repeat the same command."},
@@ -191,7 +194,6 @@ var spawnRefusals = []spawnRefusal{
 	{rc: exitPreflight, code: "preflight", hint: spawnPreflightHint},
 	{rc: exitSeatRefused, code: "seat_refused", hint: "Use panewire resolve --role ROLE --t Tn to select a rung admitted for the requested role and task, then retry with that policy."},
 	{rc: exitLaneUnregistered, code: "lane_unregistered", hint: "Run panewire lanes to inspect routing and register the committed pane's lane before dispatching more work; do not relaunch the live job."},
-	{match: "parent metadata unreadable", code: "parent_unreadable", hint: "Check handoffkeep reachability from the executing host and restore access there before retrying; hk is unreachable from that host."},
 	{rc: exitStateConflict, code: "state_conflict", hint: "Inspect the job's saved report and events under jobs/JOB; reconcile the conflicting task/job binding before retrying."},
 	{rc: exitRoleWait, code: "role_wait", hint: "Wait until a listed eligible pool resets, refresh it with panewire quota refresh POOL, then retry."},
 	{rc: exitRoleEscalate, code: "role_escalate", hint: "Emit a decision to the parent lane naming the exhausted role pools; choose another authorized policy only after its reply."},

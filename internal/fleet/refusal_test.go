@@ -131,6 +131,8 @@ func TestSpawnRefusalTextWinsOverExitStatusInTableOrder(t *testing.T) {
 		{"workspace trust: malformed workspace trust store", exitConfig, "trust_store_malformed"},
 		{"workspace trust: permission denied", exitConfig, "trust_store"},
 		{"parent metadata unreadable: handoffkeep: unavailable", exitStateConflict, "parent_unreadable"},
+		{"parent metadata unreadable: parent job fix-brief-upload: handoffkeep unavailable", exitStateConflict, "parent_unreadable"},
+		{"parent metadata unreadable: parent job job-6760: handoffkeep workspace unavailable", exitStateConflict, "parent_unreadable"},
 		{"parent job job-a not found: --parent-job must name an existing job", exitStateConflict, "state_conflict"},
 		{"symlink path refused: /srv/workspace/brief", exitUsage, "symlink_path"},
 		{"unrecognised", exitSeatRefused, "seat_refused"},
