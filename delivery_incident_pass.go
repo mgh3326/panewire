@@ -355,6 +355,9 @@ func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident delivery
 	}
 	recovered, open, due, live := false, 0, 0, 0
 	last := incident.lastMemberAt
+	// The pass reads a lane's jobs from handoffkeep only for a notice; between
+	// notices the hub's own job records decide, once per lane.
+	ended := mootCache{}
 	for _, m := range members {
 		recovered = recovered || m.state == obligationConfirmed && m.updated >= incident.openedAt
 		last = max(last, m.lastFaultAt)
@@ -365,11 +368,12 @@ func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident delivery
 			due++
 		}
 		if !m.terminal() || m.dueAt > 0 {
-			// The pass reads a lane's jobs from handoffkeep only for a notice;
-			// between notices the hub's own job records decide.
 			why, known := moot[m.lane]
 			if !known {
-				why = h.laneJobsAllEnded(m.lane)
+				if why, known = ended[m.lane]; !known {
+					why = h.laneJobsAllEnded(m.lane)
+					ended[m.lane] = why
+				}
 			}
 			if why == "" {
 				live++

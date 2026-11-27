@@ -366,21 +366,40 @@ func TestExhaustedDetachesFromClosedIncident(t *testing.T) {
 // left with only such rows closes as moot. Killed by: naming an ended lane;
 // never closing moot.
 func TestIncidentMootMembersNotNamed(t *testing.T) {
-	t.Run("an ended lane is not named", func(t *testing.T) {
-		rig := t6821Live(t)
-		ended := rig.fail()
-		live := rig.failOn(t6821Second)
-		rig.job(t3431Job, true, false)
+	// The lane's job ends before the row joins, or while it waits in the
+	// incident for the next notice.
+	for _, waited := range []bool{false, true} {
+		name := "an ended lane is not named"
+		if waited {
+			name = "a lane that ends while waiting is not named"
+		}
+		t.Run(name, func(t *testing.T) {
+			rig := t6821Live(t)
+			if waited {
+				rig.failOn(t6821Second)
+				rig.one(0)
+			}
+			ended := rig.fail()
+			if waited {
+				rig.none(0)
+				if r := rig.row(ended); r.Incident == 0 || r.DueAt == 0 {
+					t.Fatalf("the row did not wait in the incident: %+v", r)
+				}
+				rig.clock.advance(31 * time.Minute)
+			}
+			live := rig.failOn(t6821Second)
+			rig.job(t3431Job, true, false)
 
-		got := rig.one(0)
-		if !strings.Contains(got, "event "+t6821Num(live.EventID)+" ") || strings.Contains(got, t6821Num(ended)) || t3431FoldCount(got) != 0 {
-			t.Fatalf("notice=%q, want only the live lane's row %d", got, live.EventID)
-		}
-		if r := rig.row(ended); r.DueAt != 0 || r.ToldAt != 0 {
-			t.Fatalf("the ended lane's row = %+v", r)
-		}
-		rig.open()
-	})
+			got := rig.one(0)
+			if !strings.Contains(got, "event "+t6821Num(live.EventID)+" ") || strings.Contains(got, "event "+t6821Num(ended)+" ") || t3431FoldCount(got) != 0 {
+				t.Fatalf("notice=%q, want only the live lane's row %d", got, live.EventID)
+			}
+			if r := rig.row(ended); r.DueAt != 0 || r.ToldAt != 0 {
+				t.Fatalf("the ended lane's row = %+v", r)
+			}
+			rig.open()
+		})
+	}
 	t.Run("only ended lanes close it", func(t *testing.T) {
 		rig := t6821Live(t)
 		rig.fail()
@@ -456,6 +475,14 @@ func TestWithheldNoticeIsRecordedNotRepeated(t *testing.T) {
 	if got := decisions(); got != 1 {
 		t.Fatalf("decisions=%d, want the withheld notice counted once", got)
 	}
+	if got := rig.open(); got.Members != 1 || got.Announced != 1 || rig.count(`SELECT count(*) FROM delivery_notice_slots`) != 0 {
+		t.Fatalf("withheld incident = %+v", got)
+	}
+	rig.clock.advance(time.Minute)
+	other := rig.fail()
+	if got := rig.one(0); !strings.Contains(got, "event "+t6821Num(other)+" ") || t3431FoldCount(got) != 0 {
+		t.Fatalf("the next spawn's notice = %q, want row %d alone", got, other)
+	}
 	for range 3 {
 		rig.report(d, t6820Maybe)
 		rig.none(31 * time.Minute)
@@ -466,11 +493,6 @@ func TestWithheldNoticeIsRecordedNotRepeated(t *testing.T) {
 	if r := rig.row(d.EventID); r.ToldAt == 0 || r.DueAt != 0 {
 		t.Fatalf("withheld row = %+v", r)
 	}
-	if got := rig.incidents()[0]; got.Members != 1 || got.Announced != 1 {
-		t.Fatalf("withheld incident = %+v", got)
-	}
-	rig.fail()
-	rig.one(0)
 }
 
 // A safe fault is told when its row is exhausted, never at its first report, and
@@ -533,7 +555,13 @@ func TestNoticeTimingByFault(t *testing.T) {
 		}
 	})
 	t.Run("a notice that is itself lost starts no other", func(t *testing.T) {
-		rig := t6821Live(t)
+		// The design lane has a lane above it, which a lost notice could name.
+		routes := t6821Routes()
+		routes[t3431Design] = reportRelayRoute{Machine: "host-a", Pane: "w1:pD", Parent: "desk-t6821"}
+		routes["desk-t6821"] = reportRelayRoute{Machine: "host-a", Pane: "w1:pK"}
+		rig := &t6821Rig{t3431Rig: t3431StartWith(t, t3431LiveJobWithTask(), routes, freshLaneInboxFile(t))}
+		rig.task(t3431Task, "in_progress", "started")
+		rig.job(t3431Job, false, false)
 		rig.fail()
 		rig.pass(0)
 		got := rig.notices()
