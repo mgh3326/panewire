@@ -257,10 +257,12 @@ injected. Only then is the retire written, `delivered_to`
 `hub/replay-retired:unconfirmed`. A failed retire spends nothing: the mark
 stays pending and the next trigger retries the whole sequence, so a store
 that keeps refusing the write defers the replay instead of repeating it
-every restart. When the retire lands but the injection queue refuses the
-directive, the one replay is spent without reaching a pane — the hub
-broadcasts `relay.unrouted` and logs one warning naming the row, and never
-re-marks it. The spent marker then retires with
+every restart. The pane's injection queue is checked for room before that
+retire: with no room the replay is deferred, the row stays unspent, and the
+next trigger tries again (hk 6893). When the retire lands but the queue refuses
+the directive anyway (it filled in the gap between the check and the queue
+write), the one replay is spent without reaching a pane — the hub broadcasts
+`relay.unrouted` and logs one warning naming the row, and never re-marks it. The spent marker then retires with
 `hub/replay-retired:unconfirmed-mark`; a marker whose original is already
 delivered, exhausted, or gone retires on sight. Every other row class —
 never-attempted, held, exhausted, sink — replays exactly as before.
@@ -413,8 +415,13 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
   and not devin settles it: a safe fault or a working expiry takes its place.
   A drop from devin, or naming no harness, leaves it maybe typed. While the
   node still holds the row, a pass does not end it for this fault.
+- An exhausted row is a verdict on the fault it held when it was exhausted. A
+  drop that settles that maybe-typed fault to a safe one reopens the row while
+  `spent` is below 3: it is owed again and the next pass queues the copy the
+  exhaustion ended (hk 6935). A spent budget stays exhausted.
 - A `job.*` copy carries no label and has no revive: the three safe faults retry
-  to the budget, `job_ended` never, and any other gets one copy.
+  to the budget, `job_ended` never, `working_wait_expired` gets no copy at all
+  (hk 6935), and any other maybe-typed fault gets one.
 - An idle wake sets `revive_requested` on one row. The pass takes the revive
   first, ahead of the budget: it commits `revived`, raises handoffkeep's
   attempts to the ceiling and queues one copy. A copy that was not queued gives

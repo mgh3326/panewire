@@ -125,48 +125,6 @@ func TestT1034RetireAlwaysFailsNeverInjects(t *testing.T) {
 	}
 }
 
-// The retire lands but the injection queue refuses the directive: the one
-// replay is spent without reaching a pane — one relay.unrouted broadcast,
-// one spent-not-queued warning naming the row, the row stays retired, and
-// no later restart injects or re-marks it.
-func TestT1034QueueFailAfterRetireSpendsReplay(t *testing.T) {
-	rig := t1002Start(t)
-	directive := rig.sendLaneEvent("ev-1034-qf", "qf body")
-	eventID := directive.EventID
-	rig.unconfirmed(directive, "maybe_in_pane")
-
-	// A restart whose destination queue cannot take another directive.
-	rig.startHub()
-	events := r20t5Subscribe(t, rig.hub)
-	rig.dest.relays = make(chan hubRelayInjectEvent, 1)
-	rig.dest.relays <- hubRelayInjectEvent{Type: "relay.inject", JobID: "filler", Text: "filler"}
-	rig.hub.replayUndeliveredRelayEvents(context.Background())
-	rig.hub.replayUndeliveredLaneEvents(context.Background())
-
-	if injects := rig.t1034Labelled(eventID); len(injects) != 0 {
-		t.Fatalf("queue-full restart injected %d labelled copies, want 0", len(injects))
-	}
-	if got := rig.logs.count("unconfirmed replay was retired but never queued"); got != 1 {
-		t.Fatalf("spent-not-queued warnings=%d, want 1: %s", got, rig.logs.String())
-	}
-	if got := len(events("relay.unrouted")); got != 1 {
-		t.Fatalf("relay.unrouted broadcasts=%d, want 1", got)
-	}
-	row := rig.row(eventID)
-	if row.DeliveredAt == "" || row.DeliveredTo != "hub/replay-retired:"+relayUnconfirmedRetireReason {
-		t.Fatalf("row after the spent replay: delivered_at=%q delivered_to=%q", row.DeliveredAt, row.DeliveredTo)
-	}
-	if markers := rig.markers(); len(markers) != 1 || markers[0].DeliveredAt == "" {
-		t.Fatalf("marker after the spent replay: %+v, want retired", markers)
-	}
-	for restart := 1; restart <= 2; restart++ {
-		rig.restart()
-		if injects := rig.injects(); len(injects) != 0 {
-			t.Fatalf("restart %d after the spent replay injected %d rows, want 0", restart, len(injects))
-		}
-	}
-}
-
 // S2 offline path: while the destination is offline the mark keeps the one
 // replay pending; the first trigger that can route the row injects it once.
 // [0 0 | 1 | 0 0 0].

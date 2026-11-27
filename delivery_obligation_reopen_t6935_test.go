@@ -1,0 +1,79 @@
+package panewire
+
+// hk 6935 (the consult on #927, thread lJk7): an exhausted row is a verdict on
+// the fault it held when its budget ran out. A later drop that settles that
+// maybe-typed fault to a safe one reopens the row while budget remains, and the
+// next pass queues the copy the exhaustion ended.
+
+import (
+	"testing"
+	"time"
+)
+
+func TestSafeDropReopensExhaustedRowWithBudget(t *testing.T) {
+	for name, how := range map[string]struct {
+		report string
+		settle t6820Drop
+	}{
+		"prompt rejected, inject budget settles": {
+			report: relayUnconfirmedPromptFailed,
+			settle: t6820Drop{drop: relayDroppedRetriesExhausted, harness: "claude"},
+		},
+		"unproven pane read, read failure settles": {
+			report: "maybe_in_pane presend:unproven:read_failed",
+			settle: t6820Drop{drop: relayDroppedPaneReadFailed, harness: "claude"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newT6384Rig(t)
+			d := rig.send("lane-a", "reopen-6935")
+			t6820Report(t, rig, d, t6820Drop{report: how.report})
+			rig.pass(0)
+			copy := rig.injected()
+			// The labelled copy's own pass finds its maybe-typed fault spent.
+			rig.pass(time.Minute)
+			if o := rig.obligation(d.EventID); o.State != obligationExhausted || o.Spent != 2 {
+				t.Fatalf("before the settling drop: %+v", o)
+			}
+			t6820Report(t, rig, copy, t6820Drop{drop: how.settle.drop, harness: how.settle.harness})
+			t6820AwaitDropExpiry(t, rig, copy)
+			if o := rig.obligation(d.EventID); o.State != obligationOwed || o.Spent != 2 || o.Fault != how.settle.drop {
+				t.Fatalf("after the safe drop, want owed with budget left: %+v", o)
+			}
+			rig.pass(0)
+			rig.injected()
+			if o := rig.obligation(d.EventID); o.Spent != relayReplayMaxAttempts {
+				t.Fatalf("the reopened row's copy did not spend the budget: %+v", o)
+			}
+		})
+	}
+}
+
+// A safe drop does not reopen an exhausted row whose budget is spent: that
+// verdict stands. Killed by: reopening on the fault alone, without spent<budget.
+func TestSafeDropKeepsExhaustedRowWithSpentBudget(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "spent-6935")
+	for _, wait := range []time.Duration{0, time.Minute} {
+		t6820Report(t, rig, d, t6820ReadFailed)
+		rig.pass(wait)
+		d = rig.injected()
+	}
+	rig.pass(5 * time.Minute)
+	if o := rig.obligation(d.EventID); o.State != obligationExhausted || o.Spent != relayReplayMaxAttempts {
+		t.Fatalf("before the safe drop: %+v", o)
+	}
+	t6820Report(t, rig, d, t6820Drop{drop: relayDroppedRetriesExhausted, harness: "claude"})
+	t6820AwaitDropExpiry(t, rig, d)
+	// Checked before any pass: a pass would exhaust a reopened row again and hide it.
+	if o := rig.obligation(d.EventID); o.State != obligationExhausted {
+		t.Fatalf("spent row reopened by the safe drop: %+v", o)
+	}
+	rig.pass(time.Minute)
+	if got := t3426Injected(rig.agent); len(got) != 0 {
+		t.Fatalf("a spent budget was copied again after a safe drop: %+v", got)
+	}
+	if o := rig.obligation(d.EventID); o.State != obligationExhausted {
+		t.Fatalf("spent row reopened: %+v", o)
+	}
+}

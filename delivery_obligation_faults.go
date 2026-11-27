@@ -112,6 +112,20 @@ func obligationDropReplaces(fault, harness string) (condition string, args []any
 	return condition, args
 }
 
+// obligationReopenWhen is the condition under which a drop reopens the row it
+// settles to a safe fault (hk 6935). Exhaustion is a verdict on the fault the
+// row held when the budget ran out: a maybe-typed fault that a later drop
+// settles to a safe one ended copies no pane ever owed it, so while budget
+// remains the row is owed again. replace and replaced are the drop's own
+// replacement condition and its arguments; they are read against the stored
+// row, so the reopen must be written before the fault is.
+func obligationReopenWhen(fault, replace string, replaced []any) (string, []any) {
+	if classifyObligationFault(fault) != obligationSafe {
+		return "1=0", nil
+	}
+	return `state='` + obligationExhausted + `' AND spent<? AND ` + replace, append([]any{relayReplayMaxAttempts}, replaced...)
+}
+
 // obligationFaultReplaces is the condition on the stored fault under which
 // fault takes its place. A timeout, a missing route and a legacy marker name no
 // outcome, so they replace only a timeout or a missing route. Among the other
@@ -157,9 +171,10 @@ func (o openObligation) retriesDone(kind string) bool {
 		// one labelled copy in its life.
 		return class == obligationWorkingExpired || class == obligationMaybeTyped && o.labelled > 0
 	default:
-		// A job.* copy carries no label and no idle wake revives it: only a
-		// safe fault earns a second one.
-		return class != obligationSafe && o.spent > o.attemptsSeen
+		// A job.* copy carries no label and no idle wake revives it. A working
+		// expiry has no budget copy at all (design v4 §6); a maybe-typed fault
+		// earns one; only a safe fault earns the whole budget (hk 6935).
+		return class == obligationWorkingExpired || class != obligationSafe && o.spent > o.attemptsSeen
 	}
 }
 
@@ -279,7 +294,8 @@ func (s *laneInboxStore) markOrphanedDropDue(parent context.Context, relayID int
 // noteObligationDrop reports whether an untaken revive of the row was made due:
 // the drop ends the node's hold, which is what kept the pass from queueing it.
 // A maybe-typed drop makes the row due a notice, and job_ended ends any notice
-// the row awaits.
+// the row awaits. A safe fault that settles a maybe-typed one reopens an
+// exhausted row that has budget left (obligationReopenWhen).
 func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int64, lane, machine string, current bool, reason, harness string, now time.Time) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
@@ -292,10 +308,14 @@ func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int6
 	if fault == relayDroppedJobEnded {
 		due = `notice_due_at=0,`
 	}
-	// fault is assigned last: MySQL reads an assigned column's new value.
-	args := slices.Concat(replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
+	reopen, reopened := obligationReopenWhen(fault, replace, replaced)
+	// The reopen reads the stored row before state is assigned, and fault is
+	// assigned last: MySQL reads an assigned column's new value.
+	args := slices.Concat(reopened, []any{now.UnixMilli()}, reopened, []any{obligationOwed}, replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
 	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
-		SET last_fault_at=CASE WHEN `+replace+` THEN ? ELSE last_fault_at END,
+		SET next_at=CASE WHEN `+reopen+` THEN ? ELSE next_at END,
+		    state=CASE WHEN `+reopen+` THEN ? ELSE state END,
+		    last_fault_at=CASE WHEN `+replace+` THEN ? ELSE last_fault_at END,
 		    `+due+`
 		    fault=CASE WHEN `+replace+` THEN ? ELSE fault END
 		WHERE `+where), args...); err != nil {
