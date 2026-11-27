@@ -289,6 +289,12 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
+	for _, q := range relayStaleNoticeSchema {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	store := newLaneInboxStore(db, dialectSQLite)
 	if err := store.seedDeliveryReconcilerState(ctx); err != nil {
 		store.close()
