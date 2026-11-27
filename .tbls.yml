@@ -253,11 +253,11 @@ comments:
       Retention: relay_stale_notice_store.go:pruneStaleReplayRows deletes filed rows 14 days after their day.
   - table: relay_stale_notice_lanes
     tableComment: |
-      Why: binds a worker lane to the job its route named when a lane.event arrived, so a row retired after its route is gone still names its job (hk 6924).
+      Why: binds a worker lane to the job its route named when a lane.event arrived, so a row retired after its route is gone still names its job (hk 6924). One row per change of the lane's job, keyed by the receipt time (hk 6994).
       Role: lookup.
       Read: relay_stale_notice_store.go:staleReplayJobAt; relay_stale_notice.go:staleReplayJobOf.
-      Write: relay_stale_notice_store.go:insertStaleReplayLane (INSERT IGNORE), from relay.go:relayLaneEventContext through noteStaleReplayLane.
-      Retention: none: one row per lane and job pair.
+      Write: relay_stale_notice_store.go:bindStaleReplayLane (INSERT IGNORE), from relay.go:relayLaneEventContext through noteStaleReplayLane once the row is persisted.
+      Retention: none: one row per change of a lane's job.
       Relations: none by design. relay_id is the handoffkeep relay row id.
   - table: drain_wake_lanes
     tableComment: |

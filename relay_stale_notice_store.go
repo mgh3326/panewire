@@ -24,7 +24,7 @@ var relayStaleNoticeSchema = []string{
 	`CREATE INDEX IF NOT EXISTS relay_stale_notice_rows_day ON relay_stale_notice_rows(notice_day, design_lane, filed)`,
 	`CREATE TABLE IF NOT EXISTS relay_stale_notice_lanes (
  worker_lane VARCHAR(255) NOT NULL, job VARCHAR(255) NOT NULL, first_ms BIGINT NOT NULL,
- PRIMARY KEY (worker_lane, job))`,
+ PRIMARY KEY (worker_lane, first_ms))`,
 	`CREATE INDEX IF NOT EXISTS relay_stale_notice_lanes_first ON relay_stale_notice_lanes(worker_lane, first_ms)`,
 }
 
@@ -51,15 +51,60 @@ type staleReplayRow struct {
 	ReceivedMS, RetiredMS   int64
 }
 
-// insertStaleReplayLane binds a worker lane to the job its route named when a
-// row arrived. The first binding of a pair is kept: the bound job is the one the
-// lane had at the earliest receipt the hub saw for it.
-func (s *laneInboxStore) insertStaleReplayLane(parent context.Context, lane, job string, firstMS int64) error {
+// bindStaleReplayLane records that a worker lane's job changed at firstMS: one
+// binding per change of the lane's job, keyed by the receipt time (hk 6994). A
+// receipt whose job is the job already in force binds nothing, so a lane that
+// keeps one job adds no rows; a lane that returns to an earlier job gets a new
+// binding for that later stint.
+func (s *laneInboxStore) bindStaleReplayLane(parent context.Context, lane, job string, firstMS int64) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO relay_stale_notice_lanes(worker_lane,job,first_ms) VALUES(?,?,?)`, "worker_lane,job")),
-		utf8PrefixWithin(lane, staleReplayWidthLane), utf8PrefixWithin(job, staleReplayWidthJob), firstMS)
+	lane, job = utf8PrefixWithin(lane, staleReplayWidthLane), utf8PrefixWithin(job, staleReplayWidthJob)
+	var current string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT job FROM relay_stale_notice_lanes WHERE worker_lane=? ORDER BY first_ms DESC LIMIT 1`), lane).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil && current == job {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO relay_stale_notice_lanes(worker_lane,job,first_ms) VALUES(?,?,?)`, "worker_lane,first_ms")), lane, job, firstMS)
 	return err
+}
+
+// migrateStaleReplayBindingKey rebuilds a SQLite store's binding table from its
+// first key, (worker_lane, job), to (worker_lane, first_ms), keeping its rows
+// (hk 6994). A store with the new key, or with no table yet, is left as it is.
+// Postgres and MySQL take the same change in migrations 0045 and 0042.
+func (s *laneInboxStore) migrateStaleReplayBindingKey(parent context.Context) error {
+	ctx, done := s.op(parent)
+	defer done()
+	var byJob int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('relay_stale_notice_lanes') WHERE name='job' AND pk>0`).Scan(&byJob); err != nil {
+		return err
+	}
+	if byJob == 0 {
+		return nil
+	}
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`DROP INDEX IF EXISTS relay_stale_notice_lanes_first`,
+		`ALTER TABLE relay_stale_notice_lanes RENAME TO relay_stale_notice_lanes_first_key`,
+		`CREATE TABLE relay_stale_notice_lanes (
+ worker_lane VARCHAR(255) NOT NULL, job VARCHAR(255) NOT NULL, first_ms BIGINT NOT NULL,
+ PRIMARY KEY (worker_lane, first_ms))`,
+		`INSERT OR IGNORE INTO relay_stale_notice_lanes(worker_lane,job,first_ms) SELECT worker_lane,job,first_ms FROM relay_stale_notice_lanes_first_key`,
+		`DROP TABLE relay_stale_notice_lanes_first_key`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // staleReplayJobAt names the job a worker lane was bound to when a row received

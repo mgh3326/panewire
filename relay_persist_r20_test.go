@@ -34,6 +34,9 @@ type fakeHandoffkeep struct {
 	undelivere []handoffkeepRelayEvent
 	// deliveredTo is handoffkeep's delivered_to for each closed row.
 	deliveredTo map[int64]string
+	// receivedAt, when set, is the received_at the fake stamps on a row it
+	// creates, as handoffkeep does (hk 6994).
+	receivedAt func() time.Time
 	// deliveredStatus, when set, is the reply to every /delivered POST, and
 	// a non-200 closes nothing.
 	deliveredStatus int
@@ -420,6 +423,9 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Epoch: asInt(body["epoch"]), OwnerLane: asString(body["owner_lane"]), ReportPath: asString(body["report_path"]), ReportLastLine: asString(body["report_last_line"]),
 				Question: asString(body["question"]), Machine: asString(body["machine"]), PaneID: asString(body["pane_id"]), Head: asString(body["head"]), PR: asString(body["pr"]),
 				Reason: asString(body["reason"]), EventID: asString(body["event_id"]), Text: asString(body["text"]), EventTime: asString(body["event_time"]), Attempts: 1}
+			if f.receivedAt != nil {
+				row.ReceivedAt = f.receivedAt().UTC().Format(time.RFC3339Nano)
+			}
 			if f.ownerLane != "" {
 				row.OwnerLane = f.ownerLane
 			}
