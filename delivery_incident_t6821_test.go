@@ -434,7 +434,9 @@ func TestIncidentNoticeWriteFailureKeepsOpen(t *testing.T) {
 	rig.none(time.Hour * 3) // past the quiet close: a notice still owed holds it open
 
 	i := rig.open()
-	if i.Announced != 0 || i.NoticeEventID != "" || rig.count(`SELECT count(*) FROM delivery_notice_slots`) != 0 {
+	// The posted id is kept; nothing else of the notice is committed.
+	if i.Announced != 0 || !strings.HasSuffix(i.NoticeEventID, "-n0") || rig.count(`SELECT count(*) FROM delivery_notice_slots`) != 0 ||
+		rig.count(`SELECT count(*) FROM delivery_incidents WHERE notice_at>0 OR notice_relay_id>0`) != 0 {
 		t.Fatalf("a refused notice was committed: incident=%+v", i)
 	}
 	if r := rig.row(row); r.DueAt == 0 || r.ToldAt != 0 {
@@ -475,7 +477,7 @@ func TestWithheldNoticeIsRecordedNotRepeated(t *testing.T) {
 	if got := decisions(); got != 1 {
 		t.Fatalf("decisions=%d, want the withheld notice counted once", got)
 	}
-	if got := rig.open(); got.Members != 1 || got.Announced != 1 || rig.count(`SELECT count(*) FROM delivery_notice_slots`) != 0 {
+	if got := rig.open(); got.Members != 1 || got.Announced != 0 || rig.count(`SELECT count(*) FROM delivery_notice_slots`) != 0 {
 		t.Fatalf("withheld incident = %+v", got)
 	}
 	rig.clock.advance(time.Minute)
@@ -580,7 +582,7 @@ func TestNoticeTimingByFault(t *testing.T) {
 			t.Fatalf("a lost notice started another: rows=%+v incidents=%+v", rows, rig.incidents())
 		}
 	})
-	t.Run("unrouted is never told", func(t *testing.T) {
+	t.Run("an unrouted ack timeout is not told while it can still be retried", func(t *testing.T) {
 		rig := t6821Live(t)
 		d := rig.send(t3431Worker)
 		rig.hub.expireRelayAckWindow(relayPendingKey(d.EventID, d.JobID), nil)
@@ -700,9 +702,9 @@ func TestUnreadableMemberDoesNotHoldNotice(t *testing.T) {
 	}
 }
 
-// A row of a lane with no design lane is only logged, at its report and again
-// if it is exhausted, and waits for nothing. Killed by: opening an incident for
-// it; leaving it due.
+// A row of a lane with no design lane waits an hour for one to be named, then
+// is logged and dropped. Killed by: opening an incident for it; keeping it due
+// for good.
 func TestRowWithoutDesignLaneIsOnlyLogged_t6821(t *testing.T) {
 	routes := t6821Routes()
 	routes[t3431Worker] = reportRelayRoute{Machine: "host-a", Pane: "w1:pW"}
@@ -713,16 +715,12 @@ func TestRowWithoutDesignLaneIsOnlyLogged_t6821(t *testing.T) {
 		return strings.Count(rig.logs.String(), `msg="relay unconfirmed escalation has no design lane" event_id=`+t6821Num(row)+" ")
 	}
 	rig.none(0)
-	if got := lines(); got != 1 {
-		t.Fatalf("no-design-lane lines=%d, want 1:\n%s", got, rig.logs.String())
+	rig.none(59 * time.Minute)
+	if r := rig.row(row); lines() != 0 || r.DueAt == 0 || r.Incident != 0 {
+		t.Fatalf("inside the wait: lines=%d row=%+v", lines(), r)
 	}
-	if r := rig.row(row); r.DueAt != 0 || r.Incident != 0 {
-		t.Fatalf("row=%+v", r)
-	}
-	for range 3 {
-		rig.none(31 * time.Minute)
-	}
-	if got := lines(); got > 2 || len(rig.incidents()) != 0 || rig.row(row).DueAt != 0 {
-		t.Fatalf("lines=%d row=%+v incidents=%+v", got, rig.row(row), rig.incidents())
+	rig.none(2 * time.Minute)
+	if r := rig.row(row); lines() != 1 || r.DueAt != 0 || r.Incident != 0 || len(rig.incidents()) != 0 {
+		t.Fatalf("after the wait: lines=%d row=%+v incidents=%+v\n%s", lines(), r, rig.incidents(), rig.logs.String())
 	}
 }

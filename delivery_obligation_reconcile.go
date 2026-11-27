@@ -45,6 +45,8 @@ const (
 	// (settlementReason).
 	obligationSettledInbox  = relayUnconfirmedInboxRetireReason
 	obligationSettledDigest = relayDigestNotReplayedRetireReason
+	// obligationSettledStale is the age retirement (relayReplayRetireReason).
+	obligationSettledStale = "stale"
 )
 
 // relaySinkMachine is the delivered_to machine of a row a sink lane recorded.

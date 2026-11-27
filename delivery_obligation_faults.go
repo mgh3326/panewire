@@ -199,12 +199,31 @@ func (h *HubServer) relayWindowOpen(eventID int64, jobID string) bool {
 	return open
 }
 
+// orphanedDropBackoff spaces the retries of an orphaned drop that could not be
+// recorded; the last wait repeats until it is. The node does not send the drop
+// again, so the hub holds it, in memory, until its row is due a notice or is
+// found to owe none.
+var orphanedDropBackoff = [...]time.Duration{2 * time.Second, 10 * time.Second, time.Minute, 5 * time.Minute}
+
 // noteOrphanedDrop makes a row due a notice on a drop nothing else will follow
 // up: it has no ack window and no fault, so no retry or exhaustion will come.
 // The design lane is told from the drop, as it was before there were
-// incidents; the row's fault and retry schedule are left alone.
+// incidents; the row's fault and retry schedule are left alone. A failed read or
+// write is retried (orphanedDropBackoff).
 func (h *HubServer) noteOrphanedDrop(ctx context.Context, machine string, current bool, dropped relayDroppedPayload) {
+	h.noteOrphanedDropAttempt(ctx, machine, current, dropped, 0)
+}
+
+func (h *HubServer) noteOrphanedDropAttempt(ctx context.Context, machine string, current bool, dropped relayDroppedPayload, attempt int) {
 	store := h.inbox.store
+	retry := func(why string) {
+		h.logger.Warn("orphaned relay drop was not recorded; it is retried", "event_id", dropped.OriginalEventID, "reason", dropped.Reason, "why", why, "attempt", attempt+1)
+		time.AfterFunc(orphanedDropBackoff[min(attempt, len(orphanedDropBackoff)-1)], func() {
+			if h.closeCtx.Err() == nil {
+				h.noteOrphanedDropAttempt(h.closeCtx, machine, current, dropped, attempt+1)
+			}
+		})
+	}
 	fault := obligationDropFault(dropped.Reason, dropped.Harness)
 	tracked, err := store.trackedRow(ctx, dropped.OriginalEventID)
 	if err == nil && !tracked && h.handoffkeep != nil {
@@ -214,7 +233,7 @@ func (h *HubServer) noteOrphanedDrop(ctx context.Context, machine string, curren
 		defer cancel()
 		record, found, readErr := h.handoffkeep.relayEvent(readCtx, dropped.OriginalEventID)
 		if readErr != nil {
-			h.logger.Warn("orphaned relay drop was not recorded; its row could not be read", "event_id", dropped.OriginalEventID, "reason", dropped.Reason, "error_class", hubHKReadErrorClass(readErr))
+			retry("row_read_" + hubHKReadErrorClass(readErr))
 			return
 		}
 		if o, adoptable := adoptableObligation(record); found && adoptable {
@@ -227,6 +246,7 @@ func (h *HubServer) noteOrphanedDrop(ctx context.Context, machine string, curren
 	}
 	if err != nil {
 		h.logger.Warn("orphaned relay drop was not recorded on its obligation", "event_id", dropped.OriginalEventID, "reason", dropped.Reason, "error", store.loggable("orphaned drop", err))
+		retry("store")
 	}
 }
 
@@ -266,23 +286,19 @@ func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int6
 	where := "fault<>'' AND " + obligationOpen + " AND " + scope
 	fault := obligationDropFault(reason, harness)
 	replace, replaced := obligationDropReplaces(fault, harness)
+	// The due mark is made or ended in the same write as the fault.
+	due, dued := obligationReportDue(fault, now.UnixMilli())
+	if fault == relayDroppedJobEnded {
+		due = `notice_due_at=0,`
+	}
 	// fault is assigned last: MySQL reads an assigned column's new value.
-	args := slices.Concat(replaced, []any{now.UnixMilli()}, replaced, []any{fault}, keys)
+	args := slices.Concat(replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
 	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
 		SET last_fault_at=CASE WHEN `+replace+` THEN ? ELSE last_fault_at END,
+		    `+due+`
 		    fault=CASE WHEN `+replace+` THEN ? ELSE fault END
 		WHERE `+where), args...); err != nil {
 		return false, err
-	}
-	switch {
-	case noticedAtReport(fault):
-		if err := s.markNoticeDue(parent, fault, now, where, keys...); err != nil {
-			return false, err
-		}
-	case fault == relayDroppedJobEnded:
-		if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET notice_due_at=0 WHERE `+where), keys...); err != nil {
-			return false, err
-		}
 	}
 	result, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET next_at=0 WHERE revive_requested>0 AND revived=0 AND `+where), keys...)
 	if err != nil {

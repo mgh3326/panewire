@@ -326,7 +326,12 @@ in that lane. The notice is an `automation-failed` lane event; its text names
 one durable event id, the producer's event id, the worker lane, the node and
 pane, and the fault, and counts the other rows it speaks for. A `job.*` row, an
 idle-wake report, an unconfirmed marker, and a notice that is itself lost never
-start one, and a lane with no design lane is only logged.
+start one.
+
+A row whose design lane cannot be named waits for an hour, counted from the
+later of its becoming due and the hub's start, then is logged and dropped: a
+job's owner lane comes from job records held in memory, which a restarted hub
+learns again from its nodes, and the lanes file can be unreadable for a while.
 
 The incidents live in the hub's inbox store
 ([r20-relay-persistence.md](r20-relay-persistence.md), "Incidents and
@@ -340,16 +345,29 @@ notices"). A hub with no store is [the exception](#a-hub-with-no-inbox-store).
 | `ack_timeout`, `pane_read_failed`, `inject_failed_max_attempts` | when the retries end and the row is exhausted |
 | `working_wait_expired` | when the row is exhausted, which is the first pass after its drop |
 | `unconfirmed` (a spent copy an older build retired) | when the pass exhausts it |
-| `unrouted`, `job_ended` | never |
+| `unrouted` | not on its own; see below for the failure it replaced |
+| `job_ended` | never |
+
+A safe fault does not wait for exhaustion when its retries cannot get there:
+
+- A node's drop that typed nothing (`pane_read_failed`,
+  `inject_failed_max_attempts`, `working_wait_expired`) is told as soon as a
+  pass finds no route for the row, since nothing may ever exhaust it, and when
+  the row is a released digest batch's.
+- A row with any failed copy whose retries end by age, found by the pass or
+  retired `stale`, is told then. A row renamed `unrouted` is told under the
+  fault it had, an `ack_timeout` included.
+
+A row with an `ack_timeout` that only lost its route is not told while it can
+still be retried, and a released digest batch's row is not told of one.
 
 A row is told once: after a notice covers it, nothing it does later makes it
-due again. A row confirmed before its notice is stored is not told. A drop for
-a row that has no ack window and no recorded fault -- one the node held across a
-hub restart -- makes the row due at once, as the drop reports it, and changes no
-retry.
-
-A released digest batch's row is settled, not exhausted, so a safe fault on one
-is not told; a maybe-typed one still is.
+due again. A row confirmed before its notice is stored is not told, nor one the
+receiver already read. A drop for a row that has no ack window and no recorded
+fault -- one the node held across a hub restart -- makes the row due at once, as
+the drop reports it, and changes no retry. A drop the hub cannot record, its row
+unreadable or the store failing, is held in memory and retried after 2 s, 10 s,
+1 min and then every 5 min until it is recorded; a restart loses it.
 
 ### Incidents
 
@@ -372,11 +390,15 @@ worker lane on the same host with the same fault joins the same incident.
   the incident stays open and the same notice is posted again after 10 s, 1 min,
   5 min and then every 15 min, with whatever has joined, until it is stored. A
   restart posts at once.
-- The producer id is `delivery-unconfirmed-i<incident>-n<announced>`: fixed
-  until a notice is committed, so a repeat of a post whose reply was lost is
-  answered as a duplicate. A duplicate takes the window and tells no row, since
-  its stored text is the earlier post's; the next notice names the rows. One
-  extra notice is accepted, a lost one is not.
+- The producer id is `delivery-unconfirmed-i<incident>-n<announced>`, where
+  `announced` counts the rows committed notices have covered: fixed until a
+  notice is committed, so a repeat of a post whose reply was lost is answered as
+  a duplicate. The id is recorded before the post, and while it is uncommitted
+  and a row waits for it the incident stays open, whatever else holds, so no
+  other incident of the key posts the same rows under another id. A duplicate
+  takes the window and tells no row, since its stored text is the earlier
+  post's; the next notice names the rows. One extra notice is accepted, a lost
+  one is not.
 
 ### Only when someone can act
 
@@ -394,8 +416,8 @@ notice names it, so an ended lane is never named.
 
 When the spawn's `--owner-notify` mode withholds the notice (hk 5360), the row
 is counted once under `unconfirmed:<event id>` in the daily loops row, marked
-told, and never sent; it takes no window. The mode is looked up by the row's own
-job id.
+told, and never sent; it takes no window and does not advance `announced`. The
+mode is looked up by the row's own job id.
 
 ### How an incident ends
 
@@ -406,9 +428,10 @@ job id.
 | `moot` | every member still open or waiting is in a lane with nobody to act |
 | `quiet` | no member faulted, and none joined, for 60 minutes, and none is waiting to be told |
 
-A closed incident's members leave it: a `noticed` row is `exhausted` again, and
-a row still waiting to be told joins the key's next incident. Nothing is
-hidden: the obligation, the handoffkeep row and `relay.lane_stalled` remain.
+None of these closes an incident whose posted notice is uncommitted while a row
+waits for it. A closed incident's members leave it: a `noticed` row is
+`exhausted` again, and a row still waiting to be told joins the key's next
+incident. Nothing is hidden: the obligation, the handoffkeep row and `relay.lane_stalled` remain.
 
 ### A hub with no inbox store
 
@@ -445,6 +468,7 @@ wrapped composer, a draft or second nonce beside it, and a late-drawn text.
 job or task, the fail-open reads, the 30-minute window, the notices that are
 never stored and concurrent drops; `delivery_incident_t6821_test.go` pins the
 incidents, their window across closes and restarts, the closes, the timing per
-fault and the withheld notice, and `delivery_incident_store_t6821_test.go` the
-store on all three backends. `relay_unconfirmed_quiet_legacy_t3431_test.go`
+fault and the withheld notice, `delivery_incident_loss_t6821_test.go` the rows
+a lost route, age, a restart or a failed read would otherwise end silently, and
+`delivery_incident_store_t6821_test.go` the store on all three backends. `relay_unconfirmed_quiet_legacy_t3431_test.go`
 pins the hub with no inbox store.

@@ -183,13 +183,22 @@ func TestObligationStoreContractIncidents(t *testing.T) {
 			t.Fatal("an owed member changed state")
 		}
 		incidents, err := s.openIncidents(ctx)
-		if err != nil || len(incidents) != 2 || incidents[0].key != k || incidents[0].announced != 0 || incidents[1].announced != 1 ||
+		// A withheld row is told without advancing announced.
+		if err != nil || len(incidents) != 2 || incidents[0].key != k || incidents[0].announced != 0 || incidents[1].announced != 0 ||
 			incidents[0].openedAt != opened.UnixMilli() || incidents[0].lastMemberAt != opened.Add(time.Second).UnixMilli() {
 			t.Fatalf("open incidents = %+v, %v", incidents, err)
 		}
 		members, err := s.incidentMembers(ctx, first)
 		if got := relays(members); err != nil || !slices.Equal(got, []int64{1, 2}) {
 			t.Fatalf("members = %v, %v; want the longest due first", got, err)
+		}
+
+		// A posted id is unresolved until its notice is committed.
+		if err := s.markNoticePosted(ctx, first, incidents[0].noticeID()); err != nil {
+			t.Fatal(err)
+		}
+		if posted, err := s.openIncidents(ctx); err != nil || !posted[0].unresolved() || posted[1].unresolved() {
+			t.Fatalf("posted = %+v, %v", posted, err)
 		}
 
 		// A stored notice commits the incident, the slot and the rows once.
@@ -215,7 +224,7 @@ func TestObligationStoreContractIncidents(t *testing.T) {
 			t.Fatal("a told row became due again")
 		}
 		incidents, err = s.openIncidents(ctx)
-		if err != nil || incidents[0].announced != 1 {
+		if err != nil || incidents[0].announced != 1 || incidents[0].unresolved() {
 			t.Fatalf("after the notice = %+v, %v", incidents, err)
 		}
 		if err := s.recordNotice(ctx, incidents[0], storedNotice{eventID: "n1"}, told.Add(time.Second)); err != nil {
@@ -286,6 +295,59 @@ func TestObligationStoreContractIncidents(t *testing.T) {
 		flag(8, "lane.event", "host-a", relayDroppedMaybeInPane, told)
 		if b, err := s.joinIncident(ctx, wide, "", member(8).id, false, told); err != nil || b != a {
 			t.Fatalf("wide key: %d then %d, %v", a, b, err)
+		}
+
+		// A route loss keeps the fault it replaces: a node's drop is due at once,
+		// an ack timeout when its retries end by exhaustion, age or a stale
+		// retirement.
+		for relay := int64(20); relay <= 27; relay++ {
+			if err := s.createObligation(ctx, row(relay, "lane.event", "host-a"), now, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for relay, fault := range map[int64]string{20: relayDroppedPaneReadFailed, 21: obligationAckTimeout, 22: obligationAckTimeout, 23: obligationAckTimeout, 24: relayDroppedRetriesExhausted, 25: obligationAckTimeout} {
+			flag(relay, "lane.event", "host-a", fault, told)
+		}
+		for relay := int64(20); relay <= 23; relay++ {
+			for range 2 { // a second rename changes nothing
+				if err := s.markObligationUnrouted(ctx, observed(relay), told, told); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if r := member(20); r.due != told.UnixMilli() || r.as != relayDroppedPaneReadFailed {
+			t.Fatalf("a dropped row that lost its route = %+v", r)
+		}
+		if r := member(21); r.due != 0 {
+			t.Fatalf("an ack timeout is due at its route loss: %+v", r)
+		}
+		if err := s.exhaustObservedObligation(ctx, observed(21), told.Add(time.Second), told); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.endUnprovenNotice(ctx, member(22).id, told.Add(2*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.closeObligation(ctx, member(23).id, obligationSettled, obligationSettledStale, told.Add(3*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		for relay, after := range map[int64]time.Duration{21: time.Second, 22: 2 * time.Second, 23: 3 * time.Second} {
+			if r := member(relay); r.due != told.Add(after).UnixMilli() || r.as != obligationAckTimeout {
+				t.Fatalf("row %d at the end of its retries = %+v", relay, r)
+			}
+		}
+		// A released digest batch is told of a node's drop, not of an ack
+		// timeout; a row with no failure, and a receiver's read, tell nothing.
+		for relay, reason := range map[int64]string{24: obligationSettledDigest, 25: obligationSettledDigest, 26: obligationSettledStale} {
+			if err := s.closeObligation(ctx, member(relay).id, obligationSettled, reason, told); err != nil {
+				t.Fatal(err)
+			}
+		}
+		flag(27, "lane.event", "host-a", relayDroppedPaneReadFailed, told)
+		if err := s.closeObligation(ctx, member(27).id, obligationSettled, obligationSettledInbox, told); err != nil {
+			t.Fatal(err)
+		}
+		if member(24).due == 0 || member(24).as != relayDroppedRetriesExhausted || member(25).due != 0 || member(26).due != 0 || member(27).due != 0 {
+			t.Fatalf("digest drop=%+v digest timeout=%+v no failure=%+v read=%+v", member(24), member(25), member(26), member(27))
 		}
 
 		// A closed row needs no notice, except a released digest batch.

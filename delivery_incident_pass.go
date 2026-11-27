@@ -25,6 +25,11 @@ const (
 	obligationNoticeReadLimit = 3
 	// incidentQuietAfter closes an incident no member has faulted in.
 	incidentQuietAfter = 2 * unconfirmedNoticeSpacing
+	// noticeDesignWait is how long a due row with no design lane is kept, from
+	// the later of its becoming due and this hub's start: the job records that
+	// can name one are memory only, and the nodes report them again after a
+	// restart.
+	noticeDesignWait = time.Hour
 )
 
 // incidentNoticeBackoff spaces the posts of a notice that was not stored; the
@@ -88,8 +93,7 @@ func (h *HubServer) runDeliveryIncidents(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		// A notice changes nothing the close reads from the incident itself.
-		h.noticeDeliveryIncident(ctx, incident, moot)
+		h.noticeDeliveryIncident(ctx, &incident, moot)
 		h.closeDeliveryIncident(ctx, incident, moot)
 	}
 }
@@ -111,6 +115,17 @@ func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, 
 			h.logger.Warn("due delivery notice was not cleared", "event_id", row.relayID, "error", store.loggable("clear notice", err))
 		}
 	}
+	design := h.designLaneFor(row.lane)
+	if design == "" {
+		since := max(row.dueAt, h.startedAt.UnixMilli())
+		if now := h.now().UTC(); now.Sub(time.UnixMilli(since)) < noticeDesignWait {
+			// The answer may be transient, an unreadable lanes file included.
+			if err := store.deferNoticeJoin(ctx, row.id, now); err != nil {
+				h.logger.Warn("due delivery notice was not deferred", "event_id", row.relayID, "error", store.loggable("defer notice", err))
+			}
+			return true
+		}
+	}
 	readCtx, cancel := context.WithTimeout(ctx, nodeLoopHKTimeout)
 	record, found, err := h.handoffkeep.relayEvent(readCtx, row.relayID)
 	cancel()
@@ -122,7 +137,6 @@ func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, 
 		forget()
 		return true
 	}
-	design := h.designLaneFor(row.lane)
 	if design == "" {
 		h.logger.Warn("relay unconfirmed escalation has no design lane", "event_id", record.ID, "lane", row.lane, "reason", row.fault)
 		forget()
@@ -174,9 +188,9 @@ func (h *HubServer) logFoldedNotice(ctx context.Context, key incidentKey, incide
 }
 
 // noticeOwed reports whether a due row's delivery is still unproven: the row is
-// undelivered, was retired with its one labelled copy spent, or is a digest
-// batch released for a later one. A confirmed row and one handoffkeep shows
-// settled some other way need no notice.
+// undelivered, was retired with its one labelled copy spent or as stale, or is a
+// digest batch released for a later one. A confirmed row and one handoffkeep
+// shows settled some other way need no notice.
 func noticeOwed(record handoffkeepRelayEvent) bool {
 	if record.DeliveredAt == "" {
 		return true
@@ -185,7 +199,7 @@ func noticeOwed(record handoffkeepRelayEvent) bool {
 		return false
 	}
 	reason := settlementReason(record.DeliveredTo)
-	return reason == "" || reason == obligationSettledDigest
+	return reason == "" || reason == obligationSettledDigest || reason == obligationSettledStale
 }
 
 // noticeDestination is the machine and pane a row's fault is about: where the
@@ -226,8 +240,9 @@ func dueRows(members []noticeMember) []noticeMember {
 // noticeDeliveryIncident posts the incident's notice if it has a member still
 // to tell and its key's slot is free. The notice, its slot and the rows it told
 // are committed only once the notice is durable; until then the incident stays
-// open and the post is repeated under the same id.
-func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident deliveryIncident, moot mootCache) {
+// open and the post is repeated under the same id. It leaves on incident whether
+// a post is unresolved.
+func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident *deliveryIncident, moot mootCache) {
 	store := h.inbox.store
 	members, err := store.incidentMembers(ctx, incident.id)
 	if err != nil {
@@ -275,7 +290,7 @@ func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident deliver
 		cancel()
 		if err != nil {
 			if unread++; unread == obligationNoticeReadLimit || len(due) == 1 {
-				h.deferNotice(incident, due[0].relayID, "row_read_"+hubHKReadErrorClass(err))
+				h.deferNotice(*incident, due[0].relayID, "row_read_"+hubHKReadErrorClass(err))
 				return
 			}
 			due = due[1:]
@@ -300,12 +315,17 @@ func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident deliver
 	}
 	// The id is fixed until a notice is committed, so a repeat of a post whose
 	// reply was lost is answered by the durable idempotency.
-	eventID := fmt.Sprintf("%si%d-n%d", unconfirmedEscalationPrefix, incident.id, incident.announced)
+	eventID := incident.noticeID()
+	if err := store.markNoticePosted(ctx, incident.id, eventID); err != nil {
+		h.logger.Warn("delivery notice was not posted; its id could not be recorded", "incident", incident.id, "event_id", named.relayID, "error", store.loggable("mark notice", err))
+		return
+	}
+	incident.eventID = eventID
 	postCtx, cancel := context.WithTimeout(ctx, nodeLoopHKTimeout)
 	defer cancel()
 	result := h.relayLaneEventContext(postCtx, unconfirmedNoticeEvent(incident.key.design, eventID, incident.key.fault, text), nil)
 	if result.ID == 0 || result.PersistFailed {
-		h.deferNotice(incident, named.relayID, "persist_failed")
+		h.deferNotice(*incident, named.relayID, "persist_failed")
 		return
 	}
 	delete(h.obligations.noticeWaits, incident.id)
@@ -320,10 +340,11 @@ func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident deliver
 			notice.told = append(notice.told, row.id)
 		}
 	}
-	if err := store.recordNotice(context.WithoutCancel(ctx), incident, notice, h.now().UTC()); err != nil {
+	if err := store.recordNotice(context.WithoutCancel(ctx), *incident, notice, h.now().UTC()); err != nil {
 		h.logger.Warn("delivery notice was stored but not recorded; it is posted again", "incident", incident.id, "event_id", named.relayID, "error", store.loggable("record notice", err))
 		return
 	}
+	incident.eventID = ""
 	if !result.Duplicate {
 		h.logger.Warn("relay delivery unconfirmed; design lane told", "event_id", named.relayID, "lane", named.lane, "design_lane", incident.key.design, "reason", incident.key.fault, "incident", incident.id, "rows", len(due))
 	}
@@ -345,7 +366,9 @@ func (h *HubServer) deferNotice(incident deliveryIncident, relayID int64, why st
 // confirmed since it opened (recovered), every member is closed (all-terminal),
 // every open or due member's lane has nobody to act (moot), or no member has
 // faulted for incidentQuietAfter and none is still to be told (quiet). A
-// confirmation of anything but a member says nothing about this fault.
+// confirmation of anything but a member says nothing about this fault. An
+// incident with an unresolved post and a row to post it for stays open: another
+// incident of the key would post the same rows under another id.
 func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident deliveryIncident, moot mootCache) {
 	store := h.inbox.store
 	members, err := store.incidentMembers(ctx, incident.id)
@@ -379,6 +402,9 @@ func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident delivery
 				live++
 			}
 		}
+	}
+	if due > 0 && incident.unresolved() {
+		return
 	}
 	var reason string
 	switch {

@@ -29,9 +29,33 @@ const (
 	incidentQuiet       = "quiet"
 )
 
-// obligationNeverNoticed is the predicate of the faults no design lane hears
-// of: nothing was queued for an unrouted row, and no pane takes an ended job's.
+// obligationNeverNoticed is the predicate of the faults no report makes due:
+// unrouted names a missing route rather than a failed copy, and no pane takes an
+// ended job's row.
 const obligationNeverNoticed = `fault IN ('` + obligationFaultUnrouted + `','` + relayDroppedJobEnded + `')`
+
+// obligationUntold is the predicate of a row a notice may still become due for.
+const obligationUntold = `kind='lane.event' AND notice_due_at=0 AND told_at=0`
+
+// obligationNodeDropped is the predicate of the faults a node dropped a row
+// with, having typed nothing. The design lane was told of them from the drop
+// before there were incidents, so a row that loses its route or its retries
+// under one is told then.
+const obligationNodeDropped = `fault IN ('` + relayDroppedPaneReadFailed + `','` + relayDroppedRetriesExhausted + `','` + relayDroppedWorkingExpired + `')`
+
+// obligationFailed is the predicate of a row that had a failed copy to tell of.
+// A row renamed unrouted keeps that fault in fault_reason; one renamed by a
+// build from before it kept any has nothing to tell.
+const obligationFailed = `fault NOT IN ('','` + relayDroppedJobEnded + `') AND (fault<>'` + obligationFaultUnrouted + `' OR fault_reason<>'')`
+
+// obligationDueWhen is the SET fragment that makes a row matching when due a
+// notice of its failure: its fault, or what an unrouted rename kept. It binds
+// one value, the time. MySQL reads an assigned column's new value, so it goes
+// ahead of any assignment to state or fault.
+func obligationDueWhen(when string) string {
+	return `fault_reason=CASE WHEN ` + when + ` AND fault<>'` + obligationFaultUnrouted + `' THEN fault ELSE fault_reason END,
+		notice_due_at=CASE WHEN ` + when + ` THEN ? ELSE notice_due_at END,`
+}
 
 // incidentKey is what one incident, and the spacing of its notices, belongs to.
 type incidentKey struct{ design, machine, fault string }
@@ -57,7 +81,19 @@ type deliveryIncident struct {
 	key                    incidentKey
 	announced              int
 	openedAt, lastMemberAt int64
+	// eventID is the last notice id the incident posted or committed.
+	eventID string
 }
+
+// noticeID is the producer id of the incident's next notice. It is fixed until
+// a notice is committed: only recordNotice advances announced.
+func (i deliveryIncident) noticeID() string {
+	return fmt.Sprintf("%si%d-n%d", unconfirmedEscalationPrefix, i.id, i.announced)
+}
+
+// unresolved reports whether the next notice was posted and not committed, so
+// that handoffkeep or an inbox may already hold it.
+func (i deliveryIncident) unresolved() bool { return i.eventID == i.noticeID() }
 
 // noticeMember is an obligation as the incident pass reads it.
 type noticeMember struct {
@@ -96,6 +132,20 @@ func (s *laneInboxStore) noticeMembers(parent context.Context, query string, arg
 	return out, rows.Err()
 }
 
+// obligationReportDue is the SET fragment, with its values, by which a report
+// or a drop of fault makes its row due a notice in the same write: nothing for
+// a fault not noticed at its report. A row of an ended job is left alone. The
+// fragment reads the fault the row had, so it goes ahead of the assignment to
+// fault: MySQL reads an assigned column's new value.
+func obligationReportDue(fault string, at int64) (set string, values []any) {
+	if !noticedAtReport(fault) {
+		return "", nil
+	}
+	const when = obligationUntold + ` AND fault<>'` + relayDroppedJobEnded + `'`
+	return `fault_reason=CASE WHEN ` + when + ` THEN ? ELSE fault_reason END,
+		notice_due_at=CASE WHEN ` + when + ` THEN ? ELSE notice_due_at END,`, []any{fault, at}
+}
+
 // markNoticeDue records that the open lane.event rows matching where have a
 // fault their design lane is to be told of. A row already due, a row a notice
 // has covered, and a row whose fault is never noticed keep what they have.
@@ -105,6 +155,16 @@ func (s *laneInboxStore) markNoticeDue(parent context.Context, fault string, now
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET fault_reason=?,notice_due_at=?
 		WHERE kind='lane.event' AND notice_due_at=0 AND told_at=0 AND NOT (`+obligationNeverNoticed+`) AND `+obligationOpen+` AND `+where),
 		append([]any{utf8PrefixWithin(fault, 128), now.UnixMilli()}, keys...)...)
+	return err
+}
+
+// endUnprovenNotice makes an open row whose retries have ended by age due a
+// notice of its failure, unless it has none or was already told.
+func (s *laneInboxStore) endUnprovenNotice(parent context.Context, id int64, now time.Time) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET `+obligationDueWhen(obligationUntold+` AND `+obligationFailed)+`updated_at=?
+		WHERE id=? AND `+obligationUntold+` AND `+obligationFailed+` AND `+obligationOpen), now.UnixMilli(), now.UnixMilli(), id)
 	return err
 }
 
@@ -139,7 +199,7 @@ func (s *laneInboxStore) incidentMembers(parent context.Context, incident int64)
 func (s *laneInboxStore) openIncidents(parent context.Context) ([]deliveryIncident, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,design_lane,machine,fault,announced,opened_at,last_member_at FROM delivery_incidents WHERE open_slot IS NOT NULL ORDER BY id`))
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id,design_lane,machine,fault,announced,opened_at,last_member_at,notice_event_id FROM delivery_incidents WHERE open_slot IS NOT NULL ORDER BY id`))
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +207,7 @@ func (s *laneInboxStore) openIncidents(parent context.Context) ([]deliveryIncide
 	var out []deliveryIncident
 	for rows.Next() {
 		var i deliveryIncident
-		if err := rows.Scan(&i.id, &i.key.design, &i.key.machine, &i.key.fault, &i.announced, &i.openedAt, &i.lastMemberAt); err != nil {
+		if err := rows.Scan(&i.id, &i.key.design, &i.key.machine, &i.key.fault, &i.announced, &i.openedAt, &i.lastMemberAt, &i.eventID); err != nil {
 			return nil, err
 		}
 		out = append(out, i)
@@ -159,8 +219,9 @@ var errNoticeMemberChanged = errors.New("delivery incident row changed")
 
 // joinIncident makes the due row id a member of the open incident of key,
 // opening one if the key has none. An exhausted row becomes noticed. A withheld
-// notice is recorded at once: the row is told, and the incident counts it as
-// announced, without taking the key's notice slot. It returns the incident id.
+// notice is recorded at once: the row is told, without taking the key's notice
+// slot and without advancing announced, which names the notice a retry may be
+// posting; only recordNotice advances it. It returns the incident id.
 //
 // An incident id starts at the clock, not at 1, so a hub that starts on a new
 // store does not reuse a notice id handoffkeep already holds.
@@ -202,7 +263,7 @@ func (s *laneInboxStore) joinIncident(parent context.Context, key incidentKey, h
 		if _, err := tx.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET told_at=?,notice_due_at=0 WHERE id=?`), at, id); err != nil {
 			return 0, err
 		}
-		counted += `,announced=announced+1,notice_at=?`
+		counted += `,notice_at=?`
 		values = append(values, at)
 	}
 	if _, err := tx.ExecContext(ctx, s.q(`UPDATE delivery_incidents SET `+counted+` WHERE id=?`), append(values, incident)...); err != nil {
@@ -222,6 +283,15 @@ func (s *laneInboxStore) noticeSlot(parent context.Context, key incidentKey) (in
 		return 0, nil
 	}
 	return at, err
+}
+
+// markNoticePosted records the id of a notice about to be posted, ahead of the
+// post: until recordNotice commits it, the incident is unresolved.
+func (s *laneInboxStore) markNoticePosted(parent context.Context, incident int64, eventID string) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_incidents SET notice_event_id=? WHERE id=?`), utf8PrefixWithin(eventID, 255), incident)
+	return err
 }
 
 // storedNotice is a notice that is durable: relayID is its handoffkeep row, or

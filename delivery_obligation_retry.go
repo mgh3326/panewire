@@ -39,26 +39,25 @@ func (s *laneInboxStore) flagObligationRetry(parent context.Context, o newDelive
 		    pane=CASE WHEN ` + replace + ` THEN ? ELSE pane END,`
 		destined = slices.Concat(replaced, []any{utf8PrefixWithin(o.machine, 255)}, replaced, []any{utf8PrefixWithin(o.pane, 255)})
 	}
+	// The due mark is set with the fault: a pass that settles the row between two
+	// writes would leave a notice that is never due.
+	due, dued := obligationReportDue(fault, at)
 	// fault is assigned after every CASE that reads it: MySQL reads an assigned
 	// column's new value.
 	args := slices.Concat([]any{o.attempts, o.attempts, o.attempts, o.attempts, at}, replaced, []any{at, at},
-		destined, replaced, []any{fault, marker}, keys)
-	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
+		destined, dued, replaced, []any{fault, marker}, keys)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
 		SET spent=CASE WHEN fault='' AND spent<? THEN ? ELSE spent END,
 		    attempts_seen=CASE WHEN fault='' AND attempts_seen<? THEN ? ELSE attempts_seen END,
 		    next_at=CASE WHEN fault='' THEN ? ELSE next_at END,
 		    last_fault_at=CASE WHEN `+replace+` THEN ? ELSE last_fault_at END,
 		    updated_at=CASE WHEN fault='' THEN ? ELSE updated_at END,
 		    `+destination+`
+		    `+due+`
 		    fault=CASE WHEN `+replace+` THEN ? ELSE fault END,
 		    marker_event_id=CASE WHEN marker_event_id='' THEN ? ELSE marker_event_id END
-		WHERE `+obligationOpen+` AND `+where), args...); err != nil {
-		return err
-	}
-	if !noticedAtReport(fault) {
-		return nil
-	}
-	return s.markNoticeDue(parent, fault, now, where, keys...)
+		WHERE `+obligationOpen+` AND `+where), args...)
+	return err
 }
 
 // retryOwnerOf returns the fault scheduled on the key's obligation, if one
@@ -182,6 +181,10 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	// A digest must release its claims even when its original body aged out.
 	// A revive is bounded by its drop instead of its receipt (revivable).
 	if h.relayReplayRetireReasonAged(record, !revive) != "" {
+		// No further copy of an aged row is queued: its retries end here.
+		if err := store.endUnprovenNotice(ctx, o.id, now); err != nil {
+			return err
+		}
 		return wait(obligationRecheckMin)
 	}
 

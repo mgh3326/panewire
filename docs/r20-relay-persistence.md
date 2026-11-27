@@ -427,8 +427,9 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
   elsewhere). Rows labelled after that start keep their revive.
   `hub store-copy` of `delivery_obligations` carries that record: the target
   holds it exactly when the source does.
-- A row with no route spends nothing, writes no design-lane notice and is
-  announced `relay.unrouted` once per process. A `lane.event` is retired as
+- A row with no route spends nothing and is announced `relay.unrouted` once per
+  process. The missing route is no notice of its own; a node's drop it replaces
+  is still told ("Incidents and notices"). A `lane.event` is retired as
   `lane_gone` only when it is an idle-wake report (above), never because its own
   pane vanished.
 - Exhausted is not settled: the obligation and the handoffkeep row stay open,
@@ -445,23 +446,28 @@ hk 4289 T4 (hk 6821). Which rows the design lane is told of, and when, is in
 |---|---|
 | `notice_due_at` | when the row got a fault no notice has covered; 0 when there is nothing to tell |
 | `told_at` | when a stored or withheld notice covered the row, which never becomes due again |
-| `fault_reason` | the fault a due row's notice reports |
+| `fault_reason` | the fault a due row's notice reports; on a row that is not due, the fault an `unrouted` rename replaced |
 
 - A row becomes due in the same write as the change that makes it so: a
-  maybe-typed report or drop, or the exhaustion of an owed row. An orphaned
-  drop makes a row with no fault due. A report that replaces the fault also
-  records its machine and pane, which key the incident.
-- Closing an obligation clears its due notice, except a `digest-not-replayed`
-  settlement, whose row may still be waiting to be told.
+  maybe-typed report or drop, the exhaustion of an owed row, or the rename to
+  `unrouted` of a node's drop. A row found past the replay window is made due by
+  the pass before anything else is done with it. An orphaned drop makes a row
+  with no fault due. A report that replaces the fault also records its machine
+  and pane, which key the incident.
+- Closing an obligation clears its due notice, except a `stale` settlement,
+  which makes a row with a failed copy due, and a `digest-not-replayed` one,
+  which keeps a due notice and makes a node's drop due.
 - The pass joins at most 50 due rows to incidents, then for each open incident
   posts its notice if one is due, then closes it if it has ended. The join
   opens the key's incident if it has none (`open_slot`), and an exhausted
   member becomes `noticed`. An incident id starts at the clock in
   milliseconds, so a hub on a new store does not reuse a notice id handoffkeep
   already holds.
-- A stored notice commits `announced`, `notice_at`, `notice_relay_id` (0 when
-  the notice was filed in an inbox), the key's slot and the rows it told in one
-  transaction.
+- `notice_event_id` is written before a notice is posted. A stored notice
+  commits `announced`, `notice_at`, `notice_relay_id` (0 when the notice was
+  filed in an inbox), the key's slot and the rows it told in one transaction;
+  until then the posted id is unresolved and a row due for it holds the incident
+  open.
 - A close sets `open_slot` to NULL and detaches the members (`incident_id` 0,
   `noticed` back to `exhausted`). A `moot` close also clears their due notices.
 - `hub store-copy` reads a source without the two new columns as having

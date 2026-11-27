@@ -255,17 +255,23 @@ func (s *laneInboxStore) dueObligations(parent context.Context, now time.Time, l
 }
 
 // closeObligation ends an open obligation as confirmed, or as settled for
-// reason. A closed row needs no notice, except a settled digest batch: its
-// items go out again under a new batch, and the notice of this one still says a
-// delivery to the lane went unproven.
+// reason. A closed row needs no notice, since its text reached the receiver or
+// no pane takes it, with two exceptions that end the retries unproven. A row
+// retired as stale is told of any failure it had. A settled digest batch keeps
+// a due notice and is told of a node's drop: its items go out again under a new
+// batch, and the notice of this one still says a delivery to the lane failed.
 func (s *laneInboxStore) closeObligation(parent context.Context, id int64, state, reason string, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	notice := `notice_due_at=0,`
-	if reason == obligationSettledDigest {
-		notice = ``
+	notice, values := `notice_due_at=0,`, []any{}
+	switch reason {
+	case obligationSettledStale:
+		notice, values = obligationDueWhen(obligationUntold+` AND `+obligationFailed), []any{now.UnixMilli()}
+	case obligationSettledDigest:
+		notice, values = obligationDueWhen(obligationUntold+` AND `+obligationNodeDropped), []any{now.UnixMilli()}
 	}
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET `+notice+`state=?,settle_reason=?,next_at=0,updated_at=? WHERE id=? AND `+obligationOpen), state, utf8PrefixWithin(reason, 64), now.UnixMilli(), id)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET `+notice+`state=?,settle_reason=?,next_at=0,updated_at=? WHERE id=? AND `+obligationOpen),
+		append(values, state, utf8PrefixWithin(reason, 64), now.UnixMilli(), id)...)
 	return err
 }
 
@@ -314,19 +320,24 @@ func (s *laneInboxStore) deferObservedObligation(parent context.Context, o openO
 }
 
 // exhaustObservedObligation is exhaustObligation for a retry decision: it keeps
-// the fault, and does nothing if the row changed after the caller read it.
+// the fault, and does nothing if the row changed after the caller read it. A row
+// a route loss renamed is told of the failure it had.
 func (s *laneInboxStore) exhaustObservedObligation(parent context.Context, o openObligation, now, due time.Time) error {
-	const becomesDue = obligationBecomesDue + ` AND NOT (` + obligationNeverNoticed + `)`
-	return s.updateObservedObligation(parent, o, `
-		fault_reason=CASE WHEN `+becomesDue+` THEN fault ELSE fault_reason END,
-		notice_due_at=CASE WHEN `+becomesDue+` THEN ? ELSE notice_due_at END,
-		`+obligationToExhausted+`,next_at=?,updated_at=?`, now.UnixMilli(), due.UnixMilli(), now.UnixMilli())
+	return s.updateObservedObligation(parent, o, obligationDueWhen(obligationBecomesDue+` AND `+obligationFailed)+
+		obligationToExhausted+`,next_at=?,updated_at=?`, now.UnixMilli(), due.UnixMilli(), now.UnixMilli())
 }
 
 // markObligationUnrouted names the missing route as the fault of a row the
-// caller found safe to copy, and reads it again at due.
+// caller found safe to copy, and reads it again at due. The fault it replaces is
+// kept in fault_reason, unless a notice is already due; a node's drop makes the
+// row due now, since nothing may ever exhaust it.
 func (s *laneInboxStore) markObligationUnrouted(parent context.Context, o openObligation, now, due time.Time) error {
-	return s.updateObservedObligation(parent, o, `fault=?,next_at=?,updated_at=?`, obligationFaultUnrouted, due.UnixMilli(), now.UnixMilli())
+	// fault is assigned after both CASEs read it, and notice_due_at after the
+	// first does: MySQL reads an assigned column's new value.
+	return s.updateObservedObligation(parent, o, `
+		fault_reason=CASE WHEN notice_due_at=0 AND fault<>'`+obligationFaultUnrouted+`' THEN fault ELSE fault_reason END,
+		notice_due_at=CASE WHEN `+obligationUntold+` AND `+obligationNodeDropped+` THEN ? ELSE notice_due_at END,
+		fault=?,next_at=?,updated_at=?`, now.UnixMilli(), obligationFaultUnrouted, due.UnixMilli(), now.UnixMilli())
 }
 
 // updateObservedObligation applies set to an open obligation that still matches
