@@ -415,6 +415,11 @@ func TestMixedLaneUncertainBatchKeepsRowsUnconfirmedAndWarnsOnce(t *testing.T) {
 	}
 	transport := &spawnSentryTransport{}
 	rig.hub.spawnSentry = spawnReasonSentryClient(t, transport)
+	// The summary goes only to a hub whose hub.features listed
+	// relay_uncertain_batch (hk 6887); this connection is such a hub.
+	advertising := &hubClientConnection{}
+	advertising.acceptsRelayUncertainBatch.Store(true)
+	rig.node.signalsPeer.Store(advertising)
 	rig.node.relayInjectVerdict = func(context.Context, string, string, []string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: "codex", Evidence: "unproven:composer_unlocated"}
 	}

@@ -258,17 +258,51 @@ type relayUncertainBatchPayload struct {
 	ReplaySource string   `json:"replay_source"`
 }
 
-func relayUncertainBatch(group []relayHeld, verdict, evidence, harness string) relayUncertainBatchPayload {
+// hubFeatureRelayUncertainBatch is listed in hub.features by a hub that takes
+// relay.uncertain_batch and warns once for it. A hub without it (a base build)
+// gets no summary, and each unproven row warns on its own (hk 6887).
+const hubFeatureRelayUncertainBatch = "relay_uncertain_batch"
+
+// uncertainBatch builds the one summary an uncertain batch sends, and reports
+// whether it is sent. When it is not, every row keeps its own warning and
+// batch_uncertain stays false. That happens for a single row, a batch that
+// names no lane (the hub decodes a lane reference, so a summary with no lane
+// would be dropped and its rows silenced), and a hub that did not advertise
+// hubFeatureRelayUncertainBatch.
+//
+// Every uncertain path goes through here, so the queued_banner path has the
+// same eligibility as the nonce and maybe_in_pane paths. A queued_banner batch
+// whose every nonce is proven never reaches here: its members are delivered
+// and raise no warning (panewire-design's decision on #920). The contract is
+// in docs/relay-harness-delivery.md, "Uncertain batches".
+func (manager *relayBusyManager) uncertainBatch(group []relayHeld, verdict, evidence, harness string) (relayUncertainBatchPayload, bool) {
+	if len(group) < 2 || !manager.client.hubAcceptsRelayUncertainBatch() {
+		return relayUncertainBatchPayload{}, false
+	}
 	lanes := make([]string, 0, len(group))
 	seen := make(map[string]struct{}, len(group))
 	for _, item := range group {
+		if item.Lane == "" {
+			continue
+		}
 		if _, ok := seen[item.Lane]; ok {
 			continue
 		}
 		seen[item.Lane] = struct{}{}
 		lanes = append(lanes, item.Lane)
 	}
-	return relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: group[0].Lane, Lanes: lanes, MemberCount: len(group), Verdict: verdict, Evidence: evidence, Harness: harness, ReplaySource: "hub_unconfirmed_once"}
+	if len(lanes) == 0 {
+		return relayUncertainBatchPayload{}, false
+	}
+	return relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: lanes[0], Lanes: lanes, MemberCount: len(group), Verdict: verdict, Evidence: evidence, Harness: harness, ReplaySource: "hub_unconfirmed_once"}, true
+}
+
+// hubAcceptsRelayUncertainBatch reads the current connection's feature state.
+// The feature frame arrives after the hello, so a summary sent before it is
+// not sent at all, and its rows warn on their own.
+func (client *HubClient) hubAcceptsRelayUncertainBatch() bool {
+	peer := client.signalsPeer.Load()
+	return peer != nil && peer.acceptsRelayUncertainBatch.Load()
 }
 
 // relayBusyManager serializes each pane, so a returned wait can batch every
@@ -1304,12 +1338,13 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		switch result.Outcome {
 		case relayInjectRetryable:
 			if previousUncertain {
-				if len(group) > 1 {
-					manager.emit("relay.uncertain_batch", relayUncertainBatch(group, "maybe_in_pane", result.Evidence, result.Harness))
+				summary, batched := manager.uncertainBatch(group, "maybe_in_pane", result.Evidence, result.Harness)
+				if batched {
+					manager.emit("relay.uncertain_batch", summary)
 				}
 				for _, item := range group {
 					manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane previous_attempt_unproven " + result.Evidence), OriginalEventID: item.EventID})
-					manager.stopWithoutRetryBatch(item, result.Harness, "previous_attempt_unproven:"+result.Evidence, len(group) > 1)
+					manager.stopWithoutRetryBatch(item, result.Harness, "previous_attempt_unproven:"+result.Evidence, batched)
 				}
 				continue
 			}
@@ -1332,12 +1367,13 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			if previousUncertain {
 				dropEvidence = "previous_attempt_unproven:" + dropEvidence
 			}
-			if len(group) > 1 {
-				manager.emit("relay.uncertain_batch", relayUncertainBatch(group, "maybe_in_pane", dropEvidence, result.Harness))
+			summary, batched := manager.uncertainBatch(group, "maybe_in_pane", dropEvidence, result.Harness)
+			if batched {
+				manager.emit("relay.uncertain_batch", summary)
 			}
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane " + result.Evidence), OriginalEventID: item.EventID})
-				manager.stopWithoutRetryBatch(item, result.Harness, dropEvidence, len(group) > 1)
+				manager.stopWithoutRetryBatch(item, result.Harness, dropEvidence, batched)
 			}
 			continue
 		}
@@ -1364,12 +1400,13 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			}
 			landed = append(landed, item)
 		}
-		if len(uncertain) > 1 {
-			manager.emit("relay.uncertain_batch", relayUncertainBatch(uncertain, "nonce_missing", result.Evidence, result.Harness))
+		summary, batched := manager.uncertainBatch(uncertain, "nonce_missing", result.Evidence, result.Harness)
+		if batched {
+			manager.emit("relay.uncertain_batch", summary)
 		}
 		for _, item := range uncertain {
 			manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane nonce_missing " + result.Evidence), OriginalEventID: item.EventID})
-			manager.stopWithoutRetryBatch(item, result.Harness, result.Evidence, len(uncertain) > 1)
+			manager.stopWithoutRetryBatch(item, result.Harness, result.Evidence, batched)
 		}
 		if len(landed) > 1 {
 			ids := make([]int64, 0, len(landed))
