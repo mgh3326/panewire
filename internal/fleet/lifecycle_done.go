@@ -34,6 +34,9 @@ type doneInput struct {
 	// named. body is empty, so the step never publishes again; only the
 	// receipts decide what remains.
 	recovered bool
+	// readyEvent is --ready-event: the event id of the READY this completion
+	// concludes, announced as the completion's result_id.
+	readyEvent string
 }
 
 // settledReceipt is a job.record_settled receipt: the hk record is terminal
@@ -307,6 +310,11 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 		if in.late {
 			p["late"] = true
 		}
+		// The node scanner reads this envelope when the flat emit record was
+		// never written, so it names the READY too.
+		if in.readyEvent != "" {
+			p["result_id"] = in.readyEvent
+		}
 		if e := a.event(ctx, id, "job.completed", p); e != nil {
 			return e
 		}
@@ -314,7 +322,7 @@ func (a *App) doneReport(ctx context.Context, j Job, in doneInput) error {
 			a.jobResultEvent(id, "missing", "no_result", "")
 			a.warn("reviewer done carried no result: %s", id)
 		}
-		relay = a.relayReport(ctx, j, "job.completed", in.report, in.question, in.body, doc, in.late)
+		relay = a.relayReport(ctx, j, "job.completed", in.report, in.question, in.body, doc, in.late, in.readyEvent)
 		a.commentOnTask(ctx, j, "job.completed", in.report)
 		ran = append(ran, "notified")
 	}
@@ -458,10 +466,11 @@ func repaired(ran []string) string {
 // relayReport emits the completion to the parent lane's inbox: the report
 // path and its last line, with the document key when the report is in hk. A
 // completion names the report by that hk key in place of the local path,
-// which the fleet deletes once the record pins it (hk 3685). It returns
-// " relay=file-only" when the emit failed and the durable arbiter event alone
-// carries it.
-func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, question string, body []byte, doc string, late bool) string {
+// which the fleet deletes once the record pins it (hk 3685). readyEvent, when
+// set, goes out as a job.completed's result_id (docs/quiet-delivery.md, "A
+// READY and its completion"). It returns " relay=file-only" when the emit
+// failed and the durable arbiter event alone carries it.
+func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, question string, body []byte, doc string, late bool, readyEvent string) string {
 	owner := j.Owner
 	if j.Parent != "" && (eventKind == "job.escalate" || j.Role == "builder") {
 		owner = j.Parent
@@ -492,6 +501,9 @@ func (a *App) relayReport(ctx context.Context, j Job, eventKind, report, questio
 	}
 	if question != "" {
 		argsEmit = append(argsEmit, "--question", question)
+	}
+	if readyEvent != "" {
+		argsEmit = append(argsEmit, "--result-id", readyEvent)
 	}
 	r := a.call(ctx, "panewire", argsEmit...)
 	if r.Code == 0 {
@@ -566,7 +578,7 @@ func (a *App) escalateReport(ctx context.Context, j Job, report, question string
 	if _, rerr := a.recordFailedOutcome(ctx, j, j.Task, "escalated", a.PRs); rerr != nil {
 		a.warn("failure rep not recorded: %v", rerr)
 	}
-	relay := a.relayReport(ctx, j, "job.escalate", report, question, body, doc, late)
+	relay := a.relayReport(ctx, j, "job.escalate", report, question, body, doc, late, "")
 	a.commentOnTask(ctx, j, "job.escalate", report)
 	fmt.Fprintf(a.Out, "OK job=%s report=%s kind=job.escalate%s\n", id, report, relay)
 	return nil

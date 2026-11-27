@@ -294,13 +294,90 @@ Nothing is dropped: hk lists each filed row with `delivered_to`
 `hub/filtered:reviewer-lifecycle`, and the job's own hk record is unchanged.
 What still reaches a design lane is everything else: READY, BLOCKED, decision,
 findings, `order`, every `job.completed` of a worker (including one after its
-READY), a design session's own spawn notices and the failures in
+READY, unless it [names that READY](#a-ready-and-its-completion)), a design
+session's own spawn notices and the failures in
 [hub spawn operations](hub-spawn-operations.md#notifications-and-telemetry).
 Lanes that are not design lanes are unchanged.
 
-**Not done under hk 4270:** hiding a `job.completed` that repeats a READY, and
-the retry/coalescing of unconfirmed deliveries. See the
+**Not done under hk 4270:** hiding a `job.completed` that repeats a READY
+(since done for a completion that names its READY on an inbox-only lane,
+below), and the
+retry/coalescing of unconfirmed deliveries. See the
 [pull request](https://github.com/mgh3326/panewire/pull/448).
+
+## A READY and its completion
+
+A worker's `--type ready` lane event and the `job.completed` that concludes it
+report one result. They share one identifier, the READY's producer event id
+(the `event_id` `panewire emit` prints). The completion carries it as
+`result_id`:
+
+```sh
+panewire done <job> --report <path> --ready-event <READY event id>
+panewire emit --kind job.completed --job <job> --report <path> \
+  --owner-lane <lane> --result-id <READY event id>
+```
+
+On an [inbox-only lane](#inbox-only-lanes) (design, desk and trial lanes) the
+hub then folds the completion into the READY's inbox item in place of a second
+item (hk 4289 T5). Every other lane is typed into and gets the READY and the
+completion exactly as without the field: the hub drops `result_id` there. The
+T5 design merged on every lane; `panewire-design` narrowed it to inbox-only
+lanes, because a one-line wake cannot stand in for a typed relay.
+
+The READY item is looked up by the completion's owner lane and `result_id`
+alone:
+
+| The READY of that lane and id | The completion |
+| --- | --- |
+| a `ready` lane event, not acked and not superseded, whether or not it was read | merged |
+| already lists this completion in `merged_completions` | changes nothing and is answered again, also after the ack |
+| acked or superseded | delivered as before |
+| not filed (the completion arrived first, or the id names no such event of this lane, or one of another type) | delivered as before; a READY that arrives later is delivered too, and a resend of the completion stays its own item |
+| no `result_id`, a lane that is not inbox-only, or no inbox store (`--delivery-policy off`) | delivered as before |
+
+The rules that withhold a record come first: a completion that
+`--owner-notify` or the [daemon reviewer filter](#records-kept-in-hk-only)
+keeps from the lane is not merged. A store error during the merge also delivers
+the completion as before: it can cost a second item, never the completion.
+
+**What a merge does.**
+
+- The item takes the completion's `report_path`, `report_last_line`, `pr` and
+  `head` (an empty one erases nothing), adds its `question` after any it already
+  has (` / ` between them), and appends the completion's key to
+  `merged_completions` (the hub's dedupe key, with newlines between its
+  fields). The set is what makes a repeat a no-op across restarts; a second
+  completion with another event key is appended too. The READY keeps its text,
+  type and must-ack state, so it stays unread until `inbox ack`.
+- The completion gets no item. Its `cause` still supersedes what its own item
+  would have, never the READY it joined.
+- The first merge sends [the one-line wake](#the-one-line-wake) when the
+  completion would have woken the lane, and restarts the lane's
+  [re-wake](#the-re-wake) count.
+- The READY item is the merge's receipt: no handoffkeep row is written.
+- `panewire spawn --wait` reads a merged completion from the item's
+  `merged_completions`.
+
+**Rollout.** The hub lists `result-id-v1` in `hub.features`. A node holds a
+completion that has a `result_id` until it knows the connected hub's features,
+as it holds a `lane.event`, and adds the field only for a hub that listed it. A
+new node therefore sends an older hub the completion without it, and an older
+node sends a new hub no field; either may be deployed or rolled back first. The
+hub accepts the field from any node, reads it whole, and drops one that is no
+event id. handoffkeep is unchanged.
+
+**Limits.**
+
+- Nothing in the fleet names a READY on its own: the completion watcher that
+  completes a job on its READY passes no `--ready-event`, and a later `done`
+  for the same report is a duplicate that announces nothing.
+- A node that scans a READY and its completion in one pass sends `job.*`
+  records before lane events, so both are delivered.
+- The hub trusts the producer's id. It does not check that the completion and
+  the READY come from one job or node.
+- A merged completion adds no item, so a desk summary that already listed the
+  READY does not list it again.
 
 ## Inbox-only lanes
 
@@ -472,8 +549,9 @@ wake. The hub sends a re-wake when all of these hold:
 - Fewer than `relay.inbox_rewake_max` (default `3`) re-wake lines went out for
   the set.
 
-A new unread item starts a new set, so the count resets. When nothing is left
-unread and unacked, nothing is sent. A re-wake sends the wake line unchanged: the
+A new unread item starts a new set, so the count resets. A completion
+[merged into a READY](#a-ready-and-its-completion) adds no item and resets the
+count too. When nothing is left unread and unacked, nothing is sent. A re-wake sends the wake line unchanged: the
 same text and transport, with `most urgent: <kind>` as today. No item body is
 typed, and the re-wake opens the lane's window like any line, so an arrival in
 the next five minutes waits for the window's end.
@@ -528,6 +606,9 @@ call it are:
   an `ack` that names no lane (all lanes, or an item by id alone) is
   all-lanes;
 - `fileUnread`: each lane of the rows it turns into unread inbox items;
+- `mergeCompletion`: the lane, when a completion
+  [joins a READY](#a-ready-and-its-completion) (its supersede marks older
+  rows);
 - `prune`: all-lanes, when it deletes rows. Pruned rows are never unread, but a
   lane can lose its last row.
 
@@ -715,8 +796,9 @@ find, so a tick builds batches only when one of these holds:
   (`noteWorkChanged`, `lane_inbox_store.go`). The writes are: an insert into
   `lane_inbox` (new item, with or without a deadline, digest window or hold; this also
   covers a superseding insert), `read`, `ack`, `fileUnread` (an item filed as unread
-  inbox; also `fileEventUnread` for a new row), and `releaseBatchClaims` (claims given
-  back for re-escalation). A batch the pass itself creates needs no mark: the pass
+  inbox; also `fileEventUnread` for a new row), `releaseBatchClaims` (claims given
+  back for re-escalation) and a [merge](#a-ready-and-its-completion) that supersedes an
+  item. A batch the pass itself creates needs no mark: the pass
   reports what it left unclaimed. Startup writes (`prepareInbox`, `recoverMustAct`) run
   before the first pass and retention only deletes;
 - **earliest due time passed:** every pass returns the earliest hold-release, digest

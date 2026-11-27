@@ -109,6 +109,10 @@ type hubClientEvent struct {
 	// sinkRecord is a lane.event whose producer named a sink (emit --sink). Its
 	// text bound is the sink bound, not the typed-line one (relayWire).
 	sinkRecord bool
+	// resultID is a job.completed's READY event id: the event is held until the
+	// hub's features are known, and the field is added only for a hub that
+	// advertised hubFeatureResultID (relayWire).
+	resultID string
 }
 
 type quotaPoolReconcileHooks struct {
@@ -767,6 +771,9 @@ type hubClientConnection struct {
 	// acceptsEndedPanes is the same for hubFeatureEndedPanes
 	// (node_pane_sweep.go): the heartbeat may carry the sweep's open-pane count.
 	acceptsEndedPanes atomic.Bool
+	// acceptsResultID is the same for hubFeatureResultID (result_identity.go):
+	// a job.completed carries result_id only to such a hub.
+	acceptsResultID atomic.Bool
 	// acceptsFinalLost is the same for hubFeatureFinalLost (hub_jobs_client.go):
 	// the final field of a job.lost goes only to such a hub.
 	acceptsFinalLost   atomic.Bool
@@ -2344,6 +2351,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsCheckoutPull.Store(slices.Contains(message.Features, hubFeatureCheckoutPull))
 				peer.acceptsEndedPanes.Store(slices.Contains(message.Features, hubFeatureEndedPanes))
 				peer.acceptsFinalLost.Store(slices.Contains(message.Features, hubFeatureFinalLost))
+				peer.acceptsResultID.Store(slices.Contains(message.Features, hubFeatureResultID))
 				peer.acceptsLaunchProof.Store(slices.Contains(message.Features, hubFeatureLaunchProof))
 				peer.acceptsCheckoutSparse.Store(slices.Contains(message.Features, hubFeatureCheckoutSparse))
 				peer.acceptsCheckoutBranch.Store(slices.Contains(message.Features, hubFeatureCheckoutBranch))
@@ -3005,7 +3013,11 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	payload = relayPayloadNotifyType(payload, job.NotifyType)
 	payload = relayPayloadOptionalString(payload, "cause", job.Cause)
 	payload = relayPayloadOptionalString(payload, "head", job.Head)
-	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, finalLost: job.Kind == "job.lost" && job.Final}, true
+	resultID := ""
+	if job.Kind == "job.completed" && validLaneEventID(job.ResultID) {
+		resultID = job.ResultID
+	}
+	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, finalLost: job.Kind == "job.lost" && job.Final, resultID: resultID}, true
 }
 
 // suppressPreMigrationRelayEvent retires event files that predate this node's

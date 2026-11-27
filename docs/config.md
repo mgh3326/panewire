@@ -1041,6 +1041,14 @@ whose receipt exists is skipped:
 | 3 pin | the record's `report_doc` and `report_sha256` name the completing report | the hk job record | `job.report_pinned {report_sha256, document, outcome}` |
 | 4 notify | the parent was told about `S` | the local ledger, then the relay | `job.completed {report_sha256, document}` |
 
+`done --ready-event <event id>` names the READY this completion concludes. Step
+4 records it as `result_id` and relays it with `emit --result-id`, so on an
+inbox-only lane the hub keeps the READY and the completion as one inbox item
+([quiet delivery](quiet-delivery.md#a-ready-and-its-completion)). A value that is
+not a lane event id is refused before any step runs. The flag applies to the
+announcement it is given with: a report already announced is a duplicate, and
+its READY is not named afterwards.
+
 Step 1 confirms hk holds exactly these bytes, by the sha256 in hk's answer or a
 read-back. The key lies under `reports/<job>/sha256/`, which a basename key can
 never reach (a file name holds no slash), so a key there only ever holds the

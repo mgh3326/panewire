@@ -374,6 +374,23 @@ func TestInboxChangeSignalEveryWriterBumps(t *testing.T) {
 			}
 		}, true)
 
+		readyEvent := quietEvent("ready-6822", "hk 6822 READY")
+		readyEvent.NotifyType = "ready"
+		if _, err := s.put(relayLaneEventOutboxKey(lane, readyEvent.EventID), lane, "lane.event", "inbox", readyEvent, now, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		completion := hubJobEventPayload{JobID: "job-6822", Epoch: 1, OwnerLane: lane, ResultID: "ready-6822", EventID: "00001-job.completed.json"}
+		moved("mergeCompletion", func() {
+			if _, merge, err := s.mergeCompletion(lane, completion, now); err != nil || merge != completionMerged {
+				t.Fatalf("mergeCompletion = %v, %v", merge, err)
+			}
+		}, false)
+		still("mergeCompletion of a repeat", func() {
+			if _, merge, err := s.mergeCompletion(lane, completion, now); err != nil || merge != completionRepeated {
+				t.Fatalf("repeat = %v, %v", merge, err)
+			}
+		})
+
 		still("prune of nothing", func() {
 			if n, err := s.prune(now, inboxRetentionPolicy{Days: 1, PerLane: 1000}); err != nil || n != 0 {
 				t.Fatalf("early prune = %d, %v", n, err)
@@ -399,7 +416,7 @@ var laneInboxWriteSQL = regexp.MustCompile("(UPDATE|DELETE FROM|INSERT INTO|INSE
 // `hub store-copy` (hub_store_copy.go) build their SQL from table names; they
 // run with the hub stopped (docs/hub-mysql.md#cutover-and-rollback).
 func TestInboxChangeSignalEveryLaneInboxWriterBumps(t *testing.T) {
-	bumps := []string{"putFrom", "read", "ack", "fileUnread", "prune"}
+	bumps := []string{"putFrom", "read", "ack", "fileUnread", "prune", "mergeCompletion"}
 	exempt := map[string]string{
 		"supersede":                      "its rows end in putFrom's transaction, which bumps",
 		"laneInboxInsert":                "statement text putFrom runs",

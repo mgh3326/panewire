@@ -47,11 +47,12 @@ func (peer *hubClientConnection) laneEventsKnown(acked bool) bool {
 }
 
 // relayHeldForFeatures reports whether a relay event waits for the hub's feature
-// state: a lane.event, and a final job.lost, which hubFeatureFinalLost must
+// state: a lane.event, a final job.lost, which hubFeatureFinalLost must take
+// whole, and a job.completed with a result_id, which hubFeatureResultID must
 // take whole. Both the scan burst and the immediate `panewire emit` path hold
 // the same set (hk 5351).
 func relayHeldForFeatures(event hubClientEvent) bool {
-	return event.Kind == "lane.event" || event.finalLost
+	return event.Kind == "lane.event" || event.finalLost || event.resultID != ""
 }
 
 // splitRelayBurst divides a burst into the events to write now and the events
@@ -92,6 +93,11 @@ func (peer *hubClientConnection) relayWire(event hubClientEvent) any {
 	// over its own bound, so the cut form is sent to it (lane_event_long.go).
 	if event.Kind == "lane.event" && !peer.acceptsLaneEventLong.Load() {
 		event.Payload = laneEventPayloadForOldHub(event.Payload, event.sinkRecord)
+	}
+	// A hub without hubFeatureResultID refuses the completion with the key, and
+	// with it the event, so the node adds it only for a hub that listed it.
+	if event.resultID != "" && peer.acceptsResultID.Load() {
+		event.Payload = relayPayloadOptionalString(event.Payload, "result_id", event.resultID)
 	}
 	// A hub without hubFeatureFinalLost takes the job.lost without its final
 	// field, as an older node sends it (hk 5351).

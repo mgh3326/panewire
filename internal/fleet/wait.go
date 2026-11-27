@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/laneevent"
 )
 
 // waitOutcome is one terminal signal for spawn --wait: a durable job event on
@@ -166,6 +169,10 @@ func (a *App) waitOutcome(ctx context.Context, s Spawn, lane string, warned, hkW
 			Job      string `json:"job"`
 			Report   string `json:"report"`
 			Question string `json:"question"`
+			// A READY item that completions were folded into
+			// (docs/quiet-delivery.md, "A READY and its completion").
+			MergedCompletions []string `json:"merged_completions"`
+			ReportPath        string   `json:"report_path"`
 		} `json:"event"`
 	}
 	if e := json.Unmarshal([]byte(r.Out), &msgs); e != nil {
@@ -176,8 +183,13 @@ func (a *App) waitOutcome(ctx context.Context, s Spawn, lane string, warned, hkW
 		return waitOutcome{}
 	}
 	marker := "[" + s.Job + "]"
+	completionKey := laneevent.CompletionKeyPrefix(s.Job)
 	for _, m := range msgs {
 		ev := m.Event
+		// This job's completion has no item of its own once it joined a READY.
+		if slices.ContainsFunc(ev.MergedCompletions, func(key string) bool { return strings.HasPrefix(key, completionKey) }) {
+			return waitOutcome{name: "completed", report: ev.ReportPath}
+		}
 		if ev.JobID != s.Job && ev.Job != s.Job && !strings.Contains(ev.Text, marker) {
 			continue
 		}

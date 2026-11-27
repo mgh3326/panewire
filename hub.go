@@ -356,8 +356,15 @@ type hubJobEventPayload struct {
 	Cause    string `json:"cause,omitempty"`
 	// Notice names the job an info lane.event is about (hk 5454). The job's
 	// --owner-notify mode decides it in receiveInbox. Absent for every other event.
-	Notice   *ownerInfoNotice `json:"notice,omitempty"`
-	noDigest bool
+	Notice *ownerInfoNotice `json:"notice,omitempty"`
+	// ResultID is the producer event id of the READY a job.completed concludes
+	// (result_identity.go). It is never part of a dedupe key or a relay row.
+	ResultID string `json:"result_id,omitempty"`
+	// MergedCompletions is set only on a stored READY inbox item: one entry for
+	// each completion folded into it (laneevent.MergedCompletionKey). The wire
+	// decoders refuse or ignore the name, so only the hub writes it.
+	MergedCompletions []string `json:"merged_completions,omitempty"`
+	noDigest          bool
 	// inboxID is the lane inbox row that holds this lane.event whole, set by
 	// receiveInbox. The typed head points at it (laneEventRelayText).
 	inboxID int64

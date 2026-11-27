@@ -318,6 +318,18 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		hold, _ = time.ParseDuration(settings.MaxHold)
 		window = 0
 	}
+	// hk 4289 T5: on an inbox-only lane a completion that names its READY joins
+	// that unread item in place of a second one. It comes after every rule that
+	// withholds or reclassifies a record, so only a completion that would be
+	// delivered merges. Any other lane is typed into and gets the completion as
+	// one without the field (panewire-design, result-identity-6822-decision-2).
+	if kind == "job.completed" && event.ResultID != "" {
+		if inboxOnly == "" {
+			event.ResultID = ""
+		} else if result, handled := h.receiveReadyMerge(kind, *event, sender, lane, inboxOnly, wake); handled {
+			return result, true
+		}
+	}
 	item, err := h.inbox.store.putFrom(senderID, relayEventDedupeKey(kind, *event), lane, kind, class, *event, h.now().UTC(), deadline, window, hold)
 	if err != nil {
 		if class == "interrupt" {
