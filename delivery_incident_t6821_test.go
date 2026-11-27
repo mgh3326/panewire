@@ -699,3 +699,30 @@ func TestUnreadableMemberDoesNotHoldNotice(t *testing.T) {
 		t.Fatalf("the unreadable row was never told: %q", got)
 	}
 }
+
+// A row of a lane with no design lane is only logged, at its report and again
+// if it is exhausted, and waits for nothing. Killed by: opening an incident for
+// it; leaving it due.
+func TestRowWithoutDesignLaneIsOnlyLogged_t6821(t *testing.T) {
+	routes := t6821Routes()
+	routes[t3431Worker] = reportRelayRoute{Machine: "host-a", Pane: "w1:pW"}
+	rig := &t6821Rig{t3431Rig: t3431StartWith(t, t3431LiveJobWithTask(), routes, freshLaneInboxFile(t))}
+
+	row := rig.fail()
+	lines := func() int {
+		return strings.Count(rig.logs.String(), `msg="relay unconfirmed escalation has no design lane" event_id=`+t6821Num(row)+" ")
+	}
+	rig.none(0)
+	if got := lines(); got != 1 {
+		t.Fatalf("no-design-lane lines=%d, want 1:\n%s", got, rig.logs.String())
+	}
+	if r := rig.row(row); r.DueAt != 0 || r.Incident != 0 {
+		t.Fatalf("row=%+v", r)
+	}
+	for range 3 {
+		rig.none(31 * time.Minute)
+	}
+	if got := lines(); got > 2 || len(rig.incidents()) != 0 || rig.row(row).DueAt != 0 {
+		t.Fatalf("lines=%d row=%+v incidents=%+v", got, rig.row(row), rig.incidents())
+	}
+}
