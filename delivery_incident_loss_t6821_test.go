@@ -388,19 +388,19 @@ func TestOrphanedDropSurvivesAStoreFailure(t *testing.T) {
 // lane its job names.
 func TestRowOfAnOrphanedJobWaits(t *testing.T) {
 	waiting := func(rig *t6821Rig, relayID int64) {
-		t.Helper()
+		rig.t.Helper()
 		for range 3 {
 			rig.none(31 * time.Minute)
 		}
 		if r := rig.row(relayID); r.DueAt == 0 || r.ToldAt != 0 {
-			t.Fatalf("an orphaned job's row no longer waits: %+v\n%s", r, rig.logs.String())
+			rig.t.Fatalf("an orphaned job's row no longer waits: %+v\n%s", r, rig.logs.String())
 		}
 	}
 	toldOnReturn := func(rig *t6821Rig, relayID int64) {
-		t.Helper()
+		rig.t.Helper()
 		rig.job(t3431Job, false, false)
 		if got := rig.one(31 * time.Minute); !strings.Contains(got, "event "+t6821Num(relayID)+" ") {
-			t.Fatalf("notice=%q, want row %d", got, relayID)
+			rig.t.Fatalf("notice=%q, want row %d", got, relayID)
 		}
 	}
 	t.Run("a row waiting behind the slot", func(t *testing.T) {
