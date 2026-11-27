@@ -60,17 +60,17 @@ func (s *laneInboxStore) obligationSurfaces(parent context.Context, eventKeys []
 	return out, rows.Err()
 }
 
-// obligationMarkerEvent is the legacy unconfirmed marker still pending for
-// the obligation, "" when there is none.
-func (s *laneInboxStore) obligationMarkerEvent(parent context.Context, id int64) (string, error) {
+// obligationMarkerLink is the legacy unconfirmed marker still pending for the
+// obligation, "" when there is none, and the reason the obligation settled
+// with.
+func (s *laneInboxStore) obligationMarkerLink(parent context.Context, id int64) (markerID, settleReason string, err error) {
 	ctx, done := s.op(parent)
 	defer done()
-	var markerID string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT marker_event_id FROM delivery_obligations WHERE id=?`), id).Scan(&markerID)
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT marker_event_id,settle_reason FROM delivery_obligations WHERE id=?`), id).Scan(&markerID, &settleReason)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+		return "", "", nil
 	}
-	return markerID, err
+	return markerID, settleReason, err
 }
 
 // clearObligationMarker drops the marker link after its retire is durable.
@@ -112,9 +112,9 @@ func (s *laneInboxStore) markedTerminalObligations(parent context.Context, limit
 // obligationMarkerRetireLimit bounds the marker retirements one pass retries.
 const obligationMarkerRetireLimit = 10
 
-// closeObligation ends an open obligation and retires the legacy marker its
-// row kept as a downgrade breadcrumb, in the same pass (v2 L2): once the
-// origin is terminal an older binary must not replay it.
+// closeObligation ends an open obligation and then retires the legacy marker
+// its row kept as a downgrade breadcrumb (v2 L2), once the marker has no work
+// left: see retireObligationMarker.
 func (h *HubServer) closeObligation(ctx context.Context, id int64, state, reason string, now time.Time) error {
 	if err := h.inbox.store.closeObligation(ctx, id, state, reason, now); err != nil {
 		return err
@@ -123,18 +123,24 @@ func (h *HubServer) closeObligation(ctx context.Context, id int64, state, reason
 	return nil
 }
 
-// retireObligationMarker retires the marker the obligation links to, when the
-// row is terminal or being closed, and clears the link once the retire is
-// durable. A marker that cannot be found or is already delivered clears the
-// link too; a failed retire leaves it for a later pass.
+// retireObligationMarker retires the marker the obligation links to, and clears
+// the link once the retire is durable. The marker is retired only once its
+// origin row has no replay left (unconfirmedOriginSpent): an older binary must
+// still find the labelled marker for an origin that could replay. A digest
+// batch's origin is retired first, as digest-not-replayed, so the released
+// batch is never copied again; a failed origin write keeps the link for the
+// next pass, which retries both steps.
 func (h *HubServer) retireObligationMarker(ctx context.Context, id int64) {
 	store := h.inbox.store
-	markerID, err := store.obligationMarkerEvent(ctx, id)
+	markerID, settleReason, err := store.obligationMarkerLink(ctx, id)
 	if err != nil {
 		h.logger.Warn("delivery obligation marker was not read", "obligation", id, "error", store.loggable("obligation marker", err))
 		return
 	}
 	if markerID == "" {
+		return
+	}
+	if settleReason == obligationSettledDigest && !h.retireDigestOrigin(ctx, markerID) {
 		return
 	}
 	marker, found, err := h.obligationMarkerRecord(ctx, markerID)
@@ -144,6 +150,14 @@ func (h *HubServer) retireObligationMarker(ctx context.Context, id int64) {
 	}
 	retired := !found || marker.DeliveredAt != "" || strings.HasPrefix(marker.DeliveredTo, relayReplayRetiredMarker)
 	if !retired {
+		spent, err := h.unconfirmedOriginSpent(ctx, markerID)
+		if err != nil {
+			h.logger.Warn("delivery obligation marker origin could not be read", "obligation", id, "error_class", hubHKReadErrorClass(err))
+			return
+		}
+		if !spent {
+			return
+		}
 		retired = h.retireRelayReplay(marker, relayUnconfirmedMarkRetireReason)
 	}
 	if !retired {
@@ -152,6 +166,26 @@ func (h *HubServer) retireObligationMarker(ctx context.Context, id int64) {
 	if err := store.clearObligationMarker(ctx, id); err != nil {
 		h.logger.Warn("delivery obligation marker link was not cleared", "obligation", id, "error", store.loggable("clear marker", err))
 	}
+}
+
+// retireDigestOrigin durably retires the origin row of a digest marker as
+// digest-not-replayed, the settle reason a released digest batch's row carries
+// (settlementReason). It reports whether the origin has no replay left
+// afterwards: it is gone, already delivered or retired, or this call retired it.
+func (h *HubServer) retireDigestOrigin(ctx context.Context, markerID string) bool {
+	origin := unconfirmedMarkOriginID(markerID)
+	if origin == 0 {
+		return true
+	}
+	record, found, err := h.handoffkeep.relayEvent(ctx, origin)
+	if err != nil {
+		h.logger.Warn("digest origin could not be read", "event_id", origin, "error_class", hubHKReadErrorClass(err))
+		return false
+	}
+	if !found || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
+		return true
+	}
+	return h.retireRelayReplay(record, relayDigestNotReplayedRetireReason)
 }
 
 // obligationMarkerRecord finds the marker row an obligation names: in the
@@ -226,7 +260,10 @@ func (s *laneInboxStore) deliveryCounts(parent context.Context) (hubObligationCo
 	}
 	c.Open = states[obligationOwed] + states[obligationNoticed] + states[obligationExhausted]
 	c.Confirmed, c.Settled, c.Exhausted = states[obligationConfirmed], states[obligationSettled], states[obligationExhausted]
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT COALESCE(SUM(CASE WHEN spent>1 THEN spent-1 ELSE 0 END),0),COALESCE(SUM(revived),0) FROM delivery_obligations`)).Scan(&c.Retries, &c.Revived)
+	// A retry is a copy the backoff spent past the handoffkeep attempts the row
+	// arrived with (spent is seeded from them): the difference retryObligation's
+	// backoff reads. A CASE rather than GREATEST, which SQLite lacks.
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT COALESCE(SUM(CASE WHEN spent>attempts_seen THEN spent-attempts_seen ELSE 0 END),0),COALESCE(SUM(revived),0) FROM delivery_obligations`)).Scan(&c.Retries, &c.Revived)
 	if err != nil {
 		return c, err
 	}

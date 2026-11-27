@@ -339,15 +339,18 @@ obligation of the row the answer's delivery fields came from: `obligation`
 with). The fields are absent for an event with no obligation.
 
 The hub feed's `hub.obligations` counts the tables as they stand — `open`,
-`confirmed`, `settled`, `exhausted`, the copies `retries` and `revived`,
+`confirmed`, `settled`, `exhausted`, the copies `retries` (spent past the attempts a row arrived with) and `revived`,
 `incidents_open`, `incidents_closed` by reason, and `notices_folded` — so the
 counts are read off the store and a restart loses nothing.
 
 A `hub/unconfirmed` marker an obligation keeps as `marker_event_id` is
-retired in the same pass that closes the obligation: once the origin is
-terminal an older binary must not replay it. A marker whose retire write
-failed stays linked and each pass retries it, at most 10 a pass. A marker
-whose origin is still open stays pending.
+retired only once its origin row has no replay left: the origin is delivered
+or retired, gone, or out of attempts (`unconfirmedOriginSpent`, the rule the
+replay walk uses too). Until then the marker stays undelivered and linked, so
+an older binary that replays the origin still finds the labelled marker. A
+digest batch's origin is first retired as `hub/replay-retired:digest-not-replayed`;
+if that write fails the marker stays linked. Each pass retries a linked
+marker, at most 10 a pass, so a later origin retirement releases it.
 
 ### Which events have one
 
