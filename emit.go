@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mgh3326/panewire/internal/filelock"
+	"github.com/mgh3326/panewire/internal/laneevent"
 )
 
 // emitRelayKinds is the closed set of relay record kinds, and the node
@@ -114,6 +115,9 @@ type emitRecord struct {
 	EventID        string `json:"event_id,omitempty"`
 	Text           string `json:"text,omitempty"`
 	Truncated      bool   `json:"truncated,omitempty"`
+	// ResultID names the READY a job.completed concludes (--result-id): the
+	// READY's producer event id (hk 4289 T5).
+	ResultID string `json:"result_id,omitempty"`
 	// Sink marks a lane.event emitted with --sink: its text is cut to the sink
 	// bound at emit, and the node keeps that bound on the wire (relayWire).
 	Sink bool `json:"sink,omitempty"`
@@ -132,6 +136,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	eventID := fs.String("event-id", "", "producer event id for lane.event (generated when omitted)")
 	text := fs.String("text", "", "payload for lane.event")
 	late := fs.Bool("late", false, "completion found by a re-armed watcher")
+	resultID := fs.String("result-id", "", "with --kind job.completed: the event id of the READY this completion concludes; the hub keeps both as one inbox item (docs/quiet-delivery.md)")
 	deliver := fs.String("deliver", "", "interrupt | inbox (otherwise receiving-lane policy)")
 	notifyType := fs.String("type", "", "notification type: decision | order | ready | merged | blocked | findings | idle-wake | progress | report | ack | info | deploy-approval | watch-hold | culprit-hold | automation-failed")
 	priority := fs.String("priority", "", "order priority: stop | hold | urgent | normal | low (only with --kind lane.event --type order; normal and low wait for the lane's next idle moment, an unmarked order and the rest interrupt)")
@@ -163,6 +168,16 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	}
 	if *late && *kind != "job.completed" {
 		fmt.Fprintln(stderr, "emit: --late requires job.completed")
+		return ExitUsage
+	}
+	resultIDSet := false
+	fs.Visit(func(f *flag.Flag) { resultIDSet = resultIDSet || f.Name == "result-id" })
+	if resultIDSet && *kind != "job.completed" {
+		fmt.Fprintln(stderr, "emit: --result-id requires job.completed")
+		return ExitUsage
+	}
+	if resultIDSet && !validLaneEventID(*resultID) {
+		fmt.Fprintln(stderr, "emit: invalid --result-id")
 		return ExitUsage
 	}
 	if *timeout <= 0 {
@@ -266,7 +281,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	record := emitRecord{
 		DeliveryClass: *deliver, Late: *late, NotifyType: *notifyType, Type: *kind, Cause: *cause, JobID: *job, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		AgentLabel: *label, OwnerLane: *ownerLane, Label: *label, Host: *host, ReportPath: *report,
-		ReportLastLine: *reportLastLine, Reason: *reason, Question: *question, PR: *pr, Head: *head, PaneID: *pane,
+		ReportLastLine: *reportLastLine, Reason: *reason, Question: *question, PR: *pr, Head: *head, PaneID: *pane, ResultID: *resultID,
 	}
 	socket := cfg.SocketPath
 	if socket == "" {
@@ -535,17 +550,7 @@ func readEmitLaneEventDedupeKey(eventsDir, name string) (string, bool) {
 	return relayLaneEventOutboxKey(event.OwnerLane, event.EventID), true
 }
 
-func validLaneEventID(value string) bool {
-	if value == "" || len(value) > 512 || !utf8.ValidString(value) {
-		return false
-	}
-	for _, r := range value {
-		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
-			return false
-		}
-	}
-	return true
-}
+func validLaneEventID(value string) bool { return laneevent.ValidID(value) }
 
 func validLaneEventText(value string) bool {
 	if value == "" || len(value) > laneEventTextCeiling || !utf8.ValidString(value) {
@@ -590,6 +595,7 @@ type emitDedupeRecord struct {
 	pr             string
 	head           string
 	paneID         string
+	resultID       string
 }
 
 // matches intentionally omits CreatedAt and AgentLabel. CreatedAt is local
@@ -607,7 +613,8 @@ func (existing emitDedupeRecord) matches(record emitRecord) bool {
 		existing.question == record.Question &&
 		existing.pr == record.PR &&
 		existing.head == record.Head &&
-		existing.paneID == record.PaneID
+		existing.paneID == record.PaneID &&
+		existing.resultID == record.ResultID
 }
 
 // readEmitDedupeKey reads one existing event file into the dedupe record it
@@ -653,6 +660,7 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 		pr:             event.pr(),
 		head:           event.head(),
 		paneID:         event.paneID(),
+		resultID:       event.resultID(),
 	}, true
 }
 
@@ -671,7 +679,7 @@ func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) (strin
 		Type: req.Kind, DeliveryClass: req.DeliveryClass, Late: req.Late, NotifyType: req.NotifyType, Cause: req.Cause, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
 		Label: req.Label, Host: req.Host, ReportPath: relaySignalReportPath(req.Kind, req.ReportPath),
 		ReportLastLine: req.ReportLastLine, Reason: req.Reason, Question: req.Question,
-		PR: req.PR, Head: req.Head, PaneID: req.PaneID,
+		PR: req.PR, Head: req.Head, PaneID: req.PaneID, ResultID: req.ResultID,
 	}
 	reportPaths := []string{record.ReportPath}
 	if relayEventPathFallbackKinds[req.Kind] && record.ReportPath != "" {
@@ -750,7 +758,7 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Priority: record.Priority, Cause: record.Cause, Notice: record.Notice, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
 		Label: record.Label, Host: record.Host, PaneID: record.PaneID, ReportPath: record.ReportPath,
 		ReportLastLine: record.ReportLastLine, Reason: record.Reason, Question: record.Question,
-		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, Ceiling: record.Ceiling, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
+		PR: record.PR, Head: record.Head, ResultID: record.ResultID, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, Ceiling: record.Ceiling, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
 	}
 	body, _ := json.Marshal(request)
 	if _, err := fmt.Fprintf(connection, "%s\n", body); err != nil {

@@ -713,8 +713,10 @@ type localRequest struct {
 	PR             string `json:"pr,omitempty"`
 	Head           string `json:"head,omitempty"`
 	EventID        string `json:"event_id,omitempty"`
-	Text           string `json:"text,omitempty"`
-	Truncated      bool   `json:"truncated,omitempty"`
+	// ResultID is a job.completed's READY event id (hk 4289 T5).
+	ResultID  string `json:"result_id,omitempty"`
+	Text      string `json:"text,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 	// Ceiling is set by a CLI that kept a non-sink lane.event whole (hk 4835). A
 	// request without it is a sink-bounded event, as a file without the marker is.
 	Ceiling bool `json:"ceiling,omitempty"`
@@ -940,6 +942,9 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	if !emitRelayKinds[req.Kind] || !validDeliveryClass(req.DeliveryClass) || !validNotifyType(req.NotifyType) || !validOrderPriority(req.Priority) || !validInboxCause(req.Cause) {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
+	if req.ResultID != "" && (req.Kind != "job.completed" || !validLaneEventID(req.ResultID)) {
+		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
+	}
 	if req.Kind == "lane.event" {
 		if !LaneNamePattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || (!req.Ceiling && len(req.Text) > laneEventTextLimitSink) {
 			return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
@@ -993,6 +998,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,
 		},
 		Reason: req.Reason, Question: req.Question, PR: req.PR, Head: req.Head, PaneID: req.PaneID, EventID: req.EventID, Text: req.Text, Truncated: req.Truncated, Sink: !req.Ceiling,
+		ResultID: req.ResultID,
 	}
 	if req.Kind == "lane.event" {
 		event.JobID = laneEventTransportID(req.OwnerLane, req.EventID)

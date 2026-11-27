@@ -318,6 +318,17 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		hold, _ = time.ParseDuration(settings.MaxHold)
 		window = 0
 	}
+	// hk 4289 T5: a completion that names its READY joins that unread item in
+	// place of a second one. It comes after every rule that withholds or
+	// reclassifies a record, so only a completion that would be delivered merges.
+	if kind == "job.completed" && event.ResultID != "" {
+		// typed is whether the row below would be handed to the relay path: an
+		// interrupt that putFrom neither holds nor digests.
+		typed := class == "interrupt" && hold == 0 && (window == 0 || mustAckNotifyTypes[event.NotifyType])
+		if result, handled := h.receiveReadyRepeat(kind, *event, sender, senderID, lane, typed); handled {
+			return result, true
+		}
+	}
 	item, err := h.inbox.store.putFrom(senderID, relayEventDedupeKey(kind, *event), lane, kind, class, *event, h.now().UTC(), deadline, window, hold)
 	if err != nil {
 		if class == "interrupt" {

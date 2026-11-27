@@ -765,7 +765,7 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	}
 	var superseded int
 	if item.Fresh && e.Cause != "" {
-		if superseded, err = s.supersede(ctx, tx, item, now); err != nil {
+		if superseded, err = s.supersede(ctx, tx, item, item.ID, now); err != nil {
 			return laneInboxItem{}, err
 		}
 	}

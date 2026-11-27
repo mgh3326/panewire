@@ -46,7 +46,7 @@ func TestJobOwnerFenceReturningNodeRequiresNewAttempt_t5067(t *testing.T) {
 func TestJobOwnerFenceRelayUsesProducingEpoch_t5067(t *testing.T) {
 	runner := &fakeRunner{}
 	a := &App{Runner: runner, Jobs: filepath.Join(t.TempDir(), "jobs")}
-	a.relayReport(t.Context(), Job{ID: "j", Owner: "lane-a", OwnerEpoch: 3}, "job.completed", "report", "", nil, "", false)
+	a.relayReport(t.Context(), Job{ID: "j", Owner: "lane-a", OwnerEpoch: 3}, "job.completed", "report", "", nil, "", false, "")
 	if len(runner.Calls) != 1 {
 		t.Fatalf("relay calls=%v", runner.Calls)
 	}
