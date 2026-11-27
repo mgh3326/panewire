@@ -406,24 +406,40 @@ worker lane on the same host with the same fault joins the same incident.
 
 ### Only when someone can act
 
-The hub logs one INFO line (event id, lane, reason, `why`) instead of telling a
-row when every hub job in its worker lane is completed or orphaned
-(`why=job_ended`), or when the hk task of every live job there is in an ended
-state (`why=task_ended`). A task is ended when hk's category is `completed` or
-`canceled`, or, if the record has no category, when its state is `merged`,
-`deployed`, `done`, `dropped` or `canceled`. The hub reads the job record and
-the task through the client that hub-placed spawns use. The row is still told
-when the record or task cannot be read, when a live job has no task, or when the
-hub knows no job in the lane. The last case covers a hub restart, which forgets
-ended jobs. The check runs when the row joins an incident and again before a
-notice names it, so an ended lane is never named.
+A row whose worker lane has nobody to act is not told: the hub logs one INFO
+line (event id, lane, reason, `why`) and marks it told, for good. So it does
+this only on an answer that cannot change back. The jobs counted are those the
+hub knows in the lane (the route's own job, once the route names one).
 
-A job that is only orphaned -- its node away for longer than the hub's grace --
-counts as nobody to act, but not for good: it comes back running or completed.
-On a hub with an inbox store such a row is not named and is not settled either:
-it stays due in its incident, which does not close as moot, and is told when the
-job runs again or settled when it completes. A row whose design lane an orphaned
-job would name waits the same way, past the hour.
+| The lane's jobs | Answer |
+|---|---|
+| every one completed | skip (`why=job_ended`) |
+| every one completed or with its hk task ended, at least one by its task | skip (`why=task_ended`) |
+| a live job with an open task, or with no task | tell |
+| otherwise, an orphaned job with an open task, or with no task | hold |
+| a job record or task that had to be read and cannot be | tell |
+| none known (a hub restart forgets ended jobs, and a lane may run work the hub never placed) | tell |
+
+A task is ended when hk's category is `completed` or `canceled`, or, if the
+record has no category, when its state is `merged`, `deployed`, `done`,
+`dropped` or `canceled`. The hub reads the job record and the task through the
+client that hub-placed spawns use.
+
+An orphaned job -- its node away for longer than the hub's grace -- comes back
+running or completed. A held row is not named and is not settled: it stays due
+in its incident, which does not close as moot, and a later pass tells it when
+the job runs again or skips it when the job completes.
+
+A pass reads each lane's jobs once and uses that one reading to join, to name
+and to close, so a job that changes while the pass runs is read by the next one.
+A close reads no task of its own: for a lane the pass has read no task of, it
+holds an orphaned job's rows and counts a live job as someone to act.
+
+The design lane is the parent the worker lane's route names, else the owner of a
+live job in the lane, else the owner of an orphaned one. A row with no design
+lane is kept for an hour from its becoming due or the hub's start, whichever is
+later, and for as long as an orphaned job in the lane names an owner; it is then
+logged and marked told.
 
 When the spawn's `--owner-notify` mode withholds the notice (hk 5360), the row
 is counted once under `unconfirmed:<event id>` in the daily loops row, marked
@@ -436,7 +452,7 @@ mode is looked up by the row's own job id.
 |---|---|
 | `recovered` | a member's own delivery was confirmed; a delivery of any other row, the same pane included, says nothing about this fault |
 | `all-terminal` | every member is confirmed or settled |
-| `moot` | every member still open or waiting is in a lane with nobody to act, none of them waiting for an orphaned job |
+| `moot` | every member still open or waiting is in a lane whose answer is skip; one tell or hold keeps it open |
 | `quiet` | no member faulted, and none joined, for 60 minutes, and none is waiting to be told |
 
 None of these closes an incident whose posted notice is uncommitted while a row
@@ -454,7 +470,9 @@ the producer id is `delivery-unconfirmed-<durable event id>`, a failed write is
 retried after 2 s, 10 s, 1 min and 5 min, and one notice per (design lane,
 worker lane) every 30 minutes counts the drops folded since, `(+N more
 unconfirmed for this lane since HH:MM UTC)`. That window and those retries are
-memory only: a restart forgets them. The same skip rules apply.
+memory only: a restart forgets them. It asks once, at the drop, and holds
+nothing: an orphaned job counts with the completed ones (`why=job_ended`), only
+the live jobs' tasks are read, and only a parent or a live job's owner is told.
 
 The hub's own one-labelled-replay after a restart
 ([#1002](r27-busy-relay.md)) is unchanged and is not an escalation.

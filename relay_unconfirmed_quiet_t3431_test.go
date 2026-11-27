@@ -192,22 +192,34 @@ func (rig *t6821Rig) noticeRows() []handoffkeepRelayEvent {
 }
 
 // Acceptance 1 of hk 3431: the worker lane's only job has ended, so nobody is
-// there to read or re-send: no owner-lane notice, one INFO line instead.
+// there to read or re-send: no owner-lane notice, one INFO line instead. An
+// orphaned job has not ended: the lane is not named while its node is away, and
+// the row waits for it.
 func TestUnconfirmedNoticeSkippedWhenWorkerJobEnded_t3431(t *testing.T) {
-	for name, state := range map[string][2]bool{"completed": {true, false}, "orphaned": {false, true}} {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		completed, orphaned bool
+		message, why        string
+	}{
+		{name: "completed", completed: true, message: "skipped; nobody can act on it", why: "why=job_ended"},
+		{name: "orphaned", orphaned: true, message: "held; the lane's job is orphaned"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			rig := t6821Start(t, t3431LiveJobWithTask())
 			rig.task(t3431Task, "in_progress", "started")
-			rig.job(t3431Job, state[0], state[1])
+			rig.job(t3431Job, tc.completed, tc.orphaned)
 
 			row := rig.fail()
 			rig.none(0)
 
-			lines := rig.infoLines(fmt.Sprintf("event_id=%d", row), "lane="+t3431Worker, "reason=maybe_in_pane", "why=job_ended")
+			lines := rig.infoLines(tc.message, fmt.Sprintf("event_id=%d", row), "lane="+t3431Worker, "reason=maybe_in_pane", tc.why)
 			if len(lines) != 1 {
-				t.Fatalf("want exactly one INFO line naming the event, lane, reason and why; got %d in:\n%s", len(lines), rig.logs.String())
+				t.Fatalf("want exactly one INFO line naming the event, lane and reason; got %d in:\n%s", len(lines), rig.logs.String())
 			}
 			rig.none(time.Hour)
+			if r := rig.row(row); (r.DueAt != 0) != tc.orphaned || (r.ToldAt != 0) != tc.completed {
+				t.Fatalf("row = %+v", r)
+			}
 		})
 	}
 }

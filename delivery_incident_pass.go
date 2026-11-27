@@ -43,25 +43,12 @@ type noticeWait struct {
 	next     time.Time
 }
 
-// mootCache is one pass's answers to unconfirmedNoticeMoot, which reads the
-// job record and task of every live job in a lane.
-type mootCache map[string]string
-
-func (h *HubServer) cachedNoticeMoot(cache mootCache, lane string) string {
-	why, known := cache[lane]
-	if !known {
-		why = h.unconfirmedNoticeMoot(lane)
-		cache[lane] = why
-	}
-	return why
-}
-
 // runDeliveryIncidents joins the due rows to incidents, posts the notices that
 // are due, and closes the incidents that have ended. The caller holds
 // h.obligations.mu.
 func (h *HubServer) runDeliveryIncidents(ctx context.Context) {
 	store := h.inbox.store
-	moot := mootCache{}
+	lanes := passLanes{}
 	joins, err := store.noticeJoins(ctx, obligationNoticeJoinLimit)
 	if err != nil {
 		h.logger.Warn("due delivery notices were not read", "error", store.loggable("notice joins", err))
@@ -72,7 +59,7 @@ func (h *HubServer) runDeliveryIncidents(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if h.joinDeliveryIncident(ctx, row, moot) {
+		if h.joinDeliveryIncident(ctx, row, lanes) {
 			unread = 0
 		} else if unread++; unread == obligationNoticeReadLimit {
 			break
@@ -93,8 +80,8 @@ func (h *HubServer) runDeliveryIncidents(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		h.noticeDeliveryIncident(ctx, &incident, moot)
-		h.closeDeliveryIncident(ctx, incident, moot)
+		h.noticeDeliveryIncident(ctx, &incident, lanes)
+		h.closeDeliveryIncident(ctx, incident, lanes)
 	}
 }
 
@@ -102,7 +89,7 @@ func (h *HubServer) runDeliveryIncidents(ctx context.Context) {
 // not a producer's lane.event, no design lane, or nobody can act), a notice the
 // spawn's owner asked not to hear, which is counted, or a member of its key's
 // incident. It reports false only when the row could not be read.
-func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, moot mootCache) (read bool) {
+func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, lanes passLanes) (read bool) {
 	store := h.inbox.store
 	later := func(why string) {
 		h.logger.Warn("relay unconfirmed escalation will retry", "event_id", row.relayID, "lane", row.lane, "why", why)
@@ -115,10 +102,11 @@ func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, 
 			h.logger.Warn("due delivery notice was not cleared", "event_id", row.relayID, "error", store.loggable("clear notice", err))
 		}
 	}
-	design := h.designLaneFor(row.lane)
+	lane := h.passLane(lanes, row.lane)
+	design := lane.design
 	if design == "" {
 		since := max(row.dueAt, h.startedAt.UnixMilli())
-		if now := h.now().UTC(); now.Sub(time.UnixMilli(since)) < noticeDesignWait || h.designAwaitsOrphanedJob(row.lane) {
+		if now := h.now().UTC(); now.Sub(time.UnixMilli(since)) < noticeDesignWait || lane.ownerAway {
 			// The answer may be transient: an unreadable lanes file, or the
 			// owner's job on a node that is away.
 			if err := store.deferNoticeJoin(ctx, row.id, now); err != nil {
@@ -151,14 +139,13 @@ func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, 
 			later("count_not_recorded")
 			return true
 		}
-	} else if why := h.cachedNoticeMoot(moot, row.lane); why != "" {
-		waits := h.laneAwaitsOrphanedJob(row.lane)
-		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", record.ID, "lane", row.lane, "design_lane", design, "reason", row.fault, "why", why, "waits_for_node", waits)
-		if !waits {
-			forget()
-			return true
-		}
+	} else if answer := h.passAnswer(lanes, row.lane); answer.final() {
+		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", record.ID, "lane", row.lane, "design_lane", design, "reason", row.fault, "why", string(answer))
+		forget()
+		return true
+	} else if answer == noticeHold {
 		// It waits in the incident, unnamed, for the orphaned job to return.
+		h.logger.Info("relay unconfirmed escalation held; the lane's job is orphaned", "event_id", record.ID, "lane", row.lane, "design_lane", design, "reason", row.fault)
 	}
 	machine, pane := h.noticeDestination(row)
 	key := incidentKey{design: design, machine: machine, fault: row.fault}
@@ -247,7 +234,7 @@ func dueRows(members []noticeMember) []noticeMember {
 // are committed only once the notice is durable; until then the incident stays
 // open and the post is repeated under the same id. It leaves on incident whether
 // a post is unresolved.
-func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident *deliveryIncident, moot mootCache) {
+func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident *deliveryIncident, lanes passLanes) {
 	store := h.inbox.store
 	members, err := store.incidentMembers(ctx, incident.id)
 	if err != nil {
@@ -277,16 +264,12 @@ func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident *delive
 	// An ended job's lane is not named. A row whose job is only orphaned is not
 	// named either, and stays due.
 	due = slices.DeleteFunc(due, func(row noticeMember) bool {
-		why := h.cachedNoticeMoot(moot, row.lane)
-		if why == "" {
-			return false
+		answer := h.passAnswer(lanes, row.lane)
+		if answer.final() {
+			h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", row.relayID, "lane", row.lane, "design_lane", incident.key.design, "reason", incident.key.fault, "why", string(answer))
+			forget(row)
 		}
-		if h.laneAwaitsOrphanedJob(row.lane) {
-			return true
-		}
-		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", row.relayID, "lane", row.lane, "design_lane", incident.key.design, "reason", incident.key.fault, "why", why)
-		forget(row)
-		return true
+		return answer != noticeTell
 	})
 	// The notice names the longest due row whose delivery is still unproven. A
 	// row that cannot be read stays due, outside this notice, so that it does
@@ -373,23 +356,20 @@ func (h *HubServer) deferNotice(incident deliveryIncident, relayID int64, why st
 
 // closeDeliveryIncident closes the incident if it has ended: a member was
 // confirmed since it opened (recovered), every member is closed (all-terminal),
-// every open or due member's lane has nobody to act (moot), or no member has
-// faulted for incidentQuietAfter and none is still to be told (quiet). A
-// confirmation of anything but a member says nothing about this fault. An
-// incident with an unresolved post and a row to post it for stays open: another
-// incident of the key would post the same rows under another id.
-func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident deliveryIncident, moot mootCache) {
+// every open or due member's lane has nobody to act, for good (moot), or no
+// member has faulted for incidentQuietAfter and none is still to be told
+// (quiet). A confirmation of anything but a member says nothing about this
+// fault. An incident with an unresolved post and a row to post it for stays
+// open: another incident of the key would post the same rows under another id.
+func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident deliveryIncident, lanes passLanes) {
 	store := h.inbox.store
 	members, err := store.incidentMembers(ctx, incident.id)
 	if err != nil {
 		h.logger.Warn("delivery incident members were not read", "incident", incident.id, "error", store.loggable("incident members", err))
 		return
 	}
-	recovered, open, due, live := false, 0, 0, 0
+	recovered, open, due, live, held := false, 0, 0, 0, 0
 	last := incident.lastMemberAt
-	// The pass reads a lane's jobs from handoffkeep only for a notice; between
-	// notices the hub's own job records decide, once per lane.
-	ended := mootCache{}
 	for _, m := range members {
 		recovered = recovered || m.state == obligationConfirmed && m.updated >= incident.openedAt
 		last = max(last, m.lastFaultAt)
@@ -400,15 +380,11 @@ func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident delivery
 			due++
 		}
 		if !m.terminal() || m.dueAt > 0 {
-			why, known := moot[m.lane]
-			if !known {
-				if why, known = ended[m.lane]; !known {
-					why = h.laneJobsAllEnded(m.lane)
-					ended[m.lane] = why
-				}
-			}
-			if why == "" || h.laneAwaitsOrphanedJob(m.lane) {
+			switch answer := h.closingAnswer(lanes, m.lane); {
+			case answer == noticeTell:
 				live++
+			case !answer.final():
+				held++
 			}
 		}
 	}
@@ -421,7 +397,7 @@ func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident delivery
 		reason = incidentRecovered
 	case len(members) > 0 && open == 0 && due == 0:
 		reason = incidentAllTerminal
-	case open+due > 0 && live == 0:
+	case open+due > 0 && live == 0 && held == 0:
 		reason = incidentMoot
 	case due == 0 && h.now().Sub(time.UnixMilli(last)) >= incidentQuietAfter:
 		reason = incidentQuiet

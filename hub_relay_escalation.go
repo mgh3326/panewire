@@ -53,22 +53,46 @@ func relayDroppedIsUnconfirmed(reason string) bool {
 // is a registered route, and never the worker lane itself.
 func (h *HubServer) designLaneFor(lane string) string {
 	routes := loadReportRelayRoutes(h.reportRelayPath)
+	if parent := parentDesignLane(routes, lane); parent != "" {
+		return parent
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	live, _, _ := h.jobDesignLanesLocked(routes, lane)
+	return live
+}
+
+// parentDesignLane is the registered lane the worker lane's route reports to,
+// or "".
+func parentDesignLane(routes map[string]reportRelayRoute, lane string) string {
 	if parent := routes[lane].Parent; parent != "" && parent != lane {
 		if _, registered := routes[parent]; registered {
 			return parent
 		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	return ""
+}
+
+// jobDesignLanesLocked reads the owner lanes of the jobs, not completed, that
+// run in the worker lane: live is a registered owner of one that is not
+// orphaned, away a registered owner of an orphaned one, and ownerAway whether
+// an orphaned one names any owner. The caller holds h.mu.
+func (h *HubServer) jobDesignLanesLocked(routes map[string]reportRelayRoute, lane string) (live, away string, ownerAway bool) {
 	for _, job := range h.jobs {
-		if job.Completed || job.Orphaned || job.AgentLabel != lane || job.OwnerLane == "" || job.OwnerLane == lane {
+		if job.Completed || job.AgentLabel != lane || job.OwnerLane == "" || job.OwnerLane == lane {
 			continue
 		}
-		if _, registered := routes[job.OwnerLane]; registered {
-			return job.OwnerLane
+		ownerAway = ownerAway || job.Orphaned
+		if _, registered := routes[job.OwnerLane]; !registered {
+			continue
+		}
+		if job.Orphaned {
+			away = job.OwnerLane
+		} else {
+			live = job.OwnerLane
 		}
 	}
-	return ""
+	return live, away, ownerAway
 }
 
 // escalatesWhenUnconfirmed picks the rows worth a design lane's attention: a
@@ -119,88 +143,74 @@ func unconfirmedNoticeEvent(design, eventID, reason, text string) hubJobEventPay
 // It returns "" -- send the notice -- when the hub knows no job in the lane (a
 // hub restart forgets ended jobs, and a lane may run work the hub never
 // placed), when a live job has no task, and when a job record or task cannot
-// be read.
+// be read. A hub without an inbox store asks it once, at the drop; the incident
+// pass, which asks later and may ask again, holds an orphaned job's notice
+// instead (delivery_incident_lane.go).
 func (h *HubServer) unconfirmedNoticeMoot(lane string) string {
-	known, live, _ := h.noticeLaneJobs(lane)
-	if !known {
+	routes := loadReportRelayRoutes(h.reportRelayPath)
+	h.mu.Lock()
+	jobs := h.noticeLaneJobsLocked(routes, lane)
+	h.mu.Unlock()
+	if !jobs.known {
 		return ""
 	}
-	if len(live) == 0 {
+	if len(jobs.live) == 0 {
 		return "job_ended"
 	}
 	ctx, cancel := context.WithTimeout(h.closeCtx, handoffkeepTimeout)
 	defer cancel()
-	for _, id := range live {
-		task, app, err := h.jobTaskID(ctx, id)
-		if err != nil {
-			h.logger.Warn("job record unreadable; unconfirmed delivery reported", "job", id, "lane", lane)
-			return ""
-		}
-		if task == "" {
-			return ""
-		}
-		status, err := app.TaskStatus(ctx, task)
-		if err != nil {
-			h.logger.Warn("task unreadable; unconfirmed delivery reported", "job", id, "task", task, "lane", lane)
-			return ""
-		}
-		if !status.Ended() {
+	for _, id := range jobs.live {
+		if ended, _ := h.noticeTaskEnded(ctx, lane, id); !ended {
 			return ""
 		}
 	}
 	return "task_ended"
 }
 
-// laneJobsAllEnded is the part of unconfirmedNoticeMoot the hub's own job
-// records answer: "job_ended", or "".
-func (h *HubServer) laneJobsAllEnded(lane string) string {
-	if known, live, _ := h.noticeLaneJobs(lane); known && len(live) == 0 {
-		return "job_ended"
+// noticeTaskEnded reports whether the job's hk task has ended; a job with no
+// task has not. readable is false, and the failure logged, when its record or
+// task cannot be read.
+func (h *HubServer) noticeTaskEnded(ctx context.Context, lane, id string) (ended, readable bool) {
+	task, app, err := h.jobTaskID(ctx, id)
+	if err != nil {
+		h.logger.Warn("job record unreadable; unconfirmed delivery reported", "job", id, "lane", lane)
+		return false, false
 	}
-	return ""
-}
-
-// laneAwaitsOrphanedJob reports whether a job a notice about the lane counts is
-// orphaned and not completed: its node is away, and it comes back running or
-// completed. That nobody can act on the lane is then not final.
-func (h *HubServer) laneAwaitsOrphanedJob(lane string) bool {
-	_, _, orphaned := h.noticeLaneJobs(lane)
-	return orphaned
-}
-
-// designAwaitsOrphanedJob reports whether a job that would name the lane's
-// design lane (designLaneFor) is orphaned and not completed.
-func (h *HubServer) designAwaitsOrphanedJob(lane string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, job := range h.jobs {
-		if job.Orphaned && !job.Completed && job.AgentLabel == lane && job.OwnerLane != "" && job.OwnerLane != lane {
-			return true
-		}
+	if task == "" {
+		return false, true
 	}
-	return false
+	status, err := app.TaskStatus(ctx, task)
+	if err != nil {
+		h.logger.Warn("task unreadable; unconfirmed delivery reported", "job", id, "task", task, "lane", lane)
+		return false, false
+	}
+	return status.Ended(), true
 }
 
-// noticeLaneJobs reports whether the hub knows a job that runs in the lane, the
-// ids of those that have not ended and are not orphaned, and whether one is
-// orphaned and not completed.
-func (h *HubServer) noticeLaneJobs(lane string) (known bool, live []string, orphaned bool) {
-	route, routed := loadReportRelayRoutes(h.reportRelayPath)[lane]
+// noticeJobSet is one reading of the jobs a notice about a worker lane counts:
+// whether the hub knows one, and the ids of those neither completed nor
+// orphaned and of those orphaned and not completed.
+type noticeJobSet struct {
+	known          bool
+	live, orphaned []string
+}
+
+// noticeLaneJobsLocked reads them. The caller holds h.mu.
+func (h *HubServer) noticeLaneJobsLocked(routes map[string]reportRelayRoute, lane string) (jobs noticeJobSet) {
+	route, routed := routes[lane]
 	// A takeover keeps the lane name while replacing its worker. Once the
 	// report-relay row carries job identity, that binding is authoritative;
 	// the predecessor's AgentLabel still names the lane but no longer names
 	// the job that can act on an unconfirmed notice.
 	routeBound := routed && (route.Job != "" || route.TakenOverFrom != "")
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	count := func(id string, job *hubJobRecord) {
-		known = true
+		jobs.known = true
 		switch {
 		case job.Completed:
 		case job.Orphaned:
-			orphaned = true
+			jobs.orphaned = append(jobs.orphaned, id)
 		default:
-			live = append(live, id)
+			jobs.live = append(jobs.live, id)
 		}
 	}
 	if routeBound {
@@ -209,14 +219,14 @@ func (h *HubServer) noticeLaneJobs(lane string) (known bool, live []string, orph
 				count(route.Job, job)
 			}
 		}
-	} else {
-		for id, job := range h.jobs {
-			if job.AgentLabel == lane {
-				count(id, job)
-			}
+		return jobs
+	}
+	for id, job := range h.jobs {
+		if job.AgentLabel == lane {
+			count(id, job)
 		}
 	}
-	return known, live, orphaned
+	return jobs
 }
 
 // unconfirmedNoticeSpacing is how long one stored notice speaks for its key --
