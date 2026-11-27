@@ -247,7 +247,21 @@ func (a *App) recordedReadyEvent(j Job, digest, question string) string {
 		return ""
 	}
 	for _, ev := range j.Events {
-		if ev.Kind == "job.completed" && str(ev.Payload, "result_id") == record.ID &&
+		if ev.Kind != "job.completed" {
+			continue
+		}
+		claim := str(ev.Payload, "result_id")
+		if claim == "" {
+			// The flat emit form (`panewire emit --kind job.completed`) keeps
+			// result_id at top level and names its report by path, not
+			// digest: a claim it made cannot be compared to this report, so
+			// it consumes the id.
+			if ev.ResultID == record.ID {
+				return ""
+			}
+			continue
+		}
+		if claim == record.ID &&
 			(str(ev.Payload, "report_sha256") != digest || str(ev.Payload, "question") != question) {
 			return ""
 		}

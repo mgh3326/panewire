@@ -6,10 +6,13 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/jobowner"
 	"github.com/mgh3326/panewire/internal/laneevent"
@@ -176,6 +179,56 @@ func TestDoneIgnoresRecordFromStaleAttempt(t *testing.T) {
 	}
 	if _, ok := resultIDArg(emits[0]); ok {
 		t.Fatalf("relay emit=%v carries a stale attempt's record", emits[0])
+	}
+}
+
+// putFlatCompleted writes the record `panewire emit --kind job.completed`
+// leaves in the job's events dir: the flat emitRecord form, with result_id
+// at top level and no payload object.
+func putFlatCompleted(t *testing.T, a *App, job, resultID string) {
+	t.Helper()
+	dir := filepath.Join(a.Jobs, job, "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := map[string]any{
+		"type": "job.completed", "kind": "job.completed", "job_id": job, "epoch": 1,
+		"created_at":  a.Now().Add(time.Duration(len(files)) * time.Nanosecond).Format(time.RFC3339Nano),
+		"agent_label": "agent-a", "owner_lane": "owner", "label": "agent-a", "host": "local",
+		"report_path": "reports/j/sha256/claimed.md", "pane_id": "w:p1", "result_id": resultID,
+	}
+	body, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("%04d-job.completed.json", len(files))
+	if err := os.WriteFile(filepath.Join(dir, name), body, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A completion made through the `emit --kind job.completed` form claims the
+// READY too: its record keeps result_id at top level and names the report by
+// path, not digest, so the recorded id is consumed and a later done goes out
+// on its own (hk 7014 review). Mutant: read only Payload.
+func TestDoneRecordedReadyEventClaimedByEmitForm(t *testing.T) {
+	r := newDoneRig(t)
+	r.write("report body\n")
+	recordReady(t, r.a, "j", "j-ready-1")
+	putFlatCompleted(t, r.a, "j", "j-ready-1")
+	if e := r.done(); e != nil {
+		t.Fatal(e)
+	}
+	emits := doneRigEmits(r)
+	if len(emits) != 1 {
+		t.Fatalf("relay emits=%v", emits)
+	}
+	if _, ok := resultIDArg(emits[0]); ok {
+		t.Fatalf("relay emit=%v reuses an id the emit form already claimed", emits[0])
 	}
 }
 
