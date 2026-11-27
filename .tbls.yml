@@ -2,7 +2,7 @@ name: panewire_hub
 desc: |
   Built with MySQL ${MYSQL_VERSION:-8.4} in CI (production is MySQL 26.10.0-cloud, CI is 8.4).
 
-  The hub's MySQL store: 25 tables in seven domains (viewpoints). Each table's comment says why it exists, its role, the store functions that read and write it (file.go:function), and its retention rule as the code has it. MySQL has no foreign keys here (hk 6128); the relations below name each join, lookup or sweep the code walks. Store-to-store copy (hub_store_copy.go) is a migration path and is not listed per table.
+  The hub's MySQL store: 31 tables in eight domains (viewpoints). Each table's comment says why it exists, its role, the store functions that read and write it (file.go:function), and its retention rule as the code has it. MySQL has no foreign keys here (hk 6128); the relations below name each join, lookup or sweep the code walks. Store-to-store copy (hub_store_copy.go) is a migration path and is not listed per table.
 
   Roles (one per table):
   - source of record: the row a fact is read from
@@ -14,24 +14,26 @@ desc: |
 
   | Domain (viewpoint) | Tables |
   |---|---|
-  | Lane inbox and digests | 5 |
+  | Lane inbox and digests | 7 |
   | Spawn operations | 5 |
   | Spawn notices, outboxes and placement records | 5 |
   | Supersede and pool actions | 4 |
   | Consults and owner notices | 2 |
   | Quota, accounts and operator notices | 3 |
+  | Delivery obligations and incidents | 4 |
   | Schema ledger | 1 |
 
   Edges between domains:
 
   ```mermaid
   flowchart LR
-    inbox["Lane inbox and digests (5)"]
+    inbox["Lane inbox and digests (7)"]
     ops["Spawn operations (5)"]
     notices["Spawn notices, outboxes, placement (5)"]
     supersede["Supersede and pool actions (4)"]
     consults["Consults and owner notices (2)"]
     accounts["Quota, accounts, operator notices (3)"]
+    delivery["Delivery obligations and incidents (4)"]
     ledger["Schema ledger (1)"]
     notices -.->|"spawn notices become lane events"| inbox
     consults -.->|"consult_requests.request_id"| ops
@@ -200,6 +202,14 @@ relations:
       - event_id
     parentCardinality: zero or one
     def: "a spawn notice's decision is keyed by its outbox event id: decideSpawnNotice (hub_spawn_notice_silence.go:131) looks the decision up by that id before it sends or counts the notice. The same column also holds job:, notice: and unconfirmed: keys that name no spawn_notifications row"
+  - table: delivery_obligations
+    columns:
+      - incident_id
+    parentTable: delivery_incidents
+    parentColumns:
+      - id
+    parentCardinality: zero or one
+    def: "an obligation joins the incident it is grouped into by incident_id (0 when ungrouped); the incident's member lists, its close and its revive read the obligations by incident_id"
 
 # Each table's comment: why it exists, its role, the store functions that read and
 # write it (file.go:function, the unit the code is checked against at edde0a89),
@@ -404,6 +414,38 @@ comments:
       Write: hub_mysql.go:migrateHubMySQLConn (INSERT version); hub_spawn_drain.go:backfillSpawnBoundMachines (INSERT its version); the table is created by hubMySQLLedger.
       Retention: none.
       Relations: none by design. It describes the schema, not the data; nothing references it.
+  - table: delivery_obligations
+    tableComment: |
+      Why: one row per relay delivery the hub still owes a lane: its state, fault, retry schedule and the incident it is grouped into, so a restart resumes the retries and notices it owes (hk 4289, hk 6384).
+      Role: queue/outbox.
+      Read: delivery_obligation_store.go:dueObligations, trackedObligationKeys, adoptCursor; delivery_incident_store.go:noticeJoins, incidentMembers, noticeMembers; delivery_obligation_faults.go:trackedRow.
+      Write: delivery_obligation_store.go:insertObligation, adoptObligations (INSERT IGNORE), closeObligation, exhaustObligation, deferObligation, updateObservedObligation; delivery_obligation_faults.go:noteObligationDrop, markOrphanedDropDue; delivery_obligation_revive.go (state owed, incident_id cleared); delivery_incident_store.go:joinIncident, markNoticeDue, endUnprovenNotice, forgetNotice, closeIncident.
+      Retention: none. No statement deletes a row; a row reaches a final state (confirmed or settled) and stays.
+      Relations: incident_id is declared in relations. relay_id is the handoffkeep relay row id, so it has no relation line.
+  - table: delivery_incidents
+    tableComment: |
+      Why: one incident per fault on one machine for one design lane, grouping the obligations that share it so a single notice covers them (hk 4289, hk 6821). open_slot holds the key while the incident is open.
+      Role: source of record.
+      Read: delivery_incident_store.go:openIncidents, joinIncident (open_slot lookup), incidentMembers through delivery_obligations.incident_id.
+      Write: delivery_incident_store.go:joinIncident (INSERT, then UPDATE counts), recordNotice and markNoticePosted (notice fields), closeIncident (state closed, open_slot NULL).
+      Retention: none. A closed incident keeps its row with close_reason set; no statement deletes it.
+      Relations: see delivery_obligations.incident_id.
+  - table: delivery_notice_slots
+    tableComment: |
+      Why: the notice spacing of each incident key (design lane, machine, fault), so closing and reopening an incident cannot shorten the wait before the next notice (hk 6821).
+      Role: bookkeeping.
+      Read: delivery_incident_store.go:noticeSlot.
+      Write: delivery_incident_store.go:recordNotice (INSERT IGNORE, then UPDATE notice_at and notices).
+      Retention: none: one row per key, never deleted.
+      Relations: none by design. Keyed by (design_lane, machine, fault) and read by that key only.
+  - table: delivery_reconciler_state
+    tableComment: |
+      Why: where the adopt walk over delivery obligations resumes (its last id and wrap time), kept in one row so a restart does not rescan from the start (hk 4289 T1).
+      Role: bookkeeping.
+      Read: delivery_obligation_store.go:adoptCursor.
+      Write: delivery_obligation_store.go:seedDeliveryReconcilerState (INSERT IGNORE, singleton 1), saveAdoptCursor (upsert).
+      Retention: none: one row.
+      Relations: none by design. singleton is always 1; nothing joins to it.
 
 # Domain viewpoints. Every table is in exactly one (lint: requireViewpoints).
 viewpoints:
@@ -457,6 +499,14 @@ viewpoints:
       - account_credit_marks
       - quota_refresh_attempts
       - one_time_action_notices
+  - id: delivery
+    name: "Delivery obligations and incidents"
+    desc: "The relay deliveries the hub still owes a lane, the incidents that group them per host fault, the notice spacing per incident key, and the reconciler's adopt cursor."
+    tables:
+      - delivery_obligations
+      - delivery_incidents
+      - delivery_notice_slots
+      - delivery_reconciler_state
   - id: ledger
     name: "Schema ledger"
     desc: "The migration ledger the MySQL store records its applied files in."
