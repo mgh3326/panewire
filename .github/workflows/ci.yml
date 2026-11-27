@@ -294,6 +294,18 @@ jobs:
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/store-copy.log"; then
             echo "store copy integration skipped"; exit 1
           fi
+      - name: obligation store contract on Postgres and MySQL
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+          PANEWIRE_TEST_HUB_MYSQL_URL: mysql://root@127.0.0.1:53306/panewire
+        shell: bash
+        # Both backends must run here: a skip would leave a dialect untested.
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run 'ObligationStoreContract' . 2>&1 | tee "$RUNNER_TEMP/obligation-contract.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/obligation-contract.log"; then
+            echo "an obligation store contract test skipped"; exit 1
+          fi
       - name: copied-back key mutation probe
         env:
           PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable

@@ -296,6 +296,42 @@ func (s *laneInboxStore) markOrphanedDropDue(parent context.Context, relayID int
 	return s.markNoticeDue(parent, fault, now, "fault='' AND "+where, keys...)
 }
 
+// obligationDropStatement is the one UPDATE of a node's drop: the fault, the
+// due mark it makes, and the reopen of a safe fault that settles a maybe-typed
+// verdict (obligationReopenWhen). Each column is assigned once, since Postgres
+// rejects a column assigned twice in one SET list; the statement tests check
+// that for every dialect. MySQL reads an assigned column's new value, so the
+// reopen reads the stored row before state is assigned, and fault is assigned
+// last.
+func obligationDropStatement(fault, harness string, now time.Time, where string, keys []any) (string, []any) {
+	replace, replaced := obligationDropReplaces(fault, harness)
+	// The due mark is made or ended in the same write as the fault.
+	due, dued := obligationReportDue(fault, now.UnixMilli())
+	if fault == relayDroppedJobEnded {
+		due = `notice_due_at=0,`
+	}
+	reopen, reopened := obligationReopenWhen(fault, replace, replaced)
+	// A fault that makes a notice due carries notice_due_at in due. A safe fault
+	// has none, so the reopen withdraws a due notice there. The reopen never
+	// applies to job_ended or a maybe-typed fault, so the two never meet.
+	withdraw, withdrawn := ``, []any(nil)
+	if due == `` {
+		withdraw = `notice_due_at=CASE WHEN ` + reopen + ` THEN 0 ELSE notice_due_at END,`
+		withdrawn = reopened
+	}
+	args := slices.Concat(reopened, []any{now.UnixMilli()}, reopened, withdrawn, reopened, []any{obligationOwed}, replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
+	query := `UPDATE delivery_obligations
+		SET next_at=CASE WHEN ` + reopen + ` THEN ? ELSE next_at END,
+		    incident_id=CASE WHEN ` + reopen + ` THEN 0 ELSE incident_id END,
+		    ` + withdraw + `
+		    state=CASE WHEN ` + reopen + ` THEN ? ELSE state END,
+		    last_fault_at=CASE WHEN ` + replace + ` THEN ? ELSE last_fault_at END,
+		    ` + due + `
+		    fault=CASE WHEN ` + replace + ` THEN ? ELSE fault END
+		WHERE ` + where
+	return query, args
+}
+
 // noteObligationDrop reports whether an untaken revive of the row was made due:
 // the drop ends the node's hold, which is what kept the pass from queueing it.
 // A maybe-typed drop makes the row due a notice, and job_ended ends any notice
@@ -306,26 +342,8 @@ func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int6
 	defer done()
 	scope, keys := dropScope(relayID, lane, machine, current)
 	where := "fault<>'' AND " + obligationOpen + " AND " + scope
-	fault := obligationDropFault(reason, harness)
-	replace, replaced := obligationDropReplaces(fault, harness)
-	// The due mark is made or ended in the same write as the fault.
-	due, dued := obligationReportDue(fault, now.UnixMilli())
-	if fault == relayDroppedJobEnded {
-		due = `notice_due_at=0,`
-	}
-	reopen, reopened := obligationReopenWhen(fault, replace, replaced)
-	// The reopen reads the stored row before state is assigned, and fault is
-	// assigned last: MySQL reads an assigned column's new value.
-	args := slices.Concat(reopened, []any{now.UnixMilli()}, reopened, reopened, reopened, []any{obligationOwed}, replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
-	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
-		SET next_at=CASE WHEN `+reopen+` THEN ? ELSE next_at END,
-		    incident_id=CASE WHEN `+reopen+` THEN 0 ELSE incident_id END,
-		    notice_due_at=CASE WHEN `+reopen+` THEN 0 ELSE notice_due_at END,
-		    state=CASE WHEN `+reopen+` THEN ? ELSE state END,
-		    last_fault_at=CASE WHEN `+replace+` THEN ? ELSE last_fault_at END,
-		    `+due+`
-		    fault=CASE WHEN `+replace+` THEN ? ELSE fault END
-		WHERE `+where), args...); err != nil {
+	query, args := obligationDropStatement(obligationDropFault(reason, harness), harness, now, where, keys)
+	if _, err := s.db.ExecContext(ctx, s.q(query), args...); err != nil {
 		return false, err
 	}
 	result, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET next_at=0 WHERE revive_requested>0 AND revived=0 AND `+where), keys...)
