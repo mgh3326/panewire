@@ -297,12 +297,28 @@ func (manager *relayBusyManager) uncertainBatch(group []relayHeld, verdict, evid
 	return relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: lanes[0], Lanes: lanes, MemberCount: len(group), Verdict: verdict, Evidence: evidence, Harness: harness, ReplaySource: "hub_unconfirmed_once"}, true
 }
 
-// hubAcceptsRelayUncertainBatch reads the current connection's feature state.
-// The feature frame arrives after the hello, so a summary sent before it is
-// not sent at all, and its rows warn on their own.
+// hubFeaturesWait bounds how long an uncertain batch waits for its connection's
+// hub.features frame. The resume that delivers held rows can run before the
+// read loop has read that frame; a hub that never sends one falls back to
+// per-row warnings after the wait.
+const hubFeaturesWait = 5 * time.Second
+
+// hubAcceptsRelayUncertainBatch reads the current connection's feature state,
+// waiting (bounded) for the feature frame when it has not arrived yet.
 func (client *HubClient) hubAcceptsRelayUncertainBatch() bool {
 	peer := client.signalsPeer.Load()
-	return peer != nil && peer.acceptsRelayUncertainBatch.Load()
+	if peer == nil {
+		return false
+	}
+	if !peer.featuresKnown.Load() && peer.featuresReady != nil {
+		timer := time.NewTimer(hubFeaturesWait)
+		defer timer.Stop()
+		select {
+		case <-peer.featuresReady:
+		case <-timer.C:
+		}
+	}
+	return peer.acceptsRelayUncertainBatch.Load()
 }
 
 // relayBusyManager serializes each pane, so a returned wait can batch every

@@ -790,8 +790,12 @@ type hubClientConnection struct {
 	// acceptsRelayUncertainBatch is the same for hubFeatureRelayUncertainBatch
 	// (busy_relay.go): the one summary of an uncertain batch goes only to such a hub.
 	acceptsRelayUncertainBatch atomic.Bool
-	connection                 *websocket.Conn
-	writeMu                    hubWriteMutex
+	// featuresReady is closed once this connection's hub.features is read
+	// (markFeaturesReady). An uncertain batch decided earlier waits on it.
+	featuresReady chan struct{}
+	featuresOnce  sync.Once
+	connection    *websocket.Conn
+	writeMu       hubWriteMutex
 	// closed is closed when the session on this connection ends; a nil
 	// channel (a test peer) never ends.
 	closed chan struct{}
@@ -2224,7 +2228,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	client.serving.Add(1)
 	defer client.serving.Add(-1)
-	peer := &hubClientConnection{connection: connection, closed: make(chan struct{})}
+	peer := &hubClientConnection{connection: connection, closed: make(chan struct{}), featuresReady: make(chan struct{})}
 	defer close(peer.closed)
 	// Each connection may reach a different hub build (failover, redeploy).
 	client.signalsPeer.Store(peer)
@@ -2351,6 +2355,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				// every accept bit above, or a held final loss could be written
 				// before acceptsFinalLost is set (mergewake, hk 5351).
 				peer.featuresKnown.Store(true)
+				peer.markFeaturesReady()
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
@@ -3549,4 +3554,11 @@ func ledgerFinalLost(inboxRoot string, job hubScannedRelayEvent) bool {
 		} `json:"payload"`
 	}
 	return json.Unmarshal(contents, &event) == nil && event.Payload.Final
+}
+
+// markFeaturesReady releases the batches waiting on this connection's hub.features.
+func (peer *hubClientConnection) markFeaturesReady() {
+	if peer.featuresReady != nil {
+		peer.featuresOnce.Do(func() { close(peer.featuresReady) })
+	}
 }

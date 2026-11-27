@@ -31,6 +31,17 @@ func t6887Items(lanes ...string) []relayHeld {
 // uncertain-batch summary is one whose hub connection accepts it.
 func t6887Deliver(t *testing.T, items []relayHeld, echoed []int, queued, accepts bool) []hubClientEvent {
 	t.Helper()
+	var peer *hubClientConnection
+	if accepts {
+		peer = &hubClientConnection{}
+		peer.acceptsRelayUncertainBatch.Store(true)
+	}
+	return t6887DeliverOn(t, items, echoed, queued, peer)
+}
+
+// t6887DeliverOn is t6887Deliver over the connection peer (nil: none yet).
+func t6887DeliverOn(t *testing.T, items []relayHeld, echoed []int, queued bool, peer *hubClientConnection) []hubClientEvent {
+	t.Helper()
 	var shown []relayHeld
 	for _, index := range echoed {
 		shown = append(shown, items[index])
@@ -51,9 +62,7 @@ func t6887Deliver(t *testing.T, items []relayHeld, echoed []int, queued, accepts
 	events := make(chan hubClientEvent, 64)
 	client := &HubClient{}
 	client.setRelayEmitter(func(event hubClientEvent) { events <- event })
-	if accepts {
-		peer := &hubClientConnection{}
-		peer.acceptsRelayUncertainBatch.Store(true)
+	if peer != nil {
 		client.signalsPeer.Store(peer)
 	}
 	client.relayBusyManager().deliver(context.Background(), items, false)
@@ -255,5 +264,23 @@ func TestT6887SixRowBatchThroughNodeAndHub(t *testing.T) {
 	}
 	if len(transport.events) != 1 {
 		t.Fatalf("Sentry warnings=%d, want one batch warning", len(transport.events))
+	}
+}
+
+// A batch decided before the connection's hub.features frame arrives waits for
+// it: the fleet's resume can deliver before the read loop has read the frame,
+// and a summary a current hub would accept must not be lost to that order.
+func TestT6887SummaryWaitsForHubFeatures(t *testing.T) {
+	items := t6887Items("worker-a", "worker-a", "worker-a")
+	peer := &hubClientConnection{featuresReady: make(chan struct{})}
+	go func() {
+		time.Sleep(50 * time.Millisecond) // the frame arrives mid-batch
+		peer.acceptsRelayUncertainBatch.Store(true)
+		peer.featuresKnown.Store(true)
+		peer.markFeaturesReady()
+	}()
+	events := t6887DeliverOn(t, items, []int{0}, false, peer)
+	if summaries := t6887Kind(events, "relay.uncertain_batch"); len(summaries) != 1 {
+		t.Fatalf("summaries=%d, want one: the frame arrived before the decision was due", len(summaries))
 	}
 }
