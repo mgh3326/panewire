@@ -104,3 +104,19 @@ func TestT6994BindingKeyRebuildKeepsRows(t *testing.T) {
 		t.Fatalf("the binding made under the first key was not carried over: kept=%d", kept)
 	}
 }
+
+// hk 6994 (PR #933 review): the copy orders the bindings' first_ms as a number on
+// every backend, as it does relay_id; a text COLLATE on it is refused by Postgres
+// (SQLSTATE 42804). Killed by: leaving first_ms out of storeCopyNumericKeys.
+func TestT6994CopyOrdersBindingTimeAsNumber(t *testing.T) {
+	table, ok := storeCopyTableNamed("relay_stale_notice_lanes")
+	if !ok {
+		t.Fatal("relay_stale_notice_lanes is not a portable table")
+	}
+	want := map[string]string{"postgres": `worker_lane COLLATE "C",first_ms`, "mysql": "BINARY worker_lane,first_ms", "sqlite": "worker_lane,first_ms"}
+	for name, d := range map[string]sqlDialect{"postgres": dialectPostgres, "mysql": dialectMySQL, "sqlite": dialectSQLite} {
+		if got := storeCopyOrderBy(d, table); got != want[name] {
+			t.Errorf("%s order by %q, want %q", name, got, want[name])
+		}
+	}
+}

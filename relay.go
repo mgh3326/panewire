@@ -376,7 +376,13 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.broadcastRelayUnpersisted("lane.event", event)
 		return relayLaneEventResult{PersistFailed: true, PersistStatus: status}
 	}
-	h.noteStaleReplayLane(event.OwnerLane, staleJob, stored.ReceivedAt)
+	// A binding is written only when this persist created the row (201). A 200
+	// answers a resend of a row handoffkeep already holds, after a restart or an
+	// evicted key. That row's receipt time is old, and the lane's job now may be
+	// another one, so binding it would move the lane's job back in time (hk 6994).
+	if status == http.StatusCreated {
+		h.noteStaleReplayLane(event.OwnerLane, staleJob, stored.ReceivedAt)
+	}
 	h.recordObligation(key, "lane.event", event, route, stored)
 	// #725: the durable text now names this identity for the rest of the
 	// process, so every future resend can be compared against it — including

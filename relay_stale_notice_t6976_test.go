@@ -4,6 +4,7 @@ package panewire
 // relay_stale_notice_t6924_test.go drives them.
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,5 +130,48 @@ func TestStaleNoticeEntryNamesLaneAndJob(t *testing.T) {
 	}
 	if !strings.Contains(items[0], " lane "+t6924Lane(1)+" job "+t6924Job(1)+" received ") {
 		t.Fatalf("the entry does not name its lane and job: %s", items[0])
+	}
+}
+
+// hk 6994 (PR #933 review): a row a restarted hub resends is answered 200 with the
+// original receipt, so it must not bind the lane's current job at that old time.
+// Here the lane moves from A to B after row X arrives on A, with no receipt yet on
+// B; a restart then resends X. Killed by: binding on every successful persist, not only a created row: X
+// would resolve to B, and B's merged task would overtake it.
+func TestStaleNoticeResentRowDoesNotRebindItsLane(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	const jobB = "job-6924-w1b"
+	rig.taskOf[t6924Job(1)] = "1001"
+	rig.taskOf[jobB] = "1002"
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "started", UpdatedAt: rig.before(30)})
+	rig.tasks.set(t6924HKTask{ID: 1002, State: "merged", CompletedAt: t6924At(rig.before(27)), UpdatedAt: rig.before(27)})
+
+	// The lane's A binding starts at its first receipt; row X is a later receipt
+	// on A that adds no binding.
+	rig.receive(1, rig.before(31), "[consult-done] first receipt on A")
+	rowX := rig.receive(1, rig.before(28), "[consult-done] received on A")
+	// The lane is reassigned to B, and no receipt has bound B yet.
+	rig.setRoute(1, jobB)
+
+	// Restart, then resend row X's body: handoffkeep answers 200 with X's receipt.
+	client := rig.hub.handoffkeep
+	if err := rig.hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rig.open(client)
+	rig.hub.relayLaneEventContext(context.Background(), hubJobEventPayload{
+		JobID: laneEventTransportID(t6924Lane(1), rowX), Epoch: 1, OwnerLane: t6924Lane(1), EventID: rowX,
+		Text: "[consult-done] received on A",
+	}, nil)
+
+	rig.replay()
+	rig.fileNextDay()
+	items := rig.designItems()
+	if len(items) != 1 {
+		t.Fatalf("design lane items=%d, want one notice: %v", len(items), items)
+	}
+	// The item is JSON: the last named row is followed by the closing quote.
+	if !strings.Contains(items[0], "hk "+rowX+" ") && !strings.Contains(items[0], "hk "+rowX+`","`) {
+		t.Fatalf("row X, received on A while A's task was open, is not listed: a resend rebound its lane to B: %s", items[0])
 	}
 }

@@ -535,7 +535,9 @@ closed.
   0043 and 0045, MySQL migrations 0039 and 0042), so a restart mid-day keeps
   them. A filed day's rows are pruned after 14 days. Bindings are kept: one row
   per change of a lane's job, keyed `(worker_lane, first_ms)`. A SQLite store
-  with the first key is rebuilt on open.
+  with the first key is rebuilt on open. Rolling back past this change is a
+  known degradation: an older binary's binding writes fail, so rows received in
+  that window fall back to the lanes.json hint or the notice lane.
 
 Code: `relay_stale_notice.go`, `relay_stale_notice_store.go`, and the two hooks
 in `relay.go` (`noteStaleReplayLane` once a lane.event is persisted,
