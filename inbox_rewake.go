@@ -18,9 +18,10 @@ import "time"
 //   - fewer than relay.inbox_rewake_max (default 3) re-wake lines went out for
 //     the set.
 //
-// A new unread item starts a new set, which resets the count. An ack that
-// leaves nothing unread sends nothing. No item body is typed: only the wake
-// line, as inbox_wake.go does (docs/quiet-delivery.md#the-re-wake).
+// A new unread item starts a new set, which resets the count, and so does a
+// completion merged into a READY, which adds no item (restartInboxRewake). An
+// ack that leaves nothing unread sends nothing. No item body is typed: only the
+// wake line, as inbox_wake.go does (docs/quiet-delivery.md#the-re-wake).
 //
 // The pass reads the store only for what changed (hk 6257). An unread set
 // changes only when a row of its lane is written, so the pass keeps, per lane,
@@ -85,6 +86,20 @@ func (w *inboxWakes) rewakeFor(lane string) *inboxRewake {
 // before the next re-wake. The caller holds the wake mutex.
 func (h *HubServer) noteInboxLine(lane string, now time.Time) {
 	h.inbox.wakes.rewakeFor(lane).lastLine = now
+}
+
+// restartInboxRewake starts the count of the lane's unread set again for news
+// that added no item: a completion merged into a READY (result_identity.go),
+// whose own item would have started a new set.
+func (h *HubServer) restartInboxRewake(lane string) {
+	w := &h.inbox.wakes
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	st := w.rewakeFor(lane)
+	st.lines = 0
+	if now := h.now(); now.After(st.lastLine) {
+		st.lastLine = now
+	}
 }
 
 // rewakeInboxLanes is the re-wake pass runInbox calls after flushInboxWakes.

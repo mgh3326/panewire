@@ -243,6 +243,12 @@ func (h *HubServer) flushInboxWakes() {
 			continue
 		}
 		class := h.inbox.policy.inboxOnlyClass(lane, now)
+		// A merge's announcement stands for a completion that would have been
+		// typed on a lane that is not inbox-only, so it stays owed there
+		// (result_identity.go).
+		if class == "" && state.class == inboxWakeReadyRepeat {
+			class = inboxWakeReadyRepeat
+		}
 		if !state.pending || class == "" {
 			delete(w.lanes, lane)
 			continue

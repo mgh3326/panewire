@@ -337,17 +337,30 @@ the completion as before: it can cost a second item, never the completion.
 **What a merge does.**
 
 - The item takes the completion's `report_path`, `report_last_line`, `pr` and
-  `head` (an empty one erases nothing) and appends the completion's key to
+  `head` (an empty one erases nothing), adds its `question` after any it already
+  has (` / ` between them), and appends the completion's key to
   `merged_completions` (the hub's dedupe key, with newlines between its
   fields). The set is what makes a repeat a no-op across restarts; a second
   completion with another event key is appended too. The READY keeps
   its text, type and must-ack state, so it stays unread until `inbox ack`.
 - The completion gets no item and is not typed, held or digested. Its `cause`
   still supersedes what its own item would have, never the READY it joined.
-- A READY that was already typed into the pane and is not acked is announced
-  once more with [the one-line wake](#the-one-line-wake). On a lane that is not
-  inbox-only that line is sent at most once per coalescing window, is not
-  retried or repeated, and its `inbox_wake` event has the reason `ready-repeat`.
+- The merge tells the lane no less than the completion would have. The first
+  merge sends [the one-line wake](#the-one-line-wake) when:
+  - the completion would have woken an inbox-only lane;
+  - it would have been typed into the pane, whatever became of the READY;
+  - it would have reached the pane later (held or digested), unless the READY
+    itself still waits for a held or digest batch that no pass has composed (a
+    held batch composed after the merge carries the completion's report and
+    question; a digest points at the inbox);
+  - in any case, the READY was already typed, by its own relay or in a digest,
+    escalation or held batch, and is not acked.
+  Otherwise the completion would have been silent. Either way the first merge
+  restarts the lane's [re-wake](#the-re-wake) count.
+- On a lane that is not inbox-only that line has the `inbox_wake` reason
+  `ready-repeat`, at most one per coalescing window. A line still owed, because
+  the window was open or the pane out of reach, is sent at the window's end or
+  the next node hello. It is held in memory, so a hub restart drops it.
 - The READY item is the merge's receipt. A completion bound for the inbox
   writes no handoffkeep row. One that would have taken the relay path into the
   pane is also written to handoffkeep, delivered as `hub` /
@@ -549,8 +562,9 @@ wake. The hub sends a re-wake when all of these hold:
 - Fewer than `relay.inbox_rewake_max` (default `3`) re-wake lines went out for
   the set.
 
-A new unread item starts a new set, so the count resets. When nothing is left
-unread and unacked, nothing is sent. A re-wake sends the wake line unchanged: the
+A new unread item starts a new set, so the count resets. A completion
+[merged into a READY](#a-ready-and-its-completion) adds no item and resets the
+count too. When nothing is left unread and unacked, nothing is sent. A re-wake sends the wake line unchanged: the
 same text and transport, with `most urgent: <kind>` as today. No item body is
 typed, and the re-wake opens the lane's window like any line, so an arrival in
 the next five minutes waits for the window's end.

@@ -322,10 +322,18 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	// place of a second one. It comes after every rule that withholds or
 	// reclassifies a record, so only a completion that would be delivered merges.
 	if kind == "job.completed" && event.ResultID != "" {
-		// typed is whether the row below would be handed to the relay path: an
-		// interrupt that putFrom neither holds nor digests.
-		typed := class == "interrupt" && hold == 0 && (window == 0 || mustAckNotifyTypes[event.NotifyType])
-		if result, handled := h.receiveReadyRepeat(kind, *event, sender, senderID, lane, typed); handled {
+		// What delivering the completion on its own would do, so that the merge
+		// can tell the lane no less.
+		alone := completionDelivery{
+			class: class,
+			// typed: the row would be handed to the relay path, an interrupt
+			// that putFrom neither holds nor digests.
+			typed: class == "interrupt" && hold == 0 && (window == 0 || mustAckNotifyTypes[event.NotifyType]),
+		}
+		if wake {
+			alone.wake = inboxOnly
+		}
+		if result, handled := h.receiveReadyRepeat(kind, *event, sender, senderID, lane, alone); handled {
 			return result, true
 		}
 	}
