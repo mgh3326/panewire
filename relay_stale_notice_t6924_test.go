@@ -3,8 +3,10 @@ package panewire
 // hk 6924: the daily stale-replay notice. Each case retires rows through the
 // real replay path (replayUndeliveredLaneEvents, with an inbox present), then
 // files the day's notice through fileStaleReplayNotices and reads the design
-// lane's inbox table. The only double is hk: its GET /v1/tasks/{id} is served
-// from a map the test fills, and the spawn-store read is a hook.
+// lane's inbox table. Receipts go through relayLaneEventContext, so the lane
+// bindings are the ones a live hub writes. The doubles are hk, which serves
+// GET /v1/tasks/{id} from a map the test fills, and the spawn-store read, which
+// is a hook.
 
 import (
 	"context"
@@ -14,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,23 +38,52 @@ var (
 	t6924NextDay = time.Date(2026, 11, 27, 0, 30, 0, 0, time.UTC)
 )
 
-func t6924Lane(i int) string { return fmt.Sprintf("stale-6924-w%d", i) }
-func t6924Job(i int) string  { return fmt.Sprintf("job-6924-w%d", i) }
+func t6924Lane(i int) string          { return fmt.Sprintf("stale-6924-w%d", i) }
+func t6924Job(i int) string           { return fmt.Sprintf("job-6924-w%d", i) }
+func t6924At(at time.Time) *time.Time { return &at }
+
+// t6924HKTask is the part of hk's task answer the cases set: the state, the
+// completed_at and canceled_at stamps hk keeps for the end, and updated_at, which
+// moves with every edit. Category is served so a case can also cover a reader
+// that uses it; the notice does not read it.
+type t6924HKTask struct {
+	ID          int64      `json:"id"`
+	State       string     `json:"state"`
+	Category    string     `json:"category,omitempty"`
+	CompletedAt *time.Time `json:"completed_at"`
+	CanceledAt  *time.Time `json:"canceled_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
 
 // t6924Tasks serves GET /v1/tasks/{id} from a map the test fills.
 type t6924Tasks struct {
-	mu    sync.Mutex
-	tasks map[int64]staleReplayTaskRead
+	mu     sync.Mutex
+	tasks  map[int64]t6924HKTask
+	onRead func()
 }
 
-func (t *t6924Tasks) set(id int64, state, category string, updated time.Time) {
+func (t *t6924Tasks) set(task t6924HKTask) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.tasks[id] = staleReplayTaskRead{ID: id, State: state, Category: category, UpdatedAt: updated}
+	t.tasks[task.ID] = task
+}
+
+// once runs fn at the next task read, before the read is answered.
+func (t *t6924Tasks) once(fn func()) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.onRead = fn
 }
 
 func (t *t6924Tasks) serve(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/v1/tasks/"), 10, 64)
+	t.mu.Lock()
+	hook := t.onRead
+	t.onRead = nil
+	t.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	t.mu.Lock()
 	task, ok := t.tasks[id]
 	t.mu.Unlock()
@@ -66,20 +98,23 @@ type t6924Rig struct {
 	t     *testing.T
 	fake  *fakeHandoffkeep
 	tasks *t6924Tasks
-	path  string
-	now   time.Time
 	hub   *HubServer
+	// routes is the lanes.json the hub reads: the design lane and one worker
+	// lane per job.
+	routes map[string]reportRelayRoute
 	// taskOf maps a worker job to the hk task it was spawned for; a job not set
 	// has no task.
 	taskOf map[string]string
 	seq    int64
+	now    time.Time
+	path   string
 }
 
 // newT6924Rig starts a fake hk that also serves task reads, and a hub whose
 // inbox store lives at path.
 func newT6924Rig(t *testing.T, path string) *t6924Rig {
 	t.Helper()
-	tasks := &t6924Tasks{tasks: map[int64]staleReplayTaskRead{}}
+	tasks := &t6924Tasks{tasks: map[int64]t6924HKTask{}}
 	fake := &fakeHandoffkeep{nextID: 100, status: http.StatusCreated, rows: map[string]*handoffkeepRelayEvent{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/tasks/") {
@@ -93,7 +128,11 @@ func newT6924Rig(t *testing.T, path string) *t6924Rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rig := &t6924Rig{t: t, fake: fake, tasks: tasks, path: path, now: t6924Day, taskOf: map[string]string{}}
+	routes := map[string]reportRelayRoute{t6924Design: {Machine: "host-a", Pane: "w1:design"}}
+	for i := 1; i <= t6924Workers; i++ {
+		routes[t6924Lane(i)] = reportRelayRoute{Machine: "host-a", Pane: fmt.Sprintf("w1:worker%d", i), Job: t6924Job(i), Parent: t6924Design}
+	}
+	rig := &t6924Rig{t: t, fake: fake, tasks: tasks, routes: routes, taskOf: map[string]string{}, now: t6924Day, path: path}
 	rig.open(client)
 	return rig
 }
@@ -101,11 +140,7 @@ func newT6924Rig(t *testing.T, path string) *t6924Rig {
 // open starts a hub on the rig's inbox store. A restart reopens the same path.
 func (r *t6924Rig) open(client *handoffkeepRelayClient) {
 	r.t.Helper()
-	routes := map[string]reportRelayRoute{t6924Design: {Machine: "host-a", Pane: "w1:design"}}
-	for i := 1; i <= t6924Workers; i++ {
-		routes[t6924Lane(i)] = reportRelayRoute{Machine: "host-a", Pane: fmt.Sprintf("w1:worker%d", i), Job: t6924Job(i), Parent: t6924Design}
-	}
-	lanes, err := json.Marshal(map[string]any{"lanes": routes})
+	lanes, err := json.Marshal(map[string]any{"lanes": r.routes})
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -127,9 +162,57 @@ func (r *t6924Rig) open(client *handoffkeepRelayClient) {
 	r.hub = hub
 }
 
+// setRoute points worker lane i at job; an empty job removes the lane's route,
+// as releaseDeadLanes does when a worker pane has ended. It rewrites the lanes
+// file the hub reads.
+func (r *t6924Rig) setRoute(i int, job string) {
+	r.t.Helper()
+	lane := t6924Lane(i)
+	if job == "" {
+		delete(r.routes, lane)
+	} else {
+		route := r.routes[lane]
+		route.Job = job
+		r.routes[lane] = route
+	}
+	body, err := json.Marshal(map[string]any{"lanes": r.routes})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if err := os.WriteFile(r.hub.reportRelayPath, body, 0600); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// receive posts a lane.event on worker lane i at the instant at, through the
+// hub's own receipt path, and returns the event id. The receipt time is the row's
+// handoffkeep received_at, which the fake does not stamp, so it is set here.
+func (r *t6924Rig) receive(i int, at time.Time, text string) string {
+	r.t.Helper()
+	r.seq++
+	eventID := "t6924-" + strconv.FormatInt(r.seq, 10)
+	saved := r.now
+	r.now = at
+	defer func() { r.now = saved }()
+	event := hubJobEventPayload{JobID: laneEventTransportID(t6924Lane(i), eventID), Epoch: 1, OwnerLane: t6924Lane(i), EventID: eventID, Text: text}
+	r.hub.relayLaneEventContext(context.Background(), event, nil)
+	r.fake.mu.Lock()
+	defer r.fake.mu.Unlock()
+	for _, row := range r.fake.rows {
+		if row.EventID == eventID {
+			row.ReceivedAt = at.UTC().Format(time.RFC3339Nano)
+			return eventID
+		}
+	}
+	r.t.Fatalf("receipt %s was not persisted", eventID)
+	return ""
+}
+
 // retire seeds one lane.event row on worker lane i, received at received, and
 // runs the replay that retires it. The clock is at t6924Day, so the row is past
-// the 24 h window. It returns the row's hk event id.
+// the 24 h window. It returns the row's hk event id. The seeded rows are the
+// only ones the fake lists, so a case mixing receive and retire must use receive
+// alone.
 func (r *t6924Rig) retire(i int, received time.Time, text string) string {
 	r.t.Helper()
 	r.seq++
@@ -138,8 +221,13 @@ func (r *t6924Rig) retire(i int, received time.Time, text string) string {
 		ID: 500 + r.seq, Kind: "lane.event", JobID: laneEventTransportID(t6924Lane(i), eventID), Epoch: 1,
 		OwnerLane: t6924Lane(i), EventID: eventID, Text: text, ReceivedAt: received.UTC().Format(time.RFC3339Nano),
 	})
-	r.hub.replayUndeliveredLaneEvents(context.Background())
+	r.replay()
 	return eventID
+}
+
+// replay runs the startup replay on the current clock.
+func (r *t6924Rig) replay() {
+	r.hub.replayUndeliveredLaneEvents(context.Background())
 }
 
 // before is the instant hours before the retirement.
@@ -167,10 +255,35 @@ func (r *t6924Rig) noticeRows() int {
 	return n
 }
 
-// designItems reads the design lane's inbox items as class|kind|payload.
-func (r *t6924Rig) designItems() []string {
+// retiredCount counts the handoffkeep rows the replay closed.
+func (r *t6924Rig) retiredCount() int {
+	r.fake.mu.Lock()
+	defer r.fake.mu.Unlock()
+	return len(r.fake.deliveredTo)
+}
+
+// dropNoticeRows removes the notice table, so the store refuses the row insert.
+func (r *t6924Rig) dropNoticeRows() {
 	r.t.Helper()
-	rows, err := r.hub.inbox.store.db.Query(`SELECT class||'|'||kind||'|'||payload FROM lane_inbox WHERE lane=? ORDER BY id`, t6924Design)
+	if _, err := r.hub.inbox.store.db.Exec(`DROP TABLE relay_stale_notice_rows`); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// createNoticeRows restores the notice tables the schema defines.
+func (r *t6924Rig) createNoticeRows() {
+	r.t.Helper()
+	for _, stmt := range relayStaleNoticeSchema {
+		if _, err := r.hub.inbox.store.db.Exec(stmt); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+}
+
+// itemsOf reads one lane's inbox items as class|kind|payload.
+func (r *t6924Rig) itemsOf(lane string) []string {
+	r.t.Helper()
+	rows, err := r.hub.inbox.store.db.Query(`SELECT class||'|'||kind||'|'||payload FROM lane_inbox WHERE lane=? ORDER BY id`, lane)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -188,6 +301,9 @@ func (r *t6924Rig) designItems() []string {
 	}
 	return out
 }
+
+// designItems reads the design lane's inbox items.
+func (r *t6924Rig) designItems() []string { return r.itemsOf(t6924Design) }
 
 // fileNextDay runs the filing pass on the next UTC day.
 // The clock is put back afterwards, so a later retirement stays on t6924Day.
@@ -209,9 +325,9 @@ func TestT6924OvertakenRowsCountedNotListed(t *testing.T) {
 	rig.taskOf[t6924Job(2)] = "1002"
 	rig.taskOf[t6924Job(3)] = "1003"
 	received := rig.before(26)
-	rig.tasks.set(1001, "merged", "completed", received.Add(time.Hour))
-	rig.tasks.set(1002, "merged", "completed", received.Add(10*time.Hour))
-	rig.tasks.set(1003, "started", "started", received.Add(30*time.Hour))
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "merged", CompletedAt: t6924At(received.Add(time.Hour)), UpdatedAt: received.Add(time.Hour)})
+	rig.tasks.set(t6924HKTask{ID: 1002, State: "merged", CompletedAt: t6924At(received.Add(10 * time.Hour)), UpdatedAt: received.Add(10 * time.Hour)})
+	rig.tasks.set(t6924HKTask{ID: 1003, State: "started", UpdatedAt: received.Add(30 * time.Hour)})
 
 	rig.retire(1, received, "[consult-done] advice one")
 	rig.retire(2, received, "[consult-done] advice two")
@@ -231,8 +347,9 @@ func TestT6924OvertakenRowsCountedNotListed(t *testing.T) {
 	if strings.Contains(items[0], "hk t6924-1 ") {
 		t.Fatalf("the overtaken row (1 h) is listed: %s", items[0])
 	}
-	if !strings.Contains(items[0], "hk t6924-2 ") || !strings.Contains(items[0], "hk t6924-3") {
-		t.Fatalf("the 10 h and the open-task rows are not listed: %s", items[0])
+	// The handoffkeep row ids are 502 and 503: each entry names its row.
+	if !strings.Contains(items[0], "row 502 hk t6924-2 ") || !strings.Contains(items[0], "row 503 hk t6924-3") {
+		t.Fatalf("the 10 h and the open-task rows are not listed by row id: %s", items[0])
 	}
 }
 
@@ -266,10 +383,11 @@ func TestT6924IdleWakeIsNotNoticed(t *testing.T) {
 	}
 }
 
-// A row received after its worker job recorded job.completed is the hk 6900
-// case and is excluded; one received before it is kept. Killed by: removing the
-// job-completion predicate from noteStaleReplayRetire.
-func TestT6924PostCompletionRowIsExcluded(t *testing.T) {
+// A row received after its worker job's completion was recorded is kept like any
+// other: the hk 6900 exclusion was dropped once 6900 merged, and a lost or
+// revoked job's rows are real messages. Killed by: restoring a job-completion
+// exclusion in noteStaleReplayRetire.
+func TestT6924RowAfterJobCompletionIsNoticed(t *testing.T) {
 	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
 	rig.hub.mu.Lock()
 	rig.hub.jobs[t6924Job(1)] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: t6924Job(1), AgentLabel: t6924Lane(1)}, Completed: true, LastSeen: rig.before(25)}
@@ -277,13 +395,13 @@ func TestT6924PostCompletionRowIsExcluded(t *testing.T) {
 
 	rig.retire(1, rig.before(26), "[consult-done] before completion")
 	rig.retire(1, rig.before(24.5), "[consult-done] after completion")
-	if got := rig.noticeRows(); got != 1 {
-		t.Fatalf("rows kept=%d, want only the row received before the completion", got)
+	if got := rig.noticeRows(); got != 2 {
+		t.Fatalf("rows kept=%d, want both rows", got)
 	}
 	rig.fileNextDay()
 	items := rig.designItems()
-	if len(items) != 1 || !strings.Contains(items[0], "hk t6924-1") || strings.Contains(items[0], "hk t6924-2") {
-		t.Fatalf("notice=%v, want only t6924-1", items)
+	if len(items) != 1 || !strings.Contains(items[0], "hk t6924-1") || !strings.Contains(items[0], "hk t6924-2") {
+		t.Fatalf("notice=%v, want both rows", items)
 	}
 }
 
@@ -298,7 +416,7 @@ func TestT6924EmptyDayFilesNoEvent(t *testing.T) {
 	}
 
 	rig.taskOf[t6924Job(1)] = "1001"
-	rig.tasks.set(1001, "merged", "completed", rig.before(25))
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "merged", CompletedAt: t6924At(rig.before(25)), UpdatedAt: rig.before(25)})
 	rig.retire(1, rig.before(26), "[consult-done] overtaken only")
 	rig.fileNextDay()
 	if items := rig.designItems(); len(items) != 0 {
@@ -331,11 +449,10 @@ func TestT6924RestartMidDayKeepsRows(t *testing.T) {
 }
 
 // Two filing passes make one notice: a closed day's rows are marked filed once
-// its item is in the inbox. Killed by: not marking the lane's rows filed.
-// The first pass closes the day's rows (filed=1), so a second pass has nothing
-// owed. The inbox's event dedupe would hide a second filing from an item count,
-// so the closed rows are what is asserted. Killed by: not marking the lane's
-// rows filed, which leaves them owed for every later pass.
+// its item is in the inbox. The first pass closes the day's rows (filed=1), so a
+// second pass has nothing owed. The inbox's event dedupe would hide a second
+// filing from an item count, so the closed rows are what is asserted. Killed by:
+// not marking the lane's rows filed, which leaves them owed for every later pass.
 func TestT6924FilingIsOncePerDay(t *testing.T) {
 	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
 	rig.retire(1, rig.before(26), "[consult-done] once")
@@ -350,24 +467,43 @@ func TestT6924FilingIsOncePerDay(t *testing.T) {
 }
 
 // The notice names at most staleReplayListLimit rows, counts the rest and the
-// overtaken rows, and stays inside one lane.event.
+// overtaken rows, and stays inside one lane.event, also when every field is at
+// its width cap. Killed by: a footer written after the entries without room
+// reserved for it.
 func TestT6924NoticeTextIsBounded(t *testing.T) {
-	var rows []staleReplayRow
-	for i := 0; i < staleReplayListLimit+5; i++ {
-		rows = append(rows, staleReplayRow{RelayID: int64(i + 1), Kind: "lane.event", Sender: "consult-done", HKEventID: strings.Repeat("e", 400), ReceivedMS: t6924Day.Add(-26 * time.Hour).UnixMilli(), RetiredMS: t6924Day.UnixMilli()})
+	received := t6924Day.Add(-26 * time.Hour)
+	cases := map[string]staleReplayRow{
+		// Entries at their widest: a 32-byte sender, a 64-byte kind and a long
+		// event id (cut to 48 bytes in the notice).
+		"wide":  {Kind: strings.Repeat("k", 64), Sender: strings.Repeat("s", 32), HKEventID: strings.Repeat("e", 400)},
+		"short": {Kind: "lane.event", Sender: "consult-done", HKEventID: "e"},
 	}
-	text := staleReplayNoticeText("2026-11-26", t6924Design, rows, 2)
-	if len(text) > laneEventTextLimit {
-		t.Fatalf("notice is %d bytes, over the lane.event limit %d", len(text), laneEventTextLimit)
-	}
-	if got := strings.Count(text, " | "); got != staleReplayListLimit {
-		t.Fatalf("notice lists %d rows, want %d", got, staleReplayListLimit)
-	}
-	if !strings.Contains(text, "+5 more not listed.") {
-		t.Fatalf("notice does not count the rows past the list: %s", text)
-	}
-	if !strings.Contains(text, "Overtaken by their task within 6 h of receipt, not listed: 2.") {
-		t.Fatalf("notice does not count the overtaken rows: %s", text)
+	for name, sample := range cases {
+		var rows []staleReplayRow
+		for i := 0; i < staleReplayListLimit+5; i++ {
+			row := sample
+			row.RelayID = int64(i + 1)
+			row.ReceivedMS = received.UnixMilli()
+			row.RetiredMS = t6924Day.UnixMilli()
+			rows = append(rows, row)
+		}
+		text := staleReplayNoticeText("2026-11-26", t6924Design, rows, 2)
+		if len(text) > laneEventTextLimit {
+			t.Fatalf("%s: notice is %d bytes, over the lane.event limit %d", name, len(text), laneEventTextLimit)
+		}
+		listed := strings.Count(text, " | ")
+		if listed == 0 || listed > staleReplayListLimit {
+			t.Fatalf("%s: notice lists %d rows, want between 1 and %d", name, listed, staleReplayListLimit)
+		}
+		if !strings.Contains(text, fmt.Sprintf(" +%d more not listed.", len(rows)-listed)) {
+			t.Fatalf("%s: notice does not count the rows it did not list: %s", name, text)
+		}
+		if !strings.Contains(text, "Overtaken by their task within 6 h of receipt, not listed: 2.") {
+			t.Fatalf("%s: notice does not count the overtaken rows: %s", name, text)
+		}
+		if name == "short" && listed != staleReplayListLimit {
+			t.Fatalf("short entries list %d rows, want the full %d", listed, staleReplayListLimit)
+		}
 	}
 }
 
@@ -399,5 +535,184 @@ func TestT6924CopyOrdersRelayIDAsNumber(t *testing.T) {
 		if got := storeCopyOrderBy(d, table); got != "relay_id" {
 			t.Errorf("%s order by %q, want %q", name, got, "relay_id")
 		}
+	}
+}
+
+// A row retired after its worker's route is gone (the pane ended and
+// releaseDeadLanes removed the route) still reaches its design lane: the job it
+// was received for was bound at receipt. Killed by: resolving the job from the
+// route at retirement only.
+func TestT6924RouteRemovedBeforeRetirementIsListed(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	rig.taskOf[t6924Job(1)] = "1001"
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "started", UpdatedAt: rig.before(26)})
+	eventID := rig.receive(1, rig.before(26), "[consult-done] received while its route stood")
+	rig.setRoute(1, "")
+	rig.replay()
+	rig.fileNextDay()
+	items := rig.designItems()
+	if len(items) != 1 || !strings.Contains(items[0], "hk "+eventID) {
+		t.Fatalf("row of a lane whose route is gone was not listed on its design lane: items=%v", items)
+	}
+}
+
+// A row with no bound job and no route to hint one is listed on the hub's notice
+// lane, not dropped. Killed by: dropping an unresolved row.
+func TestT6924UnboundRowIsListedOnTheNoticeLane(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	rig.setRoute(1, "")
+	rig.retire(1, rig.before(26), "[consult-done] no route, no binding")
+	rig.fileNextDay()
+	if items := rig.designItems(); len(items) != 0 {
+		t.Fatalf("an unresolved row was filed on the design lane: %v", items)
+	}
+	items := rig.itemsOf(defaultLoopsNoticeLane)
+	if len(items) != 1 || !strings.Contains(items[0], "hk t6924-1") {
+		t.Fatalf("unresolved row must be listed on the notice lane %s: items=%v", defaultLoopsNoticeLane, items)
+	}
+}
+
+// A row is judged against the job its lane had when the row arrived, not the job
+// the lane has later: a lane taken over by a new job does not move an older row
+// into the new job's task. Killed by: resolving every row's job from the route at
+// retirement.
+func TestT6924RowKeepsTheJobItWasReceivedFor(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	const laterJob = "job-6924-w1b"
+	rig.taskOf[t6924Job(1)] = "1001"
+	rig.taskOf[laterJob] = "1002"
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "merged", CompletedAt: t6924At(rig.before(39)), UpdatedAt: rig.before(39)})
+	rig.tasks.set(t6924HKTask{ID: 1002, State: "started", UpdatedAt: rig.before(30)})
+
+	early := rig.receive(1, rig.before(40), "[consult-done] received under the first job")
+	rig.setRoute(1, laterJob)
+	late := rig.receive(1, rig.before(30), "[consult-done] received under the later job")
+	rig.replay()
+	rig.fileNextDay()
+
+	items := rig.designItems()
+	if len(items) != 1 {
+		t.Fatalf("design lane items=%d, want one notice: %v", len(items), items)
+	}
+	if !strings.Contains(items[0], "Overtaken by their task within 6 h of receipt, not listed: 1.") {
+		t.Fatalf("the row received under the first job is not counted as overtaken: %s", items[0])
+	}
+	if strings.Contains(items[0], "hk "+early) {
+		t.Fatalf("the row received under the first job is listed against the later job: %s", items[0])
+	}
+	if !strings.Contains(items[0], "hk "+late) {
+		t.Fatalf("the row received under the later job is not listed: %s", items[0])
+	}
+}
+
+// The end of a task is its completed_at, so a merged task that was deployed a
+// day after the row arrived still overtook it. Its updated_at moved with the
+// deploy and is not the end. Killed by: reading updated_at as the end.
+func TestT6924TaskEndIsCompletedAtNotUpdatedAt(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	rig.taskOf[t6924Job(1)] = "1001"
+	rig.taskOf[t6924Job(2)] = "1002"
+	received := rig.before(26)
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "deployed", CompletedAt: t6924At(received.Add(time.Hour)), UpdatedAt: received.Add(20 * time.Hour)})
+	rig.tasks.set(t6924HKTask{ID: 1002, State: "started", UpdatedAt: received})
+	rig.retire(1, received, "[consult-done] merged an hour after receipt, deployed later")
+	rig.retire(2, received, "[mergewake] still open")
+	rig.fileNextDay()
+
+	items := rig.designItems()
+	if len(items) != 1 {
+		t.Fatalf("design lane items=%d, want one notice: %v", len(items), items)
+	}
+	if !strings.Contains(items[0], "Overtaken by their task within 6 h of receipt, not listed: 1.") {
+		t.Fatalf("a task deployed after the window was not counted as overtaken: %s", items[0])
+	}
+	if strings.Contains(items[0], "hk t6924-1 ") {
+		t.Fatalf("the overtaken row is listed: %s", items[0])
+	}
+}
+
+// A task that ended before the row arrived did not overtake it, even when an
+// edit after the receipt moves updated_at into the window. Killed by: reading
+// updated_at as the end.
+func TestT6924EndBeforeReceiptIsNotOvertaken(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	rig.taskOf[t6924Job(1)] = "1001"
+	received := rig.before(26)
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "merged", CompletedAt: t6924At(received.Add(-2 * time.Hour)), UpdatedAt: received.Add(time.Hour)})
+	rig.retire(1, received, "[consult-done] merged before it arrived, edited after")
+	rig.fileNextDay()
+
+	items := rig.designItems()
+	if len(items) != 1 || !strings.Contains(items[0], "hk t6924-1") {
+		t.Fatalf("a row whose task ended before it arrived must be listed: items=%v", items)
+	}
+	if strings.Contains(items[0], "Overtaken") {
+		t.Fatalf("a row whose task ended before it arrived is counted as overtaken: %s", items[0])
+	}
+}
+
+// icebox is parked, not ended: a task parked within the window does not overtake
+// its rows. Killed by: accepting the canceled category as an end.
+func TestT6924IceboxIsNotEnded(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	rig.taskOf[t6924Job(1)] = "1001"
+	received := rig.before(26)
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "icebox", Category: "canceled", CanceledAt: t6924At(received.Add(time.Hour)), UpdatedAt: received.Add(time.Hour)})
+	rig.retire(1, received, "[consult-done] parked in icebox an hour after receipt")
+	rig.fileNextDay()
+
+	items := rig.designItems()
+	if len(items) != 1 || !strings.Contains(items[0], "hk t6924-1") {
+		t.Fatalf("a row whose task is parked in icebox must be listed: items=%v", items)
+	}
+	if strings.Contains(items[0], "Overtaken") {
+		t.Fatalf("an icebox task counted as overtaking its row: %s", items[0])
+	}
+}
+
+// A row whose notice row cannot be kept is not closed: it stays undelivered, and
+// the next replay keeps it and closes it. Killed by: closing the row before its
+// notice row is written.
+func TestT6924NoticeRowFailureLeavesRowForRetry(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	rig.dropNoticeRows()
+	rig.retire(1, rig.before(26), "[consult-done] kept once the store is back")
+	if got := rig.retiredCount(); got != 0 {
+		t.Fatalf("row closed without its notice row: %d closed", got)
+	}
+	rig.createNoticeRows()
+	rig.replay()
+	if got := rig.retiredCount(); got != 1 {
+		t.Fatalf("row closed=%d after the retry, want 1", got)
+	}
+	if got := rig.noticeRows(); got != 1 {
+		t.Fatalf("notice rows=%d after the retry, want 1", got)
+	}
+}
+
+// A row retired while the filing pass reads its task is not closed by that pass:
+// only the rows the pass read are marked filed. Killed by: closing every owed row
+// of the lane and day.
+func TestT6924FilingKeepsRowsReadLater(t *testing.T) {
+	rig := newT6924Rig(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	rig.taskOf[t6924Job(1)] = "1001"
+	rig.tasks.set(t6924HKTask{ID: 1001, State: "started", UpdatedAt: rig.before(26)})
+	rig.retire(1, rig.before(26), "[consult-done] read by the filing pass")
+	rig.tasks.once(func() {
+		err := rig.hub.inbox.store.insertStaleReplayRow(context.Background(), staleReplayRow{
+			RelayID: 900, NoticeDay: staleReplayDay(t6924Day), DesignLane: t6924Design, WorkerLane: t6924Lane(2), Job: t6924Job(2),
+			Kind: "lane.event", Sender: "consult-done", HKEventID: "t6924-late", ReceivedMS: rig.before(26).UnixMilli(), RetiredMS: t6924Day.UnixMilli(),
+		})
+		if err != nil {
+			t.Error(err)
+		}
+	})
+	rig.fileNextDay()
+	if got := rig.unfiledRows(); got != 1 {
+		t.Fatalf("rows still owed after the pass=%d, want the row retired during the read", got)
+	}
+	items := rig.designItems()
+	if len(items) != 1 || !strings.Contains(items[0], "hk t6924-1") || strings.Contains(items[0], "t6924-late") {
+		t.Fatalf("notice=%v, want only the row the pass read", items)
 	}
 }

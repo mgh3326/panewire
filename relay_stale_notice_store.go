@@ -8,6 +8,9 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"strings"
 )
 
 // relayStaleNoticeSchema is SQLite's form of the table. Postgres has it in
@@ -19,6 +22,10 @@ var relayStaleNoticeSchema = []string{
  kind VARCHAR(64) NOT NULL, sender VARCHAR(32) NOT NULL DEFAULT '', hk_event_id VARCHAR(255) NOT NULL DEFAULT '',
  received_ms BIGINT NOT NULL, retired_ms BIGINT NOT NULL, filed INTEGER NOT NULL DEFAULT 0)`,
 	`CREATE INDEX IF NOT EXISTS relay_stale_notice_rows_day ON relay_stale_notice_rows(notice_day, design_lane, filed)`,
+	`CREATE TABLE IF NOT EXISTS relay_stale_notice_lanes (
+ worker_lane VARCHAR(255) NOT NULL, job VARCHAR(255) NOT NULL, first_ms BIGINT NOT NULL,
+ PRIMARY KEY (worker_lane, job))`,
+	`CREATE INDEX IF NOT EXISTS relay_stale_notice_lanes_first ON relay_stale_notice_lanes(worker_lane, first_ms)`,
 }
 
 // Column widths of relay_stale_notice_rows. MySQL refuses a longer value, so
@@ -30,6 +37,8 @@ const (
 	staleReplayWidthKind  = 64
 	staleReplayWidthSend  = 32
 	staleReplayWidthEvent = 255
+	// staleReplayFileChunk bounds the ids one filing UPDATE names.
+	staleReplayFileChunk = 500
 )
 
 // staleReplayRow is one retired real message as the notice reads it.
@@ -40,6 +49,33 @@ type staleReplayRow struct {
 	Job, Task, Kind, Sender string
 	HKEventID               string
 	ReceivedMS, RetiredMS   int64
+}
+
+// insertStaleReplayLane binds a worker lane to the job its route named when a
+// row arrived. The first binding of a pair is kept: the bound job is the one the
+// lane had at the earliest receipt the hub saw for it.
+func (s *laneInboxStore) insertStaleReplayLane(parent context.Context, lane, job string, firstMS int64) error {
+	ctx, done := s.op(parent)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO relay_stale_notice_lanes(worker_lane,job,first_ms) VALUES(?,?,?)`, "worker_lane,job")),
+		utf8PrefixWithin(lane, staleReplayWidthLane), utf8PrefixWithin(job, staleReplayWidthJob), firstMS)
+	return err
+}
+
+// staleReplayJobAt names the job a worker lane was bound to when a row received
+// at atMS arrived: the binding whose first sighting is the latest at or before
+// atMS. found is false when no binding is that old.
+func (s *laneInboxStore) staleReplayJobAt(parent context.Context, lane string, atMS int64) (job string, found bool, err error) {
+	ctx, done := s.op(parent)
+	defer done()
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT job FROM relay_stale_notice_lanes WHERE worker_lane=? AND first_ms<=? ORDER BY first_ms DESC LIMIT 1`), lane, atMS).Scan(&job)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return job, true, nil
 }
 
 // insertStaleReplayRow records one retired row. A row the store already holds
@@ -116,13 +152,26 @@ func (s *laneInboxStore) staleReplayRowsOf(parent context.Context, day, lane str
 	return out, rows.Err()
 }
 
-// markStaleReplayFiled closes one lane's rows for day once its notice is in the
-// inbox, or once there was nothing to list.
-func (s *laneInboxStore) markStaleReplayFiled(parent context.Context, day, lane string) error {
+// markStaleReplayFiled closes the rows named by ids once their lane's notice is
+// in the inbox, or once there was nothing to list. A row the filing pass did not
+// read (one retired after the read) stays owed for the next pass.
+func (s *laneInboxStore) markStaleReplayFiled(parent context.Context, ids []int64) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE relay_stale_notice_rows SET filed=1 WHERE notice_day=? AND design_lane=? AND filed=0`), day, lane)
-	return err
+	for len(ids) > 0 {
+		n := min(len(ids), staleReplayFileChunk)
+		args := make([]any, n)
+		marks := make([]string, n)
+		for i, id := range ids[:n] {
+			args[i] = id
+			marks[i] = "?"
+		}
+		if _, err := s.db.ExecContext(ctx, s.q(`UPDATE relay_stale_notice_rows SET filed=1 WHERE filed=0 AND relay_id IN (`+strings.Join(marks, ",")+`)`), args...); err != nil {
+			return err
+		}
+		ids = ids[n:]
+	}
+	return nil
 }
 
 // pruneStaleReplayRows deletes filed rows of days before cutoff.

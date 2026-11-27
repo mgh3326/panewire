@@ -355,29 +355,50 @@ its lane may never have seen. The hub keeps a daily account of those rows and
 files one inbox item per owning design lane for each UTC day, once the day has
 closed.
 
-- **What is kept.** A `stale` retirement of a real message: not an idle-wake
-  report, not a `lane_gone` row, and not a row received after its worker job's
-  `job.completed` was recorded (the hk 6900 case, behind one predicate,
-  `staleReplayAfterJobCompletion`, to be dropped once 6900 is live). The owner
-  is the design lane of the worker job's spawn record; a row without one is
-  logged and left out.
+- **What is kept.** A `stale` retirement of a real message, except an
+  idle-wake report. A row is kept before its handoffkeep row is closed: if the
+  row cannot be kept (the store or the job lookup fails), the close is released
+  and the row stays undelivered for the next replay. There is no exclusion for a
+  row received after its worker job's `job.completed` (hk 6900 is merged, so
+  that case is no longer re-delivered), and a lost or revoked job's rows are kept.
+- **Which job a row belongs to.** From durable state, in this order:
+  1. a `job.*` row carries its job;
+  2. a `lane.event` row takes the job its lane was bound to when the row
+     arrived. The receipt records the lane's route job in
+     `relay_stale_notice_lanes` (first sighting per lane and job; the binding
+     with the latest first sighting at or before the receipt wins);
+  3. for a row received before any binding was kept, the lanes.json route is a
+     hint, used only when that route's job was spawned before the row arrived.
+  The job's spawn record gives the design owner and the hk task. A job whose
+  owner is not a design lane is left out, as before.
+- **Unresolved rows are listed, not dropped.** A row with no job, or with no
+  spawn record or owner, is filed on the hub's notice lane (`panewire-design`
+  by default) with the job shown as `-`, so no retired row disappears silently.
 - **The item.** Filed inbox-class (`notify_type` `info`) to the design lane,
   event id `stale-replay-<day>`. It names the rows the task did not overtake:
   sender prefix, message type (the relay kind), received time, age at
-  retirement and the hk event id, at most ten of them, then a count of the rest.
-- **Overtaken rows.** A row is overtaken when its lane's hk task was merged,
-  closed or completed within **6 h after its receipt**, judged from the task's
-  end (its `updated_at` in a merged, deployed, done, dropped, canceled or
-  duplicate state, or a completed or canceled category). Overtaken rows are
-  counted in the footer, not listed. A task that cannot be read counts as not
-  overtaken, so its row is listed.
+  retirement, the handoffkeep row id (`row N`, the key to look a row up by) and
+  the hk event id, at most ten of them, then a count of the rest. The footer
+  counts the overtaken rows; room for it is reserved, so it is never cut off.
+- **Overtaken rows.** A row is overtaken when its lane's hk task reached an end
+  state (merged, deployed, completed, dropped or duplicate; icebox is parked, not
+  ended) and hk's `completed_at` or `canceled_at` falls within **6 h after the
+  row's receipt**. Those stamps are kept across a later edit such as merged ->
+  deployed, so `updated_at` (which moves with every edit) is not read. Overtaken
+  rows are counted in the footer, not listed. A task that cannot be read, or one
+  whose end is not in the window, leaves its row listed.
 - **No event on an empty day.** A day with no listed row for a lane files
   nothing for that lane. Its rows are then marked filed.
-- **Survival.** The rows live in `relay_stale_notice_rows` (hub store, SQLite,
-  Postgres migration 0043, MySQL migration 0039), so a restart mid-day keeps
-  them. A filed day's rows are pruned after 14 days.
+- **Closing a filed day.** Only the rows the filing pass read are marked filed; a
+  row retired while the pass runs stays owed for the next pass.
+- **Survival.** The rows live in `relay_stale_notice_rows`, and the lane
+  bindings in `relay_stale_notice_lanes` (hub store, SQLite, Postgres migration
+  0043, MySQL migration 0039), so a restart mid-day keeps them. A filed day's
+  rows are pruned after 14 days. Bindings are kept (one row per lane and job).
 
-Code: `relay_stale_notice.go`, `relay_stale_notice_store.go`. Tests:
+Code: `relay_stale_notice.go`, `relay_stale_notice_store.go`, and the two hooks
+in `relay.go` (`noteStaleReplayLane` at lane.event receipt, `noteStaleReplayRetire`
+before the close in `retireRelayReplay`). Tests:
 `relay_stale_notice_t6924_test.go`.
 
 ## Tests

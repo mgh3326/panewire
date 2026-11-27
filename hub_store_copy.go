@@ -37,7 +37,7 @@ var storeCopyTables = []storeCopyTable{
 	{"task_fail_notice_outbox", "request_id"}, {"owner_notice_decisions", "event_key"},
 	{"supersede_lane_cause", "lock_key"}, {"delivery_obligations", "id"}, {"delivery_incidents", "id"},
 	{"delivery_notice_slots", "design_lane,machine,fault"}, {"delivery_reconciler_state", "singleton"},
-	{"relay_stale_notice_rows", "relay_id"},
+	{"relay_stale_notice_rows", "relay_id"}, {"relay_stale_notice_lanes", "worker_lane,job"},
 }
 
 // storeCopyHubKeyTables hold a hub key in event_key, which each backend stores
@@ -58,6 +58,7 @@ var storeCopyNumericKeys = map[string]string{"relay_stale_notice_rows": "relay_i
 var storeCopyOlderSourceTables = map[string]bool{
 	"supersede_lane_cause": true, "delivery_obligations": true, "delivery_incidents": true,
 	"delivery_notice_slots": true, "delivery_reconciler_state": true, "relay_stale_notice_rows": true,
+	"relay_stale_notice_lanes": true,
 }
 
 // storeCopySequenceColumns names, for each table whose ids the database hands
