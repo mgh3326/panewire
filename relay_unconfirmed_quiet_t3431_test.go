@@ -1,22 +1,22 @@
 package panewire
 
-// hk 3431: an unconfirmed relay row tells the job's owner lane only when
-// someone can still act on it, and at most once per (owner lane, worker lane)
-// per window. A worker lane whose jobs have all ended, or whose live job's hk
-// task has ended, is logged instead; drops inside the window are folded into
-// the next notice. Contract: docs/relay-harness-delivery.md.
+// hk 3431, rewritten for the durable incidents of hk 6821: an unconfirmed relay
+// row tells the job's owner lane only when someone can still act on it, and one
+// notice per host fault per incident. A worker lane whose jobs have all ended,
+// or whose live job's hk task has ended, is logged instead; the rows that fail
+// while a notice speaks for the host fault are folded into the next notice. The
+// obligation pass posts the notices, from the inbox store. Contract:
+// docs/relay-harness-delivery.md. A hub with no store keeps the in-memory window
+// (relay_unconfirmed_quiet_legacy_t3431_test.go).
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,268 +24,190 @@ import (
 )
 
 const (
-	t3431Worker = "wk-t3431"
-	t3431Design = "design-t3431"
-	t3431Job    = "hk3431-fix"
-	t3431Task   = "3431"
+	// t6821Second is a second worker lane on the first worker's host, and
+	// t6821Remote one on another host.
+	t6821Second = "wk-t6821-second"
+	t6821Remote = "wk-t6821-remote"
 )
 
-type t3431FailReadTransport struct {
-	next    http.RoundTripper
-	afterID int64
+// t6821Rig is the hk 3431 rig over a hub with an inbox store.
+type t6821Rig struct {
+	*t3431Rig
+	// copies are the retry copies queued to worker lanes, oldest first.
+	copies []hubRelayInjectEvent
 }
 
-func (rt t3431FailReadTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Method == http.MethodGet && req.URL.Query().Get("after_id") == fmt.Sprint(rt.afterID) && req.URL.Query().Get("limit") == "1" {
-		return &http.Response{StatusCode: http.StatusInternalServerError, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"forced"}`)), Request: req}, nil
-	}
-	return rt.next.RoundTrip(req)
-}
-
-type t3431Clock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *t3431Clock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *t3431Clock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
-func (c *t3431Clock) set(at time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = at
-}
-
-// t3431Jobs is the hk job-record store the hub reads to learn a job's task.
-type t3431Jobs struct {
-	records map[string]map[string]any
-	err     error
-}
-
-func (t3431Jobs) Claim(context.Context, string, string, string) error { return nil }
-func (t3431Jobs) Put(context.Context, string, map[string]any) error   { return nil }
-func (j t3431Jobs) Get(_ context.Context, id string) (map[string]any, error) {
-	if j.err != nil {
-		return nil, j.err
-	}
-	if r, ok := j.records[id]; ok {
-		return r, nil
-	}
-	return nil, fleet.ErrJobNotFound
-}
-
-// t3431Tasks answers GET /v1/tasks/<id> the way hk does. A task it does not
-// hold is a 500: the read fails.
-type t3431Tasks struct {
-	mu    sync.Mutex
-	tasks map[string]fleet.TaskStatus
-	reads int
-}
-
-func (f *t3431Tasks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.reads++
-	id := strings.TrimPrefix(r.URL.Path, "/v1/tasks/")
-	task, ok := f.tasks[id]
-	if r.Method != http.MethodGet || !ok {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	var number int64
-	fmt.Sscan(id, &number)
-	_ = json.NewEncoder(w).Encode(map[string]any{"id": number, "state": task.State, "category": task.Category, "title": task.Title})
-}
-
-type t3431Rig struct {
-	t     *testing.T
-	hub   *HubServer
-	clock *t3431Clock
-	logs  *lockedBuffer
-	dest  *hubAgent
-	src   *hubAgent
-	tasks *t3431Tasks
-	fake  *fakeHandoffkeep
-	seq   int
-	// pending holds owner-lane notices drop read while it waited for the
-	// worker-lane directive.
-	pending []hubRelayInjectEvent
-}
-
-// t3431Start is a hub whose worker lane reports to the design lane, over a
-// fake relay store, a fake hk job-record store and a fake hk task endpoint.
-// The task endpoint is reached through the hk settings in the environment,
-// pointed at the fake: no real configuration or credential is read.
-func t3431Start(t *testing.T, jobs fleet.JobStore) *t3431Rig {
-	t.Helper()
-	fake, client, closeServer := newFakeHandoffkeep(t)
-	t.Cleanup(closeServer)
-	tasks := &t3431Tasks{tasks: map[string]fleet.TaskStatus{}}
-	taskServer := httptest.NewServer(tasks)
-	t.Cleanup(taskServer.Close)
-	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
-	t.Setenv("HANDOFFKEEP_URL", taskServer.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
-	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID", "")
-	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET", "")
-
-	lanes, _ := json.Marshal(map[string]any{"lanes": map[string]reportRelayRoute{
+func t6821Routes() map[string]reportRelayRoute {
+	return map[string]reportRelayRoute{
 		t3431Worker: {Machine: "host-a", Pane: "w1:pW", Parent: t3431Design},
+		t6821Second: {Machine: "host-a", Pane: "w1:pS", Parent: t3431Design},
+		t6821Remote: {Machine: "host-b", Pane: "w2:pR", Parent: t3431Design},
 		t3431Design: {Machine: "host-a", Pane: "w1:pD"},
-	}})
-	clock := &t3431Clock{now: time.Date(2026, 11, 7, 10, 42, 0, 0, time.UTC)}
-	logs := &lockedBuffer{}
-	hub, err := NewHubServer(HubServerConfig{
-		Tokens:          map[string]string{"operator": "op", "host-a": "node"},
-		ReportRelayPath: r20LanesFile(t, string(lanes)),
-		Logger:          slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
-		handoffkeep:     client,
-		Now:             clock.Now,
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	t.Cleanup(func() { hub.Close() })
-	hub.relayControl.relayAckTimeout = time.Hour
-	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
-	}
-	rig := &t3431Rig{t: t, hub: hub, clock: clock, logs: logs, tasks: tasks, fake: fake}
-	rig.dest = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
-	rig.src = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
-	hub.mu.Lock()
-	hub.nodes["host-a"] = &hubNodeRecord{agent: rig.dest}
-	hub.nodes["host-b"] = &hubNodeRecord{agent: rig.src}
-	hub.mu.Unlock()
+}
+
+func t6821Start(t *testing.T, jobs fleet.JobStore) *t6821Rig {
+	t.Helper()
+	return &t6821Rig{t3431Rig: t3431StartWith(t, jobs, t6821Routes(), freshLaneInboxFile(t))}
+}
+
+// t6821Live is a rig whose worker lane runs a live job with a task in
+// progress, so every row that fails is told.
+func t6821Live(t *testing.T) *t6821Rig {
+	t.Helper()
+	rig := t6821Start(t, t3431LiveJobWithTask())
+	rig.task(t3431Task, "in_progress", "started")
+	rig.job(t3431Job, false, false)
 	return rig
 }
 
-// job registers one hub job running in the worker lane.
-func (rig *t3431Rig) job(id string, completed, orphaned bool) {
-	rig.hub.mu.Lock()
-	defer rig.hub.mu.Unlock()
-	rig.hub.jobs[id] = &hubJobRecord{
-		HubActiveJob: HubActiveJob{JobID: id, AgentLabel: t3431Worker, Epoch: 1, OwnerLane: t3431Design},
-		Node:         "host-b", LastSeen: rig.clock.Now(), Completed: completed, Orphaned: orphaned,
-		FencedNodes: map[string]uint64{},
-	}
-}
-
-func (rig *t3431Rig) task(id, state, category string) {
-	rig.tasks.mu.Lock()
-	defer rig.tasks.mu.Unlock()
-	rig.tasks.tasks[id] = fleet.TaskStatus{State: state, Category: category, Title: "hk " + id + " (grade C, T2)"}
-}
-
-// drop relays one findings lane.event to the worker lane and has the node drop
-// it as maybe_in_pane. It returns the durable row id and the drop.
-func (rig *t3431Rig) drop() (int64, relayDroppedPayload) {
+// send relays one findings lane.event to lane and returns the directive the hub
+// queued for it.
+func (rig *t6821Rig) send(lane string) hubRelayInjectEvent {
 	rig.t.Helper()
-	dropped := rig.relayRow()
-	t650Send(rig.t, rig.hub, "host-a", rig.dest, "relay.dropped", dropped)
-	return dropped.OriginalEventID, dropped
-}
-
-// relayRow relays one findings lane.event to the worker lane and returns the
-// maybe_in_pane drop the node would send for it, without sending it.
-func (rig *t3431Rig) relayRow() relayDroppedPayload {
-	rig.t.Helper()
+	rig.collect()
 	rig.seq++
 	eventID := fmt.Sprintf("mergewake-findings-%d", rig.seq)
-	event := hubJobEventPayload{JobID: laneEventTransportID(t3431Worker, eventID), Epoch: 1, OwnerLane: t3431Worker, EventID: eventID, NotifyType: "findings", Text: "[mergewake] findings for the worker: fix the failing check"}
+	event := hubJobEventPayload{JobID: laneEventTransportID(lane, eventID), Epoch: 1, OwnerLane: lane, EventID: eventID, NotifyType: "findings", Text: "[mergewake] findings for the worker: fix the failing check"}
 	rig.hub.relayLaneEvent(event, rig.src)
-	var directive hubRelayInjectEvent
-	for directive.Lane != t3431Worker {
+	_, agent := rig.machineOf(lane)
+	for {
 		select {
-		case directive = <-rig.dest.relays:
+		case directive := <-agent.relays:
+			if directive.Lane == lane && directive.EventID > 0 {
+				return directive
+			}
 			if directive.Lane == t3431Design {
 				rig.pending = append(rig.pending, directive)
 			}
 		case <-time.After(2 * time.Second):
-			rig.t.Fatal("the hub queued no relay.inject for the worker lane")
+			rig.t.Fatalf("the hub queued no relay.inject for %s", lane)
 		}
 	}
-	if directive.EventID < 1 {
-		rig.t.Fatalf("directive without a durable id: %+v", directive)
-	}
-	return relayDroppedPayload{JobID: directive.JobID, Pane: directive.Pane, Lane: directive.Lane, OriginalEventID: directive.EventID, Reason: relayDroppedMaybeInPane}
 }
 
-// notices returns the owner-lane notices queued since the last call.
-func (rig *t3431Rig) notices() []hubRelayInjectEvent {
-	out := rig.pending
-	rig.pending = nil
-	for {
-		select {
-		case directive := <-rig.dest.relays:
+// machineOf is the node that serves lane.
+func (rig *t6821Rig) machineOf(lane string) (string, *hubAgent) {
+	if t6821Routes()[lane].Machine == "host-b" {
+		return "host-b", rig.src
+	}
+	return "host-a", rig.dest
+}
+
+// report sends the node's two frames for a row it gave up on.
+func (rig *t6821Rig) report(d hubRelayInjectEvent, how t6820Drop) {
+	rig.t.Helper()
+	machine, agent := rig.machineOf(d.Lane)
+	if how.report != "" {
+		t650Send(rig.t, rig.hub, machine, agent, "relay.unconfirmed", relayAckPayload{JobID: d.JobID, Pane: d.Pane, OriginalEventID: d.EventID, Reason: how.report})
+	}
+	if how.drop != "" {
+		t650Send(rig.t, rig.hub, machine, agent, "relay.dropped", relayDroppedPayload{JobID: d.JobID, Pane: d.Pane, Lane: d.Lane, OriginalEventID: d.EventID, Reason: how.drop, Harness: how.harness})
+	}
+}
+
+// failOn relays one row to lane, which its node reports maybe typed.
+func (rig *t6821Rig) failOn(lane string) hubRelayInjectEvent {
+	rig.t.Helper()
+	d := rig.send(lane)
+	rig.report(d, t6820Maybe)
+	return d
+}
+
+// fail is failOn for the worker lane.
+func (rig *t6821Rig) fail() int64 {
+	rig.t.Helper()
+	return rig.failOn(t3431Worker).EventID
+}
+
+// collect sorts what the hub queued into the design lane's notices and the
+// copies for worker lanes.
+func (rig *t6821Rig) collect() {
+	for _, agent := range []*hubAgent{rig.dest, rig.src} {
+		for _, directive := range t3426Injected(agent) {
 			if directive.Lane == t3431Design {
-				out = append(out, directive)
+				rig.pending = append(rig.pending, directive)
+			} else {
+				rig.copies = append(rig.copies, directive)
 			}
-		default:
-			return out
 		}
 	}
 }
 
-// infoLines returns the INFO log lines that contain every one of parts.
-func (rig *t3431Rig) infoLines(parts ...string) []string {
-	var out []string
-	for _, line := range strings.Split(rig.logs.String(), "\n") {
-		if !strings.Contains(line, "level=INFO") {
-			continue
-		}
-		matched := true
-		for _, part := range parts {
-			if !strings.Contains(line, part) {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			out = append(out, line)
+// pass advances the clock by wait and runs one obligation pass.
+func (rig *t6821Rig) pass(wait time.Duration) {
+	rig.t.Helper()
+	rig.clock.advance(wait)
+	rig.hub.obligations.mu.Lock()
+	defer rig.hub.obligations.mu.Unlock()
+	rig.hub.reconcileObligations(rig.t.Context())
+	rig.collect()
+}
+
+// told runs one pass after wait and returns the notices it queued.
+func (rig *t6821Rig) told(wait time.Duration) []hubRelayInjectEvent {
+	rig.t.Helper()
+	rig.pass(wait)
+	return rig.notices()
+}
+
+// one is told, failing unless exactly one notice was queued.
+func (rig *t6821Rig) one(wait time.Duration) string {
+	rig.t.Helper()
+	got := rig.told(wait)
+	if len(got) != 1 {
+		rig.t.Fatalf("the pass told the design lane %d notices, want 1: %+v\nlogs:\n%s", len(got), got, rig.logs.String())
+	}
+	return got[0].Text
+}
+
+// none is told, failing if any notice was queued.
+func (rig *t6821Rig) none(wait time.Duration) {
+	rig.t.Helper()
+	if got := rig.told(wait); len(got) != 0 {
+		rig.t.Fatalf("the design lane was told: %+v", got)
+	}
+}
+
+// t6821Text is the notice of a maybe-typed worker row, as the relay ends it.
+func t6821Text(row int64, eventID, lane, pane string) string {
+	return fmt.Sprintf("[delivery unconfirmed] event %d (lane.event, producer id %s) for lane %s was not confirmed on host-a pane %s: maybe_in_pane. Check the pane before resending; it may already contain the message. Reported once.", row, eventID, lane, pane)
+}
+
+func t6821Folded(count int, since time.Time) string {
+	return fmt.Sprintf(" (+%d more unconfirmed for this host since %s UTC)", count, since.UTC().Format("15:04"))
+}
+
+// notice stores: the row the fake holds under the notice id.
+func (rig *t6821Rig) noticeRows() []handoffkeepRelayEvent {
+	rig.fake.mu.Lock()
+	defer rig.fake.mu.Unlock()
+	var out []handoffkeepRelayEvent
+	for _, row := range rig.fake.rows {
+		if strings.HasPrefix(row.EventID, unconfirmedEscalationPrefix) {
+			out = append(out, *row)
 		}
 	}
 	return out
 }
 
-// t3431TodayText is the hk 3276 notice, byte for byte. The relay puts its own
-// lane.event prefix in front of it, so a notice "is" today's text when it ends
-// with it.
-func t3431TodayText(row int64, eventID string) string {
-	return fmt.Sprintf("[delivery unconfirmed] event %d (lane.event, producer id %s) for lane %s was not confirmed on host-a pane w1:pW: maybe_in_pane. The worker may not have it; read the pane or re-send. Reported once.", row, eventID, t3431Worker)
-}
-
-func t3431LiveJobWithTask() t3431Jobs {
-	return t3431Jobs{records: map[string]map[string]any{t3431Job: {"state": "running", "task_id": float64(3431), "label": t3431Worker}}}
-}
-
-// Acceptance 1: the worker lane's only job has ended, so nobody is there to
-// read or re-send: no owner-lane notice, one INFO line instead.
+// Acceptance 1 of hk 3431: the worker lane's only job has ended, so nobody is
+// there to read or re-send: no owner-lane notice, one INFO line instead.
 func TestUnconfirmedNoticeSkippedWhenWorkerJobEnded_t3431(t *testing.T) {
 	for name, state := range map[string][2]bool{"completed": {true, false}, "orphaned": {false, true}} {
 		t.Run(name, func(t *testing.T) {
-			rig := t3431Start(t, t3431LiveJobWithTask())
+			rig := t6821Start(t, t3431LiveJobWithTask())
 			rig.task(t3431Task, "in_progress", "started")
 			rig.job(t3431Job, state[0], state[1])
 
-			row, _ := rig.drop()
+			row := rig.fail()
+			rig.none(0)
 
-			if got := rig.notices(); len(got) != 0 {
-				t.Fatalf("an ended job's lane told its owner lane: %+v", got)
-			}
 			lines := rig.infoLines(fmt.Sprintf("event_id=%d", row), "lane="+t3431Worker, "reason=maybe_in_pane", "why=job_ended")
 			if len(lines) != 1 {
 				t.Fatalf("want exactly one INFO line naming the event, lane, reason and why; got %d in:\n%s", len(lines), rig.logs.String())
 			}
+			rig.none(time.Hour)
 		})
 	}
 }
@@ -298,15 +220,13 @@ func TestUnconfirmedNoticeSkippedWhenTaskEnded_t3431(t *testing.T) {
 		{"merged", ""}, {"dropped", ""}, {"canceled", ""},
 	} {
 		t.Run(tc.state+"/"+tc.category, func(t *testing.T) {
-			rig := t3431Start(t, t3431LiveJobWithTask())
+			rig := t6821Start(t, t3431LiveJobWithTask())
 			rig.task(t3431Task, tc.state, tc.category)
 			rig.job(t3431Job, false, false)
 
-			row, _ := rig.drop()
+			row := rig.fail()
+			rig.none(0)
 
-			if got := rig.notices(); len(got) != 0 {
-				t.Fatalf("a %s task's lane told its owner lane: %+v", tc.state, got)
-			}
 			if lines := rig.infoLines(fmt.Sprintf("event_id=%d", row), "lane="+t3431Worker, "reason=maybe_in_pane", "why=task_ended"); len(lines) != 1 {
 				t.Fatalf("want exactly one INFO line for the skipped notice; logs:\n%s", rig.logs.String())
 			}
@@ -314,21 +234,15 @@ func TestUnconfirmedNoticeSkippedWhenTaskEnded_t3431(t *testing.T) {
 	}
 }
 
-// Acceptance 3: a live job whose task is in progress gets the hk 3276 notice,
-// unchanged.
+// Acceptance 3: a live job whose task is in progress gets the notice.
 func TestUnconfirmedNoticeSentForTaskInProgress_t3431(t *testing.T) {
-	rig := t3431Start(t, t3431LiveJobWithTask())
-	rig.task(t3431Task, "in_progress", "started")
-	rig.job(t3431Job, false, false)
+	rig := t6821Live(t)
 
-	row, _ := rig.drop()
+	row := rig.fail()
 
-	got := rig.notices()
-	if len(got) != 1 {
-		t.Fatalf("owner lane got %d notices, want 1: %+v", len(got), got)
-	}
-	if want := t3431TodayText(row, "mergewake-findings-1"); !strings.HasSuffix(got[0].Text, want) {
-		t.Fatalf("notice text changed:\n got %q\nwant suffix %q", got[0].Text, want)
+	got := rig.one(0)
+	if want := t6821Text(row, "mergewake-findings-1", t3431Worker, "w1:pW"); !strings.HasSuffix(got, want) {
+		t.Fatalf("notice text changed:\n got %q\nwant suffix %q", got, want)
 	}
 	rig.tasks.mu.Lock()
 	reads := rig.tasks.reads
@@ -338,50 +252,45 @@ func TestUnconfirmedNoticeSentForTaskInProgress_t3431(t *testing.T) {
 	}
 }
 
-// Acceptance 4: seven drops inside the window send one notice; the first drop
-// after the window sends the next one and names the six folded into it, from
-// the earliest fold.
+// Acceptance 4: seven rows inside the window send one notice; once the window
+// ends the next one names the six folded into it, from the earliest.
 func TestUnconfirmedNoticeOncePerWindow_t3431(t *testing.T) {
-	rig := t3431Start(t, t3431LiveJobWithTask())
-	rig.task(t3431Task, "in_progress", "started")
-	rig.job(t3431Job, false, false)
+	rig := t6821Live(t)
 	first := rig.clock.Now()
 
 	var sent []hubRelayInjectEvent
 	var rows []int64
 	for i := 0; i < 7; i++ {
-		row, _ := rig.drop()
-		rows = append(rows, row)
-		sent = append(sent, rig.notices()...)
-		rig.clock.advance(4 * time.Minute) // seven drops over 24 minutes
+		rows = append(rows, rig.fail())
+		sent = append(sent, rig.told(0)...)
+		rig.clock.advance(4 * time.Minute) // seven rows over 24 minutes
 	}
 	if len(sent) != 1 {
-		t.Fatalf("seven drops inside 30 minutes sent %d notices, want 1: %+v", len(sent), sent)
+		t.Fatalf("seven rows inside 30 minutes sent %d notices, want 1: %+v", len(sent), sent)
 	}
-	if want := t3431TodayText(rows[0], "mergewake-findings-1"); !strings.HasSuffix(sent[0].Text, want) {
-		t.Fatalf("the first notice is not the hk 3276 notice:\n got %q\nwant suffix %q", sent[0].Text, want)
+	if want := t6821Text(rows[0], "mergewake-findings-1", t3431Worker, "w1:pW"); !strings.HasSuffix(sent[0].Text, want) {
+		t.Fatalf("the first notice:\n got %q\nwant suffix %q", sent[0].Text, want)
 	}
 	for _, row := range rows[1:] {
 		if lines := rig.infoLines(fmt.Sprintf("event_id=%d", row), "lane="+t3431Worker, "why=folded"); len(lines) != 1 {
-			t.Fatalf("folded drop %d logged %d INFO lines, want 1; logs:\n%s", row, len(lines), rig.logs.String())
+			t.Fatalf("folded row %d logged %d INFO lines, want 1; logs:\n%s", row, len(lines), rig.logs.String())
 		}
 	}
 
 	rig.clock.set(first.Add(31 * time.Minute))
-	row, _ := rig.drop()
-	second := rig.notices()
-	if len(second) != 1 {
-		t.Fatalf("the drop after the window sent %d notices, want 1", len(second))
+	rows = append(rows, rig.fail())
+	got := rig.one(0)
+	// Seven rows wait: the one named and six more, since the earliest of them,
+	// the second row, 4 minutes after the first.
+	want := t6821Text(rows[1], "mergewake-findings-2", t3431Worker, "w1:pW") + t6821Folded(6, first.Add(4*time.Minute))
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("the notice after the window does not name the folded rows:\n got %q\nwant suffix %q", got, want)
 	}
-	// HH:MM is the earliest fold: the second drop, 4 minutes after the first.
-	suffix := fmt.Sprintf("(+6 more unconfirmed for this lane since %s UTC)", first.Add(4*time.Minute).Format("15:04"))
-	if !strings.HasSuffix(second[0].Text, t3431TodayText(row, "mergewake-findings-8")+" "+suffix) {
-		t.Fatalf("the notice after the window does not name the folded drops (%q):\n%q", suffix, second[0].Text)
-	}
+	rig.none(31 * time.Minute)
 }
 
-// Acceptance 5: a job record or task the hub cannot read fails open: the
-// notice goes out as before.
+// Acceptance 5: a job record or task the hub cannot read fails open: the notice
+// goes out.
 func TestUnconfirmedNoticeFailsOpenWhenUnreadable_t3431(t *testing.T) {
 	cases := map[string]struct {
 		jobs     t3431Jobs
@@ -393,494 +302,358 @@ func TestUnconfirmedNoticeFailsOpenWhenUnreadable_t3431(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			rig := t3431Start(t, tc.jobs)
+			rig := t6821Start(t, tc.jobs)
 			if tc.withTask {
 				rig.task(t3431Task, "merged", "completed")
 			}
 			rig.job(t3431Job, false, false)
 
-			row, _ := rig.drop()
+			row := rig.fail()
 
-			got := rig.notices()
-			if len(got) != 1 || !strings.HasSuffix(got[0].Text, t3431TodayText(row, "mergewake-findings-1")) {
-				t.Fatalf("an unreadable record must fail open with the hk 3276 notice; got %+v", got)
+			if got := rig.one(0); !strings.HasSuffix(got, t6821Text(row, "mergewake-findings-1", t3431Worker, "w1:pW")) {
+				t.Fatalf("an unreadable record must fail open with the notice; got %q", got)
 			}
 		})
 	}
 }
 
-// A worker lane the hub has no job for at all is not known to have ended (a
-// hub restart forgets every ended job; a lane may run work the hub never
-// placed), so it keeps the hk 3276 notice.
+// A worker lane the hub has no job for at all is not known to have ended (a hub
+// restart forgets every ended job; a lane may run work the hub never placed),
+// so it keeps the notice.
 func TestUnconfirmedNoticeSentWhenHubKnowsNoJob_t3431(t *testing.T) {
-	rig := t3431Start(t, t3431LiveJobWithTask())
+	rig := t6821Start(t, t3431LiveJobWithTask())
 
-	row, _ := rig.drop()
+	row := rig.fail()
 
-	got := rig.notices()
-	if len(got) != 1 || !strings.HasSuffix(got[0].Text, t3431TodayText(row, "mergewake-findings-1")) {
-		t.Fatalf("want the hk 3276 notice for a lane the hub has no job for; got %+v", got)
+	if got := rig.one(0); !strings.HasSuffix(got, t6821Text(row, "mergewake-findings-1", t3431Worker, "w1:pW")) {
+		t.Fatalf("want the notice for a lane the hub has no job for; got %q", got)
 	}
 }
 
-// The same row dropped again inside the window is the hk 3276 duplicate, not
-// another folded drop, and a second worker lane has its own window.
+// A row dropped again is not folded again, and a row a notice named is never
+// named or counted again.
 func TestUnconfirmedNoticeRedropIsNotFolded_t3431(t *testing.T) {
-	rig := t3431Start(t, t3431LiveJobWithTask())
-	rig.task(t3431Task, "in_progress", "started")
-	rig.job(t3431Job, false, false)
-	first := rig.clock.Now()
+	rig := t6821Live(t)
 
-	_, dropped := rig.drop()
-	if got := rig.notices(); len(got) != 1 {
-		t.Fatalf("first drop sent %d notices, want 1", len(got))
+	named := rig.failOn(t3431Worker)
+	rig.one(0)
+	rig.report(named, t6820Maybe)
+	rig.none(0)
+	folded := rig.failOn(t3431Worker)
+	rig.pass(0)
+	rig.report(folded, t6820Maybe)
+	rig.report(named, t6820Maybe)
+	got := rig.one(31 * time.Minute)
+	want := t6821Text(folded.EventID, "mergewake-findings-2", t3431Worker, "w1:pW")
+	if !strings.HasSuffix(got, want) {
+		t.Fatalf("a re-dropped row was counted:\n got %q\nwant suffix %q", got, want)
 	}
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", dropped)
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("the same row escalated twice: %+v", got)
-	}
-	rig.drop()
-	rig.clock.set(first.Add(31 * time.Minute))
-	row, _ := rig.drop()
-	got := rig.notices()
-	if len(got) != 1 || !strings.HasSuffix(got[0].Text, fmt.Sprintf("(+1 more unconfirmed for this lane since %s UTC)", first.Format("15:04"))) || !strings.Contains(got[0].Text, fmt.Sprintf("[delivery unconfirmed] event %d ", row)) {
-		t.Fatalf("a re-dropped row was counted as folded: %+v", got)
-	}
+	rig.report(folded, t6820Maybe)
+	rig.none(31 * time.Minute)
 }
 
-// t3431NoticeFor returns the notices that report row.
-func t3431NoticeFor(notices []hubRelayInjectEvent, row int64) []hubRelayInjectEvent {
-	var out []hubRelayInjectEvent
-	for _, notice := range notices {
-		if strings.Contains(notice.Text, fmt.Sprintf("[delivery unconfirmed] event %d ", row)) {
-			out = append(out, notice)
-		}
-	}
-	return out
-}
-
-// An escalation whose every retry of a 5xx post gave up told nobody, so it
-// records no window: the next drop, 7 minutes later, is sent at once and
-// counts the lost one.
+// A notice handoffkeep fails to store is posted again until it is stored, with
+// every row that failed meanwhile: nothing gives up, and nothing is spent.
 func TestUnconfirmedNoticeGiveUpLeavesWindowOpen_t3431(t *testing.T) {
-	prev := unconfirmedEscalationBackoff
-	unconfirmedEscalationBackoff = []time.Duration{time.Millisecond, time.Millisecond}
-	t.Cleanup(func() { unconfirmedEscalationBackoff = prev })
-	rig := t3431Start(t, t3431LiveJobWithTask())
-	rig.task(t3431Task, "in_progress", "started")
-	rig.job(t3431Job, false, false)
+	rig := t6821Live(t)
 	first := rig.clock.Now()
 
 	rig.fake.mu.Lock()
 	rig.fake.failPostOwnerLane = t3431Design
 	rig.fake.mu.Unlock()
-	lost, _ := rig.drop()
-	eventually(t, 5*time.Second, "the escalation to give up", func() bool {
-		return strings.Contains(rig.logs.String(), fmt.Sprintf(`msg="relay unconfirmed escalation gave up" event_id=%d `, lost))
-	})
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("a notice reached the owner lane through a failing store: %+v", got)
+	lost := rig.fail()
+	rig.none(0)
+	// Past every wait of the retired ladder, the notice is still owed.
+	for _, wait := range []time.Duration{10 * time.Second, time.Minute, 5 * time.Minute, 15 * time.Minute, 15 * time.Minute} {
+		rig.none(wait)
 	}
+	if got := rig.logs.String(); strings.Count(got, `msg="relay unconfirmed escalation will retry"`) < 6 {
+		t.Fatalf("the failing notice was not retried:\n%s", got)
+	}
+	row := rig.fail()
 	rig.fake.mu.Lock()
 	rig.fake.failPostOwnerLane = ""
 	rig.fake.mu.Unlock()
 
-	rig.clock.advance(7 * time.Minute)
-	row, _ := rig.drop()
-	got := rig.notices()
-	if len(got) != 1 || len(t3431NoticeFor(got, row)) != 1 {
-		t.Fatalf("the drop after a gave-up escalation sent %d notices, want 1 naming event %d: %+v", len(got), row, got)
-	}
-	suffix := fmt.Sprintf("(+1 more unconfirmed for this lane since %s UTC)", first.Format("15:04"))
-	if !strings.HasSuffix(got[0].Text, t3431TodayText(row, "mergewake-findings-2")+" "+suffix) {
-		t.Fatalf("the notice does not count the gave-up drop (%q):\n%q", suffix, got[0].Text)
+	got := rig.one(15 * time.Minute)
+	want := t6821Text(lost, "mergewake-findings-1", t3431Worker, "w1:pW") + t6821Folded(1, first)
+	if !strings.HasSuffix(got, want) || row == lost {
+		t.Fatalf("the stored notice does not name both rows:\n got %q\nwant suffix %q", got, want)
 	}
 }
 
-// A notice the store answers as a duplicate on its first post was told before
-// (in a window this hub no longer remembers) and records nothing, so R2,
-// dropped while that post is in flight, is sent. R3 is then folded behind R2's
-// notice, and the drop after the window names it with a real time, never the
-// zero time.
+// A post answered as a duplicate stored an earlier text, which may not name the
+// rows now waiting. It takes the window and tells no row: the next notice names
+// them under its own id.
 func TestUnconfirmedNoticeDuplicateRecordsNothing_t3431(t *testing.T) {
-	rig := t3431LiveRig(t)
-
-	r1 := rig.relayRow()
-	r2 := rig.relayRow()
-	told := handoffkeepRelayEvent{ID: 9001, Kind: "lane.event", OwnerLane: t3431Design, EventID: fmt.Sprintf("%s%d", unconfirmedEscalationPrefix, r1.OriginalEventID), Text: "told before the restart"}
+	rig := t6821Live(t)
+	// The incident opens at the pass's clock, which is its id.
+	incident := rig.clock.Now().UnixMilli()
+	told := handoffkeepRelayEvent{ID: 9001, Kind: "lane.event", OwnerLane: t3431Design, EventID: fmt.Sprintf("%si%d-n0", unconfirmedEscalationPrefix, incident),
+		JobID: laneEventTransportID(t3431Design, fmt.Sprintf("%si%d-n0", unconfirmedEscalationPrefix, incident)), Epoch: 1, Reason: relayDroppedMaybeInPane, Text: "an earlier text"}
 	rig.fake.mu.Lock()
 	rig.fake.rows[fakeHandoffkeepStoredKey(told)] = &told
 	rig.fake.mu.Unlock()
-	rig.onFirstNoticePost(func() {
-		rig.clock.advance(time.Minute)
-		t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r2)
-	})
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
-	if got := t3431NoticeFor(rig.notices(), r2.OriginalEventID); len(got) != 1 {
-		t.Fatalf("R2, dropped while R1's duplicate post was in flight, sent %d notices, want 1", len(got))
-	}
 
-	rig.clock.advance(time.Minute)
-	folded := rig.clock.Now()
-	rig.drop()
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("a drop inside R2's window was sent: %+v", got)
-	}
-	rig.clock.advance(31 * time.Minute)
-	row, _ := rig.drop()
-	got := t3431NoticeFor(rig.notices(), row)
-	if len(got) != 1 {
-		t.Fatalf("the drop after the window sent %d notices, want 1", len(got))
-	}
-	if strings.Contains(got[0].Text, "00:00 UTC") {
-		t.Fatalf("the notice printed the zero time: %q", got[0].Text)
-	}
-	suffix := fmt.Sprintf("(+1 more unconfirmed for this lane since %s UTC)", folded.Format("15:04"))
-	if !strings.HasSuffix(got[0].Text, suffix) {
-		t.Fatalf("the notice lost the fold (want suffix %q):\n%q", suffix, got[0].Text)
+	row := rig.fail()
+	rig.none(0)
+	rig.none(29 * time.Minute)
+	got := rig.one(2 * time.Minute)
+	if !strings.HasSuffix(got, t6821Text(row, "mergewake-findings-1", t3431Worker, "w1:pW")) {
+		t.Fatalf("the row was lost behind a duplicate: %q", got)
 	}
 }
 
-// A folded row dropped again after its window has expired is admitted like
-// any drop: it is sent once, and dropping it again does not send it again.
+// A folded row whose window ended is told once, by the pass, without another
+// drop; dropping it again says nothing.
 func TestUnconfirmedNoticeRedropAfterExpirySends_t3431(t *testing.T) {
-	rig := t3431Start(t, t3431LiveJobWithTask())
-	rig.task(t3431Task, "in_progress", "started")
-	rig.job(t3431Job, false, false)
-	first := rig.clock.Now()
+	rig := t6821Live(t)
 
-	rig.drop()
-	if got := rig.notices(); len(got) != 1 {
-		t.Fatalf("first drop sent %d notices, want 1", len(got))
-	}
+	rig.fail()
+	rig.one(0)
 	rig.clock.advance(time.Minute)
-	folded, dropped := rig.drop()
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("a drop inside the window was sent: %+v", got)
-	}
+	folded := rig.failOn(t3431Worker)
+	rig.none(0)
 
-	rig.clock.set(first.Add(31 * time.Minute))
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", dropped)
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", dropped)
-	got := rig.notices()
-	if len(got) != 1 || len(t3431NoticeFor(got, folded)) != 1 {
-		t.Fatalf("the folded row re-dropped after the window sent %d notices, want 1 naming event %d: %+v", len(got), folded, got)
+	got := rig.one(30 * time.Minute)
+	if !strings.HasSuffix(got, t6821Text(folded.EventID, "mergewake-findings-2", t3431Worker, "w1:pW")) {
+		t.Fatalf("the folded row counted itself, or was not named: %q", got)
 	}
-	if !strings.HasSuffix(got[0].Text, t3431TodayText(folded, "mergewake-findings-2")) {
-		t.Fatalf("the re-dropped row counted itself as folded: %q", got[0].Text)
-	}
-	rig.clock.advance(time.Minute)
-	rig.drop()
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("the re-dropped row's notice did not open a window: %+v", got)
-	}
+	rig.report(folded, t6820Maybe)
+	rig.report(folded, t6820Maybe)
+	rig.none(31 * time.Minute)
 }
 
-// t3431FastBackoff makes every escalation retry wait one millisecond.
-func t3431FastBackoff(t *testing.T) {
-	prev := unconfirmedEscalationBackoff
-	unconfirmedEscalationBackoff = []time.Duration{time.Millisecond, time.Millisecond}
-	t.Cleanup(func() { unconfirmedEscalationBackoff = prev })
-}
-
-// t3431LiveRig is a rig whose worker lane runs a live job with a task in
-// progress, so every drop that is not folded is sent.
-func t3431LiveRig(t *testing.T) *t3431Rig {
-	rig := t3431Start(t, t3431LiveJobWithTask())
-	rig.task(t3431Task, "in_progress", "started")
-	rig.job(t3431Job, false, false)
-	return rig
-}
-
-// markDelivered closes row in the store, as a late confirmation from the pane
-// would.
-func (rig *t3431Rig) markDelivered(row int64) {
-	rig.fake.mu.Lock()
-	defer rig.fake.mu.Unlock()
-	for _, stored := range rig.fake.rows {
-		if stored.ID == row {
-			stored.DeliveredAt = "2026-11-07T10:43:00Z"
-		}
-	}
-}
-
-// rowReads counts the by-id reads of row the escalation made.
-func (rig *t3431Rig) rowReads(row int64) int {
-	rig.fake.mu.Lock()
-	defer rig.fake.mu.Unlock()
-	reads := 0
-	for _, call := range rig.fake.calls {
-		if call.Method == http.MethodGet && call.Query == fmt.Sprintf("after_id=%d&limit=1", row-1) {
-			reads++
-		}
-	}
-	return reads
-}
-
-// onFirstNoticePost runs hook once, while the first owner-lane notice post is
-// in flight: after the store read the request and before it replies.
-func (rig *t3431Rig) onFirstNoticePost(hook func()) {
-	rig.fake.mu.Lock()
-	defer rig.fake.mu.Unlock()
-	rig.fake.observe = func(method, path string) {
-		if method != http.MethodPost || path != "/v1/relay/events" {
-			return
-		}
-		rig.fake.mu.Lock()
-		rig.fake.observe = nil
-		rig.fake.mu.Unlock()
-		hook()
-	}
-}
-
-func (rig *t3431Rig) storeStatus(status int) {
-	rig.fake.mu.Lock()
-	defer rig.fake.mu.Unlock()
-	rig.fake.status = status
-}
-
-// t3431FoldCount is N in a notice's "(+N more unconfirmed ...)", 0 without one.
-func t3431FoldCount(text string) int {
-	folded := 0
-	if at := strings.Index(text, "(+"); at >= 0 {
-		fmt.Sscanf(text[at:], "(+%d more", &folded)
-	}
-	return folded
-}
-
-// F1: R1's post fails, and R1 is confirmed before its retry, which then stops
-// early. R1's notice was never stored, so it holds no window: R2, dropped 5
-// minutes later, is sent.
+// F1: R1's post fails and R1 is confirmed before it is posted again. R1's notice
+// was never stored, so it holds no window: R2, which fails 5 minutes later, is
+// told at once.
 func TestUnconfirmedNoticeEarlyRetryExitLeavesWindowOpen_t3431(t *testing.T) {
-	t3431FastBackoff(t)
-	rig := t3431LiveRig(t)
+	rig := t6821Live(t)
 
-	r1 := rig.relayRow()
-	rig.storeStatus(http.StatusInternalServerError)
-	rig.onFirstNoticePost(func() {
-		rig.storeStatus(http.StatusCreated)
-		rig.markDelivered(r1.OriginalEventID)
-	})
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
-	eventually(t, 5*time.Second, "R1's retry to read its row again", func() bool { return rig.rowReads(r1.OriginalEventID) >= 2 })
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("a notice the store refused reached the owner lane: %+v", got)
-	}
-
-	rig.clock.advance(5 * time.Minute)
-	row, _ := rig.drop()
-	got := rig.notices()
-	if len(got) != 1 || !strings.HasSuffix(got[0].Text, t3431TodayText(row, "mergewake-findings-2")) {
-		t.Fatalf("the drop after an early-exited retry sent %d notices, want 1 naming event %d: %+v", len(got), row, got)
-	}
-}
-
-// F2: R2 is dropped while R1's post is failing, and its own notice is never
-// stored either. The next drop is sent and names R2.
-func TestUnconfirmedNoticeFoldDuringFailedRetriesIsNamed_t3431(t *testing.T) {
-	t3431FastBackoff(t)
-	rig := t3431LiveRig(t)
-	first := rig.clock.Now()
-
-	r1 := rig.relayRow()
-	r2 := rig.relayRow()
+	r1 := rig.failOn(t3431Worker)
 	rig.fake.mu.Lock()
 	rig.fake.failPostOwnerLane = t3431Design
 	rig.fake.mu.Unlock()
-	rig.onFirstNoticePost(func() {
-		t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r2)
-		rig.markDelivered(r1.OriginalEventID)
-	})
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
-	eventually(t, 5*time.Second, "R1's retry to stop and R2 to settle", func() bool {
-		settled := strings.Contains(rig.logs.String(), fmt.Sprintf(`msg="relay unconfirmed escalation gave up" event_id=%d `, r2.OriginalEventID)) ||
-			len(rig.infoLines(fmt.Sprintf("event_id=%d", r2.OriginalEventID), "why=folded")) > 0
-		return settled && rig.rowReads(r1.OriginalEventID) >= 2
-	})
+	rig.none(0)
 	rig.fake.mu.Lock()
 	rig.fake.failPostOwnerLane = ""
 	rig.fake.mu.Unlock()
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("a notice reached the owner lane through a failing store: %+v", got)
-	}
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.delivered", relayAckPayload{JobID: r1.JobID, Pane: r1.Pane, OriginalEventID: r1.EventID})
+	rig.none(0)
 
 	rig.clock.advance(5 * time.Minute)
-	row, _ := rig.drop()
-	got := rig.notices()
-	if len(got) != 1 || len(t3431NoticeFor(got, row)) != 1 {
-		t.Fatalf("the next drop sent %d notices, want 1 naming event %d: %+v", len(got), row, got)
-	}
-	suffix := fmt.Sprintf("(+1 more unconfirmed for this lane since %s UTC)", first.Format("15:04"))
-	if !strings.HasSuffix(got[0].Text, t3431TodayText(row, "mergewake-findings-3")+" "+suffix) {
-		t.Fatalf("the next notice does not name R2 (want suffix %q):\n%q", suffix, got[0].Text)
+	row := rig.fail()
+	if got := rig.one(0); !strings.HasSuffix(got, t6821Text(row, "mergewake-findings-2", t3431Worker, "w1:pW")) {
+		t.Fatalf("the row after a confirmed one: %q", got)
 	}
 }
 
-// A retry whose post was stored uses the first post's text. Folds arriving
-// while it is in flight must remain for the following notice.
+// F2: R2 fails while R1's post is failing. The stored notice names both.
+func TestUnconfirmedNoticeFoldDuringFailedRetriesIsNamed_t3431(t *testing.T) {
+	rig := t6821Live(t)
+	first := rig.clock.Now()
+
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = t3431Design
+	rig.fake.mu.Unlock()
+	r1 := rig.fail()
+	rig.none(0)
+	rig.clock.advance(time.Second)
+	rig.fail()
+	rig.none(0)
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = ""
+	rig.fake.mu.Unlock()
+
+	got := rig.one(10 * time.Second)
+	if want := t6821Text(r1, "mergewake-findings-1", t3431Worker, "w1:pW") + t6821Folded(1, first); !strings.HasSuffix(got, want) {
+		t.Fatalf("the notice does not name R2:\n got %q\nwant suffix %q", got, want)
+	}
+}
+
+// t6821LostReply stores the first notice post and loses its reply.
+type t6821LostReply struct {
+	next http.RoundTripper
+	once *sync.Once
+	lost *atomic.Int32
+}
+
+func (rt t6821LostReply) RoundTrip(req *http.Request) (*http.Response, error) {
+	notice := false
+	if req.Method == http.MethodPost && req.URL.Path == "/v1/relay/events" && req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		raw, _ := io.ReadAll(body)
+		notice = strings.Contains(string(raw), unconfirmedEscalationPrefix)
+	}
+	response, err := rt.next.RoundTrip(req)
+	if !notice || err != nil {
+		return response, err
+	}
+	lose := false
+	rt.once.Do(func() { lose = true })
+	if !lose {
+		return response, nil
+	}
+	_ = response.Body.Close()
+	rt.lost.Add(1)
+	return nil, fmt.Errorf("the reply was lost")
+}
+
+// A post that was stored though its reply was lost is answered as a duplicate
+// under the same id: one stored notice, and a row folded behind it is named by
+// the next one.
 func TestUnconfirmedNoticeDuplicateRetryPreservesLaterFolds_t3431(t *testing.T) {
-	windows := &unconfirmedNoticeWindows{}
-	first := time.Date(2026, 11, 7, 10, 42, 0, 0, time.UTC)
-	windows.fold(t3431Design, t3431Worker, 1, first)
-	note, _, _ := windows.admit(t3431Design, t3431Worker, 2, first.Add(time.Minute))
-	windows.record(t3431Design, t3431Worker, 2, note, first.Add(time.Minute))
-	windows.fold(t3431Design, t3431Worker, 3, first.Add(2*time.Minute))
-	windows.record(t3431Design, t3431Worker, 2, unconfirmedNoticeNote{}, first.Add(3*time.Minute))
-	w := windows.byLanes[[2]string{t3431Design, t3431Worker}]
-	if _, stillFolded := w.folded[1]; stillFolded || note.text == "" {
-		t.Fatal("fixture did not model the first stored notice")
+	rig := t6821Live(t)
+	client := rig.hub.handoffkeep.client
+	var lost atomic.Int32
+	previous := client.Transport
+	if previous == nil {
+		previous = http.DefaultTransport
 	}
-	if _, stillFolded := w.folded[3]; !stillFolded {
-		t.Fatal("duplicate retry cleared a later fold absent from the stored notice")
+	client.Transport = t6821LostReply{next: previous, once: &sync.Once{}, lost: &lost}
+	t.Cleanup(func() { client.Transport = previous })
+
+	rig.fail()
+	rig.none(0)
+	later := rig.fail()
+	rig.none(10 * time.Second) // the same id, answered as a duplicate
+	if lost.Load() != 1 || len(rig.noticeRows()) != 1 {
+		t.Fatalf("lost replies=%d stored notices=%+v, want one of each", lost.Load(), rig.noticeRows())
+	}
+	got := rig.one(31 * time.Minute)
+	if !strings.Contains(got, "(+1 more unconfirmed for this host") {
+		t.Fatalf("the later fold was cleared by a duplicate: %q (row %d)", got, later)
+	}
+	if rows := rig.noticeRows(); len(rows) != 2 || rows[0].EventID == rows[1].EventID {
+		t.Fatalf("stored notices=%+v, want two ids", rows)
 	}
 }
 
-// A concurrent ingress duplicate with no resolved durable id cannot prove
-// that any notice was stored.
+// A concurrent claim of the notice's id with no durable row proves nothing was
+// stored: no window is taken, and the notice is posted again.
 func TestUnconfirmedNoticeZeroIDDuplicateLeavesWindowOpen_t3431(t *testing.T) {
-	rig := t3431LiveRig(t)
-	r1 := rig.relayRow()
-	rig.onFirstNoticePost(func() {
-		rig.hub.mu.Lock()
-		key := relayEventDedupeKey("lane.event", hubJobEventPayload{JobID: r1.JobID, Epoch: 1, OwnerLane: t3431Worker, EventID: fmt.Sprintf("mergewake-findings-%d", rig.seq)})
-		rig.hub.relayDedupe[key] = 0
-		rig.hub.mu.Unlock()
-	})
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
-	if len(rig.notices()) != 1 {
-		t.Fatal("initial notice missing")
+	rig := t6821Live(t)
+	id := fmt.Sprintf("%si%d-n0", unconfirmedEscalationPrefix, rig.clock.Now().UnixMilli())
+	key := relayEventDedupeKey("lane.event", unconfirmedNoticeEvent(t3431Design, id, relayDroppedMaybeInPane, "x"))
+	rig.hub.mu.Lock()
+	rig.hub.relayDedupe[key] = 0
+	rig.hub.mu.Unlock()
+
+	row := rig.fail()
+	rig.none(0)
+	rig.hub.mu.Lock()
+	delete(rig.hub.relayDedupe, key)
+	rig.hub.mu.Unlock()
+	if got := rig.one(10 * time.Second); !strings.HasSuffix(got, t6821Text(row, "mergewake-findings-1", t3431Worker, "w1:pW")) {
+		t.Fatalf("a claim with no durable row took the window: %q", got)
 	}
-	rig.clock.advance(time.Minute)
-	r2, _ := rig.drop()
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("folded row unexpectedly sent: %+v", got)
-	}
-	rig.clock.advance(31 * time.Minute)
-	r3, _ := rig.drop()
-	got := t3431NoticeFor(rig.notices(), r3)
-	if len(got) != 1 || t3431FoldCount(got[0].Text) != 1 {
-		t.Fatalf("zero-id duplicate recorded a window: %+v", got)
-	}
-	_ = r2
 }
 
-// Repeating one overflow row must not inflate the counted overflow total.
+// Every row waiting for a notice is counted, once each, however many there are
+// and however often they drop again.
 func TestUnconfirmedNoticeOverflowRedropCountedOnce_t3431(t *testing.T) {
-	w := &unconfirmedNoticeWindow{folded: make(map[int64]time.Time), overRows: make(map[int64]struct{})}
-	for i := int64(1); i <= unconfirmedNoticeFoldLimit; i++ {
-		w.fold(i, time.Unix(i, 0))
+	rig := t6821Live(t)
+	rig.fail()
+	rig.one(0)
+	var folded []hubRelayInjectEvent
+	for i := 0; i < 70; i++ {
+		folded = append(folded, rig.failOn(t3431Worker))
 	}
-	w.fold(1000, time.Unix(1000, 0))
-	w.fold(1000, time.Unix(1001, 0))
-	if w.over != 1 {
-		t.Fatalf("overflow duplicate counted %d times, want 1", w.over)
+	rig.pass(0)
+	rig.pass(0)
+	for _, d := range folded {
+		rig.report(d, t6820Maybe)
+	}
+	got := rig.one(31 * time.Minute)
+	if t3431FoldCount(got) != len(folded)-1 {
+		t.Fatalf("a notice for %d waiting rows counts %d more: %q", len(folded), t3431FoldCount(got), got)
 	}
 }
 
-// A final failed row read still folds the known worker lane's drop.
+// A row whose read failed when it became due is joined later and named.
 func TestUnconfirmedNoticeGiveUpAfterRowReadFailureFolds_t3431(t *testing.T) {
-	prev := unconfirmedEscalationBackoff
-	unconfirmedEscalationBackoff = []time.Duration{time.Millisecond}
-	t.Cleanup(func() { unconfirmedEscalationBackoff = prev })
-	rig := t3431LiveRig(t)
-	r1 := rig.relayRow()
+	rig := t6821Live(t)
+	r1 := rig.failOn(t3431Worker)
 	client := rig.hub.handoffkeep.client
 	previous := client.Transport
-	client.Transport = t3431FailReadTransport{next: previous, afterID: r1.OriginalEventID - 1}
+	if previous == nil {
+		previous = http.DefaultTransport
+	}
+	client.Transport = t3431FailReadTransport{next: previous, afterID: r1.EventID - 1}
 	t.Cleanup(func() { client.Transport = previous })
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
-	eventually(t, 5*time.Second, "give-up after failed row read", func() bool { return strings.Contains(rig.logs.String(), "relay unconfirmed escalation gave up") })
-	rig.clock.advance(time.Minute)
-	r2, _ := rig.drop()
-	if got := t3431NoticeFor(rig.notices(), r2); len(got) != 1 || t3431FoldCount(got[0].Text) != 1 {
-		t.Fatalf("row-read failure was not folded: %+v", got)
+	rig.none(0)
+	r2 := rig.fail()
+	first := rig.one(time.Second)
+	if !strings.Contains(first, fmt.Sprintf("event %d ", r2)) {
+		t.Fatalf("an unreadable row held back the others: %q", first)
+	}
+	client.Transport = previous
+	if got := rig.one(31 * time.Minute); !strings.Contains(got, fmt.Sprintf("event %d ", r1.EventID)) {
+		t.Fatalf("the row whose read failed was never told: %q", got)
 	}
 }
 
-// Two drops at the same moment, while R1's post is in flight and about to
-// fail, may both be sent; they are never both lost. Each is either sent or
-// counted in a later notice.
+// Rows dropped at the same moment make one incident and are all named or
+// counted in its one notice. Killed by: an incident per drop; posting from the
+// drop.
 func TestUnconfirmedNoticeConcurrentDropsNeverLost_t3431(t *testing.T) {
-	t3431FastBackoff(t)
-	rig := t3431LiveRig(t)
-	first := rig.clock.Now()
+	rig := t6821Live(t)
+	var rows []hubRelayInjectEvent
+	for i := 0; i < 3; i++ {
+		rows = append(rows, rig.send(t3431Worker))
+	}
+	frame := func(kind string, payload any) []byte {
+		raw, _ := json.Marshal(payload)
+		wire, _ := json.Marshal(map[string]any{"type": "event", "kind": kind, "payload": json.RawMessage(raw)})
+		return wire
+	}
+	var wg sync.WaitGroup
+	for _, d := range rows {
+		report := frame("relay.unconfirmed", relayAckPayload{JobID: d.JobID, Pane: d.Pane, OriginalEventID: d.EventID, Reason: t6820Maybe.report})
+		drop := frame("relay.dropped", relayDroppedPayload{JobID: d.JobID, Pane: d.Pane, Lane: d.Lane, OriginalEventID: d.EventID, Reason: t6820Maybe.drop, Harness: t6820Maybe.harness})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rig.hub.handleAgentMessage("host-a", "fixture", rig.dest, report)
+			rig.hub.handleAgentMessage("host-a", "fixture", rig.dest, drop)
+		}()
+	}
+	wg.Wait()
 
-	r1 := rig.relayRow()
-	concurrent := []relayDroppedPayload{rig.relayRow(), rig.relayRow()}
-	var wires [][]byte
-	for _, dropped := range concurrent {
-		payload, _ := json.Marshal(dropped)
-		wire, _ := json.Marshal(map[string]any{"type": "event", "kind": "relay.dropped", "payload": json.RawMessage(payload)})
-		wires = append(wires, wire)
+	got := rig.one(0)
+	if t3431FoldCount(got) != len(rows)-1 || len(rig.incidents()) != 1 {
+		t.Fatalf("%d concurrent rows, the notice counts %d more, incidents %+v: %q", len(rows), t3431FoldCount(got), rig.incidents(), got)
 	}
-	rig.storeStatus(http.StatusInternalServerError)
-	rig.onFirstNoticePost(func() {
-		rig.storeStatus(http.StatusCreated)
-		var wg sync.WaitGroup
-		for _, wire := range wires {
-			wg.Add(1)
-			go func(wire []byte) {
-				defer wg.Done()
-				rig.hub.handleAgentMessage("host-a", "fixture", rig.dest, wire)
-			}(wire)
-		}
-		wg.Wait()
-		rig.markDelivered(r1.OriginalEventID)
-	})
-	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
-	eventually(t, 5*time.Second, "R1's retry to read its row again", func() bool { return rig.rowReads(r1.OriginalEventID) >= 2 })
-
-	sent := rig.notices()
-	told := 0
-	for _, dropped := range concurrent {
-		told += len(t3431NoticeFor(sent, dropped.OriginalEventID))
-	}
-	if told == 0 {
-		t.Fatalf("both drops made while a post was in flight were lost: %+v", sent)
-	}
-
-	rig.clock.set(first.Add(31 * time.Minute))
-	row, _ := rig.drop()
-	got := t3431NoticeFor(rig.notices(), row)
-	if len(got) != 1 {
-		t.Fatalf("the drop after the window sent %d notices, want 1", len(got))
-	}
-	if folded := t3431FoldCount(got[0].Text); told+folded != len(concurrent) {
-		t.Fatalf("%d drops were sent and %d named as folded, want %d in all: %q", told, folded, len(concurrent), got[0].Text)
-	}
+	rig.none(31 * time.Minute)
 }
 
-// Under a persistent 4xx every notice is refused and every drop is folded.
-// The window tracks at most 64 rows and counts the rest, and the next stored
-// notice still names them all.
+// Under a persistent 4xx nothing is told and every row waits; the first stored
+// notice names them all.
 func TestUnconfirmedNoticeFoldsBoundedUnderRefusal_t3431(t *testing.T) {
-	rig := t3431LiveRig(t)
+	rig := t6821Live(t)
 	first := rig.clock.Now()
-
 	const drops = 70
-	var rows []relayDroppedPayload
+	var rows []hubRelayInjectEvent
 	for i := 0; i < drops; i++ {
-		rows = append(rows, rig.relayRow())
+		rows = append(rows, rig.send(t3431Worker))
 	}
-	rig.storeStatus(http.StatusBadRequest)
-	for _, dropped := range rows {
-		t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", dropped)
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = t3431Design
+	rig.fake.mu.Unlock()
+	for _, d := range rows {
+		rig.report(d, t6820Maybe)
 	}
-	if got := rig.notices(); len(got) != 0 {
-		t.Fatalf("a refused notice reached the owner lane: %+v", got)
-	}
-	rig.hub.unconfirmedNotices.mu.Lock()
-	tracked := len(rig.hub.unconfirmedNotices.byLanes[[2]string{t3431Design, t3431Worker}].folded)
-	rig.hub.unconfirmedNotices.mu.Unlock()
-	if tracked > 64 {
-		t.Fatalf("the window tracks %d folded rows under a persistent 4xx, want at most 64", tracked)
-	}
+	rig.none(0)
+	rig.none(0)
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = ""
+	rig.fake.mu.Unlock()
 
-	rig.storeStatus(http.StatusCreated)
-	row, _ := rig.drop()
-	got := rig.notices()
-	suffix := fmt.Sprintf("(+%d more unconfirmed for this lane since %s UTC)", drops, first.Format("15:04"))
-	if len(got) != 1 || !strings.HasSuffix(got[0].Text, t3431TodayText(row, fmt.Sprintf("mergewake-findings-%d", drops+1))+" "+suffix) {
-		t.Fatalf("the notice after the refusals does not name all %d (want suffix %q): %+v", drops, suffix, got)
+	got := rig.one(15 * time.Minute)
+	if !strings.Contains(got, fmt.Sprintf("(+%d more unconfirmed for this host since %s UTC)", drops-1, first.Format("15:04"))) {
+		t.Fatalf("the notice after the refusals does not name all %d: %q", drops, got)
 	}
 }

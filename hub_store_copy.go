@@ -55,6 +55,19 @@ var storeCopyOlderSourceTables = map[string]bool{
 	"delivery_notice_slots": true, "delivery_reconciler_state": true,
 }
 
+// storeCopyOlderSourceColumns are columns a source's table may lack: a store
+// written before them has no value to copy, and the target keeps the column's
+// default. The notice columns came with hk 6821.
+var storeCopyOlderSourceColumns = map[string][]string{"delivery_obligations": {"notice_due_at", "told_at"}}
+
+// storeCopyColumnsFrom is the target's columns of table less the ones an older
+// source lacks. Any other difference stays, and refuses the copy.
+func storeCopyColumnsFrom(table string, target, source []string) []string {
+	return slices.DeleteFunc(slices.Clone(target), func(column string) bool {
+		return slices.Contains(storeCopyOlderSourceColumns[table], column) && !slices.Contains(source, column)
+	})
+}
+
 // storeCopySequenceColumns names, for each table whose ids the database hands
 // out, that column: it orders as a number, and the target's sequence must pass
 // the copied and the source's high-water ids.
@@ -263,8 +276,11 @@ func copyHubStore(ctx context.Context, from, to, selection string, verify, repla
 		if err != nil {
 			return hubDatabaseError("source columns "+table.name, err)
 		}
-		if sourceColumns != nil && !storeCopySameColumns(columns, sourceColumns) {
-			return fmt.Errorf("%s: source and target columns differ", table.name)
+		if sourceColumns != nil {
+			columns = storeCopyColumnsFrom(table.name, columns, sourceColumns)
+			if !storeCopySameColumns(columns, sourceColumns) {
+				return fmt.Errorf("%s: source and target columns differ", table.name)
+			}
 		}
 		if !verify {
 			if _, err = target.ExecContext(ctx, "DELETE FROM "+table.name); err != nil {

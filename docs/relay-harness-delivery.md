@@ -92,7 +92,7 @@ row is dropped only when:
 - the `relay.cmd_hold_max` ceiling passes, counted from when the row was held
   (default 24h; set it on the node with `PANEWIRE_RELAY_CMD_HOLD_MAX`, a Go
   duration; a ceiling below the policy wait also caps the first wait). Then the row is dropped as `working_wait_expired`, the design lane
-  is told once (see below), and the durable row stays undelivered.
+  hears of it (see "Escalation"), and the durable row stays undelivered.
 
 A cmd pane stuck at `working` (hk 3517): cmd reports its own lifecycle to herdr
 and sometimes never sends the report that ends a turn, so herdr keeps `working` for hours after the final answer
@@ -318,47 +318,109 @@ The internal verdict `maybe_in_pane` is not the terminal inbox reason.
 and no text was sent. `delivery_uncertain_check_pane` means delivery could not
 be proven; inspect the pane before resending. Both appear in inbox status.
 
-When a node drops an event as `inject_failed_max_attempts`,
-`maybe_in_pane`, `pane_read_failed`, `delivery_uncertain_check_pane` or `working_wait_expired`, the hub tells the job's design lane once. A handoffkeep outage
-while the hub reads the row or writes the escalation is retried (2 s, 10 s,
-1 min, 5 min) until the escalation is durable. The design lane is
-the parent of the worker lane's route (the lane `job.escalate` already reaches),
-else the owner lane of the live job that runs in that lane. The escalation is
-an `automation-failed` lane event with producer id
-`delivery-unconfirmed-<durable event id>`; its text carries the durable event
-id, the producer's event id, the worker lane, the node and pane, and the
-reason. The id is fixed by the row, so a second drop of the same row (a replay
-that also fails) is answered by the durable idempotency and sends nothing. An
-event that is itself such an escalation never escalates again, and a lane with
-no design lane is only logged.
+When a delivery of a producer's `lane.event` stays unproven, the hub tells the
+job's design lane: **one per host fault per incident** (hk 3276, hk 3431,
+hk 6821). The design lane is the parent of the worker lane's route (the lane
+`job.escalate` already reaches), else the owner lane of the live job that runs
+in that lane. The notice is an `automation-failed` lane event; its text names
+one durable event id, the producer's event id, the worker lane, the node and
+pane, and the fault, and counts the other rows it speaks for. A `job.*` row, an
+idle-wake report, an unconfirmed marker, and a notice that is itself lost never
+start one, and a lane with no design lane is only logged.
 
-hk 3431: the escalation goes out only when someone can act on it, and at most
-once per window. The hub logs one INFO line (event id, lane, reason, `why`)
-instead of sending when every hub job in the worker lane is completed or
-orphaned (`why=job_ended`), or when the hk task of every live job there is in
-an ended state (`why=task_ended`). A task is ended when hk's category is
-`completed` or `canceled`, or, if the record has no category, when its state
-is `merged`, `deployed`, `done`, `dropped` or `canceled`. The hub reads the job
-record and the task through the client that hub-placed spawns use. The
-escalation still goes out when the record or task cannot be read, when a live
-job has no task, or when the hub knows no job in the lane. The last case covers
-a hub restart, which forgets ended jobs. For a live job, the hub sends at most
-one escalation per (design lane, worker lane) every 30 minutes, and sends the
-first one at once. The window starts only when handoffkeep stores an
-escalation, as a new row or as a retry that answers duplicate; nothing holds
-the window before that. A later drop inside the window is logged
-(`why=folded`) and counted. The next escalation after the window ends with
-`(+N more unconfirmed for this lane since HH:MM UTC)`, where `HH:MM` is the
-earliest counted drop; storing it clears the drops it names, and drops counted
-while it was in flight stay counted. An escalation handoffkeep never stores
-(every retry gives up, handoffkeep refuses it, or a retry stops early because
-the row was delivered or its job ended) records nothing, so the next drop is
-sent at once; a refused or given-up drop is counted. Two drops at the same
-moment can both be sent: one extra escalation is accepted, a lost one is not.
-A window tracks at most 64 counted rows and only counts the rest. A counted
-row dropped again after the window is sent like any other drop and does not
-count itself. The window is kept in memory only, so a hub restart resets it
-and the first drop after a restart is sent at once.
+The incidents live in the hub's inbox store
+([r20-relay-persistence.md](r20-relay-persistence.md), "Incidents and
+notices"). A hub with no store is [the exception](#a-hub-with-no-inbox-store).
+
+### When a row is told
+
+| Fault of the row | Told |
+|---|---|
+| `maybe_in_pane`, `delivery_uncertain_check_pane`, `unproven` | at the node's first report, or at the drop that settles a `prompt_failed` or unproven pane read as maybe typed |
+| `ack_timeout`, `pane_read_failed`, `inject_failed_max_attempts` | when the retries end and the row is exhausted |
+| `working_wait_expired` | when the row is exhausted, which is the first pass after its drop |
+| `unconfirmed` (a spent copy an older build retired) | when the pass exhausts it |
+| `unrouted`, `job_ended` | never |
+
+A row is told once: after a notice covers it, nothing it does later makes it
+due again. A row confirmed before its notice is stored is not told. A drop for
+a row that has no ack window and no recorded fault -- one the node held across a
+hub restart -- makes the row due at once, as the drop reports it, and changes no
+retry.
+
+A released digest batch's row is settled, not exhausted, so a safe fault on one
+is not told; a maybe-typed one still is.
+
+### Incidents
+
+Rows due for one `(design lane, machine, fault)` are the members of one open
+incident; the harness the node reports for the pane is text on it. A second
+worker lane on the same host with the same fault joins the same incident.
+
+- The obligation pass posts the notice, so it goes out on the next maintenance
+  sweep (within about 10 s).
+- A key's notices are at least 30 minutes apart. The first goes at once; rows
+  that join inside the window are logged (`why=folded`) and wait. Once the
+  window ends, the next pass posts one notice naming the row that has waited
+  longest, ending `(+N more unconfirmed for this host since HH:MM UTC)`, where
+  `HH:MM` is when that row became due. With no row waiting, nothing is sent.
+- The window belongs to the key, not the incident: closing an incident and
+  opening another does not shorten it. It is stored, so a restart keeps it.
+- The notice, the window and the rows it told are committed only once the
+  notice is durable (a handoffkeep row, or the design lane's inbox item). A
+  post that fails, is refused, or finds only an in-flight claim commits nothing:
+  the incident stays open and the same notice is posted again after 10 s, 1 min,
+  5 min and then every 15 min, with whatever has joined, until it is stored. A
+  restart posts at once.
+- The producer id is `delivery-unconfirmed-i<incident>-n<announced>`: fixed
+  until a notice is committed, so a repeat of a post whose reply was lost is
+  answered as a duplicate. A duplicate takes the window and tells no row, since
+  its stored text is the earlier post's; the next notice names the rows. One
+  extra notice is accepted, a lost one is not.
+
+### Only when someone can act
+
+The hub logs one INFO line (event id, lane, reason, `why`) instead of telling a
+row when every hub job in its worker lane is completed or orphaned
+(`why=job_ended`), or when the hk task of every live job there is in an ended
+state (`why=task_ended`). A task is ended when hk's category is `completed` or
+`canceled`, or, if the record has no category, when its state is `merged`,
+`deployed`, `done`, `dropped` or `canceled`. The hub reads the job record and
+the task through the client that hub-placed spawns use. The row is still told
+when the record or task cannot be read, when a live job has no task, or when the
+hub knows no job in the lane. The last case covers a hub restart, which forgets
+ended jobs. The check runs when the row joins an incident and again before a
+notice names it, so an ended lane is never named.
+
+When the spawn's `--owner-notify` mode withholds the notice (hk 5360), the row
+is counted once under `unconfirmed:<event id>` in the daily loops row, marked
+told, and never sent; it takes no window. The mode is looked up by the row's own
+job id.
+
+### How an incident ends
+
+| Close reason | When |
+|---|---|
+| `recovered` | a member's own delivery was confirmed; a delivery of any other row, the same pane included, says nothing about this fault |
+| `all-terminal` | every member is confirmed or settled |
+| `moot` | every member still open or waiting is in a lane with nobody to act |
+| `quiet` | no member faulted, and none joined, for 60 minutes, and none is waiting to be told |
+
+A closed incident's members leave it: a `noticed` row is `exhausted` again, and
+a row still waiting to be told joins the key's next incident. Nothing is
+hidden: the obligation, the handoffkeep row and `relay.lane_stalled` remain.
+
+### A hub with no inbox store
+
+With `--delivery-policy off`, or no store, the hub keeps no obligations and so
+no incidents. It tells the design lane from the node's drop
+(`inject_failed_max_attempts`, `maybe_in_pane`, `pane_read_failed`,
+`delivery_uncertain_check_pane` or `working_wait_expired`), as before hk 6821:
+the producer id is `delivery-unconfirmed-<durable event id>`, a failed write is
+retried after 2 s, 10 s, 1 min and 5 min, and one notice per (design lane,
+worker lane) every 30 minutes counts the drops folded since, `(+N more
+unconfirmed for this lane since HH:MM UTC)`. That window and those retries are
+memory only: a restart forgets them. The same skip rules apply.
 
 The hub's own one-labelled-replay after a restart
 ([#1002](r27-busy-relay.md)) is unchanged and is not an escalation.
@@ -380,5 +442,9 @@ and the idle re-delivery of a `working_wait_expired` row; `prompt_cmd_t3330_test
 transport; `relay_cmd_wrapped_return_t3419_test.go` pins the return gate on a
 wrapped composer, a draft or second nonce beside it, and a late-drawn text.
 `relay_unconfirmed_quiet_t3431_test.go` pins the quiet escalation for an ended
-job or task, the fail-open reads, the 30-minute window, the escalations that
-are never stored, concurrent drops and the bound on counted rows.
+job or task, the fail-open reads, the 30-minute window, the notices that are
+never stored and concurrent drops; `delivery_incident_t6821_test.go` pins the
+incidents, their window across closes and restarts, the closes, the timing per
+fault and the withheld notice, and `delivery_incident_store_t6821_test.go` the
+store on all three backends. `relay_unconfirmed_quiet_legacy_t3431_test.go`
+pins the hub with no inbox store.

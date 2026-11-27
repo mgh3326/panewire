@@ -1124,6 +1124,7 @@ func (h *HubServer) markRelayEventDeliveredContext(ctx context.Context, pending 
 		h.logger.Warn("relay delivery was not recorded", attrs...)
 		return false
 	}
+	h.noteIncidentDelivery(ctx, pending.eventID)
 	h.observeRelayDelivered(pending)
 	return true
 }

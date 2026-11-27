@@ -18,7 +18,9 @@ var obligationRetryBackoff = [...]time.Duration{time.Minute, 5 * time.Minute, 15
 // Repeated reports for the same window leave the schedule alone. Only claiming
 // a copy advances the retry budget. The fault changes as
 // obligationFaultReplaces says, on an exhausted row too: a working expiry that
-// ends the last budget copy still earns the revive.
+// ends the last budget copy still earns the revive. A fault that replaces the
+// stored one also records where it happened, and a maybe-typed report makes the
+// row due a notice (noticedAtReport).
 func (s *laneInboxStore) flagObligationRetry(parent context.Context, o newDeliveryObligation, fault, marker string, now time.Time) error {
 	if err := s.createObligation(parent, o, now, now); err != nil {
 		return err
@@ -28,19 +30,35 @@ func (s *laneInboxStore) flagObligationRetry(parent context.Context, o newDelive
 	where, keys := s.eventKeyPredicate(o.key)
 	replace, replaced := obligationFaultReplaces(fault)
 	at := now.UnixMilli()
+	// A fault that names a destination records it: the incident is keyed on the
+	// machine the fault happened on, which a later route may not be.
+	var destination string
+	var destined []any
+	if o.machine != "" {
+		destination = `machine=CASE WHEN ` + replace + ` THEN ? ELSE machine END,
+		    pane=CASE WHEN ` + replace + ` THEN ? ELSE pane END,`
+		destined = slices.Concat(replaced, []any{utf8PrefixWithin(o.machine, 255)}, replaced, []any{utf8PrefixWithin(o.pane, 255)})
+	}
 	// fault is assigned after every CASE that reads it: MySQL reads an assigned
 	// column's new value.
-	args := slices.Concat([]any{o.attempts, o.attempts, o.attempts, o.attempts, at}, replaced, []any{at, at}, replaced, []any{fault, marker}, keys)
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
+	args := slices.Concat([]any{o.attempts, o.attempts, o.attempts, o.attempts, at}, replaced, []any{at, at},
+		destined, replaced, []any{fault, marker}, keys)
+	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
 		SET spent=CASE WHEN fault='' AND spent<? THEN ? ELSE spent END,
 		    attempts_seen=CASE WHEN fault='' AND attempts_seen<? THEN ? ELSE attempts_seen END,
 		    next_at=CASE WHEN fault='' THEN ? ELSE next_at END,
 		    last_fault_at=CASE WHEN `+replace+` THEN ? ELSE last_fault_at END,
 		    updated_at=CASE WHEN fault='' THEN ? ELSE updated_at END,
+		    `+destination+`
 		    fault=CASE WHEN `+replace+` THEN ? ELSE fault END,
 		    marker_event_id=CASE WHEN marker_event_id='' THEN ? ELSE marker_event_id END
-		WHERE `+obligationOpen+` AND `+where), args...)
-	return err
+		WHERE `+obligationOpen+` AND `+where), args...); err != nil {
+		return err
+	}
+	if !noticedAtReport(fault) {
+		return nil
+	}
+	return s.markNoticeDue(parent, fault, now, where, keys...)
 }
 
 // retryOwnerOf returns the fault scheduled on the key's obligation, if one

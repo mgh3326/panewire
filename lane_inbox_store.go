@@ -289,6 +289,10 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
+	if err := addDeliveryNoticeColumns(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	store := newLaneInboxStore(db, dialectSQLite)
 	if err := store.seedDeliveryReconcilerState(ctx); err != nil {
 		store.close()

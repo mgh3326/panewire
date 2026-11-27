@@ -136,6 +136,15 @@ func obligationFaultReplaces(fault string) (condition string, args []any) {
 	return "fault IN (" + strings.TrimSuffix(strings.Repeat("?,", len(replaced)), ",") + ")", args
 }
 
+// noticedAtReport reports whether a design lane is told of fault at its first
+// report: the node has said the text may be in the pane. A prompt_failed or
+// unproven pane read report is not yet its last word; the drop that settles it
+// decides (noteObligationDrop). Every other noticed fault waits for the row to
+// be exhausted.
+func noticedAtReport(fault string) bool {
+	return fault == relayDroppedMaybeInPane || fault == relayDroppedCheckPane || fault == obligationFaultUnproven
+}
+
 // retriesDone reports whether no further budget copy of a row of kind is owed.
 // A revived copy is not a budget retry (revivable).
 func (o openObligation) retriesDone(kind string) bool {
@@ -158,7 +167,9 @@ func (o openObligation) retriesDone(kind string) bool {
 // delivery, to a fault the obligation already has. The report ahead of it has
 // usually retired the ack window, so this is where a working expiry after a
 // held retry, and the outcome of an unproven pane read, are learned. A row with
-// no fault yet takes its first one from the ack window.
+// no fault yet takes its first one from the ack window; one with neither -- a
+// row the node held across a hub restart -- is only made due a notice
+// (noteOrphanedDrop).
 func (h *HubServer) noteObligationDrop(ctx context.Context, machine string, dropped relayDroppedPayload) {
 	if h.inbox == nil || dropped.OriginalEventID < 1 || !relayDroppedIsUnconfirmed(dropped.Reason) && dropped.Reason != relayDroppedJobEnded {
 		return
@@ -173,20 +184,86 @@ func (h *HubServer) noteObligationDrop(ctx context.Context, machine string, drop
 		h.logger.Warn("relay drop was not recorded on its obligation", "event_id", dropped.OriginalEventID, "reason", dropped.Reason, "error", store.loggable("drop fault", err))
 		return
 	}
+	if relayDroppedIsUnconfirmed(dropped.Reason) && !h.relayWindowOpen(dropped.OriginalEventID, dropped.JobID) {
+		h.noteOrphanedDrop(ctx, machine, current, dropped)
+	}
 	if due {
 		h.startObligationReconcile()
 	}
 }
 
-// noteObligationDrop reports whether an untaken revive of the row was made due:
-// the drop ends the node's hold, which is what kept the pass from queueing it.
-func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int64, lane, machine string, current bool, reason, harness string, now time.Time) (bool, error) {
+func (h *HubServer) relayWindowOpen(eventID int64, jobID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, open := h.relayControl.relayPending[relayPendingKey(eventID, jobID)]
+	return open
+}
+
+// noteOrphanedDrop makes a row due a notice on a drop nothing else will follow
+// up: it has no ack window and no fault, so no retry or exhaustion will come.
+// The design lane is told from the drop, as it was before there were
+// incidents; the row's fault and retry schedule are left alone.
+func (h *HubServer) noteOrphanedDrop(ctx context.Context, machine string, current bool, dropped relayDroppedPayload) {
+	store := h.inbox.store
+	fault := obligationDropFault(dropped.Reason, dropped.Harness)
+	tracked, err := store.trackedRow(ctx, dropped.OriginalEventID)
+	if err == nil && !tracked && h.handoffkeep != nil {
+		// The row's obligation was never written and adoption has not reached
+		// it; the drop is not sent again.
+		readCtx, cancel := context.WithTimeout(ctx, nodeLoopHKTimeout)
+		defer cancel()
+		record, found, readErr := h.handoffkeep.relayEvent(readCtx, dropped.OriginalEventID)
+		if readErr != nil {
+			h.logger.Warn("orphaned relay drop was not recorded; its row could not be read", "event_id", dropped.OriginalEventID, "reason", dropped.Reason, "error_class", hubHKReadErrorClass(readErr))
+			return
+		}
+		if o, adoptable := adoptableObligation(record); found && adoptable {
+			now := h.now().UTC()
+			err = store.createObligation(ctx, o, now, now.Add(obligationFirstCheck))
+		}
+	}
+	if err == nil {
+		err = store.markOrphanedDropDue(ctx, dropped.OriginalEventID, dropped.Lane, machine, current, fault, h.now().UTC())
+	}
+	if err != nil {
+		h.logger.Warn("orphaned relay drop was not recorded on its obligation", "event_id", dropped.OriginalEventID, "reason", dropped.Reason, "error", store.loggable("orphaned drop", err))
+	}
+}
+
+func (s *laneInboxStore) trackedRow(parent context.Context, relayID int64) (bool, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	where, keys := "relay_id=? AND lane=? AND fault<>'' AND "+obligationOpen, []any{relayID, lane}
+	var n int
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM delivery_obligations WHERE relay_id=?`), relayID).Scan(&n)
+	return n > 0, err
+}
+
+// dropScope is the predicate of the obligations a node's drop speaks for: the
+// row's, for its lane, and only one recorded on that machine when the lane no
+// longer routes there.
+func dropScope(relayID int64, lane, machine string, current bool) (where string, keys []any) {
+	where, keys = "relay_id=? AND lane=?", []any{relayID, lane}
 	if !current {
 		where, keys = where+" AND machine=?", append(keys, machine)
 	}
+	return where, keys
+}
+
+// markOrphanedDropDue makes the row with no fault due a notice of fault.
+func (s *laneInboxStore) markOrphanedDropDue(parent context.Context, relayID int64, lane, machine string, current bool, fault string, now time.Time) error {
+	where, keys := dropScope(relayID, lane, machine, current)
+	return s.markNoticeDue(parent, fault, now, "fault='' AND "+where, keys...)
+}
+
+// noteObligationDrop reports whether an untaken revive of the row was made due:
+// the drop ends the node's hold, which is what kept the pass from queueing it.
+// A maybe-typed drop makes the row due a notice, and job_ended ends any notice
+// the row awaits.
+func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int64, lane, machine string, current bool, reason, harness string, now time.Time) (bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	scope, keys := dropScope(relayID, lane, machine, current)
+	where := "fault<>'' AND " + obligationOpen + " AND " + scope
 	fault := obligationDropFault(reason, harness)
 	replace, replaced := obligationDropReplaces(fault, harness)
 	// fault is assigned last: MySQL reads an assigned column's new value.
@@ -196,6 +273,16 @@ func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int6
 		    fault=CASE WHEN `+replace+` THEN ? ELSE fault END
 		WHERE `+where), args...); err != nil {
 		return false, err
+	}
+	switch {
+	case noticedAtReport(fault):
+		if err := s.markNoticeDue(parent, fault, now, where, keys...); err != nil {
+			return false, err
+		}
+	case fault == relayDroppedJobEnded:
+		if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET notice_due_at=0 WHERE `+where), keys...); err != nil {
+			return false, err
+		}
 	}
 	result, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET next_at=0 WHERE revive_requested>0 AND revived=0 AND `+where), keys...)
 	if err != nil {

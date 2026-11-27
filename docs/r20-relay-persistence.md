@@ -311,14 +311,15 @@ delivery (hk 4289, step T1: hk 6384). It lives in the hub store, beside
 `lane_inbox`, and shares the inbox item's `event_key` and `relay_id`. The
 handoffkeep row stays the record of the event and of its delivery.
 
-Four tables, with the same columns on SQLite, Postgres (migration 0040) and
-MySQL (migrations 0033-0036):
+Four tables, with the same columns on SQLite, Postgres (migrations 0040 and
+0043) and MySQL (migrations 0033-0036 and 0039):
 
 | Table | Holds |
 |---|---|
 | `delivery_obligations` | one row per tracked event: state, destination, settlement reason, next read |
 | `delivery_reconciler_state` | the one row with the adopt cursor, seeded when the store opens |
-| `delivery_incidents`, `delivery_notice_slots` | nothing yet; later steps of hk 4289 write them |
+| `delivery_incidents` | one row per notice episode: its key, members, announced count, last notice and close reason ("Incidents and notices") |
+| `delivery_notice_slots` | when each (design lane, machine, fault) was last told, kept across incidents |
 
 `panewire hub store-copy` carries all four. Nothing prunes or deletes their
 rows.
@@ -336,7 +337,8 @@ rows.
 ### The pass
 
 Each maintenance sweep starts one pass in the background, unless one is still
-running. A pass has 30 seconds and does two things.
+running. A pass has 30 seconds to adopt and classify, and 30 more for the
+incidents that follow ("Incidents and notices").
 
 **Adopt** creates missing obligations. It reads at most 3 pages of 200 rows of
 the undelivered listing, resumes at the stored cursor, and returns to the start
@@ -375,7 +377,8 @@ holds applies:
 A new obligation is first read after 30 seconds. An owed one is read again after
 a tenth of its age, at least a minute and at most an hour; an exhausted or
 missing one after 4 hours. A failed read is retried after a minute. A requested
-revive is read by the next pass, ahead of the other due rows.
+revive is read by the next pass, ahead of the other due rows, and so is an
+incident member whose delivery the hub just recorded.
 
 An owed row with a scheduled fault uses its durable `spent` and `next_at` for
 the retry budget and backoff. A pre-upgrade row retired as
@@ -430,6 +433,43 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
   pane vanished.
 - Exhausted is not settled: the obligation and the handoffkeep row stay open,
   and a late delivery still confirms them.
+
+### Incidents and notices
+
+hk 4289 T4 (hk 6821). Which rows the design lane is told of, and when, is in
+[relay-harness-delivery.md](relay-harness-delivery.md), "Escalation". Migration
+0043 (MySQL 0039, and an `ALTER TABLE` at open on SQLite) adds to
+`delivery_obligations`:
+
+| Column | Holds |
+|---|---|
+| `notice_due_at` | when the row got a fault no notice has covered; 0 when there is nothing to tell |
+| `told_at` | when a stored or withheld notice covered the row, which never becomes due again |
+| `fault_reason` | the fault a due row's notice reports |
+
+- A row becomes due in the same write as the change that makes it so: a
+  maybe-typed report or drop, or the exhaustion of an owed row. An orphaned
+  drop makes a row with no fault due. A report that replaces the fault also
+  records its machine and pane, which key the incident.
+- Closing an obligation clears its due notice, except a `digest-not-replayed`
+  settlement, whose row may still be waiting to be told.
+- The pass joins at most 50 due rows to incidents, then for each open incident
+  posts its notice if one is due, then closes it if it has ended. The join
+  opens the key's incident if it has none (`open_slot`), and an exhausted
+  member becomes `noticed`. An incident id starts at the clock in
+  milliseconds, so a hub on a new store does not reuse a notice id handoffkeep
+  already holds.
+- A stored notice commits `announced`, `notice_at`, `notice_relay_id` (0 when
+  the notice was filed in an inbox), the key's slot and the rows it told in one
+  transaction.
+- A close sets `open_slot` to NULL and detaches the members (`incident_id` 0,
+  `noticed` back to `exhausted`). A `moot` close also clears their due notices.
+- `hub store-copy` reads a source without the two new columns as having
+  nothing due.
+
+Rolling back to a build without incidents is safe: it ignores the columns and
+the incident tables, and tells design lanes from the drop again. A row either
+build told may be told once more.
 
 ## The relay kind set
 
