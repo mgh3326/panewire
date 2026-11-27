@@ -346,17 +346,27 @@ func (h *HubServer) replayLegacyUnconfirmed(ctx context.Context, record handoffk
 // exhausted, or gone, the mark has no work left and retires with the other
 // replay-retired rows.
 func (h *HubServer) settleUnconfirmedMarker(ctx context.Context, marker handoffkeepRelayEvent) {
-	origin := unconfirmedMarkOriginID(marker.EventID)
-	if origin > 0 {
-		record, found, err := h.handoffkeep.relayEvent(ctx, origin)
-		switch {
-		case err != nil:
-			return // a transient read failure keeps the mark for the next pass
-		case found && record.DeliveredAt == "" && record.Attempts < relayReplayMaxAttempts:
-			return // still pending its one replay
-		}
+	spent, err := h.unconfirmedOriginSpent(ctx, marker.EventID)
+	if err != nil || !spent {
+		return // a transient read failure, or a row still pending its one replay, keeps the mark
 	}
 	h.retireRelayReplay(marker, relayUnconfirmedMarkRetireReason)
+}
+
+// unconfirmedOriginSpent reports whether the row a marker names has no replay
+// left: it is gone, delivered or retired, or out of attempts. The obligation
+// path and the replay walk both retire a marker by this rule. A read error is
+// returned so the caller keeps the marker.
+func (h *HubServer) unconfirmedOriginSpent(ctx context.Context, markerID string) (bool, error) {
+	origin := unconfirmedMarkOriginID(markerID)
+	if origin == 0 {
+		return true, nil
+	}
+	record, found, err := h.handoffkeep.relayEvent(ctx, origin)
+	if err != nil {
+		return false, err
+	}
+	return !found || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || record.Attempts >= relayReplayMaxAttempts, nil
 }
 
 // convertUnconfirmedMarker records the origin's retry without closing an owed

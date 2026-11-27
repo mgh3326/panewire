@@ -316,9 +316,32 @@ func TestUnconfirmedStaleDigestReleasesClaims(t *testing.T) {
 			if len(agent.relays) != 1 {
 				t.Fatalf("fresh escalations = %d, want one after releasing the stale batch's claims", len(agent.relays))
 			}
+			if mode == "legacy-marker" {
+				// hk 7047: a digest settle that a marker links retires the batch's
+				// origin first, as digest-not-replayed, before the marker goes.
+				wantMarkedDigestSettlement(t, h, rig.fake, rig.batch)
+				return
+			}
 			wantUnconfirmedSettlement(t, h, rig.fake, rig.batch, obligationSettledDigest)
 		})
 	}
+}
+
+// wantMarkedDigestSettlement is wantUnconfirmedSettlement for a digest batch
+// whose legacy marker the settle retired: the batch's durable row names the
+// digest-not-replayed retirement, and nothing else.
+func wantMarkedDigestSettlement(t *testing.T, h *HubServer, fake *fakeHandoffkeep, id int64) {
+	t.Helper()
+	const want = relayReplayRetiredMarker + relayDigestNotReplayedRetireReason
+	for _, o := range t6384Obligations(t, h.inbox.store) {
+		if o.RelayID == id {
+			if o.State != obligationSettled || o.SettleReason != obligationSettledDigest || fake.deliveredToFor(id) != want {
+				t.Fatalf("obligation=%+v, durable destination=%q, want %q", o, fake.deliveredToFor(id), want)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing obligation for row %d", id)
 }
 
 func TestUnconfirmedDigestCrossesAgeCutoffDuringReplay(t *testing.T) {
