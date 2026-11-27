@@ -114,6 +114,15 @@ const (
 // then the remaining exit statuses. Codes match ^[a-z0-9_]+$ and are at most 40
 // bytes.
 var spawnRefusals = []spawnRefusal{
+	// hk 6886: the node budget cannot hold the brief's submit window, so this
+	// host's hub_wait is too short (a configuration failure, error level in
+	// Sentry). Its text says "brief", so it must win over the broad brief row
+	// below. It also comes before every substring row: the launch-used-budget
+	// text wraps the launch's own error, which may carry any other row's words.
+	// It is not in nextHostRefusals (hub_spawn_async.go): the launch runs after
+	// the job claim, so spawnStageBeforeJobClaim already keeps a replay on this
+	// host.
+	{match: "SUBMIT_WINDOW_UNAVAILABLE", code: "submit_window", hint: "Raise hub_wait for the executing host in its hosts config so the node budget holds the launch, the brief and its submit window, then replay the same command; no brief was sent."},
 	// A full quota at the node's gate (hk 5358). The hub moves an automatic
 	// request on to its next candidate; the refusal reaches the requester only
 	// when none is left, or for a pinned profile. The text names the gate's own

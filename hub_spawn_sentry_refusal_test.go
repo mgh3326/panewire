@@ -76,3 +76,33 @@ func TestSpawnSentryHostFailureKeepsErrorEvent(t *testing.T) {
 		t.Fatalf("spawn_failed event level=%q, want error", event.Level)
 	}
 }
+
+// hk 6886: a node that cannot hold the submit window for its brief is a host
+// configuration failure (raise hub_wait), so its SUBMIT_WINDOW_UNAVAILABLE
+// refusal keeps an error-level Sentry event. The reason is derived the way the
+// node result is, from the refusal text the launch wrote.
+func TestSpawnSentrySubmitWindowRefusalIsErrorEvent(t *testing.T) {
+	h := asyncSpawnHub(t)
+	transport := &spawnSentryTransport{}
+	h.spawnSentry = spawnReasonSentryClient(t, transport)
+	req := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), req, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const exitConfig = 70 // fleet's configuration status
+	// The node writes a fleet refusal into the stderr section with its fix.
+	refusal := "SUBMIT_WINDOW_UNAVAILABLE: launch used the node budget up to the 30s submit window and the 40s reserve; no brief was sent, raise hub_wait for this host (launch error: context deadline exceeded)"
+	node := hubSpawnResult{RC: exitConfig, Error: "spawn_failed", StdoutTail: hubSpawnTailWithStderr("", refusal+"\nFix: raise hub_wait")}
+	result := hubSpawnOutcome{RC: exitConfig, Stage: "claim", Reason: spawnResultReason(node)}
+	if result.Reason != "spawn_failed:submit_window" {
+		t.Fatalf("reason=%q, want spawn_failed:submit_window", result.Reason)
+	}
+	if _, err = h.inbox.store.completeSpawn(t.Context(), task, result, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.recordSpawnTrace(task, result)
+	if event, _ := spawnReasonErrorEvent(t, transport); event.Level != sentry.LevelError {
+		t.Fatalf("submit window refusal event level=%q, want error", event.Level)
+	}
+}
