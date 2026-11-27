@@ -731,8 +731,9 @@ type HubServer struct {
 	// (inbox_design_filter.go).
 	quietTimings designQuietTimings
 
-	// unconfirmedNotices spaces delivery-unconfirmed notices (hk 3431).
-	unconfirmedNotices          unconfirmedNoticeWindows
+	// legacyNotices spaces delivery-unconfirmed notices (hk 3431) on a hub with
+	// no inbox store; with one, the store's incidents do (hk 6821).
+	legacyNotices               legacyNoticeWindows
 	handoffkeep                 *handoffkeepRelayClient
 	unpersistedRelayEvents      uint64
 	replayExhaustedEvents       uint64
@@ -1829,7 +1830,11 @@ func (h *HubServer) handleAgentMessageContext(ctx context.Context, machineID, re
 			if pending.dropReason != "" {
 				go h.expireRelayAckWindow(relayPendingKey(dropped.OriginalEventID, dropped.JobID), pending.armToken)
 			}
-			h.escalateUnconfirmedRelayContext(ctx, machineID, dropped)
+			// With an inbox store the next obligation pass tells the design
+			// lane, from the row's incident.
+			if h.inbox == nil {
+				h.escalateLegacyUnconfirmedRelay(ctx, machineID, dropped)
+			}
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)

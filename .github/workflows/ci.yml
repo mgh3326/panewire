@@ -179,7 +179,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|delivery_obligation|inbox_|hub_inbox|hub_postgres|hub_mysql|hub_database|hub_sql|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_(postgres|mysql)_migrations/'; then
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|delivery_obligation|delivery_incident|inbox_|hub_inbox|hub_postgres|hub_mysql|hub_database|hub_sql|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_(postgres|mysql)_migrations/'; then
             echo "store=true" >> "$GITHUB_OUTPUT"
           else
             echo "store=false" >> "$GITHUB_OUTPUT"
@@ -290,7 +290,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -count=1 -v -run '^TestHubStoreCopy(RoundTrips|MySQLFreshStats|FromOlderSourceWithoutDeliveryTables_t6486|HighWaterSkipsMissingOlderSourceTables_t6507)$' . 2>&1 | tee "$RUNNER_TEMP/store-copy.log"
+          go test -count=1 -v -run '^TestHubStoreCopy(RoundTrips|MySQLFreshStats|FromOlderSourceWithoutDeliveryTables_t6486|HighWaterSkipsMissingOlderSourceTables_t6507|FromOlderSourceWithoutNoticeColumns_t6821)$' . 2>&1 | tee "$RUNNER_TEMP/store-copy.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/store-copy.log"; then
             echo "store copy integration skipped"; exit 1
           fi

@@ -3,8 +3,9 @@ package panewire
 // The hub's side of the delivery obligations (hk 6384, hk 4289 T1;
 // docs/r20-relay-persistence.md, "Delivery obligations"). The relay path
 // creates an obligation once handoffkeep holds the row. A pass that Sweep
-// starts adopts the undelivered rows that have none, then closes obligations
-// from stored facts and retries scheduled unconfirmed deliveries.
+// starts adopts the undelivered rows that have none, closes obligations from
+// stored facts and retries scheduled unconfirmed deliveries, then tells design
+// lanes of the ones that stay unproven (delivery_incident_pass.go).
 
 import (
 	"context"
@@ -32,15 +33,20 @@ const (
 	obligationAdoptPages    = 3
 	obligationAdoptPageSize = handoffkeepReplayLimit
 	// obligationClassifyLimit caps the obligations one pass reads, and
-	// obligationPassBudget the time it takes.
+	// obligationPassBudget the time it takes. The incidents that follow have a
+	// budget of their own, so a slow handoffkeep that spends the first does not
+	// keep the design lanes from hearing of it.
 	obligationClassifyLimit = 50
 	obligationPassBudget    = 30 * time.Second
+	obligationNoticeBudget  = 30 * time.Second
 
 	// obligationSettledInbox and obligationSettledDigest are the settlement
 	// reasons the hub's own store proves; the others come from delivered_to
 	// (settlementReason).
 	obligationSettledInbox  = relayUnconfirmedInboxRetireReason
 	obligationSettledDigest = relayDigestNotReplayedRetireReason
+	// obligationSettledStale is the age retirement (relayReplayRetireReason).
+	obligationSettledStale = "stale"
 )
 
 // relaySinkMachine is the delivered_to machine of a row a sink lane recorded.
@@ -114,6 +120,9 @@ type obligationSweep struct {
 	closing bool
 	// reviveMu orders the idle wakes' revive requests.
 	reviveMu sync.Mutex
+	// noticeWaits spaces the posts of each incident's refused notice. The pass
+	// owns it, under mu.
+	noticeWaits map[int64]noticeWait
 }
 
 func (s *obligationSweep) close() {
@@ -134,18 +143,28 @@ func (h *HubServer) startObligationReconcile() {
 	}
 	go func() {
 		defer h.obligations.mu.Unlock()
-		ctx, cancel := context.WithTimeout(h.laneStallBaseContext(), obligationPassBudget)
-		defer cancel()
-		// Close ends the pass's handoffkeep reads, so it need not wait them out.
-		defer context.AfterFunc(h.closeCtx, cancel)()
+		ctx, done := h.obligationContext(obligationPassBudget)
+		defer done()
 		h.reconcileObligations(ctx)
 	}()
 }
 
-// reconcileObligations is one pass: adopt, then classify.
+// obligationContext bounds one part of a pass. Close ends it, and with it the
+// part's handoffkeep calls, so Close need not wait them out.
+func (h *HubServer) obligationContext(budget time.Duration) (context.Context, func()) {
+	ctx, cancel := context.WithTimeout(h.laneStallBaseContext(), budget)
+	stop := context.AfterFunc(h.closeCtx, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+// reconcileObligations is one pass: adopt and classify within ctx, then the
+// incidents within a budget of their own.
 func (h *HubServer) reconcileObligations(ctx context.Context) {
 	h.adoptObligations(ctx)
 	h.classifyObligations(ctx)
+	notices, done := h.obligationContext(obligationNoticeBudget)
+	defer done()
+	h.runDeliveryIncidents(notices)
 }
 
 // adoptObligations walks a bounded part of handoffkeep's undelivered listing

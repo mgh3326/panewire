@@ -742,9 +742,9 @@ func TestExplicitNowIsNotAnImmediateDirective_t3276(t *testing.T) {
 // escalation is written, so a handoffkeep outage at that moment would otherwise
 // lose it for good; it is retried and, the durable id being fixed, sent once.
 func TestEscalationRetriesUntilDurable_t3276(t *testing.T) {
-	prev := unconfirmedEscalationBackoff
-	unconfirmedEscalationBackoff = []time.Duration{40 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond}
-	t.Cleanup(func() { unconfirmedEscalationBackoff = prev })
+	prev := legacyEscalationBackoff
+	legacyEscalationBackoff = []time.Duration{40 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond}
+	t.Cleanup(func() { legacyEscalationBackoff = prev })
 
 	rig := t3276Start(t)
 	directive := rig.send("ev-outage", "findings", "[mergewake] findings for the worker")

@@ -16,8 +16,8 @@ import (
 )
 
 // The states of delivery_obligations.state. confirmed and settled are final;
-// the open ones are read again. noticed is exhausted plus an open incident,
-// which no build writes yet.
+// the open ones are read again. noticed is exhausted and a member of an open
+// incident (delivery_incident_store.go).
 const (
 	obligationOwed      = "owed"
 	obligationNoticed   = "noticed"
@@ -31,7 +31,8 @@ const (
 const obligationOpen = `state IN ('` + obligationOwed + `','` + obligationNoticed + `','` + obligationExhausted + `')`
 
 // deliveryObligationSchema is SQLite's form of the four tables; Postgres has
-// them in migration 0040 and MySQL in migrations 0033-0036. result_id and
+// them in migrations 0040 and 0044 and MySQL in migrations 0033-0036 and 0041.
+// addDeliveryNoticeColumns adds what 0044 and 0041 add. result_id and
 // open_slot are NULL when unset: every backend keeps NULLs distinct under a
 // plain UNIQUE, and MySQL has no partial indexes.
 var deliveryObligationSchema = []string{
@@ -65,6 +66,19 @@ var deliveryObligationSchema = []string{
 	`CREATE TABLE IF NOT EXISTS delivery_reconciler_state (
  singleton INTEGER PRIMARY KEY CHECK (singleton=1),
  adopt_after_id BIGINT NOT NULL DEFAULT 0, adopt_wrapped_at BIGINT NOT NULL DEFAULT 0)`,
+}
+
+// addDeliveryNoticeColumns brings a SQLite store's obligations to the notice
+// columns of hk 6821; a store from before them keeps its rows, none of which
+// is due a notice. The index follows the columns it names.
+func addDeliveryNoticeColumns(ctx context.Context, db *sql.DB) error {
+	for _, column := range []string{"notice_due_at", "told_at"} {
+		if _, err := addTableColumn(ctx, db, "delivery_obligations", column, "BIGINT NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+	_, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS delivery_obligations_incident ON delivery_obligations(incident_id, notice_due_at)`)
+	return err
 }
 
 // seedDeliveryReconcilerState stores the one reconciler row if it is missing.
@@ -241,21 +255,58 @@ func (s *laneInboxStore) dueObligations(parent context.Context, now time.Time, l
 }
 
 // closeObligation ends an open obligation as confirmed, or as settled for
-// reason.
+// reason. A closed row needs no notice, since its text reached the receiver or
+// no pane takes it, with two exceptions that end the retries unproven. An owed
+// row retired as stale is told of any failure it had. A settled digest batch
+// keeps a due notice: its items go out again under a new batch, and the notice
+// of this one still says a delivery to the lane went unproven.
 func (s *laneInboxStore) closeObligation(parent context.Context, id int64, state, reason string, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET state=?,settle_reason=?,next_at=0,updated_at=? WHERE id=? AND `+obligationOpen), state, utf8PrefixWithin(reason, 64), now.UnixMilli(), id)
+	notice, values := `notice_due_at=0,`, []any{}
+	switch reason {
+	case obligationSettledStale:
+		notice, values = obligationDueWhen(obligationRetriesEnd), []any{now.UnixMilli()}
+	case obligationSettledDigest:
+		notice = ``
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET `+notice+`state=?,settle_reason=?,next_at=0,updated_at=? WHERE id=? AND `+obligationOpen),
+		append(values, state, utf8PrefixWithin(reason, 64), now.UnixMilli(), id)...)
 	return err
 }
 
+// obligationBecomesDue is true of a row about to be exhausted that its design
+// lane is now to be told of: an owed lane.event no notice has covered or
+// already awaits.
+const obligationBecomesDue = `state='` + obligationOwed + `' AND kind='lane.event' AND notice_due_at=0 AND told_at=0`
+
+// obligationRetriesEnd is true of a row whose retries end now with a failure
+// its design lane is to be told of. A row already exhausted ended them earlier,
+// under a build that may have told it, and is not told again.
+const obligationRetriesEnd = obligationBecomesDue + ` AND ` + obligationFailed
+
+// obligationToExhausted is the state an exhausted obligation takes: a row
+// already in an incident is noticed.
+const obligationToExhausted = `state=CASE WHEN state<>'` + obligationOwed + `' THEN state WHEN incident_id>0 THEN '` + obligationNoticed + `' ELSE '` + obligationExhausted + `' END`
+
 // exhaustObligation records that no copy is owed any more and none was proven:
 // an owed obligation becomes exhausted for fault, still open to a later
-// confirmation. A noticed one keeps its state.
+// confirmation, and due a notice unless the fault is one never noticed. A
+// noticed one keeps its state.
 func (s *laneInboxStore) exhaustObligation(parent context.Context, id int64, fault string, now, due time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET state=CASE WHEN state='`+obligationOwed+`' THEN '`+obligationExhausted+`' ELSE state END,fault=?,next_at=?,updated_at=? WHERE id=? AND `+obligationOpen), fault, due.UnixMilli(), now.UnixMilli(), id)
+	notice := int64(0)
+	if fault != obligationFaultUnrouted && fault != relayDroppedJobEnded {
+		notice = now.UnixMilli()
+	}
+	// The notice columns read the state and notice_due_at the row had, so they
+	// are assigned first: MySQL reads an assigned column's new value.
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET
+		fault_reason=CASE WHEN `+obligationBecomesDue+` THEN ? ELSE fault_reason END,
+		notice_due_at=CASE WHEN `+obligationBecomesDue+` THEN ? ELSE notice_due_at END,
+		`+obligationToExhausted+`,fault=?,next_at=?,updated_at=? WHERE id=? AND `+obligationOpen),
+		fault, notice, fault, due.UnixMilli(), now.UnixMilli(), id)
 	return err
 }
 
@@ -274,15 +325,24 @@ func (s *laneInboxStore) deferObservedObligation(parent context.Context, o openO
 }
 
 // exhaustObservedObligation is exhaustObligation for a retry decision: it keeps
-// the fault, and does nothing if the row changed after the caller read it.
+// the fault, and does nothing if the row changed after the caller read it. A row
+// a route loss renamed is told of the failure it had.
 func (s *laneInboxStore) exhaustObservedObligation(parent context.Context, o openObligation, now, due time.Time) error {
-	return s.updateObservedObligation(parent, o, `state=CASE WHEN state='`+obligationOwed+`' THEN '`+obligationExhausted+`' ELSE state END,next_at=?,updated_at=?`, due.UnixMilli(), now.UnixMilli())
+	return s.updateObservedObligation(parent, o, obligationDueWhen(obligationRetriesEnd)+
+		obligationToExhausted+`,next_at=?,updated_at=?`, now.UnixMilli(), due.UnixMilli(), now.UnixMilli())
 }
 
 // markObligationUnrouted names the missing route as the fault of a row the
-// caller found safe to copy, and reads it again at due.
+// caller found safe to copy, and reads it again at due. The fault it replaces is
+// kept in fault_reason, unless a notice is already due; a node's drop makes the
+// row due now, since nothing may ever exhaust it.
 func (s *laneInboxStore) markObligationUnrouted(parent context.Context, o openObligation, now, due time.Time) error {
-	return s.updateObservedObligation(parent, o, `fault=?,next_at=?,updated_at=?`, obligationFaultUnrouted, due.UnixMilli(), now.UnixMilli())
+	// fault is assigned after both CASEs read it, and notice_due_at after the
+	// first does: MySQL reads an assigned column's new value.
+	return s.updateObservedObligation(parent, o, `
+		fault_reason=CASE WHEN notice_due_at=0 AND fault<>'`+obligationFaultUnrouted+`' THEN fault ELSE fault_reason END,
+		notice_due_at=CASE WHEN `+obligationUntold+` AND `+obligationNodeDropped+` THEN ? ELSE notice_due_at END,
+		fault=?,next_at=?,updated_at=?`, now.UnixMilli(), obligationFaultUnrouted, due.UnixMilli(), now.UnixMilli())
 }
 
 // updateObservedObligation applies set to an open obligation that still matches
