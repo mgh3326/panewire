@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/laneevent"
 )
@@ -178,10 +179,12 @@ func TestCompletionMergesWhileReadyDeliveredButUnacked(t *testing.T) {
 
 // A typed, unacked READY is announced again by the inbox wake line, once; a
 // repeat of the completion and a READY that was never typed announce nothing.
-// Mutant: merge silently.
+// Mutants: merge silently; announce on a repeat.
 func TestMergeResurfacesTypedUnackedReady(t *testing.T) {
 	h, agent, _, _ := t6822Hub(t)
 	t6822Typed(t, h, agent, "ready-1")
+	now := time.Now()
+	h.now = func() time.Time { return now }
 	c := t6822Completion(t6822Director, "ready-1", "00001-job.completed.json")
 	h.relayJobCompletionFrom("host-a", c)
 
@@ -190,6 +193,8 @@ func TestMergeResurfacesTypedUnackedReady(t *testing.T) {
 	if len(injected) != 1 || injected[0].Pane != "w1:director" || injected[0].Text != want {
 		t.Fatalf("injected=%+v, want the one wake line %q", injected, want)
 	}
+	// Past the coalescing window, where a second arrival would be typed at once.
+	now = now.Add(h.inbox.policy.Relay.wakeWindow + time.Second)
 	h.relayJobCompletionFrom("host-a", c)
 	if again := t3426Injected(agent); len(again) != 0 {
 		t.Fatalf("a repeat announced again: %+v", again)
@@ -255,15 +260,20 @@ func TestMergedTypedCompletionIsFiledAsReadyRepeat(t *testing.T) {
 // A completion that arrives after the READY was acked is news: it is delivered
 // as before and the READY is untouched. Mutant: always merge.
 func TestCompletionAfterReadyAckIsDelivered(t *testing.T) {
-	for _, settle := range []string{"acked", "superseded"} {
+	// A READY stored before must-ack existed and already read is settled too.
+	for settle, statement := range map[string]string{
+		"acked":                "",
+		"superseded":           `UPDATE lane_inbox SET superseded_at=1 WHERE id=?`,
+		"read before must-ack": `UPDATE lane_inbox SET must_ack=0,read_at=1 WHERE id=?`,
+	} {
 		t.Run(settle, func(t *testing.T) {
 			h, agent, _, _ := t6822Hub(t)
 			ready := t6822FileReady(t, h, agent, t3426Design, "ready-1")
-			if settle == "acked" {
+			if statement == "" {
 				if n, err := h.inbox.store.ack(ready.ID, t3426Design, false, h.now()); err != nil || n != 1 {
 					t.Fatal(n, err)
 				}
-			} else if _, err := h.inbox.store.db.Exec(`UPDATE lane_inbox SET superseded_at=1 WHERE id=?`, ready.ID); err != nil {
+			} else if _, err := h.inbox.store.db.Exec(statement, ready.ID); err != nil {
 				t.Fatal(err)
 			}
 			c := t6822Completion(t3426Design, "ready-1", "00001-job.completed.json")
@@ -382,9 +392,10 @@ func TestTwoReadysOneJobStayDistinct(t *testing.T) {
 func TestCompletionWithoutResultIDUnchanged(t *testing.T) {
 	h, agent, _, _ := t6822Hub(t)
 	t6822FileReady(t, h, agent, t3426Design, "ready-1")
-	progress := t3426Ready(t3426Design, "progress-1")
-	progress.NotifyType, progress.Text = "progress", "hk 3404 pushed"
-	h.relayLaneEvent(progress, agent)
+	// A decision is must-ack and unread, as a READY is, and is still not one.
+	decision := t3426Ready(t3426Design, "decision-1")
+	decision.NotifyType, decision.Text = "decision", "ESC hk 3404 which order"
+	h.relayLaneEvent(decision, agent)
 	t6822FileReady(t, h, agent, "operator-desk", "ready-desk")
 
 	// An older node's frame, through the hub's own decoder.
@@ -397,7 +408,7 @@ func TestCompletionWithoutResultIDUnchanged(t *testing.T) {
 	completions := []hubJobEventPayload{
 		decoded,
 		t6822Completion(t3426Design, "no-such-ready", "00002-job.completed.json"),
-		t6822Completion(t3426Design, "progress-1", "00003-job.completed.json"),
+		t6822Completion(t3426Design, "decision-1", "00003-job.completed.json"),
 		t6822Completion(t3426Design, "ready-desk", "00004-job.completed.json"),
 	}
 	for _, c := range completions {

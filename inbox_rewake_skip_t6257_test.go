@@ -374,7 +374,11 @@ func TestInboxChangeSignalEveryWriterBumps(t *testing.T) {
 			}
 		}, true)
 
-		put(relayLaneEventOutboxKey(lane, "ready-6822"), "inbox", "", "", "ready")
+		readyEvent := quietEvent("ready-6822", "hk 6822 READY")
+		readyEvent.NotifyType = "ready"
+		if _, err := s.put(relayLaneEventOutboxKey(lane, readyEvent.EventID), lane, "lane.event", "inbox", readyEvent, now, 0, 0); err != nil {
+			t.Fatal(err)
+		}
 		completion := hubJobEventPayload{JobID: "job-6822", Epoch: 1, OwnerLane: lane, ResultID: "ready-6822", EventID: "00001-job.completed.json"}
 		moved("mergeCompletion", func() {
 			if _, merge, err := s.mergeCompletion(lane, completion, now); err != nil || merge != completionMerged {

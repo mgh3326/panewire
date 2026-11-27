@@ -90,23 +90,23 @@ func (s *laneInboxStore) mergeCompletion(lane string, completion hubJobEventPayl
 	if err != nil {
 		return none(err)
 	}
-	if item.Lane != lane || item.Kind != "lane.event" || item.Event.NotifyType != "ready" {
+	// The key names a lane.event of this lane; only a READY takes a completion,
+	// not another must-ack type such as a decision.
+	if item.Event.NotifyType != "ready" {
 		return none(nil)
 	}
 	if slices.Contains(item.Event.MergedCompletions, entry) {
 		return item, completionRepeated, nil
-	}
-	if !item.MustAck || item.AckedAt > 0 || item.SupersededAt > 0 {
-		return none(nil)
 	}
 	foldCompletion(&item.Event, completion, entry)
 	raw, err := json.Marshal(item.Event)
 	if err != nil {
 		return none(err)
 	}
-	// The ack and supersede columns are tested again in the write: an ack that
-	// committed since the read must leave the completion to be delivered.
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE lane_inbox SET payload=? WHERE id=? AND acked_at=0 AND superseded_at=0`), string(raw), item.ID)
+	// The write is the one gate: only a READY still owed to the lane (must-ack,
+	// not acked, not superseded) takes the completion. Testing it here, not on
+	// the row read above, also holds against an ack that commits in between.
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE lane_inbox SET payload=? WHERE id=? AND must_ack=1 AND acked_at=0 AND superseded_at=0`), string(raw), item.ID)
 	if err != nil {
 		return none(err)
 	}

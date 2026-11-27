@@ -207,6 +207,56 @@ func TestResultIDAcceptedWhenAdvertised(t *testing.T) {
 	})
 }
 
+// An old node and a new hub, over a real socket: the node's frames are the ones
+// it sends today, the hub acknowledges both, and the lane holds the READY and
+// the completion as two items, as before.
+func TestOldNodeCompletionAgainstNewHub(t *testing.T) {
+	h, err := NewHubServer(HubServerConfig{
+		Tokens:             map[string]string{"operator": "op", "host-a": "node"},
+		ReportRelayPath:    r20LanesFile(t, t3426Lanes),
+		DeliveryPolicyPath: "default",
+		InboxStorePath:     filepath.Join(t.TempDir(), "inbox.sqlite3"),
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: t3426Records, Out: out, Err: errout}, nil
+	}
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+	node := t14NamedNodeToken(t, h, server, "host-a", "node", true, false)
+
+	payload := hubJobCompletionPayloadForJob(HubActiveJob{JobID: t6822Job, Epoch: 1, OwnerLane: t3426Design, Label: t6822Job, Host: "host-a", ReportPath: "report.md", ReportLastLine: "done"}, "00001-job.completed.json", false)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for name := range fields {
+		if !slices.Contains(t6822OldHubCompletionFields, name) {
+			t.Fatalf("fixture frame names %q, which an old node never sends", name)
+		}
+	}
+	for _, event := range []hubClientEvent{
+		{Kind: "lane.event", Payload: json.RawMessage(`{"owner_lane":"` + t3426Design + `","event_id":"old-ready","epoch":1,"notify_type":"ready","text":"[` + t6822Job + `] READY | #12"}`)},
+		{Kind: "job.completed", Payload: payload},
+	} {
+		if err := wsjson.Write(t.Context(), node, hubClientWireEvent(event)); err != nil {
+			t.Fatal(err)
+		}
+		ack := nodeFrameOfType(t, node, "relay.persisted", 10*time.Second)
+		if ack == nil || string(ack["kind"]) != `"`+event.Kind+`"` {
+			t.Fatalf("%s acknowledgement=%s", event.Kind, ack)
+		}
+	}
+	items := t6822Items(t, h, t3426Design)
+	if len(items) != 2 || len(items[0].Event.MergedCompletions)+len(items[1].Event.MergedCompletions) != 0 {
+		t.Fatalf("items=%+v, want the READY and the completion apart", items)
+	}
+}
+
 // `emit --result-id` writes the id into the event file, hands it to the daemon
 // with the id of that file, and the node scan reads it back.
 // Mutants: drop the field on any of the three paths.
@@ -302,13 +352,20 @@ func TestResultIDRefusedWhereItNamesNothing(t *testing.T) {
 	if events := scanHubRelayEvents(inbox); len(events) != 0 {
 		t.Fatalf("a refused emit left a record: %+v", events)
 	}
-	daemon := &Daemon{}
-	for _, request := range []localRequest{
-		{Kind: "job.lost", ResultID: "ready-1"},
-		{Kind: "job.completed", ResultID: "bad\nid"},
+	// Each request is complete, so only its result_id can refuse it; one that
+	// passes reaches the daemon's missing hub client.
+	daemon := &Daemon{cfg: Config{InboxRoot: inbox}}
+	for _, tc := range []struct {
+		kind, id string
+		code     int
+	}{
+		{"job.completed", "ready-1", ExitDaemonUnavailable},
+		{"job.completed", "bad\nid", ExitUsage},
+		{"job.lost", "ready-1", ExitUsage},
 	} {
-		if err := daemon.emitRelayEvent(request); ExitCode(err) != ExitUsage {
-			t.Fatalf("%+v: %v", request, err)
+		request := localRequest{Kind: tc.kind, ResultID: tc.id, JobID: "t6822-bad", Epoch: 1, OwnerLane: "lane-a", ReportPath: "report.md", Reason: "r"}
+		if err := daemon.emitRelayEvent(request); ExitCode(err) != tc.code {
+			t.Fatalf("%s %q: %v, want code %d", tc.kind, tc.id, err, tc.code)
 		}
 	}
 }
