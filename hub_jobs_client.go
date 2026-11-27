@@ -204,6 +204,10 @@ type hubScannedRelayEvent struct {
 	EventTime time.Time
 	Text      string
 	Truncated bool
+	// ResultID is a job.completed's READY event id. It is an identity: it is
+	// never cut, and it goes out only to a hub that advertised
+	// hubFeatureResultID (relayWire).
+	ResultID string
 	// Sink selects the sink wire bound: a sink event, or a file or request
 	// without the ceiling marker (hk 4835).
 	Sink bool
@@ -351,7 +355,11 @@ func appendHubJobRelayEvents(events []hubScannedRelayEvent, jobsDir string, job 
 		// The event file name is the job event's durable identity: it is
 		// unique per emission, stable across node restarts, and shared by
 		// `panewire emit`, which derives the same value for its file.
-		events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: job.id, Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: reason, Final: kind == "job.lost" && event.Payload.Final, Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: indexed.name, EventTime: eventTime})
+		var resultID string
+		if kind == "job.completed" {
+			resultID = event.resultID()
+		}
+		events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: job.id, Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: reason, Final: kind == "job.lost" && event.Payload.Final, Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: indexed.name, EventTime: eventTime, ResultID: resultID})
 	}
 	return events
 }
@@ -460,6 +468,7 @@ type hubInboxEvent struct {
 	Text           string `json:"text"`
 	Truncated      bool   `json:"truncated"`
 	Ceiling        bool   `json:"ceiling,omitempty"`
+	ResultID       string `json:"result_id,omitempty"`
 
 	// Notice is an info lane.event's job notice (hk 5454), written by panewire emit --notice-job.
 	Notice  *ownerInfoNotice `json:"notice,omitempty"`
@@ -483,6 +492,7 @@ type hubInboxEvent struct {
 		PR             string `json:"pr"`
 		Head           string `json:"head"`
 		PaneID         string `json:"pane_id"`
+		ResultID       string `json:"result_id,omitempty"`
 		Role           string `json:"role"`
 		Profile        string `json:"profile"`
 		TLevel         string `json:"t_level"`
@@ -562,9 +572,10 @@ func (e hubInboxEvent) orderPriority() string {
 	}
 	return e.Priority
 }
-func (e hubInboxEvent) eventID() string { return e.EventID }
-func (e hubInboxEvent) text() string    { return e.Text }
-func (e hubInboxEvent) truncated() bool { return e.Truncated }
+func (e hubInboxEvent) resultID() string { return firstHubValue(e.ResultID, e.Payload.ResultID) }
+func (e hubInboxEvent) eventID() string  { return e.EventID }
+func (e hubInboxEvent) text() string     { return e.Text }
+func (e hubInboxEvent) truncated() bool  { return e.Truncated }
 func (e hubInboxEvent) eventTime(entry os.DirEntry, eventsDir string) time.Time {
 	info, err := entry.Info()
 	if err != nil {

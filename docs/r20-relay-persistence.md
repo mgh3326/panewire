@@ -651,8 +651,14 @@ panewire emit --kind job.completed --job <job_id> --report <path>
               [--owner-lane <lane>] [--epoch <n>] [--label <l>] [--host <h>]
               [--pane <pane_id>] [--report-last-line <text>]
               [--reason <text>] [--question <text>] [--pr <url>] [--head <sha>]
+              [--result-id <READY event id>]
               [--inbox-root <path>] [--timeout <dur, default 2s>]
 ```
+
+`--result-id` (job.completed only) names the READY the completion concludes; see
+[a READY and its completion](quiet-delivery.md#a-ready-and-its-completion). It
+is part of the record: the same completion under another id is a duplicate
+outbox key.
 
 The inbox root comes from `--inbox-root`, else `PANEWIRE_INBOX_ROOT`, else the
 per-OS default (`defaultInboxRoot` in `inbox_root.go`, which the daemon's own

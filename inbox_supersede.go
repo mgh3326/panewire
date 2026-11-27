@@ -52,8 +52,13 @@ var supersedeRules = []struct {
 
 func supersedePRType(t string) bool { return t == "ready" || t == "blocked" || t == "findings" }
 
-func (s *laneInboxStore) supersede(ctx context.Context, tx *sql.Tx, next laneInboxItem, now time.Time) (int, error) {
-	rows, err := tx.QueryContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND cause=? AND id<? AND acked_at=0 AND superseded_at=0`), next.Lane, next.Event.Cause, next.ID)
+// supersede marks the lane's earlier unacked items of next's cause that next
+// replaces. before bounds the items that count as earlier, and next.ID, the
+// item recorded as the successor, is never replaced: for a new row both are its
+// own id; a completion folded into an older READY item passes that item's id as
+// the successor and replaces newer rows too (mergeCompletion).
+func (s *laneInboxStore) supersede(ctx context.Context, tx *sql.Tx, next laneInboxItem, before int64, now time.Time) (int, error) {
+	rows, err := tx.QueryContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND cause=? AND id<? AND id<>? AND acked_at=0 AND superseded_at=0`), next.Lane, next.Event.Cause, before, next.ID)
 	if err != nil {
 		return 0, err
 	}

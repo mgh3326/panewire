@@ -59,11 +59,11 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 19 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 20 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" && name != "final" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" && name != "final" && name != "result_id" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -111,6 +111,16 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 			if wasTruncated {
 				truncated = append(truncated, key)
 			}
+		}
+	}
+	// result_id names the READY a completion concludes. It is an identity, read
+	// whole and never cut, since a cut id names another event. A value that is
+	// no event id is dropped, not a refusal: refusing would hold back the
+	// completion itself, and without the field it is delivered as before.
+	if raw, ok := fields["result_id"]; ok {
+		var id string
+		if json.Unmarshal(raw, &id) == nil && validLaneEventID(id) {
+			completion.ResultID = id
 		}
 	}
 	// cause is a supersession key: it is validated whole and never truncated,

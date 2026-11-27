@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
+	"github.com/mgh3326/panewire/internal/laneevent"
 )
 
 func (a *App) lifecycle(ctx context.Context, kind string, args []string) error {
@@ -32,11 +34,22 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	report := f.String("report", "", "")
 	question := f.String("question", "", "")
 	resultFile := f.String("result", "", "")
+	readyEvent := f.String("ready-event", "", "")
 	if e := f.Parse(args[1:]); e != nil {
 		return fail(exitUsage, "%v", e)
 	}
 	if f.NArg() > 0 {
 		return fail(exitUsage, "unexpected arguments")
+	}
+	readyEventSet := false
+	f.Visit(func(set *flag.Flag) { readyEventSet = readyEventSet || set.Name == "ready-event" })
+	if readyEventSet && kind != "done" {
+		return fail(exitUsage, "%s accepts no --ready-event", kind)
+	}
+	// Checked before any step runs: the relay emit would refuse a bad id only
+	// after the job had completed, and the announcement would be lost.
+	if readyEventSet && !laneevent.ValidID(*readyEvent) {
+		return fail(exitUsage, "--ready-event is not a lane.event id (1 to 512 bytes, no control characters)")
 	}
 	j, e := a.job(id)
 	if e != nil {
@@ -204,6 +217,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		return a.doneReport(ctx, j, doneInput{
 			report: *report, body: body, digest: digest, question: *question, result: result,
 			strict: strictResult, watcher: watchResult, late: late, recovered: recovered,
+			readyEvent: *readyEvent,
 		})
 	}
 	return a.escalateReport(ctx, j, *report, *question, body, digest, late)

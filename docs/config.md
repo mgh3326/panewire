@@ -1041,6 +1041,14 @@ whose receipt exists is skipped:
 | 3 pin | the record's `report_doc` and `report_sha256` name the completing report | the hk job record | `job.report_pinned {report_sha256, document, outcome}` |
 | 4 notify | the parent was told about `S` | the local ledger, then the relay | `job.completed {report_sha256, document}` |
 
+`done --ready-event <event id>` names the READY this completion concludes. Step
+4 records it as `result_id` and relays it with `emit --result-id`, so the hub
+keeps the READY and the completion as one inbox item
+([quiet delivery](quiet-delivery.md#a-ready-and-its-completion)). A value that is
+not a lane event id is refused before any step runs. The flag applies to the
+announcement it is given with: a report already announced is a duplicate, and
+its READY is not named afterwards.
+
 Step 1 confirms hk holds exactly these bytes, by the sha256 in hk's answer or a
 read-back. The key lies under `reports/<job>/sha256/`, which a basename key can
 never reach (a file name holds no slash), so a key there only ever holds the
@@ -2328,7 +2336,7 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | `relay` | `delivered`, `dropped:<reason>` or `unconfirmed:<reason>` | the drop code, or the first token of the report | the hub saw one worker or design lane row's outcome |
 | `spawn_held` | the held branch (`succeeded_pane_held`, `failed_pane_held`, ...) | the pane-probe reason | a refused reclaim kept a role reservation |
 | `job_result` | `conflict` or `missing` | `different_result` or `no_result` | a `done` conflicted with, or lacked, a result |
-| `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`), `startup` for the line a hub start owes, or `rewake` for a re-wake, when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`, and a re-wake adds `rewake=` with its line number in the unread set. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
+| `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`), `startup` for the line a hub start owes, `rewake` for a re-wake, or `ready-repeat` for [a completion merged into a typed READY](quiet-delivery.md#a-ready-and-its-completion) on another lane, when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`, and a re-wake adds `rewake=` with its line number in the unread set. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
 
 The relay, held-reservation and job-result kinds and their Sentry fingerprints
 are in [observability](observability.md).
