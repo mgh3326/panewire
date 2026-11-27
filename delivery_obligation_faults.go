@@ -123,7 +123,11 @@ func obligationReopenWhen(fault, replace string, replaced []any) (string, []any)
 	if classifyObligationFault(fault) != obligationSafe {
 		return "1=0", nil
 	}
-	return `state='` + obligationExhausted + `' AND spent<? AND ` + replace, append([]any{relayReplayMaxAttempts}, replaced...)
+	// Only a stored maybe-typed verdict reopens: a working expiry or a safe fault
+	// ended its copies on purpose (hk 6935 review), so a later safe drop that
+	// overwrites it does not earn copies back.
+	args := append([]any{obligationFaultPromptUnproven, obligationFaultReadUnproven, relayReplayMaxAttempts}, replaced...)
+	return `state='` + obligationExhausted + `' AND fault IN (?,?) AND spent<? AND ` + replace, args
 }
 
 // obligationFaultReplaces is the condition on the stored fault under which

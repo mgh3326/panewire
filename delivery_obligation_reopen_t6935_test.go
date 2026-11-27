@@ -77,3 +77,27 @@ func TestSafeDropKeepsExhaustedRowWithSpentBudget(t *testing.T) {
 		t.Fatalf("spent row reopened: %+v", o)
 	}
 }
+
+// A working-expired row ends with no budget copy by design, and a later safe
+// drop that overwrites its fault does not earn copies back: only a fault
+// settled from a maybe-typed verdict reopens. Killed by: reopening on the
+// stored fault alone, without the maybe-typed check.
+func TestSafeDropLeavesWorkingExpiredRowExhausted(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "working-6935")
+	t6820Report(t, rig, d, t6820Working)
+	t6820AwaitDropExpiry(t, rig, d)
+	rig.pass(0)
+	if o := rig.obligation(d.EventID); o.State != obligationExhausted || o.Spent >= relayReplayMaxAttempts {
+		t.Fatalf("before the safe drop: %+v, want exhausted with budget left", o)
+	}
+	t6820Report(t, rig, d, t6820Drop{drop: relayDroppedPaneReadFailed, harness: "claude"})
+	t6820AwaitDropExpiry(t, rig, d)
+	if o := rig.obligation(d.EventID); o.State != obligationExhausted {
+		t.Fatalf("working-expired row reopened by a safe drop: %+v", o)
+	}
+	rig.pass(time.Minute)
+	if got := t3426Injected(rig.agent); len(got) != 0 {
+		t.Fatalf("a working-expired row was copied after a safe drop: %+v", got)
+	}
+}
