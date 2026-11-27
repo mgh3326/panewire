@@ -289,7 +289,14 @@ func TestEmitResultIDReachesTheDaemonAndTheScan(t *testing.T) {
 	if code := runEmitCLI(args, &bytes.Buffer{}, &stderr, CLIConfig{SocketPath: socket}); code != ExitOK {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	request := <-pushed
+	// Bound the wait on the daemon's side: a regression that never delivers
+	// the request must fail here with a label, not hang to the package timeout.
+	var request localRequest
+	select {
+	case request = <-pushed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the daemon to receive the emit request")
+	}
 	if request.ResultID != "ready-1" {
 		t.Fatalf("daemon request=%+v", request)
 	}
