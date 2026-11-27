@@ -709,7 +709,7 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 	var confirmed briefConfirm
 	timeout, retry := a.briefSubmitWindow()
 	clamped := false
-	// A node runs the spawn under its hub_wait budget. Refuse with 76 and the
+	// A node runs the spawn under its node budget (submitBudgetSource). Refuse with 76 and the
 	// capture before that budget expires, or the node reports a bare timeout.
 	// requireSubmitWindow held at least the minimum window when the brief was
 	// sent. The send can take seconds of it, so the floor may use the slack of
@@ -835,7 +835,7 @@ func (a *App) confirmBrief(ctx context.Context, kind, pane, brief, initial strin
 		note += "; late composer: brief was still in the composer after the landing proof"
 	}
 	if clamped {
-		note += fmt.Sprintf("; window cut to %ds by the node budget, raise hub_wait for this host", int(timeout/time.Second))
+		note += fmt.Sprintf("; window cut to %ds by the node budget, which is %s", int(timeout/time.Second), submitBudgetSource)
 	}
 	if note != "" {
 		return confirmed, fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn%s", a.herdrSession(), pane, note)

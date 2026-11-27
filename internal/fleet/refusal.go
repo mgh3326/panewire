@@ -114,15 +114,17 @@ const (
 // then the remaining exit statuses. Codes match ^[a-z0-9_]+$ and are at most 40
 // bytes.
 var spawnRefusals = []spawnRefusal{
-	// hk 6886: the node budget cannot hold the brief's submit window, so this
-	// host's hub_wait is too short (a configuration failure, error level in
-	// Sentry). Its text says "brief", so it must win over the broad brief row
+	// hk 6886: the node budget cannot hold the brief's submit window, so the
+	// launch ran past the budget (a configuration failure, error level in
+	// Sentry). The budget is the attempt deadline for a submitted spawn and
+	// hub_wait only for a via = "hub" host (submitBudgetSource). Its text says
+	// "brief", so it must win over the broad brief row
 	// below. It also comes before every substring row: the launch-used-budget
 	// text wraps the launch's own error, which may carry any other row's words.
 	// It is not in nextHostRefusals (hub_spawn_async.go): the launch runs after
 	// the job claim, so spawnStageBeforeJobClaim already keeps a replay on this
 	// host.
-	{match: "SUBMIT_WINDOW_UNAVAILABLE", code: "submit_window", hint: "Raise hub_wait for the executing host in its hosts config so the node budget holds the launch, the brief and its submit window, then replay the same command; no brief was sent."},
+	{match: "SUBMIT_WINDOW_UNAVAILABLE", code: "submit_window", hint: "A submitted spawn's node budget is its attempt deadline (deadline_seconds, capped at expires_at): check expires_at and how long the request waited in the queue, repair a slow checkout or launch on the executing host, then replay the same command for a fresh attempt deadline. A via = \"hub\" host's budget is its hub_wait: raise it in that host's hosts config, then replay. No brief was sent."},
 	// A full quota at the node's gate (hk 5358). The hub moves an automatic
 	// request on to its next candidate; the refusal reaches the requester only
 	// when none is left, or for a pinned profile. The text names the gate's own
