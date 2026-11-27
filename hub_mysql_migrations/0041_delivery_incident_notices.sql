@@ -1,7 +1,8 @@
 -- hk 6821 (hk 4289 T4): which obligation rows a design lane is still to be told
 -- about, the twin of Postgres migration 0044. notice_due_at is when a row got a
 -- fault no notice has covered, 0 once there is nothing to tell; told_at is when
--- a stored or withheld notice covered the row, which never becomes due again.
+-- its notice was settled -- stored, withheld, or skipped for good -- after which
+-- the row never becomes due again.
 -- fault_reason, from migration 0033, holds the fault a due notice reports.
 -- One ALTER adds both columns and the key, so the statement is atomic and the
 -- guard below sees all of it or none. An older hub neither reads nor writes

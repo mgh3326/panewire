@@ -111,7 +111,7 @@ func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, 
 		}
 	}
 	forget := func() {
-		if err := store.forgetNotice(ctx, row.id); err != nil {
+		if err := store.forgetNotice(ctx, row.id, h.now().UTC()); err != nil {
 			h.logger.Warn("due delivery notice was not cleared", "event_id", row.relayID, "error", store.loggable("clear notice", err))
 		}
 	}
@@ -265,7 +265,7 @@ func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident *delive
 		return
 	}
 	forget := func(row noticeMember) {
-		if err := store.forgetNotice(ctx, row.id); err != nil {
+		if err := store.forgetNotice(ctx, row.id, h.now().UTC()); err != nil {
 			h.logger.Warn("due delivery notice was not cleared", "event_id", row.relayID, "error", store.loggable("clear notice", err))
 		}
 	}

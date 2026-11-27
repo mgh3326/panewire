@@ -167,12 +167,14 @@ func (s *laneInboxStore) endUnprovenNotice(parent context.Context, id int64, now
 	return err
 }
 
-// forgetNotice ends a row's due notice without telling anyone: the row was
-// confirmed, or nobody can act on it.
-func (s *laneInboxStore) forgetNotice(parent context.Context, id int64) error {
+// forgetNotice ends a row's due notice without telling anyone, for good: the
+// row was confirmed, owes no notice, or nobody can act on it. It is marked told,
+// so that no later age, retirement or exhaustion asks again, when the jobs that
+// answered may be forgotten.
+func (s *laneInboxStore) forgetNotice(parent context.Context, id int64, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET notice_due_at=0 WHERE id=?`), id)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET notice_due_at=0,told_at=? WHERE id=? AND told_at=0`), now.UnixMilli(), id)
 	return err
 }
 
@@ -343,8 +345,8 @@ func (s *laneInboxStore) recordNotice(parent context.Context, incident deliveryI
 }
 
 // closeIncident closes an open incident for reason and detaches its members: a
-// noticed one returns to exhausted. A moot close drops their due notices; the
-// others keep them, and join the next incident. A quiet or all-terminal close
+// noticed one returns to exhausted. A moot close ends their due notices for good
+// (forgetNotice); the others keep them, and join the next incident. A quiet or all-terminal close
 // does nothing if a member became due, or one joined, since the caller read the
 // incident. It reports whether it closed.
 func (s *laneInboxStore) closeIncident(parent context.Context, incident deliveryIncident, reason string, now time.Time) (bool, error) {
@@ -371,7 +373,7 @@ func (s *laneInboxStore) closeIncident(parent context.Context, incident delivery
 		return false, err
 	}
 	if reason == incidentMoot {
-		if _, err := tx.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET notice_due_at=0 WHERE incident_id=?`), incident.id); err != nil {
+		if _, err := tx.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET notice_due_at=0,told_at=? WHERE incident_id=? AND notice_due_at>0`), at, incident.id); err != nil {
 			return false, err
 		}
 	}

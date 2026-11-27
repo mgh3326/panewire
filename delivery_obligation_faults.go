@@ -182,8 +182,9 @@ func (h *HubServer) noteObligationDrop(ctx context.Context, machine string, drop
 	due, err := store.noteObligationDrop(ctx, dropped.OriginalEventID, dropped.Lane, machine, current, dropped.Reason, dropped.Harness, h.now().UTC())
 	if err != nil {
 		h.logger.Warn("relay drop was not recorded on its obligation", "event_id", dropped.OriginalEventID, "reason", dropped.Reason, "error", store.loggable("drop fault", err))
-		return
 	}
+	// An orphaned drop is handed on whether or not that write landed: the node
+	// does not send it again, and the orphan path holds it until it is recorded.
 	if relayDroppedIsUnconfirmed(dropped.Reason) && !h.relayWindowOpen(dropped.OriginalEventID, dropped.JobID) {
 		h.noteOrphanedDrop(ctx, machine, current, dropped)
 	}

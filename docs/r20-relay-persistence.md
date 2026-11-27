@@ -445,7 +445,7 @@ hk 4289 T4 (hk 6821). Which rows the design lane is told of, and when, is in
 | Column | Holds |
 |---|---|
 | `notice_due_at` | when the row got a fault no notice has covered; 0 when there is nothing to tell |
-| `told_at` | when a stored or withheld notice covered the row, which never becomes due again |
+| `told_at` | when the row's notice was settled -- stored, withheld, or skipped for good (nobody to act, no design lane, nothing owed, a moot close) -- after which it never becomes due again |
 | `fault_reason` | the fault a due row's notice reports; on a row that is not due, the fault an `unrouted` rename replaced |
 
 - A row becomes due in the same write as the change that makes it so: a

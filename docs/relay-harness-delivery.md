@@ -363,8 +363,11 @@ still be retried. A released digest batch's row is settled, not exhausted, so a
 safe fault on one is not told; a maybe-typed one still is.
 
 A row is told once: after a notice covers it, nothing it does later makes it
-due again. A row confirmed before its notice is stored is not told, nor one the
-receiver already read. A drop for a row that has no ack window and no recorded
+due again. A row skipped when it was due -- nobody to act, no design lane after
+the wait -- is settled the same way, so its age, a stale retirement or its
+exhaustion does not bring it back once the ended job is forgotten. A row
+confirmed before its notice is stored is not told, nor one the receiver already
+read. A drop for a row that has no ack window and no recorded
 fault -- one the node held across a hub restart -- makes the row due at once, as
 the drop reports it, and changes no retry. A drop the hub cannot record, its row
 unreadable or the store failing, is held in memory and retried after 2 s, 10 s,

@@ -394,7 +394,7 @@ func TestIncidentMootMembersNotNamed(t *testing.T) {
 			if !strings.Contains(got, "event "+t6821Num(live.EventID)+" ") || strings.Contains(got, "event "+t6821Num(ended)+" ") || t3431FoldCount(got) != 0 {
 				t.Fatalf("notice=%q, want only the live lane's row %d", got, live.EventID)
 			}
-			if r := rig.row(ended); r.DueAt != 0 || r.ToldAt != 0 {
+			if r := rig.row(ended); r.DueAt != 0 || r.ToldAt == 0 {
 				t.Fatalf("the ended lane's row = %+v", r)
 			}
 			rig.open()

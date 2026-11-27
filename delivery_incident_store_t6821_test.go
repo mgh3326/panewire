@@ -278,7 +278,7 @@ func TestObligationStoreContractIncidents(t *testing.T) {
 		if closed, err := s.closeIncident(ctx, incidents[at], incidentMoot, told); err != nil || !closed {
 			t.Fatalf("moot = %v, %v", closed, err)
 		}
-		if r := member(2); r.incident != 0 || r.state != obligationExhausted || r.due != 0 {
+		if r := member(2); r.incident != 0 || r.state != obligationExhausted || r.due != 0 || r.told == 0 {
 			t.Fatalf("a moot member = %+v", r)
 		}
 		var closedRows int
@@ -372,8 +372,12 @@ func TestObligationStoreContractIncidents(t *testing.T) {
 		if member(4).due == 0 || member(8).due != 0 {
 			t.Fatalf("digest=%+v confirmed=%+v", member(4), member(8))
 		}
-		if err := s.forgetNotice(ctx, member(4).id); err != nil || member(4).due != 0 {
+		if err := s.forgetNotice(ctx, member(4).id, told); err != nil || member(4).due != 0 || member(4).told != told.UnixMilli() {
 			t.Fatalf("forgotten = %+v, %v", member(4), err)
+		}
+		// A skipped row is not asked about again.
+		if err := s.markNoticeDue(ctx, relayDroppedMaybeInPane, told, "relay_id=?", int64(4)); err != nil || member(4).due != 0 {
+			t.Fatalf("a skipped row became due again: %+v, %v", member(4), err)
 		}
 	})
 }

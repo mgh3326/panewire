@@ -306,3 +306,77 @@ func TestOrphanedDropIsHeldUntilRecorded(t *testing.T) {
 		return rig.count(`SELECT count(*) FROM delivery_obligations WHERE relay_id=`+strconv.FormatInt(d.EventID, 10)+` AND notice_due_at>0`) == 1
 	})
 }
+
+// A row skipped because nobody can act on it is skipped for good: its age, a
+// stale retirement, its exhaustion and a restart that forgets the ended job do
+// not bring it back. Killed by: clearing the due mark and leaving the row
+// untold.
+func TestSkippedRowStaysSkipped(t *testing.T) {
+	skips := func(rig *t6821Rig, relayID int64) int {
+		return strings.Count(rig.logs.String(), `msg="relay unconfirmed escalation skipped; nobody can act on it" event_id=`+t6821Num(relayID)+" ")
+	}
+	t.Run("an aged row", func(t *testing.T) {
+		rig := t6821Live(t)
+		d := rig.send(t3431Worker)
+		rig.hub.expireRelayAckWindow(relayPendingKey(d.EventID, d.JobID), nil)
+		rig.dropNode("host-a")
+		rig.none(0)
+		rig.job(t3431Job, true, false)
+		rig.age(d.EventID)
+		for range 3 {
+			rig.none(time.Hour)
+		}
+		if got := skips(rig, d.EventID); got != 1 {
+			t.Fatalf("the aged row was skipped %d times, want once:\n%s", got, rig.logs.String())
+		}
+		rig.restart()
+		rig.none(time.Hour)
+		rig.hub.replayUndeliveredLaneEvents(context.Background())
+		for range 3 {
+			rig.none(5 * time.Hour)
+		}
+		if rows := rig.noticeRows(); len(rows) != 0 || skips(rig, d.EventID) != 1 {
+			t.Fatalf("an ended lane was named after the restart: %+v, skips=%d", rows, skips(rig, d.EventID))
+		}
+	})
+	t.Run("a row skipped at its report", func(t *testing.T) {
+		rig := t6821Live(t)
+		d := rig.send(t3431Worker)
+		rig.report(d, t6820Maybe)
+		rig.job(t3431Job, true, false)
+		rig.none(0)
+		rig.restart()
+		for range 3 {
+			rig.none(5 * time.Hour)
+		}
+		if rows := rig.noticeRows(); len(rows) != 0 || skips(rig, d.EventID) != 1 {
+			t.Fatalf("an ended lane was named at exhaustion: %+v, skips=%d", rows, skips(rig, d.EventID))
+		}
+	})
+}
+
+// An orphaned drop that arrives while the store fails is held like one whose row
+// cannot be read, and recorded once the store answers. Killed by: returning at
+// the first failed write.
+func TestOrphanedDropSurvivesAStoreFailure(t *testing.T) {
+	rig := t6821Live(t)
+	d := rig.send(t3431Worker)
+	rig.restart()
+	exec := func(query string) {
+		t.Helper()
+		if _, err := rig.hub.inbox.store.db.ExecContext(t.Context(), query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Every statement on the obligations fails while the table is away.
+	exec(`ALTER TABLE delivery_obligations RENAME TO delivery_obligations_away`)
+	rig.report(d, t6820Drop{drop: relayDroppedCheckPane, harness: "claude"})
+	exec(`ALTER TABLE delivery_obligations_away RENAME TO delivery_obligations`)
+
+	eventually(t, 10*time.Second, "the held drop to make the row due", func() bool {
+		return rig.count(`SELECT count(*) FROM delivery_obligations WHERE relay_id=`+strconv.FormatInt(d.EventID, 10)+` AND notice_due_at>0`) == 1
+	})
+	if got := rig.one(0); !strings.Contains(got, "event "+t6821Num(d.EventID)+" ") {
+		t.Fatalf("notice=%q", got)
+	}
+}
