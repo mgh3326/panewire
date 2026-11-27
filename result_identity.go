@@ -247,6 +247,12 @@ func (h *HubServer) announceMerge(lane string, ready laneInboxItem, alone comple
 	h.noteInboxWakeArrival(lane, class)
 }
 
+// holdsMergedCompletion reports whether item is a READY that a completion
+// joined.
+func holdsMergedCompletion(item laneInboxItem) bool {
+	return len(item.Event.MergedCompletions) > 0
+}
+
 // awaitsBatch reports whether item is held or in a digest window and no batch
 // has claimed it yet.
 func awaitsBatch(item laneInboxItem) bool {

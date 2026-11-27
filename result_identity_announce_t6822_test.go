@@ -4,6 +4,7 @@ package panewire
 // the completion on its own would have.
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -247,5 +248,60 @@ func TestMergeRestartsTheRewakeCount(t *testing.T) {
 	}
 	if sent := step(); sent != 1 {
 		t.Fatalf("the merge left the re-wake count spent: %d lines", sent)
+	}
+}
+
+// The line owed on a lane that is not inbox-only lives in memory, and the
+// completion it stands for is recorded in hk as delivered, so a hub start owes
+// the line again while the READY is unacked. A lane with no merged completion,
+// or with the READY acked, is owed none. Mutant: seed inbox-only lanes alone.
+func TestMergeAnnouncementIsOwedAgainAfterARestartOnATypedLane(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		merge, acked bool
+		wakes        int
+	}{
+		{"merged and unacked", true, false, 1},
+		{"merged and acked", true, true, 0},
+		{"nothing merged", false, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, hk, closeServer := newFakeHandoffkeep(t)
+			t.Cleanup(closeServer)
+			path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+			h, agent := t3426Hub(t, path, hk, t3426Records)
+			first := t6822Typed(t, h, agent, "ready-1")
+			second := t6822Typed(t, h, agent, "ready-2")
+			if tc.merge {
+				// The second line falls inside the first one's window.
+				h.relayJobCompletionFrom("host-a", t6822Completion(t6822Director, "ready-1", "00001-job.completed.json"))
+				h.relayJobCompletionFrom("host-a", t6822Completion(t6822Director, "ready-2", "00002-job.completed.json"))
+				if wakes := t6822Wakes(agent); len(wakes) != 1 {
+					t.Fatalf("fixture wakes=%+v, want one sent and one owed", wakes)
+				}
+			}
+			if tc.acked {
+				for _, item := range []laneInboxItem{first, second} {
+					if n, err := h.inbox.store.ack(item.ID, t6822Director, false, h.now()); err != nil || n != 1 {
+						t.Fatal(n, err)
+					}
+				}
+			}
+			h.Close()
+
+			h2, agent2 := t3426Hub(t, path, hk, t3426Records)
+			later := time.Now().Add(h2.inbox.policy.Relay.wakeWindow + time.Second)
+			h2.now = func() time.Time { return later }
+			h2.flushInboxWakes()
+			var director []hubRelayInjectEvent
+			for _, wake := range t6822Wakes(agent2) {
+				if wake.Pane == "w1:director" {
+					director = append(director, wake)
+				}
+			}
+			if len(director) != tc.wakes || tc.wakes == 1 && director[0].Text != inboxWakeText(t6822Director, 2, "ready") {
+				t.Fatalf("wakes after the restart=%+v, want %d", director, tc.wakes)
+			}
+		})
 	}
 }

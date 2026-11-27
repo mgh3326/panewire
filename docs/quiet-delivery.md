@@ -360,7 +360,12 @@ the completion as before: it can cost a second item, never the completion.
 - On a lane that is not inbox-only that line has the `inbox_wake` reason
   `ready-repeat`, at most one per coalescing window. A line still owed, because
   the window was open or the pane out of reach, is sent at the window's end or
-  the next node hello. It is held in memory, so a hub restart drops it.
+  the next node hello. The owed line is held in memory, so a hub start owes one
+  again, with the reason `startup`, to each such lane that has an unread READY
+  holding a merged completion, also if its line had been sent before.
+- A wake line the node accepts but cannot type is not reported back or retried,
+  as for every inbox wake line, and a lane that is not inbox-only has no
+  [re-wake](#the-re-wake). The completion stays readable on the READY item.
 - The READY item is the merge's receipt. A completion bound for the inbox
   writes no handoffkeep row. One that would have taken the relay path into the
   pane is also written to handoffkeep, delivered as `hub` /
@@ -520,7 +525,8 @@ When the line is sent:
   dropped: the lane is a worker lane again.
 - When the hub starts, every inbox-only lane with unread items above `info`
   gets one line after the same wake window, with `startup` as the fleet-event
-  reason. Restarts inside the window coalesce into one line after the last
+  reason, and so does any other lane with an unread READY that holds a
+  [merged completion](#a-ready-and-its-completion). Restarts inside the window coalesce into one line after the last
   restart. Repeated restarts less than one wake window apart can defer this
   line until the hub stays up for a full window; the window is not persisted.
   A lane whose unread items cannot be read gets none.
