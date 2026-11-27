@@ -310,10 +310,21 @@ retry/coalescing of unconfirmed deliveries. See the
 A worker's `--type ready` lane event and the `job.completed` that concludes it
 report one result. They share one identifier, the READY's producer event id
 (the `event_id` `panewire emit` prints). The completion carries it as
-`result_id`:
+`result_id`.
+
+A `panewire emit --type ready` run inside a job records that id in the job's
+directory (`.ready-event-id`, mode 0600), and `panewire done` for the job
+passes the recorded id when `--ready-event` was not given (hk 7014). "Inside
+a job" is the `ARBITER_JOB` launch binding, or an explicit `--job`; the job
+dir is the one under the inbox root emit already resolves. An explicit
+`--ready-event` wins over the record, and a later READY replaces it, so the
+newest READY is the one the completion pairs with. The record is
+best-effort: emit outside a job, a job dir that is gone, or a file that does
+not hold an event id all leave `done` exactly as without it. The flag and the
+`job.completed` emit form still serve a completion made any other way:
 
 ```sh
-panewire done <job> --report <path> --ready-event <READY event id>
+panewire done <job> --report <path> [--ready-event <READY event id>]
 panewire emit --kind job.completed --job <job> --report <path> \
   --owner-lane <lane> --result-id <READY event id>
 ```
@@ -369,9 +380,10 @@ event id. handoffkeep is unchanged.
 
 **Limits.**
 
-- Nothing in the fleet names a READY on its own: the completion watcher that
-  completes a job on its READY passes no `--ready-event`, and a later `done`
-  for the same report is a duplicate that announces nothing.
+- The record covers READYs `panewire emit` wrote inside the job. A READY sent
+  any other way, or emitted before the job dir exists, leaves `done` to fall
+  back to `--ready-event` or no `result_id`; and a later `done` for the same
+  report is a duplicate that announces nothing.
 - A node that scans a READY and its completion in one pass sends `job.*`
   records before lane events, so both are delivered.
 - The hub trusts the producer's id. It does not check that the completion and

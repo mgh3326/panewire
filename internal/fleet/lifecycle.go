@@ -214,10 +214,17 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		}
 	}
 	if kind == "done" {
+		// A READY the job's worker emitted is recorded in the job dir; its
+		// producer event id is the completion's result_id unless --ready-event
+		// named one (hk 7014). The latest READY is the recorded one.
+		ready := *readyEvent
+		if !readyEventSet {
+			ready = laneevent.ReadReadyEvent(filepath.Join(a.Jobs, id))
+		}
 		return a.doneReport(ctx, j, doneInput{
 			report: *report, body: body, digest: digest, question: *question, result: result,
 			strict: strictResult, watcher: watchResult, late: late, recovered: recovered,
-			readyEvent: *readyEvent,
+			readyEvent: ready,
 		})
 	}
 	return a.escalateReport(ctx, j, *report, *question, body, digest, late)

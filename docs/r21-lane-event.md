@@ -133,7 +133,10 @@ to the producer node when the hub accepts durable responsibility.
 
 `panewire emit --kind lane.event` prints the event id it wrote and the command
 that answers where it is. `--event-id` may be given; without it `emit` generates
-one and prints it. The id is also in the durable `events-lane/` record.
+one and prints it. The id is also in the durable `events-lane/` record. A
+`--type ready` emit inside a job (`ARBITER_JOB`, or `--job`) also records the
+id in the job dir as `.ready-event-id`, which `panewire done` passes as the
+completion's `result_id` (docs/quiet-delivery.md, "A READY and its completion").
 
 ```sh
 $ panewire emit --kind lane.event --lane lane-a --event-id producer-42 --text "approval requested"

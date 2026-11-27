@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mgh3326/panewire/internal/filelock"
+	"github.com/mgh3326/panewire/internal/jobowner"
 	"github.com/mgh3326/panewire/internal/laneevent"
 )
 
@@ -267,6 +268,19 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 			fmt.Fprintln(stderr, "emit: event file could not be written:", err)
 			return ExitInternal
 		}
+		// A READY emitted inside a job records its producer event id in the
+		// job dir, so `panewire done` can name it as the completion's
+		// result_id without the worker repeating it (hk 7014, docs/
+		// quiet-delivery.md "A READY and its completion"). The record is
+		// best-effort: the lane event is already durable, and a missed write
+		// leaves done exactly as before.
+		if *notifyType == "ready" {
+			if dir := readyEventJobDir(root, *job); dir != "" {
+				if err := laneevent.WriteReadyEvent(dir, record.EventID); err != nil {
+					fmt.Fprintln(stderr, "emit: ready event id could not be recorded:", err)
+				}
+			}
+		}
 		socket := cfg.SocketPath
 		if socket == "" {
 			socket = socketPathFromEnv()
@@ -442,6 +456,27 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		return "", err
 	}
 	return final, nil
+}
+
+// readyEventJobDir resolves the job dir an in-job READY emit records its
+// event id into: --job when given, else the ARBITER_JOB launch binding, under
+// the jobs root of the inbox root emit already resolved — the same
+// jobs/<id> the job.* event path uses. It answers "" when the emit is not
+// inside a job — no usable id, or no such job dir — and emit then behaves
+// exactly as before (hk 7014).
+func readyEventJobDir(inboxRoot, jobFlag string) string {
+	job := jobFlag
+	if job == "" {
+		job = os.Getenv(jobowner.JobEnv)
+	}
+	if !hubJobIDPattern.MatchString(job) {
+		return ""
+	}
+	dir := filepath.Join(inboxRoot, "jobs", job)
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
 }
 
 // writeLaneEmitRecord intentionally uses events-lane rather than jobs/<id>.
