@@ -38,7 +38,7 @@ var storeCopyTables = []storeCopyTable{
 	{"task_fail_notice_outbox", "request_id"}, {"owner_notice_decisions", "event_key"},
 	{"supersede_lane_cause", "lock_key"}, {"delivery_obligations", "id"}, {"delivery_incidents", "id"},
 	{"delivery_notice_slots", "design_lane,machine,fault"}, {"delivery_reconciler_state", "singleton"},
-	{"relay_stale_notice_rows", "relay_id"}, {"relay_stale_notice_lanes", "worker_lane,job"},
+	{"relay_stale_notice_rows", "relay_id"}, {"relay_stale_notice_lanes", "worker_lane,first_ms"},
 }
 
 // storeCopyHubKeyTables hold a hub key in event_key, which each backend stores

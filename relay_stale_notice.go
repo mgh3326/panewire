@@ -39,6 +39,13 @@ const (
 	staleReplayFiledKeep = 14 * 24 * time.Hour
 	// staleReplayTaskDeadline bounds one hk task read.
 	staleReplayTaskDeadline = 5 * time.Second
+	// staleReplayLookupAttempts is how many replays a row whose job or owner
+	// lookup keeps failing is held for, before it is kept on the hub notice lane
+	// (hk 6994).
+	staleReplayLookupAttempts = 3
+	// staleReplayEntryWidth bounds the worker lane and the job each notice entry
+	// names.
+	staleReplayEntryWidth = 40
 )
 
 // staleReplaySpawn is what the notice reads of a worker job's spawn record: the
@@ -65,10 +72,12 @@ type staleReplayTaskRead struct {
 func staleReplayDay(t time.Time) string { return t.UTC().Format(time.DateOnly) }
 
 // noteStaleReplayRetire keeps a real message the replay gate retired as stale for
-// the day's notice. It reports false when the row could not be kept (the store or
-// the job lookup failed), so the caller leaves the handoffkeep row undelivered for
-// a later replay; true otherwise, including for a row that needs no notice.
-// Idle-wake reports are not messages a lane waits for, so they are not kept.
+// the day's notice. It reports false only when the row could not be written to the
+// store, so the caller leaves the handoffkeep row undelivered for a later replay;
+// true otherwise, including for a row that needs no notice. A row the lane already
+// read or acked, and an idle-wake report, are not kept: neither is a message a
+// lane is missing. A failed owner lookup is retried for staleReplayLookupAttempts
+// replays and then listed on the hub notice lane (hk 6994 #3).
 func (h *HubServer) noteStaleReplayRetire(record handoffkeepRelayEvent, reason string) bool {
 	if reason != "stale" || h.inbox == nil || h.inbox.store == nil {
 		return true
@@ -85,16 +94,28 @@ func (h *HubServer) noteStaleReplayRetire(record handoffkeepRelayEvent, reason s
 		return true
 	}
 	ctx := context.Background()
-	now := h.now().UTC()
-	job, err := h.staleReplayJobOf(ctx, record, received)
-	if err != nil {
-		h.logger.Warn("stale replay row job could not be read; it stays undelivered for a later replay", "event_id", record.ID, "lane", record.OwnerLane)
-		return false
+	// A row its lane already read or acked was handled; it is not a missed
+	// message (hk 6976 #2). An unreadable settlement lists the row instead.
+	settled, err := h.inbox.store.settled(relayEventDedupeKey(record.Kind, relayEventFromRecord(record)))
+	switch {
+	case err != nil:
+		h.logger.Warn("stale replay row settlement could not be read; the row is kept", "event_id", record.ID, "lane", record.OwnerLane)
+	case settled:
+		h.logger.Info("stale replay row already read or acked by its lane; not kept for the daily notice", "event_id", record.ID, "lane", record.OwnerLane)
+		return true
 	}
-	spawn, found, err := h.staleReplaySpawnOf(ctx, job)
-	if err != nil {
+	now := h.now().UTC()
+	job, spawn, found, err := h.staleReplayOwnerOf(ctx, record, received)
+	// A failed lookup holds the row for a later replay, up to its tries; then the
+	// row is kept on the hub notice lane (hk 6994 #3). A row is never dropped on a
+	// lookup error.
+	switch gaveUp := h.staleReplayLookupGaveUp(record.ID, err != nil); {
+	case err == nil:
+	case !gaveUp:
 		h.logger.Warn("stale replay row owner could not be read; it stays undelivered for a later replay", "event_id", record.ID, "lane", record.OwnerLane, "job", job)
 		return false
+	default:
+		h.logger.Warn("stale replay row owner unreadable after repeated tries; listed on the hub notice lane", "event_id", record.ID, "lane", record.OwnerLane, "job", job)
 	}
 	row := staleReplayRow{
 		RelayID: record.ID, NoticeDay: staleReplayDay(now), WorkerLane: record.OwnerLane, Job: job,
@@ -119,6 +140,42 @@ func (h *HubServer) noteStaleReplayRetire(record handoffkeepRelayEvent, reason s
 		h.logger.Warn("stale replay row was not kept for the daily notice; it stays undelivered for a later replay", "event_id", record.ID, "lane", record.OwnerLane)
 		return false
 	}
+	return true
+}
+
+// staleReplayOwnerOf names a retired row's worker job and the design owner of that
+// job. A store read error comes back with found false.
+func (h *HubServer) staleReplayOwnerOf(ctx context.Context, record handoffkeepRelayEvent, received time.Time) (job string, spawn staleReplaySpawn, found bool, err error) {
+	job, err = h.staleReplayJobOf(ctx, record, received)
+	if err != nil {
+		return job, staleReplaySpawn{}, false, err
+	}
+	spawn, found, err = h.staleReplaySpawnOf(ctx, job)
+	if err != nil {
+		return job, staleReplaySpawn{}, false, err
+	}
+	return job, spawn, found, nil
+}
+
+// staleReplayLookupGaveUp records the outcome of one owner lookup of a retired row
+// and reports whether the row has used its tries: staleReplayLookupAttempts failed
+// lookups. A success clears the count. The count is in memory, so each hub start
+// gives a row its tries again.
+func (h *HubServer) staleReplayLookupGaveUp(id int64, failed bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !failed {
+		delete(h.staleReplayLookupFails, id)
+		return false
+	}
+	if h.staleReplayLookupFails == nil {
+		h.staleReplayLookupFails = make(map[int64]int)
+	}
+	h.staleReplayLookupFails[id]++
+	if h.staleReplayLookupFails[id] < staleReplayLookupAttempts {
+		return false
+	}
+	delete(h.staleReplayLookupFails, id)
 	return true
 }
 
@@ -147,21 +204,24 @@ func (h *HubServer) staleReplayJobOf(ctx context.Context, record handoffkeepRela
 	return hint, nil
 }
 
-// noteStaleReplayLane binds a worker lane to the job its lanes.json route names
-// at a receipt, so a row retired after the route is gone (releaseDeadLanes, reap
-// or a closed pane removes it) still names the job it was received for. The
-// route is read from the file, not from the routing decision: a lane whose node
-// is down gets no routed target, and its rows are the ones that wait longest. It
-// is best effort: a failed write leaves that row to the lanes.json hint.
-func (h *HubServer) noteStaleReplayLane(lane string) {
-	if h.inbox == nil || h.inbox.store == nil {
+// noteStaleReplayLane binds a worker lane to the job its lanes.json route named
+// when it received a row, so a row retired after the route is gone (releaseDeadLanes,
+// reap or a closed pane removes it) still names the job it was received for. The
+// binding is stamped with the receipt handoffkeep gave the persisted row, the
+// clock the retired row's age is read on (hk 6976 #3). The job is the one the
+// receipt's own route read found: a lane whose node is down gets no routed target,
+// and its rows are the ones that wait longest. It is best effort: a failed write
+// leaves that row to the lanes.json hint.
+func (h *HubServer) noteStaleReplayLane(lane, job, receivedAt string) {
+	if job == "" || h.inbox == nil || h.inbox.store == nil {
 		return
 	}
-	job := loadReportRelayRoutes(h.reportRelayPath)[lane].Job
-	if job == "" {
+	received, err := time.Parse(time.RFC3339Nano, receivedAt)
+	if err != nil {
+		h.logger.Warn("stale replay lane binding was not kept: the row has no receipt time", "lane", lane, "job", job)
 		return
 	}
-	if err := h.inbox.store.insertStaleReplayLane(context.Background(), lane, job, h.now().UnixMilli()); err != nil {
+	if err := h.inbox.store.bindStaleReplayLane(context.Background(), lane, job, received.UnixMilli()); err != nil {
 		h.logger.Warn("stale replay lane binding was not kept", "lane", lane, "job", job)
 	}
 }
@@ -264,8 +324,11 @@ func (h *HubServer) fileStaleReplayDay(ctx context.Context, day string) {
 			h.logger.Warn("stale replay notice rows could not be read", "day", day, "lane", lane)
 			continue
 		}
+		if len(rows) == 0 {
+			continue
+		}
 		listed, overtaken := h.staleReplayPartition(ctx, rows)
-		if len(listed) > 0 && !h.fileStaleReplayItem(ctx, day, lane, listed, overtaken) {
+		if len(listed) > 0 && !h.fileStaleReplayItem(ctx, staleReplayEventID(day, rows), day, lane, listed, overtaken) {
 			continue
 		}
 		ids := make([]int64, 0, len(rows))
@@ -278,16 +341,33 @@ func (h *HubServer) fileStaleReplayDay(ctx context.Context, day string) {
 	}
 }
 
-// fileStaleReplayItem hands the notice to the design lane's inbox. Its event id
-// names the day, so a retry after a lost answer is a duplicate, not a second
-// item. It reports whether the item is held.
-func (h *HubServer) fileStaleReplayItem(ctx context.Context, day, lane string, listed []staleReplayRow, overtaken int) bool {
-	eventID := "stale-replay-" + day
-	event := hubJobEventPayload{
-		JobID: laneEventTransportID(lane, eventID), Epoch: 1, OwnerLane: lane, EventID: eventID,
+// staleReplayEventID names one filing pass's notice: its day and the smallest
+// handoffkeep row id the pass read. Two passes of one day read disjoint rows, so
+// their smallest ids differ and the inbox's event-id dedupe cannot hide the second
+// pass's item; a retry of a pass reads the same rows and keeps its id, so a retry
+// after a lost answer is still a duplicate (hk 6994 #1).
+func staleReplayEventID(day string, rows []staleReplayRow) string {
+	least := rows[0].RelayID
+	for _, row := range rows[1:] {
+		least = min(least, row.RelayID)
+	}
+	return "stale-replay-" + day + "-" + strconv.FormatInt(least, 10)
+}
+
+// staleReplayNoticeEvent is the inbox item one filing pass files for a design
+// lane. The hub originates it, so it carries the hub as its host, as the hub's
+// other lane events do (hk 6994 #2).
+func staleReplayNoticeEvent(eventID, day, lane string, listed []staleReplayRow, overtaken int) hubJobEventPayload {
+	return hubJobEventPayload{
+		JobID: laneEventTransportID(lane, eventID), Epoch: 1, OwnerLane: lane, EventID: eventID, Host: "hub",
 		Text: staleReplayNoticeText(day, lane, listed, overtaken), DeliveryClass: "inbox", NotifyType: "info",
 	}
-	result := h.relayLaneEventContext(ctx, event, nil)
+}
+
+// fileStaleReplayItem hands the notice to the design lane's inbox. The event id
+// is the pass's (staleReplayEventID). It reports whether the item is held.
+func (h *HubServer) fileStaleReplayItem(ctx context.Context, eventID, day, lane string, listed []staleReplayRow, overtaken int) bool {
+	result := h.relayLaneEventContext(ctx, staleReplayNoticeEvent(eventID, day, lane, listed, overtaken), nil)
 	if result.PersistFailed || result.RejectedTooLong {
 		h.logger.Warn("stale replay notice was not filed; it is retried", "day", day, "lane", lane, "rows", len(listed))
 		return false
@@ -382,8 +462,9 @@ func staleReplayNoticeText(day, lane string, listed []staleReplayRow, overtaken 
 	for i, row := range listed {
 		received := time.UnixMilli(row.ReceivedMS).UTC()
 		age := time.Duration(row.RetiredMS-row.ReceivedMS) * time.Millisecond
-		entry := fmt.Sprintf(" | %s %s received %s age %s row %d hk %s", orDash(utf8PrefixWithin(row.Sender, staleReplayWidthSend)),
-			orDash(utf8PrefixWithin(row.Kind, staleReplayWidthKind)), received.Format(time.RFC3339), age.Round(time.Minute),
+		entry := fmt.Sprintf(" | %s %s lane %s job %s received %s age %s row %d hk %s", orDash(utf8PrefixWithin(row.Sender, staleReplayWidthSend)),
+			orDash(utf8PrefixWithin(row.Kind, staleReplayWidthKind)), orDash(utf8PrefixWithin(row.WorkerLane, staleReplayEntryWidth)),
+			orDash(utf8PrefixWithin(row.Job, staleReplayEntryWidth)), received.Format(time.RFC3339), age.Round(time.Minute),
 			row.RelayID, orDash(utf8PrefixWithin(row.HKEventID, 48)))
 		if i == staleReplayListLimit || b.Len()+len(entry)+reserve > laneEventTextLimit {
 			fmt.Fprintf(&b, " +%d more not listed.", len(listed)-i)

@@ -289,6 +289,10 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
+	if err := migrateStaleReplayBindingKey(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	for _, q := range relayStaleNoticeSchema {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			db.Close()

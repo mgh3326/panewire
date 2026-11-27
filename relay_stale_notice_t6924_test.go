@@ -107,7 +107,10 @@ type t6924Rig struct {
 	taskOf map[string]string
 	seq    int64
 	now    time.Time
-	path   string
+	// stamp is the received_at handoffkeep gives the rows it creates next; it
+	// is the row's receipt time, which the hub's clock (now) need not match.
+	stamp time.Time
+	path  string
 }
 
 // newT6924Rig starts a fake hk that also serves task reads, and a hub whose
@@ -132,7 +135,8 @@ func newT6924Rig(t *testing.T, path string) *t6924Rig {
 	for i := 1; i <= t6924Workers; i++ {
 		routes[t6924Lane(i)] = reportRelayRoute{Machine: "host-a", Pane: fmt.Sprintf("w1:worker%d", i), Job: t6924Job(i), Parent: t6924Design}
 	}
-	rig := &t6924Rig{t: t, fake: fake, tasks: tasks, routes: routes, taskOf: map[string]string{}, now: t6924Day, path: path}
+	rig := &t6924Rig{t: t, fake: fake, tasks: tasks, routes: routes, taskOf: map[string]string{}, now: t6924Day, stamp: t6924Day, path: path}
+	fake.receivedAt = func() time.Time { return rig.stamp }
 	rig.open(client)
 	return rig
 }
@@ -189,18 +193,25 @@ func (r *t6924Rig) setRoute(i int, job string) {
 // handoffkeep received_at, which the fake does not stamp, so it is set here.
 func (r *t6924Rig) receive(i int, at time.Time, text string) string {
 	r.t.Helper()
+	return r.receiveStamped(i, at, at, text)
+}
+
+// receiveStamped is receive with the hub's clock (hubAt) and the row's
+// handoffkeep received_at (received) set apart: the two clocks are not one
+// clock in production, and a binding must follow the row's own stamp.
+func (r *t6924Rig) receiveStamped(i int, hubAt, received time.Time, text string) string {
+	r.t.Helper()
 	r.seq++
 	eventID := "t6924-" + strconv.FormatInt(r.seq, 10)
-	saved := r.now
-	r.now = at
-	defer func() { r.now = saved }()
+	savedNow, savedStamp := r.now, r.stamp
+	r.now, r.stamp = hubAt, received
+	defer func() { r.now, r.stamp = savedNow, savedStamp }()
 	event := hubJobEventPayload{JobID: laneEventTransportID(t6924Lane(i), eventID), Epoch: 1, OwnerLane: t6924Lane(i), EventID: eventID, Text: text}
 	r.hub.relayLaneEventContext(context.Background(), event, nil)
 	r.fake.mu.Lock()
 	defer r.fake.mu.Unlock()
 	for _, row := range r.fake.rows {
 		if row.EventID == eventID {
-			row.ReceivedAt = at.UTC().Format(time.RFC3339Nano)
 			return eventID
 		}
 	}

@@ -717,6 +717,11 @@ type HubServer struct {
 	laneEventSHAOrder    lruIndex[string]
 	replayExhausted      map[int64]struct{}
 	replayExhaustedOrder lruIndex[int64]
+
+	// staleReplayLookupFails counts the failed owner lookups of each held stale
+	// replay row (hk 6994). Guarded by mu.
+	staleReplayLookupFails map[int64]int
+
 	// replayRetired remembers durable rows this process already retired, so
 	// overlapping replays — the startup replay and one per node hello —
 	// cannot announce the same retire twice (#658).

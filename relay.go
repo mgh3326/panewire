@@ -344,9 +344,12 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	// The lane's job as lanes.json names it now, whether or not the lane is
 	// reachable at this receipt: resolveRelayRoute gives an empty route when the
 	// node is down. The stale-replay notice reads the binding back when this row
-	// retires, after the route may be gone (hk 6924).
-	h.noteStaleReplayLane(event.OwnerLane)
-	route, target, routed := h.resolveRelayRoute("lane.event", event)
+	// retires, after the route may be gone (hk 6924). One read of the file serves
+	// both the route and that binding; the binding is written once the row is
+	// persisted, with the receipt time handoffkeep stamps on it (hk 6976 #3).
+	routes := loadReportRelayRoutes(h.reportRelayPath)
+	staleJob := routes[event.OwnerLane].Job
+	route, target, routed := h.resolveRelayRouteWithRoutes("lane.event", event, routes)
 	if event.sinkOnly && !route.Sink {
 		h.forgetRelayEvent(key)
 		return relayLaneEventResult{}
@@ -373,6 +376,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.broadcastRelayUnpersisted("lane.event", event)
 		return relayLaneEventResult{PersistFailed: true, PersistStatus: status}
 	}
+	h.noteStaleReplayLane(event.OwnerLane, staleJob, stored.ReceivedAt)
 	h.recordObligation(key, "lane.event", event, route, stored)
 	// #725: the durable text now names this identity for the rest of the
 	// process, so every future resend can be compared against it — including
