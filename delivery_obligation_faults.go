@@ -316,10 +316,11 @@ func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int6
 	reopen, reopened := obligationReopenWhen(fault, replace, replaced)
 	// The reopen reads the stored row before state is assigned, and fault is
 	// assigned last: MySQL reads an assigned column's new value.
-	args := slices.Concat(reopened, []any{now.UnixMilli()}, reopened, reopened, []any{obligationOwed}, replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
+	args := slices.Concat(reopened, []any{now.UnixMilli()}, reopened, reopened, reopened, []any{obligationOwed}, replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
 	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
 		SET next_at=CASE WHEN `+reopen+` THEN ? ELSE next_at END,
 		    incident_id=CASE WHEN `+reopen+` THEN 0 ELSE incident_id END,
+		    notice_due_at=CASE WHEN `+reopen+` THEN 0 ELSE notice_due_at END,
 		    state=CASE WHEN `+reopen+` THEN ? ELSE state END,
 		    last_fault_at=CASE WHEN `+replace+` THEN ? ELSE last_fault_at END,
 		    `+due+`

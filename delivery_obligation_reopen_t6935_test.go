@@ -125,3 +125,40 @@ func TestSafeDropReopensNoticedRow(t *testing.T) {
 		t.Fatalf("copy = %+v, want row %d", c, d.EventID)
 	}
 }
+
+// A row whose incident notice is still due when a safe drop reopens it is owed
+// with that notice withdrawn: due, it would be joined back into an incident
+// while it is sent again. A notice already posted stays posted. Killed by:
+// leaving notice_due_at out of the reopen write.
+func TestSafeDropWithdrawsDueNotice(t *testing.T) {
+	rig := newT6384Rig(t)
+	d := rig.send("lane-a", "due-6935")
+	t6820Report(t, rig, d, t6820Drop{report: relayUnconfirmedPromptFailed})
+	rig.pass(0)
+	labelled := rig.injected()
+	t6820Report(t, rig, labelled, t6820Drop{report: relayUnconfirmedPromptFailed})
+	rig.pass(time.Minute)
+	read := func() (state string, incident, due, told int64) {
+		t.Helper()
+		if err := rig.hub.inbox.store.db.QueryRowContext(t.Context(),
+			`SELECT state,incident_id,notice_due_at,told_at FROM delivery_obligations WHERE relay_id=?`, d.EventID).
+			Scan(&state, &incident, &due, &told); err != nil {
+			t.Fatal(err)
+		}
+		return state, incident, due, told
+	}
+	before, _, dueBefore, toldBefore := read()
+	if before != obligationExhausted || dueBefore == 0 {
+		t.Fatalf("before the safe drop: state=%s due=%d, want exhausted with a due notice", before, dueBefore)
+	}
+	t6820Report(t, rig, labelled, t6820Drop{drop: relayDroppedRetriesExhausted, harness: "claude"})
+	t6820AwaitDropExpiry(t, rig, labelled)
+	state, incident, due, told := read()
+	if state != obligationOwed || incident != 0 || due != 0 || told != toldBefore {
+		t.Fatalf("after the safe drop: state=%s incident=%d due=%d told=%d, want owed, detached, not due, told still %d", state, incident, due, told, toldBefore)
+	}
+	rig.pass(0)
+	if got := rig.injected(); got.EventID != d.EventID {
+		t.Fatalf("copy = %+v, want row %d", got, d.EventID)
+	}
+}

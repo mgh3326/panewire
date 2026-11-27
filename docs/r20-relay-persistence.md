@@ -418,7 +418,9 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
 - An exhausted row is a verdict on the fault it held when it was exhausted. A
   drop that settles that maybe-typed fault to a safe one reopens the row while
   `spent` is below 3: it is owed again and the next pass queues the copy the
-  exhaustion ended (hk 6935). A spent budget stays exhausted.
+  exhaustion ended (hk 6935). The reopen also leaves its incident and withdraws
+  a notice that is due and not yet posted; a notice already posted stays posted.
+  A spent budget stays exhausted.
 - A `job.*` copy carries no label and has no revive: the three safe faults retry
   to the budget, `job_ended` never, `working_wait_expired` gets no copy at all
   (hk 6935), and any other maybe-typed fault gets one.
