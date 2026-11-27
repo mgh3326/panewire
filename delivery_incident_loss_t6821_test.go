@@ -141,8 +141,15 @@ func TestDueRowWaitsForItsDesignLaneAfterRestart(t *testing.T) {
 	// The hub stops before any pass, and comes back two hours later.
 	rig.clock.advance(2 * time.Hour)
 	rig.restart()
-	rig.none(0)
-	rig.none(5 * time.Minute)
+	for _, wait := range []time.Duration{0, 5 * time.Minute} {
+		rig.none(wait)
+		if r := rig.row(row); r.DueAt == 0 || r.ToldAt != 0 {
+			t.Fatalf("%v after the restart the row no longer waits: %+v\n%s", wait, r, rig.logs.String())
+		}
+		if lines := strings.Count(rig.logs.String(), `msg="relay unconfirmed escalation has no design lane"`); lines != 0 {
+			t.Fatalf("the waiting row was given up %d times:\n%s", lines, rig.logs.String())
+		}
+	}
 
 	rig.job(t3431Job, false, false)
 	if got := rig.one(0); !strings.Contains(got, "event "+t6821Num(row)+" ") {

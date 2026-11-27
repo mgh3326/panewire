@@ -351,15 +351,16 @@ notices"). A hub with no store is [the exception](#a-hub-with-no-inbox-store).
 A safe fault does not wait for exhaustion when its retries cannot get there:
 
 - A node's drop that typed nothing (`pane_read_failed`,
-  `inject_failed_max_attempts`, `working_wait_expired`) is told as soon as a
-  pass finds no route for the row, since nothing may ever exhaust it, and when
-  the row is a released digest batch's.
-- A row with any failed copy whose retries end by age, found by the pass or
-  retired `stale`, is told then. A row renamed `unrouted` is told under the
-  fault it had, an `ack_timeout` included.
+  `inject_failed_max_attempts`) is told as soon as a pass finds no route for the
+  row, since nothing may ever exhaust it.
+- An owed row with any failed copy whose retries end by age, found by the pass
+  or retired `stale`, is told then. A row renamed `unrouted` is told under the
+  fault it had, an `ack_timeout` included. A row exhausted earlier is not told
+  again.
 
 A row with an `ack_timeout` that only lost its route is not told while it can
-still be retried, and a released digest batch's row is not told of one.
+still be retried. A released digest batch's row is settled, not exhausted, so a
+safe fault on one is not told; a maybe-typed one still is.
 
 A row is told once: after a notice covers it, nothing it does later makes it
 due again. A row confirmed before its notice is stored is not told, nor one the

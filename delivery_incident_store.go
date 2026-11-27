@@ -37,11 +37,10 @@ const obligationNeverNoticed = `fault IN ('` + obligationFaultUnrouted + `','` +
 // obligationUntold is the predicate of a row a notice may still become due for.
 const obligationUntold = `kind='lane.event' AND notice_due_at=0 AND told_at=0`
 
-// obligationNodeDropped is the predicate of the faults a node dropped a row
-// with, having typed nothing. The design lane was told of them from the drop
-// before there were incidents, so a row that loses its route or its retries
-// under one is told then.
-const obligationNodeDropped = `fault IN ('` + relayDroppedPaneReadFailed + `','` + relayDroppedRetriesExhausted + `','` + relayDroppedWorkingExpired + `')`
+// obligationNodeDropped is the predicate of the safe faults a node's drop
+// names. The design lane was told of them from the drop before there were
+// incidents, so a row that loses its route under one is told then.
+const obligationNodeDropped = `fault IN ('` + relayDroppedPaneReadFailed + `','` + relayDroppedRetriesExhausted + `')`
 
 // obligationFailed is the predicate of a row that had a failed copy to tell of.
 // A row renamed unrouted keeps that fault in fault_reason; one renamed by a
@@ -158,13 +157,13 @@ func (s *laneInboxStore) markNoticeDue(parent context.Context, fault string, now
 	return err
 }
 
-// endUnprovenNotice makes an open row whose retries have ended by age due a
-// notice of its failure, unless it has none or was already told.
+// endUnprovenNotice makes an owed row whose retries have ended by age due a
+// notice of its failure (obligationRetriesEnd).
 func (s *laneInboxStore) endUnprovenNotice(parent context.Context, id int64, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET `+obligationDueWhen(obligationUntold+` AND `+obligationFailed)+`updated_at=?
-		WHERE id=? AND `+obligationUntold+` AND `+obligationFailed+` AND `+obligationOpen), now.UnixMilli(), now.UnixMilli(), id)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET `+obligationDueWhen(obligationRetriesEnd)+`updated_at=?
+		WHERE id=? AND `+obligationRetriesEnd), now.UnixMilli(), now.UnixMilli(), id)
 	return err
 }
 

@@ -455,8 +455,8 @@ hk 4289 T4 (hk 6821). Which rows the design lane is told of, and when, is in
   with no fault due. A report that replaces the fault also records its machine
   and pane, which key the incident.
 - Closing an obligation clears its due notice, except a `stale` settlement,
-  which makes a row with a failed copy due, and a `digest-not-replayed` one,
-  which keeps a due notice and makes a node's drop due.
+  which makes an owed row with a failed copy due, and a `digest-not-replayed`
+  one, which keeps a due notice.
 - The pass joins at most 50 due rows to incidents, then for each open incident
   posts its notice if one is due, then closes it if it has ended. The join
   opens the key's incident if it has none (`open_slot`), and an exhausted

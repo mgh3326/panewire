@@ -256,19 +256,19 @@ func (s *laneInboxStore) dueObligations(parent context.Context, now time.Time, l
 
 // closeObligation ends an open obligation as confirmed, or as settled for
 // reason. A closed row needs no notice, since its text reached the receiver or
-// no pane takes it, with two exceptions that end the retries unproven. A row
-// retired as stale is told of any failure it had. A settled digest batch keeps
-// a due notice and is told of a node's drop: its items go out again under a new
-// batch, and the notice of this one still says a delivery to the lane failed.
+// no pane takes it, with two exceptions that end the retries unproven. An owed
+// row retired as stale is told of any failure it had. A settled digest batch
+// keeps a due notice: its items go out again under a new batch, and the notice
+// of this one still says a delivery to the lane went unproven.
 func (s *laneInboxStore) closeObligation(parent context.Context, id int64, state, reason string, now time.Time) error {
 	ctx, done := s.op(parent)
 	defer done()
 	notice, values := `notice_due_at=0,`, []any{}
 	switch reason {
 	case obligationSettledStale:
-		notice, values = obligationDueWhen(obligationUntold+` AND `+obligationFailed), []any{now.UnixMilli()}
+		notice, values = obligationDueWhen(obligationRetriesEnd), []any{now.UnixMilli()}
 	case obligationSettledDigest:
-		notice, values = obligationDueWhen(obligationUntold+` AND `+obligationNodeDropped), []any{now.UnixMilli()}
+		notice = ``
 	}
 	_, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET `+notice+`state=?,settle_reason=?,next_at=0,updated_at=? WHERE id=? AND `+obligationOpen),
 		append(values, state, utf8PrefixWithin(reason, 64), now.UnixMilli(), id)...)
@@ -279,6 +279,11 @@ func (s *laneInboxStore) closeObligation(parent context.Context, id int64, state
 // lane is now to be told of: an owed lane.event no notice has covered or
 // already awaits.
 const obligationBecomesDue = `state='` + obligationOwed + `' AND kind='lane.event' AND notice_due_at=0 AND told_at=0`
+
+// obligationRetriesEnd is true of a row whose retries end now with a failure
+// its design lane is to be told of. A row already exhausted ended them earlier,
+// under a build that may have told it, and is not told again.
+const obligationRetriesEnd = obligationBecomesDue + ` AND ` + obligationFailed
 
 // obligationToExhausted is the state an exhausted obligation takes: a row
 // already in an incident is noticed.
@@ -323,7 +328,7 @@ func (s *laneInboxStore) deferObservedObligation(parent context.Context, o openO
 // the fault, and does nothing if the row changed after the caller read it. A row
 // a route loss renamed is told of the failure it had.
 func (s *laneInboxStore) exhaustObservedObligation(parent context.Context, o openObligation, now, due time.Time) error {
-	return s.updateObservedObligation(parent, o, obligationDueWhen(obligationBecomesDue+` AND `+obligationFailed)+
+	return s.updateObservedObligation(parent, o, obligationDueWhen(obligationRetriesEnd)+
 		obligationToExhausted+`,next_at=?,updated_at=?`, now.UnixMilli(), due.UnixMilli(), now.UnixMilli())
 }
 

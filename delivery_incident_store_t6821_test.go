@@ -300,7 +300,7 @@ func TestObligationStoreContractIncidents(t *testing.T) {
 		// A route loss keeps the fault it replaces: a node's drop is due at once,
 		// an ack timeout when its retries end by exhaustion, age or a stale
 		// retirement.
-		for relay := int64(20); relay <= 27; relay++ {
+		for relay := int64(20); relay <= 28; relay++ {
 			if err := s.createObligation(ctx, row(relay, "lane.event", "host-a"), now, now); err != nil {
 				t.Fatal(err)
 			}
@@ -335,8 +335,8 @@ func TestObligationStoreContractIncidents(t *testing.T) {
 				t.Fatalf("row %d at the end of its retries = %+v", relay, r)
 			}
 		}
-		// A released digest batch is told of a node's drop, not of an ack
-		// timeout; a row with no failure, and a receiver's read, tell nothing.
+		// A safe fault on a released digest batch, a row with no failure, a
+		// receiver's read, and a row exhausted earlier tell nothing.
 		for relay, reason := range map[int64]string{24: obligationSettledDigest, 25: obligationSettledDigest, 26: obligationSettledStale} {
 			if err := s.closeObligation(ctx, member(relay).id, obligationSettled, reason, told); err != nil {
 				t.Fatal(err)
@@ -346,8 +346,20 @@ func TestObligationStoreContractIncidents(t *testing.T) {
 		if err := s.closeObligation(ctx, member(27).id, obligationSettled, obligationSettledInbox, told); err != nil {
 			t.Fatal(err)
 		}
-		if member(24).due == 0 || member(24).as != relayDroppedRetriesExhausted || member(25).due != 0 || member(26).due != 0 || member(27).due != 0 {
-			t.Fatalf("digest drop=%+v digest timeout=%+v no failure=%+v read=%+v", member(24), member(25), member(26), member(27))
+		flag(28, "lane.event", "host-a", relayDroppedPaneReadFailed, told)
+		if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations SET state=? WHERE relay_id=28`), obligationExhausted); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.endUnprovenNotice(ctx, member(28).id, told); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.closeObligation(ctx, member(28).id, obligationSettled, obligationSettledStale, told); err != nil {
+			t.Fatal(err)
+		}
+		for _, relay := range []int64{24, 25, 26, 27, 28} {
+			if r := member(relay); r.due != 0 {
+				t.Fatalf("row %d is due a notice: %+v", relay, r)
+			}
 		}
 
 		// A closed row needs no notice, except a released digest batch.
