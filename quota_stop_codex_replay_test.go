@@ -25,7 +25,10 @@ func stubDetachedWatcher(t *testing.T) string {
 	pidFile := filepath.Join(dir, "watcher.pid")
 	script := filepath.Join(dir, "panewire-stand-in")
 	// The stand-in idles like a watcher waiting for a report; exec keeps its pid.
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho $$ > "+pidFile+"\nexec sleep 60\n"), 0700); err != nil {
+	// It publishes the pid with a rename: a plain redirect truncates the file
+	// first, so the cleanup could read an empty pid file mid-write (CI flake).
+	body := "#!/bin/sh\necho $$ > " + pidFile + ".tmp && mv " + pidFile + ".tmp " + pidFile + "\nexec sleep 60\n"
+	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
 	restore := fleet.SetWatcherExecutable(func() (string, error) { return script, nil })
