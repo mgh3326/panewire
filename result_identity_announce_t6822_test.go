@@ -135,6 +135,30 @@ func TestMergeAnnouncesAReadyTypedInAHeldBatch(t *testing.T) {
 			}
 		})
 	}
+	// A late completion is silent on its own, so only the typed READY asks for
+	// the line, and only the batch shows it was typed.
+	t.Run("a silent completion after the READY's held batch", func(t *testing.T) {
+		h, agent, now, _, _ := holdHub(t, "", true)
+		holdNotice(t, h, agent, "ready-1", "ready", "READY ready for review")
+		holdIdle(h, *now)
+		h.flushInbox()
+		holdReceive(t, agent)
+		late := completion("ready-1")
+		late.Late = true
+		h.relayJobCompletionFrom("host-a", late)
+		if wakes := t6822Wakes(agent); len(wakes) != 1 {
+			t.Fatalf("wakes=%+v, want one", wakes)
+		}
+	})
+	t.Run("a typed completion while the READY waits for its batch", func(t *testing.T) {
+		h, agent, now, _, _ := holdHub(t, "", true)
+		holdNotice(t, h, agent, "ready-1", "ready", "READY ready for review")
+		holdIdle(h, *now)
+		h.relayJobCompletionFrom("host-a", completion("ready-1"))
+		if wakes := t6822Wakes(agent); len(wakes) != 1 {
+			t.Fatalf("wakes=%+v, want one", wakes)
+		}
+	})
 	t.Run("the READY is still held", func(t *testing.T) {
 		h, agent, now, _, _ := holdHub(t, "", true)
 		holdNotice(t, h, agent, "ready-1", "ready", "READY ready for review")
