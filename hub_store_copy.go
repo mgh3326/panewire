@@ -38,7 +38,7 @@ var storeCopyTables = []storeCopyTable{
 	{"task_fail_notice_outbox", "request_id"}, {"owner_notice_decisions", "event_key"},
 	{"supersede_lane_cause", "lock_key"}, {"delivery_obligations", "id"}, {"delivery_incidents", "id"},
 	{"delivery_notice_slots", "design_lane,machine,fault"}, {"delivery_reconciler_state", "singleton"},
-	{"relay_stale_notice_rows", "relay_id"}, {"relay_stale_notice_lanes", "worker_lane,job"},
+	{"relay_stale_notice_rows", "relay_id"}, {"relay_stale_notice_lanes", "worker_lane,first_ms"},
 }
 
 // storeCopyHubKeyTables hold a hub key in event_key, which each backend stores
@@ -46,10 +46,13 @@ var storeCopyTables = []storeCopyTable{
 // event_key columns are plain text.
 var storeCopyHubKeyTables = map[string]bool{"lane_inbox": true, "delivery_obligations": true}
 
-// storeCopyNumericKeys names, for a table whose key is a BIGINT that the
-// application (not a sequence) supplies, that key column. It orders as a number
+// storeCopyNumericKeys names, for a table whose key columns include BIGINTs that
+// the application (not a sequence) supplies, those columns. They order as numbers
 // on every backend: Postgres rejects COLLATE on a bigint (SQLSTATE 42804).
-var storeCopyNumericKeys = map[string]string{"relay_stale_notice_rows": "relay_id"}
+var storeCopyNumericKeys = map[string][]string{
+	"relay_stale_notice_rows":  {"relay_id"},
+	"relay_stale_notice_lanes": {"first_ms"},
+}
 
 // storeCopyOlderSourceTables are tables an older source may lack: a store
 // written before the table's release has no such table, so no rows to copy.
@@ -394,7 +397,7 @@ type storeCopyResult struct {
 func storeCopyOrderBy(dialect sqlDialect, table storeCopyTable) string {
 	parts := strings.Split(table.key, ",")
 	for i, p := range parts {
-		numeric := p == "attempt" || p == "singleton" || storeCopySequenceColumns[table.name] == p || storeCopyNumericKeys[table.name] == p
+		numeric := p == "attempt" || p == "singleton" || storeCopySequenceColumns[table.name] == p || slices.Contains(storeCopyNumericKeys[table.name], p)
 		if !numeric && dialect == dialectPostgres {
 			parts[i] = p + ` COLLATE "C"`
 		} else if !numeric && dialect == dialectMySQL {

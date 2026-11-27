@@ -308,6 +308,28 @@ with an inbox store gives such a devin row one labelled copy at most; a rejected
 send on another harness retries to the hub's budget
 ([r20-relay-persistence.md](r20-relay-persistence.md), "Faults and copies").
 
+### Uncertain batches
+
+A batch whose members cannot all be proven is reported once, not once per row
+(hk 6887). The node sends one `relay.uncertain_batch` summary that names the
+batch's worker lanes, and each member's `relay.dropped` carries
+`batch_uncertain`, so the hub warns once
+(`relay-dropped-batch/<verdict>/<harness>`, [observability.md](observability.md)).
+
+- The summary is sent only to a hub whose `hub.features` lists
+  `relay_uncertain_batch`. To any other hub the node sends no summary, and each
+  unproven member keeps its own warning: a base build restores per-row
+  warnings.
+- The summary's lane is the first lane a member names. A member with no lane
+  is counted in `member_count` but names no lane, so a batch that starts with
+  one still reaches the hub's decoder.
+- A batch of one row, or a batch with no lane at all, gets no summary; its row
+  warns on its own.
+- A `queued_banner` batch whose every nonce is proven is delivered and raises
+  no warning (panewire-design's decision on #920). Only a member whose nonce is
+  missing from the queue joins an uncertain batch, under the same rule as the
+  other verdicts.
+
 Must-ack semantics are unchanged. An injected `findings`, `decision`, `ready`
 or `blocked` item stays unread until the worker runs `panewire inbox ack <id>`.
 
@@ -486,17 +508,23 @@ files one inbox item per owning design lane for each UTC day, once the day has
 closed.
 
 - **What is kept.** A `stale` retirement of a real message, except an
-  idle-wake report. A row is kept before its handoffkeep row is closed: if the
-  row cannot be kept (the store or the job lookup fails), the close is released
-  and the row stays undelivered for the next replay. There is no exclusion for a
+  idle-wake report and a row its lane already read or acked (the lane has it).
+  A row is kept before its handoffkeep row is closed. If the row cannot be kept
+  (the store write fails), the close is released and the row stays undelivered
+  for the next replay. A failed job or owner lookup is retried on later replays
+  for three tries (in memory, so each hub start gives it three more); then the
+  row is kept on the hub's notice lane, so a persistent lookup fault does not hold
+  it forever. There is no exclusion for a
   row received after its worker job's `job.completed` (hk 6900 is merged, so
   that case is no longer re-delivered), and a lost or revoked job's rows are kept.
 - **Which job a row belongs to.** From durable state, in this order:
   1. a `job.*` row carries its job;
   2. a `lane.event` row takes the job its lane was bound to when the row
      arrived. The receipt records the lane's route job in
-     `relay_stale_notice_lanes` (first sighting per lane and job; the binding
-     with the latest first sighting at or before the receipt wins);
+     `relay_stale_notice_lanes`: one binding per change of the lane's job, keyed
+     by the receipt time handoffkeep stamped on the persisted row (the binding
+     with the latest first sighting at or before the receipt wins, so a lane that
+     moves A -> B -> A keeps a binding for each stint);
   3. for a row received before any binding was kept, the lanes.json route is a
      hint, used only when that route's job was spawned before the row arrived.
   The job's spawn record gives the design owner and the hk task. A job whose
@@ -505,10 +533,13 @@ closed.
   spawn record or owner, is filed on the hub's notice lane (`panewire-design`
   by default) with the job shown as `-`, so no retired row disappears silently.
 - **The item.** Filed inbox-class (`notify_type` `info`) to the design lane,
-  event id `stale-replay-<day>`. It names the rows the task did not overtake:
-  sender prefix, message type (the relay kind), received time, age at
-  retirement, the handoffkeep row id (`row N`, the key to look a row up by) and
-  the hk event id, at most ten of them, then a count of the rest. The footer
+  event id `stale-replay-<day>-<n>`, where `n` is the smallest handoffkeep row
+  id the pass read, so a row retired after a pass read its rows is filed by the
+  next pass under its own id. It names the rows the task did not overtake:
+  sender prefix, message type (the relay kind), the worker lane and job (each
+  cut to 40 bytes), received time, age at retirement, the handoffkeep row id
+  (`row N`, the key to look a row up by) and the hk event id, at most ten of
+  them, then a count of the rest. The item is hub-originated (`host` `hub`). The footer
   counts the overtaken rows; room for it is reserved, so it is never cut off.
 - **Overtaken rows.** A row is overtaken when its lane's hk task reached an end
   state (merged, deployed, completed, dropped or duplicate; icebox is parked, not
@@ -522,14 +553,19 @@ closed.
 - **Closing a filed day.** Only the rows the filing pass read are marked filed; a
   row retired while the pass runs stays owed for the next pass.
 - **Survival.** The rows live in `relay_stale_notice_rows`, and the lane
-  bindings in `relay_stale_notice_lanes` (hub store, SQLite, Postgres migration
-  0043, MySQL migration 0039), so a restart mid-day keeps them. A filed day's
-  rows are pruned after 14 days. Bindings are kept (one row per lane and job).
+  bindings in `relay_stale_notice_lanes` (hub store, SQLite, Postgres migrations
+  0043 and 0045, MySQL migrations 0039 and 0042), so a restart mid-day keeps
+  them. A filed day's rows are pruned after 14 days. Bindings are kept: one row
+  per change of a lane's job, keyed `(worker_lane, first_ms)`. A SQLite store
+  with the first key is rebuilt on open. Rolling back past this change is a
+  known degradation: an older binary's binding writes fail, so rows received in
+  that window fall back to the lanes.json hint or the notice lane.
 
 Code: `relay_stale_notice.go`, `relay_stale_notice_store.go`, and the two hooks
-in `relay.go` (`noteStaleReplayLane` at lane.event receipt, `noteStaleReplayRetire`
-before the close in `retireRelayReplay`). Tests:
-`relay_stale_notice_t6924_test.go`.
+in `relay.go` (`noteStaleReplayLane` once a lane.event is persisted,
+`noteStaleReplayRetire` before the close in `retireRelayReplay`). Tests:
+`relay_stale_notice_t6924_test.go`, `relay_stale_notice_t6976_test.go`,
+`relay_stale_notice_t6994_test.go`, `relay_stale_notice_host_t6994_test.go`.
 
 ## Tests
 

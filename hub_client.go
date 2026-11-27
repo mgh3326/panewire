@@ -794,8 +794,15 @@ type hubClientConnection struct {
 	// acceptsNodeLoops is the same for hubFeatureNodeLoops
 	// (node_loop_ledger.go): the heartbeat may carry the node's loop ledger.
 	acceptsNodeLoops atomic.Bool
-	connection       *websocket.Conn
-	writeMu          hubWriteMutex
+	// acceptsRelayUncertainBatch is the same for hubFeatureRelayUncertainBatch
+	// (busy_relay.go): the one summary of an uncertain batch goes only to such a hub.
+	acceptsRelayUncertainBatch atomic.Bool
+	// featuresReady is closed once this connection's hub.features is read
+	// (markFeaturesReady). An uncertain batch decided earlier waits on it.
+	featuresReady chan struct{}
+	featuresOnce  sync.Once
+	connection    *websocket.Conn
+	writeMu       hubWriteMutex
 	// closed is closed when the session on this connection ends; a nil
 	// channel (a test peer) never ends.
 	closed chan struct{}
@@ -2228,7 +2235,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	client.serving.Add(1)
 	defer client.serving.Add(-1)
-	peer := &hubClientConnection{connection: connection, closed: make(chan struct{})}
+	peer := &hubClientConnection{connection: connection, closed: make(chan struct{}), featuresReady: make(chan struct{})}
 	defer close(peer.closed)
 	// Each connection may reach a different hub build (failover, redeploy).
 	client.signalsPeer.Store(peer)
@@ -2351,10 +2358,12 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsSpawnStageSubmit.Store(slices.Contains(message.Features, hubFeatureSpawnStageSubmit))
 				peer.acceptsSpawnStageCheckout.Store(slices.Contains(message.Features, hubFeatureSpawnStageCheckout))
 				peer.acceptsNodeLoops.Store(slices.Contains(message.Features, hubFeatureNodeLoops))
+				peer.acceptsRelayUncertainBatch.Store(slices.Contains(message.Features, hubFeatureRelayUncertainBatch))
 				// Published last: a reader that sees featuresKnown must also see
 				// every accept bit above, or a held final loss could be written
 				// before acceptsFinalLost is set (mergewake, hk 5351).
 				peer.featuresKnown.Store(true)
+				peer.markFeaturesReady()
 				continue
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
@@ -3557,4 +3566,11 @@ func ledgerFinalLost(inboxRoot string, job hubScannedRelayEvent) bool {
 		} `json:"payload"`
 	}
 	return json.Unmarshal(contents, &event) == nil && event.Payload.Final
+}
+
+// markFeaturesReady releases the batches waiting on this connection's hub.features.
+func (peer *hubClientConnection) markFeaturesReady() {
+	if peer.featuresReady != nil {
+		peer.featuresOnce.Do(func() { close(peer.featuresReady) })
+	}
 }
