@@ -123,6 +123,10 @@ type obligationSweep struct {
 	// noticeWaits spaces the posts of each incident's refused notice. The pass
 	// owns it, under mu.
 	noticeWaits map[int64]noticeWait
+	// markers remembers the durable row id each live unconfirmed-mark event id
+	// belongs to, so an obligation's marker retire need not re-scan the
+	// listing.
+	markers sync.Map
 }
 
 func (s *obligationSweep) close() {
@@ -162,6 +166,7 @@ func (h *HubServer) obligationContext(budget time.Duration) (context.Context, fu
 func (h *HubServer) reconcileObligations(ctx context.Context) {
 	h.adoptObligations(ctx)
 	h.classifyObligations(ctx)
+	h.retireObligationMarkers(ctx)
 	notices, done := h.obligationContext(obligationNoticeBudget)
 	defer done()
 	h.runDeliveryIncidents(notices)
@@ -279,11 +284,11 @@ func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, re
 	store := h.inbox.store
 	own := store.tracks(o, relayEventDedupeKey(record.Kind, relayEventFromRecord(record)))
 	if own && confirmedInHK(record) {
-		return store.closeObligation(ctx, o.id, obligationConfirmed, "", now)
+		return h.closeObligation(ctx, o.id, obligationConfirmed, "", now)
 	}
 	if own && isSyntheticDestination(record.DeliveredTo) {
 		if reason := settlementReason(record.DeliveredTo); reason != "" {
-			return store.closeObligation(ctx, o.id, obligationSettled, reason, now)
+			return h.closeObligation(ctx, o.id, obligationSettled, reason, now)
 		}
 		return store.exhaustObligation(ctx, o.id, obligationFaultUnconfirmed, now, now.Add(obligationParkRecheck))
 	}
@@ -292,7 +297,7 @@ func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, re
 		return err
 	}
 	if settled {
-		return store.closeObligation(ctx, o.id, obligationSettled, obligationSettledInbox, now)
+		return h.closeObligation(ctx, o.id, obligationSettled, obligationSettledInbox, now)
 	}
 	if own && record.Kind == "lane.event" {
 		released, err := store.digestBatchReleased(ctx, record.OwnerLane, record.EventID)
@@ -300,7 +305,7 @@ func (h *HubServer) classifyObligation(ctx context.Context, o openObligation, re
 			return err
 		}
 		if released {
-			return store.closeObligation(ctx, o.id, obligationSettled, obligationSettledDigest, now)
+			return h.closeObligation(ctx, o.id, obligationSettled, obligationSettledDigest, now)
 		}
 	}
 	// A requested revive also reopens an exhausted row.

@@ -1371,11 +1371,14 @@ func decodeIdleWakeRelayText(text string) (idleWakeRelayText, bool) {
 const relayReplayRetiredMarker = relayReplayRetiredMachine + "/" + relayReplayRetiredPane
 
 // retireRelayReplay closes a row the replay gate refused, so no later restart
-// lists it again, and puts the reason on the operator feed.
-func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason string) {
+// lists it again, and puts the reason on the operator feed. It reports whether
+// this call made the retire durable: false means the row is still undelivered,
+// whether another retire claimed it or the write failed, and a caller that
+// needs the retire retries it.
+func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason string) bool {
 	if !h.claimReplayRetire(record.ID) {
 		h.logger.Debug("relay replay row already retired", "event_id", record.ID, "lane", record.OwnerLane, "delivered_to", record.DeliveredTo)
-		return
+		return false
 	}
 	// The daily stale-replay notice row (hk 6924) is kept before the row is
 	// closed. It is idempotent on the row id, so a retry after a failed close
@@ -1383,12 +1386,12 @@ func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason strin
 	// later replay instead of losing it.
 	if !h.noteStaleReplayRetire(record, reason) {
 		h.releaseReplayRetire(record.ID)
-		return
+		return false
 	}
 	if err := h.handoffkeep.markDelivered(context.Background(), record.ID, relayReplayRetiredMachine, relayReplayRetiredPane+reason); err != nil {
 		h.releaseReplayRetire(record.ID)
 		h.logger.Warn("retired relay replay was not recorded", "event_id", record.ID, "reason", reason)
-		return
+		return false
 	}
 	h.logger.Info("relay replay retired", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "reason", reason)
 	payload, _ := json.Marshal(struct {
@@ -1399,6 +1402,7 @@ func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason strin
 		Reason   string `json:"reason"`
 	}{EventID: record.ID, Kind: record.Kind, Lane: record.OwnerLane, SourceID: record.EventID, Reason: reason})
 	h.broadcast(hubEvent{Kind: "relay.replay_retired", Payload: payload, Received: h.now().UTC()})
+	return true
 }
 
 // replayUndeliveredRelayEvents re-routes what Postgres still holds as

@@ -194,6 +194,7 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (origins, digest
 		}
 		for _, record := range records {
 			if isUnconfirmedMarkRecord(record) {
+				h.obligations.markers.Store(record.EventID, record.ID)
 				if origin := unconfirmedMarkOriginID(record.EventID); origin > 0 {
 					origins[origin] = true
 					if h.inbox != nil {

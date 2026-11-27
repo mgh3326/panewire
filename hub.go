@@ -1253,11 +1253,12 @@ type hubUIData struct {
 }
 
 type hubUIHub struct {
-	Version                string `json:"version"`
-	UptimeMS               int64  `json:"uptime_ms"`
-	UnknownMessages        uint64 `json:"unknown_messages"`
-	UnfencedCompletions    uint64 `json:"unfenced_completions"`
-	RelayPayloadMismatches uint64 `json:"relay_payload_mismatches"`
+	Version                string               `json:"version"`
+	UptimeMS               int64                `json:"uptime_ms"`
+	UnknownMessages        uint64               `json:"unknown_messages"`
+	UnfencedCompletions    uint64               `json:"unfenced_completions"`
+	RelayPayloadMismatches uint64               `json:"relay_payload_mismatches"`
+	Obligations            *hubObligationCounts `json:"obligations,omitempty"`
 }
 
 type hubUINode struct {
@@ -1338,6 +1339,7 @@ func (h *HubServer) authorizeChat(request *http.Request) bool {
 
 func (h *HubServer) uiData() hubUIData {
 	now := h.now().UTC()
+	obligations := h.obligationCounts()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	nodes := make([]hubUINode, 0, len(h.nodes))
@@ -1359,7 +1361,7 @@ func (h *HubServer) uiData() hubUIData {
 	if uptime < 0 {
 		uptime = 0
 	}
-	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions, RelayPayloadMismatches: h.relayPayloadMismatches}, Nodes: nodes, Events: events}
+	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions, RelayPayloadMismatches: h.relayPayloadMismatches, Obligations: obligations}, Nodes: nodes, Events: events}
 }
 
 func (h *HubServer) handleOrphanedJobs(writer http.ResponseWriter, request *http.Request) {

@@ -323,8 +323,31 @@ Four tables, with the same columns on SQLite, Postgres (migrations 0040 and
 | `delivery_incidents` | one row per notice episode: its key, members, announced count, last notice and close reason ("Incidents and notices") |
 | `delivery_notice_slots` | when each (design lane, machine, fault) was last told, kept across incidents |
 
-`panewire hub store-copy` carries all four. Nothing prunes or deletes their
-rows.
+`panewire hub store-copy` carries all four. Retention keeps the record of a
+finished delivery for 30 days past its close, then prunes it: a `confirmed`
+or `settled` obligation whose `updated_at` is past the window, a closed
+incident no obligation still names, and a notice slot past its `notice_at`
+that no open incident still holds. An open obligation — `owed`, `noticed` or
+`exhausted` — is never deleted, and neither is a closed one an open incident
+still names.
+
+### What the operator sees
+
+`panewire inbox status --event-id` names, beside the delivery stage, the
+obligation of the row the answer's delivery fields came from: `obligation`
+(its state), `fault` (what it carries) and `settle` (the reason it closed
+with). The fields are absent for an event with no obligation.
+
+The hub feed's `hub.obligations` counts the tables as they stand — `open`,
+`confirmed`, `settled`, `exhausted`, the copies `retries` and `revived`,
+`incidents_open`, `incidents_closed` by reason, and `notices_folded` — so the
+counts are read off the store and a restart loses nothing.
+
+A `hub/unconfirmed` marker an obligation keeps as `marker_event_id` is
+retired in the same pass that closes the obligation: once the origin is
+terminal an older binary must not replay it. A marker whose retire write
+failed stays linked and each pass retries it, at most 10 a pass. A marker
+whose origin is still open stays pending.
 
 ### Which events have one
 

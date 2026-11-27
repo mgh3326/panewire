@@ -155,7 +155,7 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 	if settled, err := store.settled(relayEventDedupeKey(record.Kind, event)); err != nil {
 		return err
 	} else if settled {
-		return store.closeObligation(ctx, o.id, obligationSettled, obligationSettledInbox, now)
+		return h.closeObligation(ctx, o.id, obligationSettled, obligationSettledInbox, now)
 	}
 	if lane {
 		batch, err := store.isDigestBatch(record.OwnerLane, record.EventID)
@@ -166,7 +166,7 @@ func (h *HubServer) retryObligation(ctx context.Context, o openObligation, recor
 			if err := store.releaseBatchClaims(record.EventID); err != nil {
 				return err
 			}
-			return store.closeObligation(ctx, o.id, obligationSettled, obligationSettledDigest, now)
+			return h.closeObligation(ctx, o.id, obligationSettled, obligationSettledDigest, now)
 		}
 	}
 	exhaust := func() error {

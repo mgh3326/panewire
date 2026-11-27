@@ -401,12 +401,12 @@ func TestInboxStatusCLI(t *testing.T) {
 		t.Fatalf("node status --json: %d %q %q", code, out, errText)
 	}
 	code, out, _ = run("operator", ackStateOperatorToken, "--event-id", "ev-a")
-	if code != ExitOK || out != "event=ev-a lane=lane-a stage=inbox_only reason=- machine=- pane=- acked=no\n" {
+	if code != ExitOK || out != "event=ev-a lane=lane-a stage=inbox_only reason=- machine=- pane=- obligation=- fault=- settle=- acked=no\n" {
 		t.Fatalf("status text: %d %q", code, out)
 	}
 	// An id with no row is printed and exits 7, so a script can tell it from an unacked one.
 	code, out, _ = run("operator", ackStateOperatorToken, "--event-id", "ev-a", "--event-id", "nope")
-	if code != ExitPartial || out != "event=ev-a lane=lane-a stage=inbox_only reason=- machine=- pane=- acked=no\nnope\tnot found\n" {
+	if code != ExitPartial || out != "event=ev-a lane=lane-a stage=inbox_only reason=- machine=- pane=- obligation=- fault=- settle=- acked=no\nnope\tnot found\n" {
 		t.Fatalf("partial status: %d %q", code, out)
 	}
 	code, out, _ = run("operator", ackStateOperatorToken, "--event-id", "nope", "--json")

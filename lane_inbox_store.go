@@ -960,11 +960,18 @@ type laneInboxAckState struct {
 	At      string `json:"at,omitempty"`
 	Acked   bool   `json:"acked"`
 	AckedAt string `json:"acked_at,omitempty"`
+	// Obligation is the state of the delivery obligation on the row the
+	// delivery fields name; fault is what the agent told it, settle the
+	// reason it closed with.
+	Obligation string `json:"obligation,omitempty"`
+	Fault      string `json:"fault,omitempty"`
+	Settle     string `json:"settle,omitempty"`
 }
 
 // laneInboxAckRow is one visible row behind an event id, before the answer is
 // aggregated across the lanes the same event reached.
 type laneInboxAckRow struct {
+	key                                string
 	lane, stage, reason, machine, pane string
 	deliveryAt, deliveredAt            int64
 	ackedAt, supersededAt              int64
@@ -983,7 +990,7 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 		marks[i] = "?"
 		args = append(args, id)
 	}
-	q := `SELECT event_id,lane,delivery_stage,delivery_reason,delivery_machine,delivery_pane,delivery_at,delivered_at,acked_at,superseded_at FROM lane_inbox WHERE event_id IN (` + strings.Join(marks, ",") + `)`
+	q := `SELECT event_key,event_id,lane,delivery_stage,delivery_reason,delivery_machine,delivery_pane,delivery_at,delivered_at,acked_at,superseded_at FROM lane_inbox WHERE event_id IN (` + strings.Join(marks, ",") + `)`
 	if sender != "" {
 		q += ` AND sender=?`
 		args = append(args, sender)
@@ -998,6 +1005,7 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 	defer rows.Close()
 	type aggregate struct {
 		state   laneInboxAckState
+		key     string
 		total   int64
 		settled int64
 		latest  int64
@@ -1009,7 +1017,7 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 	for rows.Next() {
 		var eventID string
 		var row laneInboxAckRow
-		if err := rows.Scan(&eventID, &row.lane, &row.stage, &row.reason, &row.machine, &row.pane, &row.deliveryAt, &row.deliveredAt, &row.ackedAt, &row.supersededAt); err != nil {
+		if err := rows.Scan(&row.key, &eventID, &row.lane, &row.stage, &row.reason, &row.machine, &row.pane, &row.deliveryAt, &row.deliveredAt, &row.ackedAt, &row.supersededAt); err != nil {
 			return nil, err
 		}
 		agg := aggregates[eventID]
@@ -1036,6 +1044,7 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 		rank := laneInboxStageRank(stage)
 		if !agg.have || at > agg.at || (at == agg.at && rank > agg.rank) {
 			agg.have, agg.at, agg.rank = true, at, rank
+			agg.key = row.key
 			agg.state.Lane, agg.state.Stage, agg.state.Reason = row.lane, stage, row.reason
 			agg.state.Machine, agg.state.Pane = row.machine, row.pane
 			agg.state.At = ""
@@ -1047,6 +1056,15 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
+	keys := make([]string, 0, len(aggregates))
+	for _, agg := range aggregates {
+		keys = append(keys, agg.key)
+	}
+	surfaces, err := s.obligationSurfaces(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
 	states := map[string]laneInboxAckState{}
 	for id, agg := range aggregates {
 		state := agg.state
@@ -1054,6 +1072,9 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 		state.Acked = agg.settled == agg.total
 		if state.Acked {
 			state.AckedAt = time.UnixMilli(agg.latest).UTC().Format(time.RFC3339)
+		}
+		if o, ok := surfaces[agg.key]; ok {
+			state.Obligation, state.Fault, state.Settle = o.state, o.fault, o.settleReason
 		}
 		states[id] = state
 	}
