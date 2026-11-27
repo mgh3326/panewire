@@ -24,6 +24,9 @@ type Event struct {
 	CreatedAt string         `json:"created_at"`
 	TS        string         `json:"ts"`
 	Payload   map[string]any `json:"payload"`
+	// ResultID is the flat result_id a `panewire emit` job.* record stores at
+	// top level; envelope events carry it inside Payload instead.
+	ResultID string `json:"result_id"`
 	// Outcome is the flat outcome a `panewire job close` record carries
 	// (completed, abandoned or superseded); other events leave it empty.
 	Outcome string `json:"outcome"`
