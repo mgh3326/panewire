@@ -198,8 +198,12 @@ func ownerInfoBypasses(t *testing.T, filename string, src []byte) []string {
 }
 
 // ownerInfoExempt names the functions whose info notice is not about a job: the
-// daily loops notice names a mechanism, not a job.
-var ownerInfoExempt = map[string]bool{"hub_loop_ledger.go:persistLoopNotice": true}
+// daily loops notice names a mechanism, not a job, and the daily stale replay
+// notice names a day's retired rows, not one job (hk 6924, relay_stale_notice.go).
+var ownerInfoExempt = map[string]bool{
+	"hub_loop_ledger.go:persistLoopNotice":      true,
+	"relay_stale_notice.go:fileStaleReplayItem": true,
+}
 
 func ownerInfoLiteral(expr ast.Expr) bool {
 	ident, ok := expr.(*ast.Ident)

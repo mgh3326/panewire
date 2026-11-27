@@ -520,6 +520,9 @@ type HubServer struct {
 	// handoverInputs, when set, replaces the hk reads of the quota policy and
 	// the task a pool hand-over decides by (tests).
 	handoverInputs func(context.Context, string) handoverInputs
+	// staleReplaySpawn, when set, replaces the spawn-store read that names a
+	// worker job's design owner and task for the stale replay notice (tests).
+	staleReplaySpawn func(context.Context, string) (staleReplaySpawn, bool)
 	// quotaReplaceBudget overrides the hard bound on one replacement; zero uses
 	// quotaReplaceBudget.
 	quotaReplaceBudget time.Duration
@@ -2910,6 +2913,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	h.maintenanceCtx = ctx
 	h.mu.Unlock()
 	go h.runInbox(ctx)
+	go h.runStaleReplayNotice(ctx)
 	go h.runLaneRelease(ctx.Done())
 	go h.runPaneSweep(ctx)
 	go h.runReviewerEnd(ctx)

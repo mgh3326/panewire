@@ -341,6 +341,11 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.broadcastRelayUnpersisted("lane.event", event)
 		return relayLaneEventResult{PersistFailed: true}
 	}
+	// The lane's job as lanes.json names it now, whether or not the lane is
+	// reachable at this receipt: resolveRelayRoute gives an empty route when the
+	// node is down. The stale-replay notice reads the binding back when this row
+	// retires, after the route may be gone (hk 6924).
+	h.noteStaleReplayLane(event.OwnerLane)
 	route, target, routed := h.resolveRelayRoute("lane.event", event)
 	if event.sinkOnly && !route.Sink {
 		h.forgetRelayEvent(key)
@@ -1360,6 +1365,14 @@ const relayReplayRetiredMarker = relayReplayRetiredMachine + "/" + relayReplayRe
 func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason string) {
 	if !h.claimReplayRetire(record.ID) {
 		h.logger.Debug("relay replay row already retired", "event_id", record.ID, "lane", record.OwnerLane, "delivered_to", record.DeliveredTo)
+		return
+	}
+	// The daily stale-replay notice row (hk 6924) is kept before the row is
+	// closed. It is idempotent on the row id, so a retry after a failed close
+	// repeats it harmlessly, and a failure here leaves the row undelivered for a
+	// later replay instead of losing it.
+	if !h.noteStaleReplayRetire(record, reason) {
+		h.releaseReplayRetire(record.ID)
 		return
 	}
 	if err := h.handoffkeep.markDelivered(context.Background(), record.ID, relayReplayRetiredMachine, relayReplayRetiredPane+reason); err != nil {

@@ -31,8 +31,8 @@ const (
 const obligationOpen = `state IN ('` + obligationOwed + `','` + obligationNoticed + `','` + obligationExhausted + `')`
 
 // deliveryObligationSchema is SQLite's form of the four tables; Postgres has
-// them in migrations 0040 and 0043 and MySQL in migrations 0033-0036 and 0039.
-// addDeliveryNoticeColumns adds what 0043 and 0039 add. result_id and
+// them in migrations 0040 and 0044 and MySQL in migrations 0033-0036 and 0041.
+// addDeliveryNoticeColumns adds what 0044 and 0041 add. result_id and
 // open_slot are NULL when unset: every backend keeps NULLs distinct under a
 // plain UNIQUE, and MySQL has no partial indexes.
 var deliveryObligationSchema = []string{

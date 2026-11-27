@@ -234,6 +234,21 @@ comments:
       Read: hub_inbox_summary.go:summaryFor; lane_inbox_store.go:surfacedRuns.
       Write: hub_inbox_summary.go:saveInboxSummary (INSERT IGNORE), surfaceInboxSummary (delivered_at).
       Retention: none: no statement deletes a row.
+  - table: relay_stale_notice_rows
+    tableComment: |
+      Why: one row per real message the replay gate retired as stale, kept until its design lane's daily notice is filed, so a hub restart mid-day still names the day's rows (hk 6924).
+      Role: queue/outbox.
+      Read: relay_stale_notice_store.go:staleReplayDaysBefore, staleReplayLanes, staleReplayRowsOf; relay_stale_notice.go:fileStaleReplayNotices.
+      Write: relay_stale_notice_store.go:insertStaleReplayRow (INSERT IGNORE), markStaleReplayFiled (filed).
+      Retention: relay_stale_notice_store.go:pruneStaleReplayRows deletes filed rows 14 days after their day.
+  - table: relay_stale_notice_lanes
+    tableComment: |
+      Why: binds a worker lane to the job its route named when a lane.event arrived, so a row retired after its route is gone still names its job (hk 6924).
+      Role: lookup.
+      Read: relay_stale_notice_store.go:staleReplayJobAt; relay_stale_notice.go:staleReplayJobOf.
+      Write: relay_stale_notice_store.go:insertStaleReplayLane (INSERT IGNORE), from relay.go:relayLaneEventContext through noteStaleReplayLane.
+      Retention: none: one row per lane and job pair.
+      Relations: none by design. relay_id is the handoffkeep relay row id.
   - table: drain_wake_lanes
     tableComment: |
       Why: each design lane's owed drain line and last send time, so a hub restart still sends the drain wakes it owes (hk 4567).
@@ -401,6 +416,8 @@ viewpoints:
       - lane_inbox_batch_quarantine
       - lane_inbox_surfaces
       - drain_wake_lanes
+      - relay_stale_notice_rows
+      - relay_stale_notice_lanes
   - id: spawn_ops
     name: "Spawn operations"
     desc: "One spawn request and what keeps its job, node binding and start proof: the queue of live operations, reservations, and the grant and start-by fences."

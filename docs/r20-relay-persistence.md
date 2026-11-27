@@ -312,7 +312,7 @@ delivery (hk 4289, step T1: hk 6384). It lives in the hub store, beside
 handoffkeep row stays the record of the event and of its delivery.
 
 Four tables, with the same columns on SQLite, Postgres (migrations 0040 and
-0043) and MySQL (migrations 0033-0036 and 0039):
+0044) and MySQL (migrations 0033-0036 and 0041):
 
 | Table | Holds |
 |---|---|
@@ -439,7 +439,7 @@ first fault is recorded. Backoff between budget copies is 1, 5 and 15 minutes.
 
 hk 4289 T4 (hk 6821). Which rows the design lane is told of, and when, is in
 [relay-harness-delivery.md](relay-harness-delivery.md), "Escalation". Migration
-0043 (MySQL 0039, and an `ALTER TABLE` at open on SQLite) adds to
+0044 (MySQL 0041, and an `ALTER TABLE` at open on SQLite) adds to
 `delivery_obligations`:
 
 | Column | Holds |
