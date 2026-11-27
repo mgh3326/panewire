@@ -214,6 +214,14 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (origins, digest
 	}
 }
 
+// relayRoomFree reports whether queueRelay would take a directive now. It is a
+// check, not a reservation: another path can fill the last place before the
+// caller queues, and then the replay is spent with nothing queued (the warning
+// replayLegacyUnconfirmed logs).
+func (agent *hubAgent) relayRoomFree() bool {
+	return agent != nil && agent.relays != nil && len(agent.relays) < cap(agent.relays)
+}
+
 // replayLegacyUnconfirmed gives a marked row its one labelled replay. The
 // gates ahead of the queue match replayRelayEvent exactly; the differences
 // are the label on the directive text and the write order at the end: the
@@ -285,6 +293,15 @@ func (h *HubServer) replayLegacyUnconfirmed(ctx context.Context, record handoffk
 		return
 	}
 	if h.refuseInboxOnlyBody(record.Kind, event, record.ID, key) {
+		return
+	}
+	// The retire below spends the one replay, and nothing is queued after it. A
+	// full queue is seen before the spend, so the row stays unspent for the next
+	// trigger instead of being retired with no copy in any pane (hk 6893).
+	if !agent.relayRoomFree() {
+		h.forgetRelayEvent(key)
+		h.logger.Warn("unconfirmed replay deferred: the pane's injection queue is full", "event_id", record.ID, "machine", route.Machine, "pane", route.Pane)
+		h.broadcastRelayUnrouted(event)
 		return
 	}
 	// Spend before inject: the retire write is what bounds the row to one

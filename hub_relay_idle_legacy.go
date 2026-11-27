@@ -75,10 +75,21 @@ func (h *HubServer) redeliverLegacyWorkingExpiredOnIdle(machine string, request 
 	}
 	paneKey := machine + "\x00" + request.Pane
 	h.mu.Lock()
+	// A row past the replay window is dropped here rather than picked: the
+	// restart replay retires it, and the rows behind it are still due this wake
+	// (hk 6935).
+	now := h.now().UTC()
 	var pick int64
 	for id, row := range h.relayControl.legacyIdle {
 		route, ok := routes[row.lane]
-		if row.claim == nil && ok && !route.Sink && route.Machine == machine && route.Pane == request.Pane && (pick == 0 || id < pick) {
+		if row.claim != nil || !ok || route.Sink || route.Machine != machine || route.Pane != request.Pane {
+			continue
+		}
+		if now.Sub(row.droppedAt) > relayReplayMaxAge {
+			delete(h.relayControl.legacyIdle, id)
+			continue
+		}
+		if pick == 0 || id < pick {
 			pick = id
 		}
 	}
@@ -89,12 +100,6 @@ func (h *HubServer) redeliverLegacyWorkingExpiredOnIdle(machine string, request 
 		return
 	}
 	row := h.relayControl.legacyIdle[pick]
-	if h.now().UTC().Sub(row.droppedAt) > relayReplayMaxAge {
-		delete(h.relayControl.legacyIdle, pick)
-		// As old as the replay window allows: the restart replay retires it.
-		h.mu.Unlock()
-		return
-	}
 	if h.relayControl.idleRedelivered == nil {
 		h.relayControl.idleRedelivered = make(map[string]idleRedeliveryWake)
 	}
