@@ -5,11 +5,17 @@ import (
 	"time"
 )
 
+// submitBudgetSource names what the node budget is on each path that carries
+// one (docs/config.md, hub_wait): a submitted spawn's attempt deadline, or the
+// hub_wait of a via = "hub" host. A direct local spawn runs on a context with
+// no deadline, so the refusals that name the budget cannot fire there.
+const submitBudgetSource = `the attempt deadline of a submitted spawn (deadline_seconds) or hub_wait on a via = "hub" host`
+
 // submitFloor is the least time the node keeps for confirming a brief after
 // sending it: one submit-key retry period (the host's brief_submit_retry_ms)
 // plus one wait slice, so a pane that starts its turn late still gets the
 // Return retry and a confirmation read, bounded by the host's own
-// brief_submit_timeout_ms. The node's hub_wait budget (docs/config.md) is split
+// brief_submit_timeout_ms. The node's budget (submitBudgetSource) is split
 // into the steps before the brief (fetch, checkout, launch), this window and
 // the briefSubmitReserve for capture and cleanup. The steps before the brief
 // may not take the window (hk 5174).
@@ -33,7 +39,7 @@ func (a *App) submitBudgetLeft(ctx context.Context) (left time.Duration, bounded
 // was submitted, so there is no unconfirmed brief to explain.
 func (a *App) requireSubmitWindow(ctx context.Context) error {
 	if left, bounded := a.submitBudgetLeft(ctx); bounded && left < a.submitFloor() {
-		return fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: %ds of the node budget remain for the brief after the %ds reserve, below the %ds submit window; brief withheld, raise hub_wait for this host", int(max(left, 0)/time.Second), int(briefSubmitReserve/time.Second), int(a.submitFloor()/time.Second))
+		return fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: %ds of the node budget remain for the brief after the %ds reserve, below the %ds submit window; brief withheld; the node budget is "+submitBudgetSource, int(max(left, 0)/time.Second), int(briefSubmitReserve/time.Second), int(a.submitFloor()/time.Second))
 	}
 	return nil
 }
@@ -49,7 +55,7 @@ func (a *App) reserveSubmitWindow(ctx context.Context) (context.Context, context
 	}
 	launchBy := until.Add(-briefSubmitReserve - a.submitFloor())
 	if time.Until(launchBy) <= 0 {
-		return nil, nil, fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: the node budget has %ds left, less than the %ds reserve plus the %ds submit window; nothing launched, raise hub_wait for this host", int(max(time.Until(until), 0)/time.Second), int(briefSubmitReserve/time.Second), int(a.submitFloor()/time.Second))
+		return nil, nil, fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: the node budget has %ds left, less than the %ds reserve plus the %ds submit window; nothing launched; the node budget is "+submitBudgetSource, int(max(time.Until(until), 0)/time.Second), int(briefSubmitReserve/time.Second), int(a.submitFloor()/time.Second))
 	}
 	launch, cancel := context.WithDeadline(ctx, launchBy)
 	return launch, cancel, nil
@@ -59,7 +65,7 @@ func (a *App) reserveSubmitWindow(ctx context.Context) (context.Context, context
 // cause when the reserved launch deadline, not the node budget, ended it.
 func (a *App) launchBudgetSpent(launch, node context.Context, e error) error {
 	if e != nil && launch.Err() != nil && node.Err() == nil {
-		return fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: launch used the node budget up to the %ds submit window and the %ds reserve; no brief was sent, raise hub_wait for this host (launch error: %v)", int(a.submitFloor()/time.Second), int(briefSubmitReserve/time.Second), e)
+		return fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: launch used the node budget up to the %ds submit window and the %ds reserve; no brief was sent; the node budget is "+submitBudgetSource+" (launch error: %v)", int(a.submitFloor()/time.Second), int(briefSubmitReserve/time.Second), e)
 	}
 	return e
 }
@@ -69,7 +75,7 @@ func (a *App) launchBudgetSpent(launch, node context.Context, e error) error {
 // window is intact, so the spawn stops with the named refusal.
 func (a *App) launchCutoff(launch, node context.Context, where string) error {
 	if launch.Err() != nil && node.Err() == nil {
-		return fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: the launch cutoff passed %s; no brief was sent, raise hub_wait for this host", where)
+		return fail(exitConfig, "SUBMIT_WINDOW_UNAVAILABLE: the launch cutoff passed %s; no brief was sent; the node budget is "+submitBudgetSource, where)
 	}
 	return nil
 }
