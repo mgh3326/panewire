@@ -35,9 +35,10 @@ ready, decision, blocked and findings items stay unread until ack <id>:
 injection into the pane and read do not retire them.
 status answers, for each event id, the lane, the delivery stage its row
 reached (queued, held, typed, delivered, unconfirmed, dropped or inbox_only),
-the reason for an unconfirmed or dropped stage, the machine and pane, and
-whether the event was acked: a node credential sees the events its own node
-relayed, a service needs the inbox.ack_state scope. It exits 7 when any id has
+the reason for an unconfirmed or dropped stage, the machine and pane, the
+state and fault of the delivery obligation on that row and the reason it
+settled with, and whether the event was acked: a node credential sees the
+events its own node relayed, a service needs the inbox.ack_state scope. It exits 7 when any id has
 no visible row.`
 
 // inboxWaitDefaultTimeout is the client deadline when --timeout is absent.
@@ -445,7 +446,7 @@ func printInboxStatus(raw []byte, stdout, stderr io.Writer, jsonMode bool) int {
 			if event.Acked {
 				acked = "yes"
 			}
-			fmt.Fprintf(stdout, "event=%s lane=%s stage=%s reason=%s machine=%s pane=%s acked=%s\n", event.EventID, dash(event.Lane), dash(event.Stage), dash(event.Reason), dash(event.Machine), dash(event.Pane), acked)
+			fmt.Fprintf(stdout, "event=%s lane=%s stage=%s reason=%s machine=%s pane=%s obligation=%s fault=%s settle=%s acked=%s\n", event.EventID, dash(event.Lane), dash(event.Stage), dash(event.Reason), dash(event.Machine), dash(event.Pane), dash(event.Obligation), dash(event.Fault), dash(event.Settle), acked)
 		}
 		for _, id := range answer.NotFound {
 			fmt.Fprintf(stdout, "%s\tnot found\n", id)

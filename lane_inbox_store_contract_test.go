@@ -1109,3 +1109,26 @@ func TestLaneInboxStoreContractVeryLongEventKeys(t *testing.T) {
 		}
 	})
 }
+
+// An ack-state answer names the obligation of its row, and the feed counters
+// count the same rows, on every backend (hk 6823).
+func TestLaneInboxStoreContractObligationSurfaceAndCounts(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		now := time.UnixMilli(1_700_000_000_000).UTC()
+		if _, err := s.put("k1", "lane-a", "lane.event", "inbox", quietEvent("ev-k1", "look"), now, 0, 0); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		o := newDeliveryObligation{key: "k1", relayID: 77, kind: "lane.event", lane: "lane-a", attempts: 1}
+		if err := s.createObligation(t.Context(), o, now, now); err != nil {
+			t.Fatalf("createObligation: %v", err)
+		}
+		states, err := s.ackStates([]string{"ev-k1"}, "")
+		if err != nil || states["ev-k1"].Obligation != obligationOwed {
+			t.Fatalf("ack state = %+v, %v, want the owed obligation", states, err)
+		}
+		if counts, err := s.deliveryCounts(t.Context()); err != nil || counts.Open != 1 {
+			t.Fatalf("counts = %+v, %v, want one open", counts, err)
+		}
+	})
+}

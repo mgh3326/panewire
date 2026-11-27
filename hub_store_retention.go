@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,10 @@ const (
 	spawnOperationRetention    = 30 * 24 * time.Hour
 	consultRetention           = 30 * 24 * time.Hour
 	poolActionRetention        = 30 * 24 * time.Hour
+	// A terminal obligation's row is the record of a delivery that ended; the
+	// month is margin past the settle or confirm. Its incident and notice slot
+	// share the window. An open obligation is never deleted.
+	deliveryObligationRetention = 30 * 24 * time.Hour
 )
 
 // spawnTerminalStatuses is the SQL list of spawn statuses nothing moves again.
@@ -50,10 +55,11 @@ func poolFinalMS(phase string, now time.Time) int64 {
 // hubStoreRetentionCounts is what one pass deleted, per table.
 type hubStoreRetentionCounts struct {
 	SentBatches, Quarantine, AttemptGrants, AttemptStartBy, SpawnOperations, Consults, PoolActions int64
+	DeliveryObligations, DeliveryIncidents, DeliveryNoticeSlots                                    int64
 }
 
 func (c hubStoreRetentionCounts) total() int64 {
-	return c.SentBatches + c.Quarantine + c.AttemptGrants + c.AttemptStartBy + c.SpawnOperations + c.Consults + c.PoolActions
+	return c.SentBatches + c.Quarantine + c.AttemptGrants + c.AttemptStartBy + c.SpawnOperations + c.Consults + c.PoolActions + c.DeliveryObligations + c.DeliveryIncidents + c.DeliveryNoticeSlots
 }
 
 func (c hubStoreRetentionCounts) attrs() []any {
@@ -61,6 +67,8 @@ func (c hubStoreRetentionCounts) attrs() []any {
 		"sent_batches", c.SentBatches, "batch_quarantine", c.Quarantine,
 		"attempt_grants", c.AttemptGrants, "attempt_start_by", c.AttemptStartBy,
 		"spawn_operations", c.SpawnOperations, "consults", c.Consults, "pool_actions", c.PoolActions,
+		"delivery_obligations", c.DeliveryObligations, "delivery_incidents", c.DeliveryIncidents,
+		"delivery_notice_slots", c.DeliveryNoticeSlots,
 	}
 }
 
@@ -100,6 +108,21 @@ const spawnOperationsRetirable = `SELECT so.request_id FROM spawn_operations so 
  AND NOT EXISTS (SELECT 1 FROM spawn_reservations r WHERE r.request_id=so.request_id)
  ORDER BY so.terminal_ms,so.request_id LIMIT ?`
 
+// terminalObligations are closed obligations past the cut: state moved out of
+// obligationOpen's set ('owed','noticed','exhausted', confirmed at
+// delivery_obligation_store.go:31) more than deliveryObligationRetention ago.
+// A member of a still-open incident stays, since the incident's answer would
+// lose what it names.
+var terminalObligations = `SELECT o.id FROM delivery_obligations o WHERE NOT (` + strings.Replace(obligationOpen, "state", "o.state", 1) + `) AND o.updated_at<? AND (o.incident_id=0 OR NOT EXISTS (SELECT 1 FROM delivery_incidents i WHERE i.id=o.incident_id AND i.state='open')) ORDER BY o.updated_at,o.id LIMIT ?`
+
+// closedDeliveryIncidents are incidents closed past the cut that no obligation
+// row still names.
+const closedDeliveryIncidents = `SELECT i.id FROM delivery_incidents i WHERE i.state='closed' AND i.closed_at>0 AND i.closed_at<? AND NOT EXISTS (SELECT 1 FROM delivery_obligations o WHERE o.incident_id=i.id) ORDER BY i.closed_at,i.id LIMIT ?`
+
+// coldNoticeSlots are notice-spacing slots past the cut whose key no open
+// incident still holds.
+const coldNoticeSlots = `SELECT s.design_lane,s.machine,s.fault FROM delivery_notice_slots s WHERE s.notice_at<? AND NOT EXISTS (SELECT 1 FROM delivery_incidents i WHERE i.state='open' AND i.design_lane=s.design_lane AND i.machine=s.machine AND i.fault=s.fault) ORDER BY s.notice_at LIMIT ?`
+
 // pruneHubStore runs one bounded retention pass at now. limit caps the rows
 // each table deletes. Each step is one statement in its own transaction, and a
 // step that fails returns the counts it already made. A repeated pass is safe.
@@ -130,6 +153,20 @@ func (s *laneInboxStore) pruneHubStore(now time.Time, limit int) (hubStoreRetent
 	// supersedeActionsOf). It goes only once its window has passed and the job
 	// has no spawn row still in progress.
 	if c.PoolActions, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("pool_actions", "id", `SELECT p.id FROM pool_actions p WHERE p.phase IN ('done','refused') AND p.final_ms>0 AND p.final_ms<? AND NOT EXISTS (SELECT 1 FROM spawn_operations so WHERE so.job=p.job AND so.status NOT IN (`+spawnTerminalStatuses+`)) ORDER BY p.final_ms,p.id LIMIT ?`), now.Add(-poolActionRetention).UnixMilli(), limit); err != nil {
+		return c, err
+	}
+	// The obligation tables keep the record of a finished delivery for their
+	// own window; an open obligation is never a candidate. Obligations go
+	// first, so an incident whose members all aged out follows in the same
+	// pass.
+	deliveryCut := now.Add(-deliveryObligationRetention).UnixMilli()
+	if c.DeliveryObligations, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("delivery_obligations", "id", terminalObligations), deliveryCut, limit); err != nil {
+		return c, err
+	}
+	if c.DeliveryIncidents, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("delivery_incidents", "id", closedDeliveryIncidents), deliveryCut, limit); err != nil {
+		return c, err
+	}
+	if c.DeliveryNoticeSlots, err = s.retentionExec(ctx, s.dialect.deleteWhereIn("delivery_notice_slots", "(design_lane,machine,fault)", coldNoticeSlots), deliveryCut, limit); err != nil {
 		return c, err
 	}
 	return c, nil
