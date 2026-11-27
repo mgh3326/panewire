@@ -101,3 +101,27 @@ func TestSafeDropLeavesWorkingExpiredRowExhausted(t *testing.T) {
 		t.Fatalf("a working-expired row was copied after a safe drop: %+v", got)
 	}
 }
+
+// A row exhausted on a maybe-typed verdict joins its design lane's incident, so
+// it is noticed and not exhausted. A safe drop that lands while it is noticed
+// reopens it, detaches it from the incident as a revive does, and its budget
+// copy is queued. Killed by: reopening only an exhausted row.
+func TestSafeDropReopensNoticedRow(t *testing.T) {
+	rig := t6821Live(t)
+	d := rig.send(t3431Worker)
+	rig.report(d, t6820Drop{report: relayUnconfirmedPromptFailed})
+	// The one labelled copy; its own report leaves the maybe-typed row spent.
+	labelled := rig.copyOf(d, 0)
+	rig.report(labelled, t6820Drop{report: relayUnconfirmedPromptFailed})
+	rig.pass(time.Minute)
+	if r := rig.row(d.EventID); r.State != obligationNoticed || r.Incident == 0 {
+		t.Fatalf("before the safe drop: %+v, want noticed in an incident", r)
+	}
+	rig.report(labelled, t6820Drop{drop: relayDroppedRetriesExhausted, harness: "claude"})
+	if r := rig.row(d.EventID); r.State != obligationOwed || r.Incident != 0 || r.Fault != relayDroppedRetriesExhausted {
+		t.Fatalf("after the safe drop: %+v, want owed and detached", r)
+	}
+	if c := rig.copyOf(d, time.Minute); c.EventID != d.EventID {
+		t.Fatalf("copy = %+v, want row %d", c, d.EventID)
+	}
+}

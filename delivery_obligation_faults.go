@@ -125,9 +125,10 @@ func obligationReopenWhen(fault, replace string, replaced []any) (string, []any)
 	}
 	// Only a stored maybe-typed verdict reopens: a working expiry or a safe fault
 	// ended its copies on purpose (hk 6935 review), so a later safe drop that
-	// overwrites it does not earn copies back.
+	// overwrites it does not earn copies back. A noticed row is an exhausted one
+	// in an incident; the reopen detaches it, as a revive does.
 	args := append([]any{obligationFaultPromptUnproven, obligationFaultReadUnproven, relayReplayMaxAttempts}, replaced...)
-	return `state='` + obligationExhausted + `' AND fault IN (?,?) AND spent<? AND ` + replace, args
+	return `state IN ('` + obligationExhausted + `','` + obligationNoticed + `') AND fault IN (?,?) AND spent<? AND ` + replace, args
 }
 
 // obligationFaultReplaces is the condition on the stored fault under which
@@ -315,9 +316,10 @@ func (s *laneInboxStore) noteObligationDrop(parent context.Context, relayID int6
 	reopen, reopened := obligationReopenWhen(fault, replace, replaced)
 	// The reopen reads the stored row before state is assigned, and fault is
 	// assigned last: MySQL reads an assigned column's new value.
-	args := slices.Concat(reopened, []any{now.UnixMilli()}, reopened, []any{obligationOwed}, replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
+	args := slices.Concat(reopened, []any{now.UnixMilli()}, reopened, reopened, []any{obligationOwed}, replaced, []any{now.UnixMilli()}, dued, replaced, []any{fault}, keys)
 	if _, err := s.db.ExecContext(ctx, s.q(`UPDATE delivery_obligations
 		SET next_at=CASE WHEN `+reopen+` THEN ? ELSE next_at END,
+		    incident_id=CASE WHEN `+reopen+` THEN 0 ELSE incident_id END,
 		    state=CASE WHEN `+reopen+` THEN ? ELSE state END,
 		    last_fault_at=CASE WHEN `+replace+` THEN ? ELSE last_fault_at END,
 		    `+due+`
