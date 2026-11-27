@@ -118,8 +118,9 @@ func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, 
 	design := h.designLaneFor(row.lane)
 	if design == "" {
 		since := max(row.dueAt, h.startedAt.UnixMilli())
-		if now := h.now().UTC(); now.Sub(time.UnixMilli(since)) < noticeDesignWait {
-			// The answer may be transient, an unreadable lanes file included.
+		if now := h.now().UTC(); now.Sub(time.UnixMilli(since)) < noticeDesignWait || h.designAwaitsOrphanedJob(row.lane) {
+			// The answer may be transient: an unreadable lanes file, or the
+			// owner's job on a node that is away.
 			if err := store.deferNoticeJoin(ctx, row.id, now); err != nil {
 				h.logger.Warn("due delivery notice was not deferred", "event_id", row.relayID, "error", store.loggable("defer notice", err))
 			}
@@ -151,9 +152,13 @@ func (h *HubServer) joinDeliveryIncident(ctx context.Context, row noticeMember, 
 			return true
 		}
 	} else if why := h.cachedNoticeMoot(moot, row.lane); why != "" {
-		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", record.ID, "lane", row.lane, "design_lane", design, "reason", row.fault, "why", why)
-		forget()
-		return true
+		waits := h.laneAwaitsOrphanedJob(row.lane)
+		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", record.ID, "lane", row.lane, "design_lane", design, "reason", row.fault, "why", why, "waits_for_node", waits)
+		if !waits {
+			forget()
+			return true
+		}
+		// It waits in the incident, unnamed, for the orphaned job to return.
 	}
 	machine, pane := h.noticeDestination(row)
 	key := incidentKey{design: design, machine: machine, fault: row.fault}
@@ -269,11 +274,15 @@ func (h *HubServer) noticeDeliveryIncident(ctx context.Context, incident *delive
 			h.logger.Warn("due delivery notice was not cleared", "event_id", row.relayID, "error", store.loggable("clear notice", err))
 		}
 	}
-	// An ended job's lane is not named.
+	// An ended job's lane is not named. A row whose job is only orphaned is not
+	// named either, and stays due.
 	due = slices.DeleteFunc(due, func(row noticeMember) bool {
 		why := h.cachedNoticeMoot(moot, row.lane)
 		if why == "" {
 			return false
+		}
+		if h.laneAwaitsOrphanedJob(row.lane) {
+			return true
 		}
 		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", row.relayID, "lane", row.lane, "design_lane", incident.key.design, "reason", incident.key.fault, "why", why)
 		forget(row)
@@ -398,7 +407,7 @@ func (h *HubServer) closeDeliveryIncident(ctx context.Context, incident delivery
 					ended[m.lane] = why
 				}
 			}
-			if why == "" {
+			if why == "" || h.laneAwaitsOrphanedJob(m.lane) {
 				live++
 			}
 		}

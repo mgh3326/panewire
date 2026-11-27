@@ -380,3 +380,67 @@ func TestOrphanedDropSurvivesAStoreFailure(t *testing.T) {
 		t.Fatalf("notice=%q", got)
 	}
 }
+
+// A job that is only orphaned, its node away, may come back: its lane is not
+// named meanwhile, but its rows stay due and are told when it does. A job that
+// completes instead settles them. Killed by: skipping an orphaned job's row for
+// good, at the join, at the notice, at a moot close, or for want of the design
+// lane its job names.
+func TestRowOfAnOrphanedJobWaits(t *testing.T) {
+	waiting := func(rig *t6821Rig, relayID int64) {
+		t.Helper()
+		for range 3 {
+			rig.none(31 * time.Minute)
+		}
+		if r := rig.row(relayID); r.DueAt == 0 || r.ToldAt != 0 {
+			t.Fatalf("an orphaned job's row no longer waits: %+v\n%s", r, rig.logs.String())
+		}
+	}
+	toldOnReturn := func(rig *t6821Rig, relayID int64) {
+		t.Helper()
+		rig.job(t3431Job, false, false)
+		if got := rig.one(31 * time.Minute); !strings.Contains(got, "event "+t6821Num(relayID)+" ") {
+			t.Fatalf("notice=%q, want row %d", got, relayID)
+		}
+	}
+	t.Run("a row waiting behind the slot", func(t *testing.T) {
+		rig := t6821Live(t)
+		rig.fail()
+		rig.one(0)
+		row := rig.fail()
+		rig.none(0)
+		rig.job(t3431Job, false, true)
+		waiting(rig, row)
+		rig.open()
+		toldOnReturn(rig, row)
+	})
+	t.Run("a row that becomes due while the node is away", func(t *testing.T) {
+		rig := t6821Live(t)
+		rig.job(t3431Job, false, true)
+		row := rig.fail()
+		waiting(rig, row)
+		toldOnReturn(rig, row)
+	})
+	t.Run("a lane whose design lane the job names", func(t *testing.T) {
+		routes := t6821Routes()
+		routes[t3431Worker] = reportRelayRoute{Machine: "host-a", Pane: "w1:pW"}
+		rig := &t6821Rig{t3431Rig: t3431StartWith(t, t3431LiveJobWithTask(), routes, freshLaneInboxFile(t))}
+		rig.task(t3431Task, "in_progress", "started")
+		rig.job(t3431Job, false, true)
+		row := rig.fail()
+		waiting(rig, row)
+		toldOnReturn(rig, row)
+	})
+	t.Run("a job that completes instead", func(t *testing.T) {
+		rig := t6821Live(t)
+		rig.job(t3431Job, false, true)
+		row := rig.fail()
+		waiting(rig, row)
+		rig.job(t3431Job, true, false)
+		rig.none(31 * time.Minute)
+		if r := rig.row(row); r.DueAt != 0 || r.ToldAt == 0 {
+			t.Fatalf("a completed job's row = %+v", r)
+		}
+		rig.none(5 * time.Hour)
+	})
+}

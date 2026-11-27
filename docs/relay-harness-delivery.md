@@ -418,6 +418,13 @@ hub knows no job in the lane. The last case covers a hub restart, which forgets
 ended jobs. The check runs when the row joins an incident and again before a
 notice names it, so an ended lane is never named.
 
+A job that is only orphaned -- its node away for longer than the hub's grace --
+counts as nobody to act, but not for good: it comes back running or completed.
+On a hub with an inbox store such a row is not named and is not settled either:
+it stays due in its incident, which does not close as moot, and is told when the
+job runs again or settled when it completes. A row whose design lane an orphaned
+job would name waits the same way, past the hour.
+
 When the spawn's `--owner-notify` mode withholds the notice (hk 5360), the row
 is counted once under `unconfirmed:<event id>` in the daily loops row, marked
 told, and never sent; it takes no window and does not advance `announced`. The
@@ -429,7 +436,7 @@ mode is looked up by the row's own job id.
 |---|---|
 | `recovered` | a member's own delivery was confirmed; a delivery of any other row, the same pane included, says nothing about this fault |
 | `all-terminal` | every member is confirmed or settled |
-| `moot` | every member still open or waiting is in a lane with nobody to act |
+| `moot` | every member still open or waiting is in a lane with nobody to act, none of them waiting for an orphaned job |
 | `quiet` | no member faulted, and none joined, for 60 minutes, and none is waiting to be told |
 
 None of these closes an incident whose posted notice is uncommitted while a row
