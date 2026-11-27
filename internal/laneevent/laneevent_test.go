@@ -31,22 +31,23 @@ func TestCompletionKeys(t *testing.T) {
 	}
 }
 
-// The READY record round-trips, the latest write wins, and content that is
-// not a lane.event id reads as no record. Mutants: append instead of replace,
-// or return unvalidated content.
+// The READY record round-trips with its epoch, the latest write wins, and
+// content that is not a lane.event id reads as no record. Mutants: append
+// instead of replace, or return unvalidated content.
 func TestReadyEventRecord(t *testing.T) {
 	dir := t.TempDir()
-	if got := ReadReadyEvent(dir); got != "" {
-		t.Fatalf("no record reads %q", got)
+	if _, ok := ReadReadyEvent(dir); ok {
+		t.Fatal("no record reads ok")
 	}
-	if err := WriteReadyEvent(dir, "ready-1"); err != nil {
+	if err := WriteReadyEvent(dir, 1, "ready-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteReadyEvent(dir, "ready-2"); err != nil {
+	if err := WriteReadyEvent(dir, 2, "ready-2"); err != nil {
 		t.Fatal(err)
 	}
-	if got := ReadReadyEvent(dir); got != "ready-2" {
-		t.Fatalf("latest record reads %q", got)
+	record, ok := ReadReadyEvent(dir)
+	if !ok || record.ID != "ready-2" || record.Epoch != 2 {
+		t.Fatalf("latest record reads %+v ok=%t", record, ok)
 	}
 	info, err := os.Stat(filepath.Join(dir, ReadyEventFile))
 	if err != nil {
@@ -55,12 +56,12 @@ func TestReadyEventRecord(t *testing.T) {
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("mode %o, want 0600", info.Mode().Perm())
 	}
-	for _, bad := range []string{"", "  \n", "bad\nid", strings.Repeat("r", idMax+1)} {
+	for _, bad := range []string{"", "  \n", "bad\nid", `{"event_id":"bad` + "\n" + `id","epoch":1}`, `{"event_id":"` + strings.Repeat("r", idMax+1) + `","epoch":1}`} {
 		if err := os.WriteFile(filepath.Join(dir, ReadyEventFile), []byte(bad), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if got := ReadReadyEvent(dir); got != "" {
-			t.Fatalf("%.20q reads %q", bad, got)
+		if _, ok := ReadReadyEvent(dir); ok {
+			t.Fatalf("%.20q reads ok", bad)
 		}
 	}
 }

@@ -32,8 +32,8 @@ func TestEmitReadyRecordsEventIDInJobDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ready event record: %v", err)
 	}
-	if got := strings.TrimSpace(string(body)); got != "ready-1" {
-		t.Fatalf("recorded id %q, want ready-1", got)
+	if !strings.Contains(string(body), `"ready-1"`) {
+		t.Fatalf("recorded body %q, want event id ready-1", body)
 	}
 	info, err := os.Stat(filepath.Join(jobDir, laneevent.ReadyEventFile))
 	if err != nil {
@@ -66,8 +66,9 @@ func TestEmitReadyRecordsGeneratedEventID(t *testing.T) {
 	if printed == "" {
 		t.Fatalf("no event_id in %q", stdout.String())
 	}
-	if got := laneevent.ReadReadyEvent(filepath.Join(root, "jobs", "job-1")); got != printed {
-		t.Fatalf("recorded id %q, want printed %q", got, printed)
+	record, ok := laneevent.ReadReadyEvent(filepath.Join(root, "jobs", "job-1"))
+	if !ok || record.ID != printed {
+		t.Fatalf("recorded %+v ok=%t, want printed %q", record, ok, printed)
 	}
 }
 
@@ -113,12 +114,12 @@ func TestEmitReadyRecordOnlyInsideAJob(t *testing.T) {
 			if code := runEmitCLI(args, &bytes.Buffer{}, &stderr, CLIConfig{SocketPath: filepath.Join(root, "absent.sock")}); code != ExitOK {
 				t.Fatalf("code=%d stderr=%q", code, stderr.String())
 			}
-			got := laneevent.ReadReadyEvent(filepath.Join(root, "jobs", job))
-			if tc.wantRec && got != id {
-				t.Fatalf("recorded id %q, want %q", got, id)
+			_, ok := laneevent.ReadReadyEvent(filepath.Join(root, "jobs", job))
+			if tc.wantRec && !ok {
+				t.Fatalf("no record for %s", id)
 			}
-			if !tc.wantRec && got != "" {
-				t.Fatalf("recorded id %q outside the contract", got)
+			if !tc.wantRec && ok {
+				t.Fatal("record written outside the contract")
 			}
 		})
 	}
@@ -140,7 +141,55 @@ func TestEmitReadyLatestReplacesRecord(t *testing.T) {
 			t.Fatalf("%s: code=%d stderr=%q", id, code, stderr.String())
 		}
 	}
-	if got := laneevent.ReadReadyEvent(jobDir); got != "ready-2" {
-		t.Fatalf("recorded id %q, want ready-2", got)
+	record, ok := laneevent.ReadReadyEvent(jobDir)
+	if !ok || record.ID != "ready-2" {
+		t.Fatalf("recorded %+v ok=%t, want ready-2", record, ok)
+	}
+}
+
+// The record binds the READY to the attempt's grant epoch: a worker whose
+// bound epoch the grant has moved past (a regrant or revocation) still emits
+// its lane event but writes no record, so it cannot replace the live
+// attempt's pairing. Mutants: skip the epoch check, or fail the emit.
+func TestEmitReadyRecordRequiresCurrentGrant(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		grant     uint64
+		bound     string
+		wantRec   bool
+		wantEpoch uint64
+	}{
+		{name: "bound to current grant", grant: 2, bound: "2", wantRec: true, wantEpoch: 2},
+		{name: "stale bound epoch", grant: 2, bound: "1"},
+		{name: "unbound at epoch 1", grant: 1, wantRec: true, wantEpoch: 1},
+		{name: "unbound past epoch 1", grant: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			jobs := filepath.Join(root, "jobs")
+			if err := os.MkdirAll(filepath.Join(jobs, "job-1"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.grant > 1 {
+				if err := jobowner.Assign(jobs, "job-1", tc.grant); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(jobowner.JobEnv, "job-1")
+			t.Setenv(jobowner.EpochEnv, tc.bound)
+			var stderr bytes.Buffer
+			args := []string{"--kind", "lane.event", "--lane", "lane-a", "--type", "ready", "--event-id", "ready-epoch", "--text", "READY", "--inbox-root", root}
+			if code := runEmitCLI(args, &bytes.Buffer{}, &stderr, CLIConfig{SocketPath: filepath.Join(root, "absent.sock")}); code != ExitOK {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			record, ok := laneevent.ReadReadyEvent(filepath.Join(jobs, "job-1"))
+			if tc.wantRec {
+				if !ok || record.ID != "ready-epoch" || record.Epoch != tc.wantEpoch {
+					t.Fatalf("record %+v ok=%t, want id ready-epoch epoch %d", record, ok, tc.wantEpoch)
+				}
+			} else if ok {
+				t.Fatalf("stale or unbound emit recorded %+v", record)
+			}
+		})
 	}
 }

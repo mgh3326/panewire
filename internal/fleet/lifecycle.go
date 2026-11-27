@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
+	"github.com/mgh3326/panewire/internal/jobowner"
 	"github.com/mgh3326/panewire/internal/laneevent"
 )
 
@@ -219,7 +220,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		// named one (hk 7014). The latest READY is the recorded one.
 		ready := *readyEvent
 		if !readyEventSet {
-			ready = laneevent.ReadReadyEvent(filepath.Join(a.Jobs, id))
+			ready = a.recordedReadyEvent(j, digest, *question)
 		}
 		return a.doneReport(ctx, j, doneInput{
 			report: *report, body: body, digest: digest, question: *question, result: result,
@@ -228,6 +229,30 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		})
 	}
 	return a.escalateReport(ctx, j, *report, *question, body, digest, late)
+}
+
+// recordedReadyEvent returns the READY event id the job's emit recorded in
+// its dir, or "" when there is nothing usable: no record, a record a
+// superseded or revoked attempt wrote, or a READY a completion already
+// claimed for a different report or question. The record pairs one READY
+// with the result it announced, so a later distinct completion goes out on
+// its own instead of folding into the READY's inbox item again (hk 7014).
+func (a *App) recordedReadyEvent(j Job, digest, question string) string {
+	record, ok := laneevent.ReadReadyEvent(filepath.Join(a.Jobs, j.ID))
+	if !ok {
+		return ""
+	}
+	if _, err := jobowner.ProducerEpoch(a.Jobs, j.ID, record.Epoch, 0); err != nil {
+		a.warn("ready event record ignored for job %s: %v", j.ID, err)
+		return ""
+	}
+	for _, ev := range j.Events {
+		if ev.Kind == "job.completed" && str(ev.Payload, "result_id") == record.ID &&
+			(str(ev.Payload, "report_sha256") != digest || str(ev.Payload, "question") != question) {
+			return ""
+		}
+	}
+	return record.ID
 }
 
 func readResult(path string) (json.RawMessage, error) {

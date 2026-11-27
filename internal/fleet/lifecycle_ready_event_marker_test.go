@@ -11,13 +11,14 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/mgh3326/panewire/internal/jobowner"
 	"github.com/mgh3326/panewire/internal/laneevent"
 )
 
 // recordReady writes the marker the way `panewire emit --type ready` does.
 func recordReady(t *testing.T, a *App, job, id string) {
 	t.Helper()
-	if err := laneevent.WriteReadyEvent(filepath.Join(a.Jobs, job), id); err != nil {
+	if err := laneevent.WriteReadyEvent(filepath.Join(a.Jobs, job), 1, id); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -123,6 +124,58 @@ func TestDoneWithoutRecordIsUnchanged(t *testing.T) {
 				t.Fatalf("job.completed carries result_id without a record: %v", completed[0])
 			}
 		})
+	}
+}
+
+// The record pairs one READY with one completion: once a completion claimed
+// the recorded id for a different report, a later done goes out on its own
+// rather than folding into the READY's inbox item again (hk 7014 review).
+// Mutants: reuse the claimed id, or claim it for the same report twice.
+func TestDoneRecordedReadyEventIsConsumedOnce(t *testing.T) {
+	r := newDoneRig(t)
+	r.write("report body\n")
+	recordReady(t, r.a, "j", "j-ready-1")
+	if e := r.done(); e != nil {
+		t.Fatal(e)
+	}
+	r.write("report body v2\n")
+	if e := r.done(); e != nil {
+		t.Fatal(e)
+	}
+	emits := doneRigEmits(r)
+	if len(emits) != 2 {
+		t.Fatalf("relay emits=%v", emits)
+	}
+	if got, ok := resultIDArg(emits[0]); !ok || got != "j-ready-1" {
+		t.Fatalf("first emit=%v, want --result-id j-ready-1", emits[0])
+	}
+	if _, ok := resultIDArg(emits[1]); ok {
+		t.Fatalf("second emit=%v reuses the claimed READY id", emits[1])
+	}
+	completed := r.events("job.completed")
+	if len(completed) != 2 || completed[1]["result_id"] != nil {
+		t.Fatalf("job.completed events=%v", completed)
+	}
+}
+
+// A record a superseded or revoked attempt wrote is ignored: the grant moved
+// past the epoch the record names. Mutants: skip the epoch check.
+func TestDoneIgnoresRecordFromStaleAttempt(t *testing.T) {
+	r := newDoneRig(t)
+	r.write("report body\n")
+	recordReady(t, r.a, "j", "j-ready-stale")
+	if err := jobowner.Assign(r.a.Jobs, "j", 2); err != nil {
+		t.Fatal(err)
+	}
+	if e := r.done(); e != nil {
+		t.Fatal(e)
+	}
+	emits := doneRigEmits(r)
+	if len(emits) != 1 {
+		t.Fatalf("relay emits=%v", emits)
+	}
+	if _, ok := resultIDArg(emits[0]); ok {
+		t.Fatalf("relay emit=%v carries a stale attempt's record", emits[0])
 	}
 }
 

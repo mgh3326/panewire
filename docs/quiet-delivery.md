@@ -316,12 +316,17 @@ A `panewire emit --type ready` run inside a job records that id in the job's
 directory (`.ready-event-id`, mode 0600), and `panewire done` for the job
 passes the recorded id when `--ready-event` was not given (hk 7014). "Inside
 a job" is the `ARBITER_JOB` launch binding, or an explicit `--job`; the job
-dir is the one under the inbox root emit already resolves. An explicit
-`--ready-event` wins over the record, and a later READY replaces it, so the
-newest READY is the one the completion pairs with. The record is
-best-effort: emit outside a job, a job dir that is gone, or a file that does
-not hold an event id all leave `done` exactly as without it. The flag and the
-`job.completed` emit form still serve a completion made any other way:
+dir is the one under the inbox root emit already resolves. The record also
+carries the attempt's grant epoch: only the current grant writes it, and a
+regrant or revocation retires it, so a superseded attempt's READY cannot
+replace the live pairing. An explicit `--ready-event` wins over the record,
+and a later READY replaces it, so the newest READY is the one the completion
+pairs with. The record pairs one READY with one result: a completion that
+already claimed the id for a different report does not reuse it, so a later
+distinct `done` goes out on its own. The record is best-effort: emit outside
+a job, a job dir that is gone, or a file that does not hold an event id all
+leave `done` exactly as without it. The flag and the `job.completed` emit
+form still serve a completion made any other way:
 
 ```sh
 panewire done <job> --report <path> [--ready-event <READY event id>]

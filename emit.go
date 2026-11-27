@@ -273,10 +273,14 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		// result_id without the worker repeating it (hk 7014, docs/
 		// quiet-delivery.md "A READY and its completion"). The record is
 		// best-effort: the lane event is already durable, and a missed write
-		// leaves done exactly as before.
+		// leaves done exactly as before. Only the current grant may write it,
+		// so a stale or revoked attempt's READY cannot replace the live one.
 		if *notifyType == "ready" {
-			if dir := readyEventJobDir(root, *job); dir != "" {
-				if err := laneevent.WriteReadyEvent(dir, record.EventID); err != nil {
+			if job, dir := readyEventJob(root, *job); dir != "" {
+				grant, err := producerEpoch(filepath.Join(root, "jobs"), job, *epoch)
+				if err != nil {
+					fmt.Fprintln(stderr, "emit: ready event id could not be recorded:", err)
+				} else if err := laneevent.WriteReadyEvent(dir, grant, record.EventID); err != nil {
 					fmt.Fprintln(stderr, "emit: ready event id could not be recorded:", err)
 				}
 			}
@@ -458,25 +462,25 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	return final, nil
 }
 
-// readyEventJobDir resolves the job dir an in-job READY emit records its
+// readyEventJob resolves the job and dir an in-job READY emit records its
 // event id into: --job when given, else the ARBITER_JOB launch binding, under
 // the jobs root of the inbox root emit already resolved — the same
 // jobs/<id> the job.* event path uses. It answers "" when the emit is not
 // inside a job — no usable id, or no such job dir — and emit then behaves
 // exactly as before (hk 7014).
-func readyEventJobDir(inboxRoot, jobFlag string) string {
+func readyEventJob(inboxRoot, jobFlag string) (string, string) {
 	job := jobFlag
 	if job == "" {
 		job = os.Getenv(jobowner.JobEnv)
 	}
 	if !hubJobIDPattern.MatchString(job) {
-		return ""
+		return "", ""
 	}
 	dir := filepath.Join(inboxRoot, "jobs", job)
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
-		return ""
+		return "", ""
 	}
-	return dir
+	return job, dir
 }
 
 // writeLaneEmitRecord intentionally uses events-lane rather than jobs/<id>.
