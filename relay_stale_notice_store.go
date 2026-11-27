@@ -76,15 +76,17 @@ func (s *laneInboxStore) bindStaleReplayLane(parent context.Context, lane, job s
 // first key, (worker_lane, job), to (worker_lane, first_ms), keeping its rows
 // (hk 6994). A store with the new key, or with no table yet, is left as it is.
 // Postgres and MySQL take the same change in migrations 0045 and 0042.
-func migrateStaleReplayBindingKey(ctx context.Context, db *sql.DB) error {
+func (s *laneInboxStore) migrateStaleReplayBindingKey(parent context.Context) error {
+	ctx, done := s.op(parent)
+	defer done()
 	var byJob int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('relay_stale_notice_lanes') WHERE name='job' AND pk>0`).Scan(&byJob); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('relay_stale_notice_lanes') WHERE name='job' AND pk>0`).Scan(&byJob); err != nil {
 		return err
 	}
 	if byJob == 0 {
 		return nil
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}

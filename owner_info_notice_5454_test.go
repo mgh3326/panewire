@@ -201,8 +201,8 @@ func ownerInfoBypasses(t *testing.T, filename string, src []byte) []string {
 // daily loops notice names a mechanism, not a job, and the daily stale replay
 // notice names a day's retired rows, not one job (hk 6924, relay_stale_notice.go).
 var ownerInfoExempt = map[string]bool{
-	"hub_loop_ledger.go:persistLoopNotice":      true,
-	"relay_stale_notice.go:fileStaleReplayItem": true,
+	"hub_loop_ledger.go:persistLoopNotice":         true,
+	"relay_stale_notice.go:staleReplayNoticeEvent": true,
 }
 
 func ownerInfoLiteral(expr ast.Expr) bool {
