@@ -4,10 +4,12 @@ package panewire
 // its completion"). A worker's READY and the job.completed that concludes it
 // share one identifier, the READY's producer event id. The completion carries
 // it as result_id (`panewire done --ready-event`, `panewire emit --result-id`),
-// and the hub folds the completion into the READY's unread inbox item in place
-// of a second item. The item is the merge's receipt: its merged_completions
-// set names every completion folded into it, so a repeat changes nothing.
-// Whatever cannot be merged is delivered as before.
+// and on an inbox-only lane the hub folds the completion into the READY's
+// unread inbox item in place of a second item. The item is the merge's receipt:
+// its merged_completions set names every completion folded into it, so a repeat
+// changes nothing. Whatever cannot be merged is delivered as before, and so is
+// every completion for a lane that is typed into
+// (panewire-design, result-identity-6822-decision-2).
 
 import (
 	"database/sql"
@@ -25,16 +27,6 @@ import (
 // with it the completion, so a node sends the field only to a hub that listed
 // it (relayWire).
 const hubFeatureResultID = "result-id-v1"
-
-const (
-	// filteredReasonReadyRepeat follows filteredDeliveryPrefix on the hk row of
-	// a merged completion that would otherwise have been typed into the pane.
-	filteredReasonReadyRepeat = "ready-repeat"
-	// inboxWakeReadyRepeat is the wake line's class when a merge announces a
-	// READY again on a lane that is not inbox-only. Unlike another class on such
-	// a lane, a line of this class that is still owed outlives its window.
-	inboxWakeReadyRepeat = "ready-repeat"
-)
 
 type completionMerge int
 
@@ -159,26 +151,16 @@ func foldCompletion(ready *hubJobEventPayload, completion hubJobEventPayload, en
 	ready.MergedCompletions = append(ready.MergedCompletions, entry)
 }
 
-// completionDelivery is what delivering a completion on its own would do.
-type completionDelivery struct {
-	// class is the class its item would have.
-	class string
-	// typed says it would take the relay path into the pane.
-	typed bool
-	// wake is the inbox-only class it would wake the lane as, or "" when it
-	// would not wake one.
-	wake string
-}
-
-// receiveReadyRepeat answers a completion that names its READY. handled is
-// false when it does not merge, and receiveInbox then delivers it as before; a
-// store failure is such a case too, so it can cost a second item and never the
-// completion. A completion that would have taken the relay path into the pane
-// is recorded in hk as delivered to hub/filtered:ready-repeat and acknowledged
-// only once hk holds that, so the producer sends it again after a failed write.
-// A completion bound for the inbox, or a hub with no hk client, has the READY
-// item as its receipt and writes no hk row.
-func (h *HubServer) receiveReadyRepeat(kind string, event hubJobEventPayload, sender *hubAgent, senderID, lane string, alone completionDelivery) (relayLaneEventResult, bool) {
+// receiveReadyMerge answers a completion that names its READY on an
+// inbox-only lane of class. handled is false when it does not merge, and
+// receiveInbox then delivers it as before; a store failure is such a case too,
+// so it can cost a second item and never the completion. The READY item is the
+// merge's receipt, so no handoffkeep row is written.
+//
+// The first merge stands in for the completion's own arrival: it starts the
+// lane's re-wake count again, and it wakes the lane when wake says the
+// completion would have.
+func (h *HubServer) receiveReadyMerge(kind string, event hubJobEventPayload, sender *hubAgent, lane, class string, wake bool) (relayLaneEventResult, bool) {
 	item, merge, err := h.inbox.store.mergeCompletion(lane, event, h.now().UTC())
 	if err != nil {
 		h.logger.Warn("completion not merged into its READY; delivered on its own", "lane", lane, "job", event.JobID, "error", h.inbox.store.loggable("ready merge", err))
@@ -187,91 +169,14 @@ func (h *HubServer) receiveReadyRepeat(kind string, event hubJobEventPayload, se
 	if merge == completionNotMerged {
 		return relayLaneEventResult{}, false
 	}
-	// Only the first merge announces, and before the hk write: a resend after a
-	// failed write is a repeat and announces nothing.
 	if merge == completionMerged {
 		h.restartInboxRewake(lane)
-		h.announceMerge(lane, item, alone)
-	}
-	result := relayLaneEventResult{ID: item.ID, Routed: true, Machine: "inbox", Duplicate: merge == completionRepeated}
-	if alone.typed && h.handoffkeep != nil {
-		stored, filed, ok := h.fileFilteredInHK(h.closeCtx, kind, event, senderID, filteredReasonReadyRepeat)
-		if !ok {
-			return relayLaneEventResult{PersistFailed: true}, true
-		}
-		if filed {
-			result.ID, result.Machine, result.AlreadyDelivered = stored.ID, filteredDeliveryPrefix+filteredReasonReadyRepeat, true
+		if wake {
+			h.noteInboxWakeArrival(lane, class)
 		}
 	}
 	if sender != nil {
-		h.queueRelayPersisted(kind, event, sender, result.ID)
+		h.queueRelayPersisted(kind, event, sender, item.ID)
 	}
-	return result, true
-}
-
-// announceMerge sends the inbox wake line for a first merge. The completion is
-// not typed and has no item of its own, so the line stands in wherever it
-// would have told the lane something:
-//
-//   - it would have woken an inbox-only lane;
-//   - it would have been typed into the pane, whatever became of the READY;
-//   - it would have reached the pane later (held or digested), unless the
-//     READY still waits for a batch composed after this merge (awaitsBatch).
-//     A READY in flight, claimed by an earlier batch or filed as a plain inbox
-//     item brings the lane no word of the completion.
-//
-// A READY already typed and not acked is announced in any case (design v4
-// §8.3). Otherwise the completion would have been silent.
-func (h *HubServer) announceMerge(lane string, ready laneInboxItem, alone completionDelivery) {
-	if alone.wake != "" {
-		h.noteInboxWakeArrival(lane, alone.wake)
-		return
-	}
-	later := alone.class != "inbox" && !awaitsBatch(ready)
-	if !alone.typed && !later {
-		typed, err := h.inbox.store.typedToPane(ready)
-		if err != nil {
-			// Unknown is announced: a line too many costs less than none.
-			h.logger.Warn("whether a merged READY was typed is unknown; announced", "lane", lane, "error", h.inbox.store.loggable("ready batch", err))
-		} else if !typed {
-			return
-		}
-	}
-	if !inboxWakeFiledWorthy([]laneInboxItem{ready}) {
-		return
-	}
-	class := h.inbox.policy.inboxOnlyClass(lane, h.now())
-	if class == "" {
-		class = inboxWakeReadyRepeat
-	}
-	h.noteInboxWakeArrival(lane, class)
-}
-
-// holdsMergedCompletion reports whether item is a READY that a completion
-// joined.
-func holdsMergedCompletion(item laneInboxItem) bool {
-	return len(item.Event.MergedCompletions) > 0
-}
-
-// awaitsBatch reports whether item is held or in a digest window and no batch
-// has claimed it yet.
-func awaitsBatch(item laneInboxItem) bool {
-	return item.Class == "interrupt" && item.DeliveredAt == 0 && item.DigestBatch == "" && item.EscalationBatch == "" && (item.HoldUntil > 0 || item.DigestAt > 0)
-}
-
-// typedToPane reports whether item was sent to its lane's pane: its own relay
-// was confirmed, or a digest, escalation or held batch that claims it was sent.
-// Only the item's own relay writes delivered_at; a batch is its own event.
-func (s *laneInboxStore) typedToPane(item laneInboxItem) (bool, error) {
-	if item.DeliveredAt > 0 {
-		return true, nil
-	}
-	if item.DigestBatch == "" && item.EscalationBatch == "" {
-		return false, nil
-	}
-	ctx, done := s.op(s.life)
-	defer done()
-	var sent int
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox_batches WHERE id IN (?,?) AND sent=1`), item.DigestBatch, item.EscalationBatch).Scan(&sent)
-	return sent > 0, err
+	return relayLaneEventResult{ID: item.ID, Routed: true, Machine: "inbox", Duplicate: merge == completionRepeated}, true
 }

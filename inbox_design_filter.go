@@ -111,13 +111,8 @@ func (h *HubServer) fileFilteredInHK(ctx context.Context, kind string, event hub
 	if !persisted || stored.ID < 1 {
 		return stored, false, false
 	}
-	collides, kept := "filtered record collides with another event's hk row; delivered to the inbox", "design lane record kept in hk only"
-	if reason == filteredReasonReadyRepeat {
-		// The READY item already holds this completion (result_identity.go).
-		collides, kept = "merged completion collides with another event's hk row; the inbox item is its receipt", "completion merged into its READY recorded in hk"
-	}
 	if stored.EventID != event.EventID || stored.Kind != kind || stored.OwnerLane != event.OwnerLane || stored.JobID != event.JobID {
-		h.logger.Info(collides, "kind", kind, "job", event.JobID, "event_id", event.EventID, "stored_event_id", stored.EventID)
+		h.logger.Info("filtered record collides with another event's hk row; delivered to the inbox", "kind", kind, "job", event.JobID, "event_id", event.EventID, "stored_event_id", stored.EventID)
 		return stored, false, true
 	}
 	if stored.DeliveredAt == "" {
@@ -126,7 +121,7 @@ func (h *HubServer) fileFilteredInHK(ctx context.Context, kind string, event hub
 			return stored, false, false
 		}
 	}
-	h.logger.Info(kept, "kind", kind, "lane", event.OwnerLane, "job", event.JobID, "reason", reason, "event_id", stored.ID)
+	h.logger.Info("design lane record kept in hk only", "kind", kind, "lane", event.OwnerLane, "job", event.JobID, "reason", reason, "event_id", stored.ID)
 	return stored, true, true
 }
 

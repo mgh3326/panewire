@@ -431,7 +431,7 @@ func (a *App) help(cmd string) error {
 		fmt.Fprintln(a.Out, spawnStatusUsage)
 		fmt.Fprintln(a.Out, spawnWithdrawUsage)
 	case "done":
-		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE] [--ready-event EVENT_ID] (--ready-event: the event id of the READY this completion concludes; the hub keeps both as one inbox item)")
+		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE] [--ready-event EVENT_ID] (--ready-event: the event id of the READY this completion concludes; on an inbox-only lane the hub keeps both as one inbox item)")
 	case "escalate":
 		fmt.Fprintln(a.Out, "Usage: panewire escalate JOB --question TEXT [--report PATH]")
 	case "escalate-author":

@@ -300,7 +300,8 @@ session's own spawn notices and the failures in
 Lanes that are not design lanes are unchanged.
 
 **Not done under hk 4270:** hiding a `job.completed` that repeats a READY
-(since done for a completion that names its READY, below), and the
+(since done for a completion that names its READY on an inbox-only lane,
+below), and the
 retry/coalescing of unconfirmed deliveries. See the
 [pull request](https://github.com/mgh3326/panewire/pull/448).
 
@@ -317,17 +318,23 @@ panewire emit --kind job.completed --job <job> --report <path> \
   --owner-lane <lane> --result-id <READY event id>
 ```
 
-The hub then folds the completion into the READY's inbox item in place of a
-second item (hk 4289 T5). This holds on every lane, not only design lanes. The
-READY item is looked up by the completion's owner lane and `result_id` alone:
+On an [inbox-only lane](#inbox-only-lanes) (design, desk and trial lanes) the
+hub then folds the completion into the READY's inbox item in place of a second
+item (hk 4289 T5). Every other lane is typed into and gets the READY and the
+completion exactly as without the field: the hub drops `result_id` there. The
+T5 design merged on every lane; `panewire-design` narrowed it to inbox-only
+lanes, because a one-line wake cannot stand in for a typed relay.
+
+The READY item is looked up by the completion's owner lane and `result_id`
+alone:
 
 | The READY of that lane and id | The completion |
 | --- | --- |
-| a `ready` lane event, not acked and not superseded, whether or not it was read or typed | merged |
+| a `ready` lane event, not acked and not superseded, whether or not it was read | merged |
 | already lists this completion in `merged_completions` | changes nothing and is answered again, also after the ack |
 | acked or superseded | delivered as before |
 | not filed (the completion arrived first, or the id names no such event of this lane, or one of another type) | delivered as before; a READY that arrives later is delivered too, and a resend of the completion stays its own item |
-| no `result_id`, or no inbox store (`--delivery-policy off`) | delivered as before |
+| no `result_id`, a lane that is not inbox-only, or no inbox store (`--delivery-policy off`) | delivered as before |
 
 The rules that withhold a record come first: a completion that
 `--owner-notify` or the [daemon reviewer filter](#records-kept-in-hk-only)
@@ -341,38 +348,14 @@ the completion as before: it can cost a second item, never the completion.
   has (` / ` between them), and appends the completion's key to
   `merged_completions` (the hub's dedupe key, with newlines between its
   fields). The set is what makes a repeat a no-op across restarts; a second
-  completion with another event key is appended too. The READY keeps
-  its text, type and must-ack state, so it stays unread until `inbox ack`.
-- The completion gets no item and is not typed, held or digested. Its `cause`
-  still supersedes what its own item would have, never the READY it joined.
-- The merge tells the lane no less than the completion would have. The first
-  merge sends [the one-line wake](#the-one-line-wake) when:
-  - the completion would have woken an inbox-only lane;
-  - it would have been typed into the pane, whatever became of the READY;
-  - it would have reached the pane later (held or digested), unless the READY
-    itself still waits for a held or digest batch that no pass has composed (a
-    held batch composed after the merge carries the completion's report and
-    question; a digest points at the inbox);
-  - in any case, the READY was already typed, by its own relay or in a digest,
-    escalation or held batch, and is not acked.
-  Otherwise the completion would have been silent. Either way the first merge
-  restarts the lane's [re-wake](#the-re-wake) count.
-- On a lane that is not inbox-only that line has the `inbox_wake` reason
-  `ready-repeat`, at most one per coalescing window. A line still owed, because
-  the window was open or the pane out of reach, is sent at the window's end or
-  the next node hello. The owed line is held in memory, so a hub start owes one
-  again, with the reason `startup`, to each such lane that has an unread READY
-  holding a merged completion, also if its line had been sent before.
-- A wake line the node accepts but cannot type is not reported back or retried,
-  as for every inbox wake line, and a lane that is not inbox-only has no
-  [re-wake](#the-re-wake). The completion stays readable on the READY item.
-- The READY item is the merge's receipt. A completion bound for the inbox
-  writes no handoffkeep row. One that would have taken the relay path into the
-  pane is also written to handoffkeep, delivered as `hub` /
-  `filtered:ready-repeat`, and the producer is answered only after that write;
-  a failed write is retried by the producer's resend. A hub with no handoffkeep
-  client, or a row folded into another event's by handoffkeep's five-field key,
-  answers with the item.
+  completion with another event key is appended too. The READY keeps its text,
+  type and must-ack state, so it stays unread until `inbox ack`.
+- The completion gets no item. Its `cause` still supersedes what its own item
+  would have, never the READY it joined.
+- The first merge sends [the one-line wake](#the-one-line-wake) when the
+  completion would have woken the lane, and restarts the lane's
+  [re-wake](#the-re-wake) count.
+- The READY item is the merge's receipt: no handoffkeep row is written.
 - `panewire spawn --wait` reads a merged completion from the item's
   `merged_completions`.
 
@@ -393,9 +376,8 @@ event id. handoffkeep is unchanged.
   records before lane events, so both are delivered.
 - The hub trusts the producer's id. It does not check that the completion and
   the READY come from one job or node.
-- If the `filtered:ready-repeat` mark fails and the replay walk reaches the row
-  before the node's resend, the walk knows no `result_id` and delivers the
-  completion as before.
+- A merged completion adds no item, so a desk summary that already listed the
+  READY does not list it again.
 
 ## Inbox-only lanes
 
@@ -525,8 +507,7 @@ When the line is sent:
   dropped: the lane is a worker lane again.
 - When the hub starts, every inbox-only lane with unread items above `info`
   gets one line after the same wake window, with `startup` as the fleet-event
-  reason, and so does any other lane with an unread READY that holds a
-  [merged completion](#a-ready-and-its-completion). Restarts inside the window coalesce into one line after the last
+  reason. Restarts inside the window coalesce into one line after the last
   restart. Repeated restarts less than one wake window apart can defer this
   line until the hub stays up for a full window; the window is not persisted.
   A lane whose unread items cannot be read gets none.

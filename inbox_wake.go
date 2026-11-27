@@ -3,7 +3,6 @@ package panewire
 import (
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -244,12 +243,6 @@ func (h *HubServer) flushInboxWakes() {
 			continue
 		}
 		class := h.inbox.policy.inboxOnlyClass(lane, now)
-		// A merge's announcement stands for a completion that would have been
-		// typed on a lane that is not inbox-only, so it stays owed there
-		// (result_identity.go).
-		if class == "" && state.class == inboxWakeReadyRepeat {
-			class = inboxWakeReadyRepeat
-		}
 		if !state.pending || class == "" {
 			delete(w.lanes, lane)
 			continue
@@ -265,13 +258,10 @@ func (h *HubServer) flushInboxWakes() {
 
 // seedStartupInboxWakes owes one line to every inbox-only lane that has unread
 // items above info when the hub starts: the window state is in memory, so
-// without it an item filed before a restart would never be announced. A lane
-// that is not inbox-only is owed one while an unread READY of it holds a merged
-// completion: the line stood for that completion, whose hk row is closed, so
-// nothing else brings it back (result_identity.go). The line is sent on the
-// first flush, through the normal window, so repeated restarts give one line
-// per start at most. A lane whose unread list cannot be read is skipped, never
-// announced as empty.
+// without it an item filed before a restart would never be announced. The
+// line is sent on the first flush, through the normal window, so repeated
+// restarts give one line per start at most. A lane whose unread list cannot
+// be read is skipped, never announced as empty.
 func (h *HubServer) seedStartupInboxWakes() {
 	lanes, err := h.inbox.store.laneNames()
 	if err != nil {
@@ -284,18 +274,15 @@ func (h *HubServer) seedStartupInboxWakes() {
 	defer w.mu.Unlock()
 	for _, lane := range lanes {
 		class := h.inbox.policy.inboxOnlyClass(lane, now)
+		if class == "" {
+			continue
+		}
 		items, err := h.inbox.store.list(lane, true)
 		if err != nil {
 			h.logger.Warn("startup inbox wake skipped: unread items unreadable", "lane", lane, "error", h.inbox.store.loggable("startup inbox wake", err))
 			continue
 		}
-		switch {
-		case class == "":
-			if !slices.ContainsFunc(items, holdsMergedCompletion) {
-				continue
-			}
-			class = inboxWakeReadyRepeat
-		case inboxWakeMostUrgent(items) == "info":
+		if inboxWakeMostUrgent(items) == "info" {
 			continue
 		}
 		if w.lanes == nil {

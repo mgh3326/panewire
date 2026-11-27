@@ -2,15 +2,15 @@ package panewire
 
 // hk 6822 (hk 4289 T5): a READY and its job.completed share one identifier.
 // The lanes, hub and hk fixtures are the quiet design-lane ones (t3426*):
-// handoffkeep-design is inbox-only, so nothing is typed for it, and director-1
-// is typed, so its completions take the relay path.
+// handoffkeep-design and operator-desk are inbox-only, so nothing is typed for
+// them and their completions merge; director-1 is typed and never merges
+// (result_identity_typed_lane_t6822_test.go).
 
 import (
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/mgh3326/panewire/internal/laneevent"
 )
@@ -156,105 +156,39 @@ func TestCompletionMergesIntoUnackedReady(t *testing.T) {
 	}
 }
 
-// Reaching the pane does not show the receiver read the READY, so a delivered,
-// unacked one still takes the completion, which is not typed and gets no item.
-// Mutant: treat delivered_at as settled.
+// Reaching a pane does not show the receiver read the READY. On an inbox-only
+// lane a delivered, unacked one still takes the completion; on a typed lane,
+// where the READY is delivered by being typed, the completion is typed too and
+// gets its own item, as on the base (decision-2). Mutants: treat delivered_at
+// as settled; merge on a typed lane.
 func TestCompletionMergesWhileReadyDeliveredButUnacked(t *testing.T) {
-	h, agent, _, _ := t6822Hub(t)
-	ready := t6822Typed(t, h, agent, "ready-1")
-
-	c := t6822Completion(t6822Director, "ready-1", "00001-job.completed.json")
-	h.relayJobCompletionFrom("host-a", c)
-
-	items := t6822Items(t, h, t6822Director)
-	if len(items) != 1 || items[0].ID != ready.ID || !slices.Equal(items[0].Event.MergedCompletions, t6822Merged(c)) {
-		t.Fatalf("items=%+v, want the completion merged into the delivered READY", items)
-	}
-	for _, injected := range t3426Injected(agent) {
-		if strings.Contains(injected.Text, c.ReportPath) {
-			t.Fatalf("the merged completion was typed: %+v", injected)
-		}
-	}
-}
-
-// A typed, unacked READY is announced again by the inbox wake line, once; a
-// repeat of the completion and a READY that was never typed announce nothing.
-// Mutants: merge silently; announce on a repeat.
-func TestMergeResurfacesTypedUnackedReady(t *testing.T) {
-	h, agent, _, _ := t6822Hub(t)
-	t6822Typed(t, h, agent, "ready-1")
-	now := time.Now()
-	h.now = func() time.Time { return now }
-	c := t6822Completion(t6822Director, "ready-1", "00001-job.completed.json")
-	h.relayJobCompletionFrom("host-a", c)
-
-	injected := t3426Injected(agent)
-	want := inboxWakeText(t6822Director, 1, "ready")
-	if len(injected) != 1 || injected[0].Pane != "w1:director" || injected[0].Text != want {
-		t.Fatalf("injected=%+v, want the one wake line %q", injected, want)
-	}
-	// Past the coalescing window, where a second arrival would be typed at once.
-	now = now.Add(h.inbox.policy.Relay.wakeWindow + time.Second)
-	h.relayJobCompletionFrom("host-a", c)
-	if again := t3426Injected(agent); len(again) != 0 {
-		t.Fatalf("a repeat announced again: %+v", again)
-	}
-
-	t.Run("a READY that was never typed", func(t *testing.T) {
+	t.Run("an inbox-only lane", func(t *testing.T) {
 		h, agent, _, _ := t6822Hub(t)
-		t6822FileReady(t, h, agent, t3426Design, "ready-1")
-		// The READY's own arrival asked for no wake (a quiet design READY).
-		if injected := t3426Injected(agent); len(injected) != 0 {
-			t.Fatalf("fixture typed the design lane: %+v", injected)
+		ready := t6822FileReady(t, h, agent, t3426Design, "ready-1")
+		if err := h.inbox.store.recordDelivery(relayLaneEventOutboxKey(t3426Design, "ready-1"), "host-a", "w1:design", h.now().UTC()); err != nil {
+			t.Fatal(err)
 		}
-		h.relayJobCompletionFrom("host-a", t6822Completion(t3426Design, "ready-1", "00001-job.completed.json"))
-		if injected := t3426Injected(agent); len(injected) != 0 {
-			t.Fatalf("an untyped READY was announced: %+v", injected)
+		c := t6822Completion(t3426Design, "ready-1", "00001-job.completed.json")
+		h.relayJobCompletionFrom("host-a", c)
+		items := t6822Items(t, h, t3426Design)
+		if len(items) != 1 || items[0].ID != ready.ID || items[0].DeliveredAt == 0 || !slices.Equal(items[0].Event.MergedCompletions, t6822Merged(c)) {
+			t.Fatalf("items=%+v, want the completion merged into the delivered READY", items)
 		}
 	})
-}
-
-// A completion that would have been typed is recorded in hk as delivered to
-// hub/filtered:ready-repeat and answered with that row. A failed hk write
-// answers nothing, and the resend writes it without a second announcement.
-// Mutants: ack without the receipt; announce on a repeat.
-func TestMergedTypedCompletionIsFiledAsReadyRepeat(t *testing.T) {
-	h, agent, fake, _ := t6822Hub(t)
-	t6822Typed(t, h, agent, "ready-1")
-	c := t6822Completion(t6822Director, "ready-1", "00001-job.completed.json")
-
-	fake.mu.Lock()
-	fake.deliveredStatus = 500
-	fake.mu.Unlock()
-	h.relayJobCompletionFrom("host-a", c)
-	if acks := t6822Acks(agent); len(acks) != 0 {
-		t.Fatalf("acknowledged without the hk receipt: %+v", acks)
-	}
-	if injected := t3426Injected(agent); len(injected) != 1 {
-		t.Fatalf("injected=%+v, want the one wake line", injected)
-	}
-
-	fake.mu.Lock()
-	fake.deliveredStatus = 0
-	fake.mu.Unlock()
-	h.relayJobCompletionFrom("host-a", c)
-	row := fake.rows[fakeHandoffkeepStoredKey(handoffkeepRelayEvent{Kind: "job.completed", JobID: t6822Job, Epoch: 1, ReportPath: c.ReportPath})]
-	if row == nil || fake.deliveredToFor(row.ID) != "hub/filtered:ready-repeat" {
-		t.Fatalf("row=%+v, want delivered to hub/filtered:ready-repeat", row)
-	}
-	if reason := settlementReason(fake.deliveredToFor(row.ID)); reason != "filtered" || confirmedInHK(*row) {
-		t.Fatalf("the receipt reads as reason=%q confirmed=%t, want a filtered settlement", reason, confirmedInHK(*row))
-	}
-	acks := t6822Acks(agent)
-	if len(acks) != 1 || acks[0].EventID != row.ID || acks[0].ProducerEventID != c.EventID {
-		t.Fatalf("persisted acks=%+v, want row %d", acks, row.ID)
-	}
-	if injected := t3426Injected(agent); len(injected) != 0 {
-		t.Fatalf("the resend typed something: %+v", injected)
-	}
-	if items := t6822Items(t, h, t6822Director); len(items) != 1 || len(items[0].Event.MergedCompletions) != 1 {
-		t.Fatalf("items=%+v", items)
-	}
+	t.Run("a typed lane", func(t *testing.T) {
+		h, agent, _, _ := t6822Hub(t)
+		t6822Typed(t, h, agent, "ready-1")
+		c := t6822Completion(t6822Director, "ready-1", "00001-job.completed.json")
+		h.relayJobCompletionFrom("host-a", c)
+		if injected := t3426Injected(agent); len(injected) != 1 || !strings.Contains(injected[0].Text, c.ReportPath) {
+			t.Fatalf("injected=%+v, want the completion typed", injected)
+		}
+		ready := t6822Item(t, h, t6822Director, relayLaneEventOutboxKey(t6822Director, "ready-1"))
+		own := t6822Item(t, h, t6822Director, t6822CompletionKey(c))
+		if len(t6822Items(t, h, t6822Director)) != 2 || len(ready.Event.MergedCompletions) != 0 || own.Event.ResultID != "" {
+			t.Fatalf("ready=%+v completion=%+v", ready, own)
+		}
+	})
 }
 
 // A completion that arrives after the READY was acked is news: it is delivered
@@ -424,11 +358,11 @@ func TestCompletionWithoutResultIDUnchanged(t *testing.T) {
 	}
 }
 
-// With no hk row, or no hk at all, the READY item is the merge's receipt.
-// Mutant: require an hk row.
+// With no hk at all the READY item is the merge's receipt, on a design lane and
+// the desk. Mutant: require an hk row.
 func TestMergeReceiptIsTheInboxItemWhenNoHKRow(t *testing.T) {
 	h, agent := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), nil, t3426Records)
-	for _, lane := range []string{t3426Design, t6822Director} {
+	for _, lane := range []string{t3426Design, "operator-desk"} {
 		t.Run(lane, func(t *testing.T) {
 			ready := t6822FileReady(t, h, agent, lane, "ready-1")
 			t3426Drain(agent)

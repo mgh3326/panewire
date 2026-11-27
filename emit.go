@@ -136,7 +136,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	eventID := fs.String("event-id", "", "producer event id for lane.event (generated when omitted)")
 	text := fs.String("text", "", "payload for lane.event")
 	late := fs.Bool("late", false, "completion found by a re-armed watcher")
-	resultID := fs.String("result-id", "", "with --kind job.completed: the event id of the READY this completion concludes; the hub keeps both as one inbox item (docs/quiet-delivery.md)")
+	resultID := fs.String("result-id", "", "with --kind job.completed: the event id of the READY this completion concludes; on an inbox-only lane the hub keeps both as one inbox item (docs/quiet-delivery.md)")
 	deliver := fs.String("deliver", "", "interrupt | inbox (otherwise receiving-lane policy)")
 	notifyType := fs.String("type", "", "notification type: decision | order | ready | merged | blocked | findings | idle-wake | progress | report | ack | info | deploy-approval | watch-hold | culprit-hold | automation-failed")
 	priority := fs.String("priority", "", "order priority: stop | hold | urgent | normal | low (only with --kind lane.event --type order; normal and low wait for the lane's next idle moment, an unmarked order and the rest interrupt)")
