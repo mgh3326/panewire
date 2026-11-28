@@ -176,6 +176,7 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 	h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawnIDs")
 	read := reviewerEndRead{Listed: len(ids)}
 	pending := h.reviewerEndUnjudged(ids)
+	pagesRead := false
 	for len(pending) > 0 {
 		page := pending[:min(reviewerEndPage, len(pending))]
 		pending = pending[len(page):]
@@ -185,7 +186,7 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 			h.logger.Warn("reviewer end pass skipped", "reason", "store_unavailable")
 			return
 		}
-		h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawnsByID")
+		pagesRead = true
 		read.Full += len(tasks)
 		for _, holder := range tasks {
 			request := holder.Request.RequestID
@@ -219,6 +220,12 @@ func (h *HubServer) endPostedReviewerJobs(ctx context.Context) {
 				h.skipReviewerEnd(request)
 			}
 		}
+	}
+	// The streak clears only once every full-row page of the pass succeeded:
+	// clearing on the first page would recount and relog a persistent
+	// later-page failure on every pass (hk 6558).
+	if pagesRead {
+		h.loopClearSilent("hub_spawn_reviewer_end.go:succeededSpawnsByID")
 	}
 	h.retainReviewerEnd(seen, ids)
 	h.mu.Lock()
