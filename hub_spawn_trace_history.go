@@ -11,9 +11,14 @@ import (
 	"github.com/getsentry/sentry-go"
 )
 
-// spawnTraceStages are the steps a node reports, in the order the trace names
-// them. Each is end-aligned to its window's end (see layoutSpawnWindow).
-var spawnTraceStages = []string{"claim", "placement", "checkout", "launch", "submit", "landing", checkoutStageLockWait, checkoutStageFetch, checkoutStageWorktreeAdd}
+// spawnTraceChain are the steps a node reports that run one after another, in
+// the order they run: the hub's placement, then the node's checkout, the spawn
+// engine's claim, then launch, submit and landing. The window's queue is what is
+// left of the window once their sum is taken away (see layoutSpawnWindow). The
+// placement key also carries the hub's placement time, so it cannot be split.
+// The checkout sub-stages (checkoutStageKeys) are parts of the checkout step,
+// not steps of their own, so they stay out of the chain and out of that sum.
+var spawnTraceChain = []string{"placement", "checkout", "claim", "launch", "submit", "landing"}
 
 // spawnTraceAttempt is one attempt that ended unstarted and was renewed: the
 // hub retried the request, so the next attempt's window opens at EndMS. It is
@@ -68,38 +73,79 @@ func (s *laneInboxStore) spawnTraceHistoryIn(ctx context.Context, q spawnTraceQu
 	return history, nil
 }
 
-// layoutSpawnWindow lays one attempt's window [open, end] under parent. Each
-// reported step ends at the window's end, as the trace has always placed them
-// (hk 5585). The part of the window before the longest step starts is a
-// "queue" span: time the attempt waited before any step of it ran, for example
-// parked for a node slot. The queue and the steps together cover the window,
-// so consecutive windows cover acceptance to landed. It returns the earliest
-// start among the steps and the queue, so the caller can widen the transaction
-// if a step reaches before the window.
+// layoutSpawnWindow lays one attempt's window [open, end] under parent (hk
+// 5585, hk 7112). The chain steps run one after another and are laid back to
+// back so they end at the window's end; the time before the first of them is
+// a "queue" span: the wait before any step ran, for example parked for a node
+// slot. The queue is window minus the sum of the chain, so the queue and the
+// steps together cover the window and consecutive windows cover acceptance to
+// landed. The checkout sub-stages are drawn from the start of the checkout
+// step, back to back, and are not counted in the sum, since checkout already
+// contains them. A node sends them only with the checkout total (hk 6075), so
+// without a checkout step they are not drawn. It returns the earliest start
+// among the steps and the queue, so the caller can widen the transaction if a
+// step reaches before the window.
 func layoutSpawnWindow(parent *sentry.Span, open, end time.Time, stages map[string]int64) time.Time {
+	var sum int64
+	for _, stage := range spawnTraceChain {
+		if ms, ok := spawnTraceStageMS(stages, stage); ok {
+			sum += ms
+		}
+	}
+	cursor := end.Add(-time.Duration(sum) * time.Millisecond)
 	earliest := open
-	var longest int64
-	for _, stage := range spawnTraceStages {
-		ms, ok := stages[stage]
-		if !ok || ms < 0 || ms > 3600000 {
+	if cursor.Before(earliest) {
+		earliest = cursor
+	}
+	if cursor.After(open) {
+		queue := parent.StartChild("queue")
+		queue.StartTime = open
+		queue.EndTime = cursor
+		queue.Finish()
+	}
+	for _, stage := range spawnTraceChain {
+		ms, ok := spawnTraceStageMS(stages, stage)
+		if !ok {
 			continue
 		}
-		longest = max(longest, ms)
 		child := parent.StartChild(stage)
-		child.EndTime = end
-		child.StartTime = end.Add(-time.Duration(ms) * time.Millisecond)
-		if child.StartTime.Before(earliest) {
-			earliest = child.StartTime
+		child.StartTime = cursor
+		cursor = cursor.Add(time.Duration(ms) * time.Millisecond)
+		child.EndTime = cursor
+		if stage == "checkout" {
+			layoutCheckoutSubStages(parent, child.StartTime, stages)
 		}
 		child.Finish()
 	}
-	if ready := end.Add(-time.Duration(longest) * time.Millisecond); ready.After(open) {
-		queue := parent.StartChild("queue")
-		queue.StartTime = open
-		queue.EndTime = ready
-		queue.Finish()
-	}
 	return earliest
+}
+
+// layoutCheckoutSubStages draws the checkout sub-stages back to back from the
+// start of the checkout step. They are siblings of the steps under parent, so
+// each keeps its own duration.
+func layoutCheckoutSubStages(parent *sentry.Span, checkoutStart time.Time, stages map[string]int64) {
+	cursor := checkoutStart
+	for _, key := range checkoutStageKeys {
+		ms, ok := spawnTraceStageMS(stages, key)
+		if !ok {
+			continue
+		}
+		child := parent.StartChild(key)
+		child.StartTime = cursor
+		cursor = cursor.Add(time.Duration(ms) * time.Millisecond)
+		child.EndTime = cursor
+		child.Finish()
+	}
+}
+
+// spawnTraceStageMS returns a reported step's duration when it is a value the
+// trace may draw; an absent or out-of-range step is not drawn.
+func spawnTraceStageMS(stages map[string]int64, key string) (int64, bool) {
+	ms, ok := stages[key]
+	if !ok || ms < 0 || ms > 3600000 {
+		return 0, false
+	}
+	return ms, true
 }
 
 // layoutRenewedAttempts adds each renewed attempt as an "attempt" span whose

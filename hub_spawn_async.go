@@ -419,6 +419,12 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 					nodeActive[task.Node.Machine] = map[string]int{}
 				}
 				nodeActive[task.Node.Machine][key]++
+				// The dispatch counts itself: the node's open dispatches now, this one included.
+				open := 0
+				for _, n := range nodeActive[task.Node.Machine] {
+					open += n
+				}
+				h.noteSpawnDispatch(task, open)
 			}
 		}
 		mu.Unlock()
@@ -437,6 +443,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 					}
 					h.drain.leave()
 				}
+				h.spawnDispatchOpen.Delete(task.Request.RequestID)
 				mu.Lock()
 				delete(active, task.Request.RequestID)
 				if open := nodeActive[task.Node.Machine]; open != nil {

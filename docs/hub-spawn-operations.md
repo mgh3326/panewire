@@ -1860,8 +1860,8 @@ A private Sentry client records one always-sampled `runtug.spawn` transaction pe
 spawn attempt (the established telemetry name survives the CLI rename). Only this
 spawn path is traced; other hub traffic and the crash reporter's budget are
 unchanged. A transaction finishes on the first outcome observation; late reconciliation stays in the durable audit and each subsequent failure transition still gets its own deduplicated error event. Stage spans use measured claim/placement/checkout/launch/submit/landing
-elapsed durations (hk 5585). The steps after placement are node claim (`claim`), pane start (`launch`), brief submit (`submit`: the brief's write, typing and record) and landing proof (`landing`: the confirmation, model proof and task link). `submit` is a timing key only; a result still reports `landing` as its coarse stage, so the hub's stage rules are unchanged. A hub that does not list `spawn_stage_submit` in hub.features gets submit folded into landing, because a strict hub rejects the whole result for an unknown key. Durations from node clocks are end-aligned, not presented as
-a synchronized cross-host causal timeline. Tags are job, host, profile, role and
+elapsed durations (hk 5585). The steps after placement are node claim (`claim`), pane start (`launch`), brief submit (`submit`: the brief's write, typing and record) and landing proof (`landing`: the confirmation, model proof and task link). `submit` is a timing key only; a result still reports `landing` as its coarse stage, so the hub's stage rules are unchanged. A hub that does not list `spawn_stage_submit` in hub.features gets submit folded into landing, because a strict hub rejects the whole result for an unknown key. Durations from node clocks are laid out one after another, ending at the window's end, not presented as
+a synchronized cross-host causal timeline (hk 7112). Tags are job, host, profile, role and
 rc. `SPAWN_FAILED`, including timeout, also produces an error event titled
 `SPAWN_FAILED <stage>/<reason>` and fingerprinted by stage and normalized reason.
 The normalized reason keeps `spawn_failed:<code>` only for a code in the closed
@@ -1886,9 +1886,16 @@ record in the same transaction as the retry, and the next attempt's window opens
 at the instant the last one ended, so the windows cover acceptance to landed.
 
 In the trace, each renewed attempt is an `attempt` span with the reason as a tag,
-and the landed attempt's steps follow it. A `queue` span is the part of a window
-that no step accounts for, such as a wait for a node slot. Refusal text, briefs
-and argv never reach the trace. A row from before the column has no acceptance
+and the landed attempt's steps follow it. A `queue` span is the window less the
+sum of its steps (placement, checkout, claim, launch, submit, landing, in the order they run), so it is
+the wait before the first step, such as a wait for a node slot (hk 7112). The
+checkout sub-stages `lock_wait`, `fetch` and `worktree_add` are drawn inside the
+checkout step and are not counted again. The landed trace also carries the
+`node_open_dispatches` tag: the node's in-flight dispatches counted at the
+request's first send, capped by the node's slots; spawns that wait behind them
+are not counted. A replay of a dispatched request carries no tag. The count is
+held in memory, so a hub restart drops the tag.
+Refusal text, briefs and argv never reach the trace. A row from before the column has no acceptance
 time in the history and keeps the attempt window as its start.
 
 ## Read gates (hk 5302)

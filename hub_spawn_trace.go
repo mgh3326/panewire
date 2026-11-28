@@ -85,8 +85,16 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 			hub.Scope().SetTag(key, value)
 		}
 	}
-	// Node replies provide elapsed durations, not synchronized clocks. End-align
-	// stage spans instead of inventing a cross-host causal timeline. The steps
+	// The node's in-flight dispatches counted at this request's first send, capped
+	// by the node's slots; spawns that wait behind them are not counted (hk 7112).
+	// Only the landed trace carries it: a refused, deadline or orphan outcome of
+	// the same first send does not (hk 7112).
+	if open, ok := h.spawnDispatchOpen.Load(task.Request.RequestID); ok && result.RC == 0 {
+		trace.SetTag("node_open_dispatches", strconv.Itoa(open.(int)))
+	}
+	// Node replies provide elapsed durations, not synchronized clocks. Stage spans
+	// run back to back and end at the window's end instead of inventing a
+	// cross-host causal timeline (hk 7112). The steps
 	// after placement are node claim, pane start (launch), brief submit (submit)
 	// and landing proof (landing); see docs/hub-spawn-operations.md (hk 5585).
 	// Each attempt renewed before this one is a window of its own, and the
@@ -105,6 +113,17 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		trace.StartTime = earliest
 	}
 	trace.Finish()
+}
+
+// noteSpawnDispatch records the node's open dispatches for a request's first
+// send (status bound). A replay (dispatching, reconciling, deadline_exceeded)
+// stores nothing: it would carry the count at replay time, not at the dispatch
+// the trace belongs to (hk 7112). The first send's dispatch goroutine removes
+// the entry when it ends, after its trace is written.
+func (h *HubServer) noteSpawnDispatch(task hubSpawnTask, open int) {
+	if task.Status == "bound" {
+		h.spawnDispatchOpen.Store(task.Request.RequestID, open)
+	}
 }
 
 // spawnSentryRefusalPolicies are the closed set of requester-side refusal
