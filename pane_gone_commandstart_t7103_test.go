@@ -1,40 +1,18 @@
 package panewire
 
-// hk 7103: a pane.close marks a completed job gone only when the job started
-// before the close command began. The start is the job's spawn: its bind time
-// (the pane is made then), or its created time when it was never bound. A job
-// placed on a reused pane id after the close began must keep PaneGone unset, even
-// when its completion arrives late.
+// hk 7103: a pane.close marks gone only the job of the agent the close names.
+// The node checks that label before it closes the pane, so the label identifies
+// the occupant. A different job on a reused pane id keeps PaneGone unset.
 
 import (
-	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// t7103Spawn creates a spawn for job with created time created, and binds it at
-// bound when bound is non-zero. It returns the spawn's request id.
-func t7103Spawn(t *testing.T, h *HubServer, seq int, job string, created, bound time.Time) {
+// t7103Hub returns a hub with node-a connected and no jobs.
+func t7103Hub(t *testing.T, clock time.Time) *HubServer {
 	t.Helper()
-	request := durableSpawnRequest()
-	request.RequestID = t14RequestID(71030 + seq)
-	request.Args = replaceSpawnArg(replaceSpawnArg(request.Args, "--job", job), "--task", fmt.Sprint(seq))
-	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, job, "parent", created)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bound.IsZero() {
-		return
-	}
-	if _, err := h.inbox.store.bindSpawn(t.Context(), task.Request.RequestID, task.Attempt, hubSpawnRequest{RequestID: request.RequestID, Machine: "node-a"}, bound); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestPaneCloseMarksByJobStartNotCompletionArrival_t7103(t *testing.T) {
-	start := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
-	clock := start.Add(-time.Hour)
 	hub, err := NewHubServer(HubServerConfig{
 		InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"),
 		Tokens:         map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
@@ -45,85 +23,86 @@ func TestPaneCloseMarksByJobStartNotCompletionArrival_t7103(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = hub.Close() })
 	useLegacyOwnerStore(hub)
-	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 2)}
-	hub.connect("node-a", "t7103", "fixture", agent, false)
+	hub.connect("node-a", "t7103", "fixture", &hubAgent{revocations: make(chan hubJobRevokedEvent, 2)}, false)
+	return hub
+}
 
-	// Each job's spawn start decides the mark, not when its completion arrived.
-	t7103Spawn(t, hub, 1, "old-occupant", start.Add(-2*time.Minute), start.Add(-time.Minute))
-	t7103Spawn(t, hub, 2, "bound-after-close", start.Add(-2*time.Minute), start.Add(time.Second))
-	t7103Spawn(t, hub, 3, "new-occupant", start.Add(time.Second), time.Time{})
-	// "no-spawn" has no spawn record: it is marked as the base code did.
-	jobs := []HubActiveJob{
-		{JobID: "old-occupant", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"},
-		{JobID: "bound-after-close", AgentLabel: "agent-b", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"},
-		{JobID: "new-occupant", AgentLabel: "agent-c", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"},
-		{JobID: "no-spawn", AgentLabel: "agent-d", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"},
-	}
-	hub.observeActiveJobs("node-a", jobs, clock)
-
-	// The old occupant's completion arrives late, after the close began.
-	for _, id := range []string{"old-occupant", "bound-after-close", "new-occupant", "no-spawn"} {
-		arrival := start.Add(5 * time.Second)
-		if !hub.observeJobCompletion("node-a", hubJobEventPayload{JobID: id, Epoch: 1}, arrival) {
-			t.Fatalf("completion of %s was rejected", id)
-		}
-	}
-
+// t7103Close delivers a pane.close outcome closed for pane, naming agent name.
+func t7103Close(hub *HubServer, pane, name string, at time.Time) {
 	closed := hubNodeCommandResult{Result: []byte(`{"outcome":"closed"}`)}
-	hub.releaseClosedPaneLanes("node-a", nodePaneCloseArgs{PaneID: "reused-pane"}, closed, start)
+	hub.releaseClosedPaneLanes("node-a", nodePaneCloseArgs{PaneID: pane, Name: name}, closed, at)
+}
 
-	want := map[string]bool{"old-occupant": true, "bound-after-close": false, "new-occupant": false, "no-spawn": true}
+func t7103PaneGone(t *testing.T, hub *HubServer, job string) bool {
+	t.Helper()
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
-	for id, marked := range want {
-		if got := hub.jobs[id].PaneGone; got != marked {
-			t.Errorf("%s: PaneGone=%t, want %t", id, got, marked)
-		}
+	return hub.jobs[job].PaneGone
+}
+
+// The closed occupant is marked however late its completion arrived: the close
+// lands while the job is still running, and it completes afterwards.
+func TestPaneCloseMarksClosedOccupantWhoseCompletionArrivesLate_t7103(t *testing.T) {
+	start := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	hub := t7103Hub(t, start.Add(-time.Minute))
+	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: "occupant", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"}}, start.Add(-time.Minute))
+	t7103Close(hub, "reused-pane", "agent-a", start)
+	if !hub.observeJobCompletion("node-a", hubJobEventPayload{JobID: "occupant", Epoch: 1}, start.Add(5*time.Second)) {
+		t.Fatal("late completion was rejected")
+	}
+	if !t7103PaneGone(t, hub, "occupant") {
+		t.Fatal("the closed occupant was not marked pane gone")
 	}
 }
 
-// A job whose original spawn row was placed on the pane before the close, and
-// whose resubmit row was created after the close began, is still marked gone:
-// the original placement is the occupant the close ended. The newest row alone
-// would hide it.
-func TestPaneCloseMarksJobWhoseResubmitFollowsCommandStart_t7103(t *testing.T) {
+// Another agent's job on the reused pane id is not marked by a close that names
+// a different agent.
+func TestPaneCloseSparesAnotherAgentsJobOnTheReusedPane_t7103(t *testing.T) {
 	start := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
-	clock := start.Add(-time.Hour)
-	hub, err := NewHubServer(HubServerConfig{
-		InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"),
-		Tokens:         map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
-		Now:            func() time.Time { return clock }, GracePeriod: time.Hour, OrphanGrace: time.Hour, KeepaliveInterval: time.Hour,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = hub.Close() })
-	useLegacyOwnerStore(hub)
-	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 2)}
-	hub.connect("node-a", "t7103", "fixture", agent, false)
-
-	const job = "resubmitted"
-	t7103Spawn(t, hub, 10, job, start.Add(-2*time.Minute), start.Add(-time.Minute))
-	// What a cleaned-up attempt leaves (as hub_spawn_retired_by_request_t6284_test.go does):
-	// retryable, unqueued and without a reservation.
-	requestID := t14RequestID(71040)
-	for _, query := range []string{`UPDATE spawn_operations SET status='retryable' WHERE request_id=?`, `DELETE FROM spawn_reservations WHERE request_id=?`, `DELETE FROM spawn_queue WHERE request_id=?`} {
-		if _, err := hub.inbox.store.db.ExecContext(t.Context(), hub.inbox.store.q(query), requestID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t7103Spawn(t, hub, 11, job, start.Add(time.Second), time.Time{})
-
-	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: job, AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"}}, clock)
-	if !hub.observeJobCompletion("node-a", hubJobEventPayload{JobID: job, Epoch: 1}, start.Add(5*time.Second)) {
+	hub := t7103Hub(t, start.Add(-time.Minute))
+	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: "other", AgentLabel: "agent-b", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"}}, start.Add(-time.Minute))
+	if !hub.observeJobCompletion("node-a", hubJobEventPayload{JobID: "other", Epoch: 1}, start.Add(time.Second)) {
 		t.Fatal("completion was rejected")
 	}
-	closed := hubNodeCommandResult{Result: []byte(`{"outcome":"closed"}`)}
-	hub.releaseClosedPaneLanes("node-a", nodePaneCloseArgs{PaneID: "reused-pane"}, closed, start)
+	t7103Close(hub, "reused-pane", "agent-a", start)
+	if t7103PaneGone(t, hub, "other") {
+		t.Fatal("a close naming agent-a marked agent-b's job on the same pane")
+	}
+}
 
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	if !hub.jobs[job].PaneGone {
-		t.Fatal("a job placed before the close, with a resubmit row after it, was not marked pane gone")
+// A resubmitted job for the same agent is marked by the close that names that agent.
+func TestPaneCloseMarksResubmittedJobOfTheNamedAgent_t7103(t *testing.T) {
+	start := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	hub := t7103Hub(t, start.Add(-time.Minute))
+	hub.observeActiveJobs("node-a", []HubActiveJob{
+		{JobID: "first", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"},
+		{JobID: "resubmit", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"},
+	}, start.Add(-time.Minute))
+	t7103Close(hub, "reused-pane", "agent-a", start)
+	for _, job := range []string{"first", "resubmit"} {
+		if !t7103PaneGone(t, hub, job) {
+			t.Fatalf("%s, a job of the named agent, was not marked pane gone", job)
+		}
+	}
+}
+
+// A close with no name keeps the base behaviour: completed jobs on the pane are
+// marked, live ones are not.
+func TestPaneCloseWithoutNameMarksCompletedJobsAsBefore_t7103(t *testing.T) {
+	start := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	hub := t7103Hub(t, start.Add(-time.Minute))
+	hub.observeActiveJobs("node-a", []HubActiveJob{
+		{JobID: "done", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"},
+		{JobID: "live", AgentLabel: "agent-b", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"},
+	}, start.Add(-time.Minute))
+	if !hub.observeJobCompletion("node-a", hubJobEventPayload{JobID: "done", Epoch: 1}, start.Add(-time.Second)) {
+		t.Fatal("completion was rejected")
+	}
+	t7103Close(hub, "reused-pane", "", start)
+	if !t7103PaneGone(t, hub, "done") {
+		t.Fatal("a completed job on the pane was not marked by an unnamed close")
+	}
+	if t7103PaneGone(t, hub, "live") {
+		t.Fatal("a live job was marked by an unnamed close")
 	}
 }
