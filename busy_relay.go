@@ -322,11 +322,16 @@ func (client *HubClient) hubAcceptsRelayUncertainBatch(ctx context.Context) bool
 	if peer == nil {
 		return false
 	}
+	timer := time.NewTimer(hubFeaturesWait)
+	defer timer.Stop()
+	// A connection that already closed hands the decision over whatever its
+	// features say: its emitter is dead, whether or not its hub.features came.
+	if peer.isClosed() {
+		return client.awaitReplacementFeatures(ctx, peer, timer.C)
+	}
 	if peer.featuresKnown.Load() || peer.featuresReady == nil {
 		return peer.acceptsRelayUncertainBatch.Load()
 	}
-	timer := time.NewTimer(hubFeaturesWait)
-	defer timer.Stop()
 	select {
 	case <-peer.featuresReady:
 		return peer.acceptsRelayUncertainBatch.Load()
@@ -337,6 +342,16 @@ func (client *HubClient) hubAcceptsRelayUncertainBatch(ctx context.Context) bool
 	case <-peer.closed:
 	}
 	return client.awaitReplacementFeatures(ctx, peer, timer.C)
+}
+
+// isClosed reports whether the connection's session has ended.
+func (peer *hubClientConnection) isClosed() bool {
+	select {
+	case <-peer.closed:
+		return true
+	default:
+		return false
+	}
 }
 
 // awaitReplacementFeatures waits, until expired, for a connection other than
@@ -350,11 +365,14 @@ func (client *HubClient) awaitReplacementFeatures(ctx context.Context, dead *hub
 		if next := client.signalsPeer.Load(); next != nil && next != dead && next.featuresReady != nil {
 			select {
 			case <-next.featuresReady:
+				return next.acceptsRelayUncertainBatch.Load()
+			case <-next.closed:
+				// The replacement died before its features came: look again below.
 			case <-expired:
+				return next.acceptsRelayUncertainBatch.Load()
 			case <-ctx.Done():
 				return false
 			}
-			return next.acceptsRelayUncertainBatch.Load()
 		}
 		select {
 		case <-ticker.C:

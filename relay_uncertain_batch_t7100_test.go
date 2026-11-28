@@ -156,3 +156,56 @@ func TestT7100UncertainBatchDecoderRejectsLaneWithoutLanes(t *testing.T) {
 		t.Fatalf("decoder accepted a named lane with no lanes: %s", raw)
 	}
 }
+
+// A connection whose hub.features already arrived, and which then closed, hands
+// the decision to its replacement: the dead connection's accepts bit no longer
+// decides for a batch, because its emitter is gone.
+func TestT7100KnownFeaturesClosedConnectionDecidesOnReplacement(t *testing.T) {
+	dead := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+	dead.featuresKnown.Store(true)
+	dead.acceptsRelayUncertainBatch.Store(true)
+	close(dead.closed)
+	client := &HubClient{}
+	client.signalsPeer.Store(dead)
+	// Simulated redial latency: the replacement arrives without the feature.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		live := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+		client.signalsPeer.Store(live)
+		live.markFeaturesReady()
+	}()
+
+	if client.hubAcceptsRelayUncertainBatch(context.Background()) {
+		t.Fatal("the dead connection accepted, but the replacement's features decide")
+	}
+}
+
+// A replacement that dies before its hub.features arrives hands the decision on
+// to the newer connection, instead of waiting out the dead one's feature frame.
+func TestT7100DeadReplacementHandsDecisionToNewerConnection(t *testing.T) {
+	dead := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+	close(dead.closed)
+	client := &HubClient{}
+	client.signalsPeer.Store(dead)
+	// Simulated redial latency: an intermediate connection dies at once, and
+	// a newer one takes over before the wait is over.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		intermediate := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+		close(intermediate.closed)
+		client.signalsPeer.Store(intermediate)
+		time.Sleep(50 * time.Millisecond)
+		live := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+		live.acceptsRelayUncertainBatch.Store(true)
+		client.signalsPeer.Store(live)
+		live.markFeaturesReady()
+	}()
+
+	start := time.Now()
+	if !client.hubAcceptsRelayUncertainBatch(context.Background()) {
+		t.Fatal("the newer connection accepts the summary, but the decision did not use it")
+	}
+	if elapsed := time.Since(start); elapsed >= hubFeaturesWait/2 {
+		t.Fatalf("decision took %s, want it to follow the newer connection at once", elapsed)
+	}
+}
