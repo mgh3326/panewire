@@ -219,6 +219,18 @@ relations:
       - event_key
     parentCardinality: zero or one
     def: "an obligation and its lane_inbox item share the event_key; obligationInboxSettled (delivery_obligation_store.go) looks the item up by it to decide the obligation is settled, and lane_inbox.event_key is unique so at most one item answers"
+  - table: delivery_notice_slots
+    columns:
+      - design_lane
+      - machine
+      - fault
+    parentTable: delivery_incidents
+    parentColumns:
+      - design_lane
+      - machine
+      - fault
+    parentCardinality: zero or one
+    def: "a slot and an incident share the incident key (design_lane, machine, fault); coldNoticeSlots (hub_store_retention.go) joins them in a NOT EXISTS on state='open' so retention keeps a slot whose key an open incident still holds — open_slot is unique, so at most one open incident answers"
 
 # Each table's comment: why it exists, its role, the store functions that read and
 # write it (file.go:function, the unit the code is checked against at edde0a89),
@@ -231,14 +243,14 @@ comments:
       Role: source of record.
       Read: lane_inbox_store.go:list, counts, firstUnread, unclaimedUnread, ackStates; hub_inbox_summary.go:unsurfacedInbox; inbox_retention.go:settled, holds.
       Write: lane_inbox_store.go:putFrom (INSERT through hub_sql_dialect.go:laneInboxInsert), read, ack, recoverMustAct, makeBatchesDue; inbox_supersede.go:supersede; inbox_retention.go:recordDelivery, recordStage; hub_inbox_hold.go:makeHeldBatches.
-      Retention: inbox_retention.go:prune, run hourly by pruneInbox. Deletes a terminal item (acked, superseded, or delivered/read) older than the relay replay age (relay.go:1205) and either older than retention.days (delivery-policy.yaml sets 14; the code default is 30) or outside its lane's newest per_lane rows. Never unread, held or awaiting a digest, or in an unsent batch.
+      Retention: inbox_retention.go:prune, run hourly by pruneInbox. Deletes a terminal item (acked, superseded, or delivered/read) older than the relay replay age (relay.go:1205) and either older than retention.days (delivery-policy.yaml sets 14; the code default is 30) or outside its lane's newest per_lane rows. Never unread, held or awaiting a digest, or named by a pending or quarantined batch (sent 0 or 2).
   - table: lane_inbox_batches
     tableComment: |
-      Why: a digest batch: the text the hub sends a lane as one message. Items name their batch by digest_batch or escalation_batch.
+      Why: a digest batch: the text the hub sends a lane as one message. Items name their batch by digest_batch or escalation_batch. sent is 0 while pending, 1 once sent, 2 once quarantined (terminal, hk 7117).
       Role: queue/outbox.
-      Read: lane_inbox_store.go:invalidBatches, earliestDue; hub_inbox_hold.go:isHeldBatch, inboxRelayDirective; inbox_batch_release.go:isDigestBatch; inbox_only_delivery.go:hasBatch.
-      Write: hub_inbox_hold.go:makeHeldBatches (INSERT), prepareHeldBatch (text); lane_inbox_store.go:makeBatchesDue (INSERT), markBatchSent (sent=1).
-      Retention: hub_store_retention.go:pruneSentBatches, run by pruneHubStore each hour. Deletes a sent batch that no lane_inbox item names (digest_batch or escalation_batch), up to hubStoreRetentionBatch (1000) per pass.
+      Read: lane_inbox_store.go:invalidBatches, pendingBatchesForContext (the pending page: sent=0 and not quarantined), earliestDue; hub_inbox_hold.go:isHeldBatch, inboxRelayDirective; inbox_batch_release.go:isDigestBatch; inbox_only_delivery.go:hasBatch.
+      Write: hub_inbox_hold.go:makeHeldBatches (INSERT), prepareHeldBatch (text); lane_inbox_store.go:makeBatchesDue (INSERT), markBatchSent (sent=1), quarantineBatch (sent=2 in the same transaction as the quarantine row).
+      Retention: hub_store_retention.go:pruneSentBatches, run by pruneHubStore each hour. Deletes a sent=1 batch that no lane_inbox item names (digest_batch or escalation_batch), up to hubStoreRetentionBatch (1000) per pass, with its quarantine rows. A quarantined batch is sent=2, never a candidate, so it and its quarantine row stay.
   - table: lane_inbox_batch_quarantine
     tableComment: |
       Why: a batch the hub refused to deliver, and the reason. The digest pass skips a quarantined batch.
@@ -265,7 +277,7 @@ comments:
       Why: binds a worker lane to the job its route named when a lane.event arrived, so a row retired after its route is gone still names its job (hk 6924). One row per change of the lane's job, keyed by the receipt time (hk 6994).
       Role: lookup.
       Read: relay_stale_notice_store.go:staleReplayJobAt, bindStaleReplayLane (the binding in force at the receipt); relay_stale_notice.go:staleReplayJobOf.
-      Write: relay_stale_notice_store.go:bindStaleReplayLane (INSERT IGNORE), from relay.go:relayLaneEventContext through noteStaleReplayLane once the row is persisted; migrateStaleReplayBindingKey rebuilds the table for the (worker_lane, first_ms) key.
+      Write: relay_stale_notice_store.go:bindStaleReplayLane (INSERT IGNORE), from relay.go:relayLaneEventContext through noteStaleReplayLane once the row is persisted; migrateStaleReplayBindingKey rebuilds the table for the (worker_lane, first_ms) key on SQLite open only — Postgres and MySQL take the same key change in hub_postgres_migrations/0045 and hub_mysql_migrations/0042.
       Retention: none: one row per change of a lane's job.
       Relations: none by design. relay_id is the handoffkeep relay row id.
   - table: drain_wake_lanes
@@ -278,10 +290,10 @@ comments:
       Relations: none by design. Keyed by lane name only; nothing joins to it.
   - table: spawn_operations
     tableComment: |
-      Why: the durable record of one spawn request: job, owner, payload, status, node binding, attempts, parks and terminal result. The other spawn tables name it by request_id, job or node_id.
+      Why: the durable record of one spawn request: job, owner, payload, status, node binding, attempts, parks, the node's queue counts an attempt's first scheduling pass recorded (hk 7125), and terminal result. The other spawn tables name it by request_id, job or node_id.
       Role: source of record.
       Read: hub_spawn_task_store.go:spawnTask, queryPendingSpawns, pendingSpawnPage, retryableSpawns, latestSpawnForJob, spawnStartReceipt, spawnRoleOwner; hub_spawn_live.go:liveSpawns; hub_spawn_park.go:spawnRollbackBlockingRows; hub_spawn_drain.go:boundExclusiveSpawns, writeSpawnBoundBatch; hub_spawn_dispatch_queue.go:countSpawnQueueAhead (bound_machine rows), spawnDispatchQueue (open_dispatches, queued_spawns); hub_spawn_trace.go:recordSpawnTrace reads that record for the landed trace.
-      Write: hub_spawn_task_store.go:claimSpawnReplacing (INSERT, and replaced_from), markSpawnStarted, bindSpawnPlaced, unbindSpawn, touchSpawn, writeSpawnOutcome (terminal); hub_spawn_park.go:parkSpawn; hub_spawn_expiry.go:endUnstartedAttempt, releaseEndedSpawn; hub_spawn_start_conditions.go:recordWaitingSpawnResult, giveUpWaitingSpawn; hub_spawn_task_fail.go:markSpawnTaskFailNotice; hub_spawn_drain.go:writeSpawnBoundBatch (bound_machine, exclusive: backfilled once, repaired at every start while in flight); hub_spawn_dispatch_queue.go:recordSpawnDispatchQueue (open_dispatches, queued_spawns: written once per attempt, at its first scheduling pass).
+      Write: hub_spawn_task_store.go:claimSpawnReplacing (INSERT, and replaced_from), markSpawnStarted, bindSpawnPlaced, unbindSpawn, touchSpawn, writeSpawnOutcome (terminal); hub_spawn_park.go:parkSpawn; hub_spawn_expiry.go:endUnstartedAttempt, releaseEndedSpawn; hub_spawn_start_conditions.go:recordWaitingSpawnResult, giveUpWaitingSpawn; hub_spawn_task_fail.go:markSpawnTaskFailNotice; hub_spawn_drain.go:writeSpawnBoundBatch (bound_machine, exclusive: backfilled once, repaired at every start while in flight); hub_spawn_dispatch_queue.go:recordSpawnDispatchQueue (open_dispatches, queued_spawns: the node's queue at the attempt's first scheduling pass after a bind; bindSpawnPlaced clears both so a rebind records its own, -1 until a pass records).
       Retention: hub_store_retention.go:pruneHubStore (spawnOperationsRetirable). Deletes a terminal operation older than 30 days (spawnOperationRetention) that no live row still needs: no undelivered or unrecorded notice, no unrecorded placement snapshot, no unfinished supersede landing, no queued, running or unnotified consult, no pending, guarded or settled pool action for its job, no reservation, and, for failed or refused operations, a posted task-failure comment.
   - table: spawn_queue
     tableComment: |
@@ -427,7 +439,7 @@ comments:
     tableComment: |
       Why: one row per relay delivery the hub still owes a lane: its state, fault, retry schedule and the incident it is grouped into, so a restart resumes the retries and notices it owes (hk 4289, hk 6384).
       Role: queue/outbox.
-      Read: delivery_obligation_store.go:createObligation, trackedObligationKeys, dueObligations, obligationInboxSettled; delivery_obligation_retry.go:retryOwnerOf, retryObligationForKey; delivery_obligation_revive.go:requestObligationRevive; delivery_obligation_faults.go:trackedRow; delivery_obligation_surface.go:obligationSurfaces, obligationMarkerLink, markedTerminalObligations, deliveryCounts; delivery_incident_store.go:noticeJoins, incidentMembers, noticeMembers.
+      Read: delivery_obligation_store.go:createObligation, trackedObligationKeys, dueObligations, obligationInboxSettled; delivery_obligation_retry.go:retryOwnerOf, retryObligationForKey; delivery_obligation_revive.go:requestObligationRevive; delivery_obligation_faults.go:trackedRow; delivery_obligation_surface.go:obligationSurfaces, obligationMarkerLink, markedTerminalObligations, deliveryCounts; delivery_incident_store.go:noticeJoins, incidentMembers, noticeMembers, closeIncident (the quiet/all-terminal close guard counts the incident's rows with notice_due_at>0).
       Write: delivery_obligation_store.go:insertObligation, adoptObligations (INSERT IGNORE), closeObligation, exhaustObligation, deferObligation, updateObservedObligation; delivery_obligation_retry.go:flagObligationRetry, spendObligationRetry, deferUnqueuedLabel, releaseUnqueuedJobRetry; delivery_obligation_revive.go:requestObligationRevive, spendObligationRevive, releaseObligationRevive; delivery_obligation_faults.go:noteObligationDrop, markOrphanedDropDue; delivery_obligation_surface.go:clearObligationMarker; delivery_incident_store.go:markNoticeDue, endUnprovenNotice, forgetNotice, deferNoticeJoin, joinIncident, recordNotice, closeIncident, readIncidentMemberNext; delivery_obligation_upgrade.go:markEarlierObligationCopies.
       Retention: hub_store_retention.go:pruneHubStore deletes a closed obligation (state confirmed or settled) whose updated_at is older than deliveryObligationRetention (30 days, hub_store_retention.go:29) and that no open incident still names, up to hubStoreRetentionBatch (1000) a pass; obligations go first so an incident whose members all aged out follows in the same pass. An open obligation is never deleted.
       Relations: incident_id and event_key are declared in relations. relay_id is the handoffkeep relay row id, so it has no relation line.
@@ -446,7 +458,7 @@ comments:
       Read: delivery_incident_store.go:noticeSlot.
       Write: delivery_incident_store.go:recordNotice (INSERT IGNORE, then UPDATE notice_at and notices).
       Retention: hub_store_retention.go:pruneHubStore deletes a slot whose notice_at is older than deliveryObligationRetention (30 days) and whose key no open incident still holds.
-      Relations: none by design. Keyed by (design_lane, machine, fault) and read by that key only.
+      Relations: (design_lane, machine, fault) is declared against delivery_incidents in relations for the coldNoticeSlots retention join; noticeSlot reads and recordNotice writes the row by that key only.
   - table: delivery_reconciler_state
     tableComment: |
       Why: where the adopt walk over delivery obligations resumes (its last id and wrap time), kept in one row so a restart does not rescan from the start (hk 4289 T1).
