@@ -71,13 +71,15 @@ func addStaleReplayJobVia(ctx context.Context, db *sql.DB) error {
 // binding per change of the lane's job, keyed by the receipt time (hk 6994). A
 // receipt whose job is the job already in force binds nothing, so a lane that
 // keeps one job adds no rows; a lane that returns to an earlier job gets a new
-// binding for that later stint.
+// binding for that later stint. The job compared against is the one in force at
+// firstMS, not the lane's newest binding: receipts can arrive out of order across
+// a job change (hk 7101).
 func (s *laneInboxStore) bindStaleReplayLane(parent context.Context, lane, job string, firstMS int64) error {
 	ctx, done := s.op(parent)
 	defer done()
 	lane, job = utf8PrefixWithin(lane, staleReplayWidthLane), utf8PrefixWithin(job, staleReplayWidthJob)
 	var current string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT job FROM relay_stale_notice_lanes WHERE worker_lane=? ORDER BY first_ms DESC LIMIT 1`), lane).Scan(&current)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT job FROM relay_stale_notice_lanes WHERE worker_lane=? AND first_ms<=? ORDER BY first_ms DESC LIMIT 1`), lane, firstMS).Scan(&current)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
