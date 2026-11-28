@@ -1,5 +1,7 @@
 package panewire
 
+import "time"
+
 // A completed job keeps its lane route only while the job's own agent holds the
 // route's pane (hk 6900). Completion alone does not keep it: a worker's pane stays
 // up until its PR merges, and reviews and orders still reach it. The contract is
@@ -54,17 +56,21 @@ func (h *HubServer) markJobPaneGone(node, job string) {
 }
 
 // markPaneJobsGone records that node closed pane, or found it gone, on a pane.close
-// the hub issued. Only completed jobs are marked. A pane id can be reused by a
-// live job that is recorded later on the same node, and its record must not
-// inherit a close that was not its own.
-func (h *HubServer) markPaneJobsGone(node, pane string) {
+// the hub issued at commandStart. Only jobs that completed before commandStart are
+// marked. A pane id can be reused by a job that completes after the close began,
+// and that job must not inherit a close that was not its own. A job with no
+// recorded completion time (CompletedAt zero) is marked as before.
+func (h *HubServer) markPaneJobsGone(node, pane string, commandStart time.Time) {
 	if pane == "" {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, rec := range h.jobs {
-		if rec.Completed && rec.Node == node && rec.Pane == pane {
+		if !rec.Completed || rec.Node != node || rec.Pane != pane {
+			continue
+		}
+		if rec.CompletedAt.IsZero() || rec.CompletedAt.Before(commandStart) {
 			rec.PaneGone = true
 		}
 	}

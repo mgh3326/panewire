@@ -376,6 +376,9 @@ func (h *HubServer) observeActiveJobsContext(parent context.Context, machineID s
 			continue
 		}
 		if current.Node == machineID && current.Orphaned && !current.Reassigning {
+			if !current.Completed {
+				current.CompletedAt = received
+			}
 			current.Orphaned, current.Completed = false, true
 			h.queueJobEventLocked("job.recovered", hubJobEventPayload{JobID: id, Node: machineID, Epoch: current.Epoch, LastSeen: received})
 		}
@@ -490,6 +493,9 @@ func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEven
 		return false // epoch fencing: stale completion is deliberately invisible.
 	}
 	wasOrphaned := job.Orphaned
+	if !job.Completed {
+		job.CompletedAt = received
+	}
 	job.Completed, job.Orphaned, job.LastSeen = true, false, received
 	if wasOrphaned {
 		h.queueJobEventLocked("job.recovered", hubJobEventPayload{JobID: job.JobID, Node: machineID, Epoch: job.Epoch, LastSeen: received})
@@ -514,6 +520,9 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 		return false
 	}
 	alreadyClosed := job.Completed
+	if !alreadyClosed {
+		job.CompletedAt = received
+	}
 	job.Completed, job.Orphaned, job.LastSeen = true, false, received
 	job.PaneGone = true // a close is the recorded end of the job (relay_route_pane.go)
 	if !alreadyClosed {
@@ -545,6 +554,9 @@ func (h *HubServer) observeJobLost(machineID string, event hubJobEventPayload, r
 		return false
 	}
 	alreadyClosed := job.Completed
+	if !alreadyClosed {
+		job.CompletedAt = received
+	}
 	job.Completed, job.LostSettled, job.Orphaned, job.LastSeen = true, true, false, received
 	job.PaneGone = true // a lost job has no pane left (hubJobEndKind)
 	if !alreadyClosed {
@@ -633,6 +645,7 @@ func (h *HubServer) lateRegisterJobEnd(machineID string, completion hubJobEventP
 		Node:         machineID,
 		LastSeen:     received,
 		Completed:    true,
+		CompletedAt:  received,
 		LostSettled:  lost,
 		FencedNodes:  make(map[string]uint64),
 	}
