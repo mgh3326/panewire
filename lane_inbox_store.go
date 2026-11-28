@@ -185,6 +185,9 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		`INSERT OR IGNORE INTO lane_inbox_id_floor(singleton,floor) VALUES(1,0)`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batches (id TEXT PRIMARY KEY, lane TEXT NOT NULL, text TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batch_quarantine (batch_id TEXT PRIMARY KEY, reason TEXT NOT NULL)`,
+		// Stores that quarantined a batch before sent=2 existed: make it terminal
+		// (hk 7117). Idempotent; the Postgres and MySQL twin is migration 0047/0044.
+		`UPDATE lane_inbox_batches SET sent=2 WHERE sent=0 AND id IN (SELECT batch_id FROM lane_inbox_batch_quarantine)`,
 		`CREATE TABLE IF NOT EXISTS drain_wake_lanes (lane TEXT PRIMARY KEY, pending INTEGER NOT NULL DEFAULT 0, last_sent INTEGER NOT NULL DEFAULT 0)`,
 		poolActionSchema,
 		`CREATE INDEX IF NOT EXISTS pool_actions_job ON pool_actions(job, phase)`,
@@ -538,14 +541,28 @@ func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
+// quarantineBatch refuses a batch for good. The batch turns terminal (sent=2)
+// in the same transaction as its quarantine row, so the pending page's sent=0
+// predicate never reaches it (hk 7117). A batch already sent keeps sent=1.
 func (s *laneInboxStore) quarantineBatch(id, reason string) error {
 	ctx, done := s.op(s.life)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO lane_inbox_batch_quarantine(batch_id,reason) VALUES(?,?)`, "batch_id")), id, reason)
-	if err == nil {
-		s.noteBatchesChanged()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return err
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO lane_inbox_batch_quarantine(batch_id,reason) VALUES(?,?)`, "batch_id")), id, reason); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, s.q(`UPDATE lane_inbox_batches SET sent=2 WHERE id=? AND sent=0`), id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.noteBatchesChanged()
+	return nil
 }
 
 func (s *laneInboxStore) quarantineInvalidBatches() error {
@@ -605,7 +622,7 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy, now time.Time) e
 	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
 	// Any positive timestamp in the past makes it immediately eligible.
-	return s.updateIDs(ctx, s.db, `UPDATE lane_inbox SET due_at=1,escalation_batch=CASE WHEN escalation_batch IN (SELECT q.batch_id FROM lane_inbox_batch_quarantine q JOIN lane_inbox_batches b ON b.id=q.batch_id WHERE b.sent=0 AND q.reason<>'external scheduler owns lane digest') THEN '' ELSE escalation_batch END`, nil, ids)
+	return s.updateIDs(ctx, s.db, `UPDATE lane_inbox SET due_at=1,escalation_batch=CASE WHEN escalation_batch IN (SELECT q.batch_id FROM lane_inbox_batch_quarantine q JOIN lane_inbox_batches b ON b.id=q.batch_id WHERE b.sent IN (0,2) AND q.reason<>'external scheduler owns lane digest') THEN '' ELSE escalation_batch END`, nil, ids)
 }
 
 type laneInboxExecer interface {
@@ -649,7 +666,7 @@ func (s *laneInboxStore) updateIDs(ctx context.Context, db laneInboxExecer, upda
 func (s *laneInboxStore) unclaimedUnread() ([]laneInboxItem, error) {
 	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND (escalation_batch='' OR escalation_batch IN (SELECT q.batch_id FROM lane_inbox_batch_quarantine q JOIN lane_inbox_batches b ON b.id=q.batch_id WHERE b.sent=0 AND q.reason<>'external scheduler owns lane digest'))`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND (escalation_batch='' OR escalation_batch IN (SELECT q.batch_id FROM lane_inbox_batch_quarantine q JOIN lane_inbox_batches b ON b.id=q.batch_id WHERE b.sent IN (0,2) AND q.reason<>'external scheduler owns lane digest'))`)
 	if err != nil {
 		return nil, err
 	}

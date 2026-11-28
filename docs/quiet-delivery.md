@@ -772,7 +772,8 @@ failed passes (`InboxFlushFailureCount`). Every batch is validated before sendin
 single-line, valid UTF-8, at most 2048 bytes, and no control characters. Invalid
 batches and permanent per-batch HTTP 4xx rejections are quarantined with a reason
 in `lane_inbox_batch_quarantine`; their originals remain in
-`lane_inbox_batches`. The flush continues with later batches. At startup the
+`lane_inbox_batches`, marked `sent=2` (terminal) in the same transaction, so the
+pending page never reads them again (hk 7117). The flush continues with later batches. At startup the
 entire pending queue is scanned to quarantine legacy multiline batches before
 sending. Authentication failures (401/403), retryable request failures
 (408/425/429), transport errors, and server outages retain bounded backoff.
