@@ -40,6 +40,7 @@ desc: |
     consults -.->|"owner_notice_decisions.event_key"| notices
     supersede -.->|"pool actions and landings name operations"| ops
     accounts -.->|"refresh waits and placement"| ops
+    delivery -.->|"delivery_obligations.event_key"| inbox
   ```
 
   In the domain diagram above and in every ER diagram, a solid line is a real foreign key in the database. A dashed line is a relation declared in .tbls.yml for a column the code joins on; the database has no foreign key for it. Every relation in this schema is declared, so every line is dashed.
@@ -210,6 +211,14 @@ relations:
       - id
     parentCardinality: zero or one
     def: "an obligation joins the incident it is grouped into by incident_id (0 when ungrouped); the incident's member lists, its close and its revive read the obligations by incident_id"
+  - table: delivery_obligations
+    columns:
+      - event_key
+    parentTable: lane_inbox
+    parentColumns:
+      - event_key
+    parentCardinality: zero or one
+    def: "an obligation and its lane_inbox item share the event_key; obligationInboxSettled (delivery_obligation_store.go) looks the item up by it to decide the obligation is settled, and lane_inbox.event_key is unique so at most one item answers"
 
 # Each table's comment: why it exists, its role, the store functions that read and
 # write it (file.go:function, the unit the code is checked against at edde0a89),
@@ -255,8 +264,8 @@ comments:
     tableComment: |
       Why: binds a worker lane to the job its route named when a lane.event arrived, so a row retired after its route is gone still names its job (hk 6924). One row per change of the lane's job, keyed by the receipt time (hk 6994).
       Role: lookup.
-      Read: relay_stale_notice_store.go:staleReplayJobAt; relay_stale_notice.go:staleReplayJobOf.
-      Write: relay_stale_notice_store.go:bindStaleReplayLane (INSERT IGNORE), from relay.go:relayLaneEventContext through noteStaleReplayLane once the row is persisted.
+      Read: relay_stale_notice_store.go:staleReplayJobAt, bindStaleReplayLane (the binding in force at the receipt); relay_stale_notice.go:staleReplayJobOf.
+      Write: relay_stale_notice_store.go:bindStaleReplayLane (INSERT IGNORE), from relay.go:relayLaneEventContext through noteStaleReplayLane once the row is persisted; migrateStaleReplayBindingKey rebuilds the table for the (worker_lane, first_ms) key.
       Retention: none: one row per change of a lane's job.
       Relations: none by design. relay_id is the handoffkeep relay row id.
   - table: drain_wake_lanes
@@ -418,17 +427,17 @@ comments:
     tableComment: |
       Why: one row per relay delivery the hub still owes a lane: its state, fault, retry schedule and the incident it is grouped into, so a restart resumes the retries and notices it owes (hk 4289, hk 6384).
       Role: queue/outbox.
-      Read: delivery_obligation_store.go:dueObligations, trackedObligationKeys, adoptCursor; delivery_incident_store.go:noticeJoins, incidentMembers, noticeMembers; delivery_obligation_faults.go:trackedRow.
-      Write: delivery_obligation_store.go:insertObligation, adoptObligations (INSERT IGNORE), closeObligation, exhaustObligation, deferObligation, updateObservedObligation; delivery_obligation_faults.go:noteObligationDrop, markOrphanedDropDue; delivery_obligation_revive.go (state owed, incident_id cleared); delivery_incident_store.go:joinIncident, markNoticeDue, endUnprovenNotice, forgetNotice, closeIncident.
-      Retention: none. No statement deletes a row; a row reaches a final state (confirmed or settled) and stays.
-      Relations: incident_id is declared in relations. relay_id is the handoffkeep relay row id, so it has no relation line.
+      Read: delivery_obligation_store.go:createObligation, trackedObligationKeys, dueObligations, obligationInboxSettled; delivery_obligation_retry.go:retryOwnerOf, retryObligationForKey; delivery_obligation_revive.go:requestObligationRevive; delivery_obligation_faults.go:trackedRow; delivery_obligation_surface.go:obligationSurfaces, obligationMarkerLink, markedTerminalObligations, deliveryCounts; delivery_incident_store.go:noticeJoins, incidentMembers, noticeMembers.
+      Write: delivery_obligation_store.go:insertObligation, adoptObligations (INSERT IGNORE), closeObligation, exhaustObligation, deferObligation, updateObservedObligation; delivery_obligation_retry.go:flagObligationRetry, spendObligationRetry, deferUnqueuedLabel, releaseUnqueuedJobRetry; delivery_obligation_revive.go:requestObligationRevive, spendObligationRevive, releaseObligationRevive; delivery_obligation_faults.go:noteObligationDrop, markOrphanedDropDue; delivery_obligation_surface.go:clearObligationMarker; delivery_incident_store.go:markNoticeDue, endUnprovenNotice, forgetNotice, deferNoticeJoin, joinIncident, recordNotice, closeIncident, readIncidentMemberNext; delivery_obligation_upgrade.go:markEarlierObligationCopies.
+      Retention: hub_store_retention.go:pruneHubStore deletes a closed obligation (state confirmed or settled) whose updated_at is older than deliveryObligationRetention (30 days, hub_store_retention.go:29) and that no open incident still names, up to hubStoreRetentionBatch (1000) a pass; obligations go first so an incident whose members all aged out follows in the same pass. An open obligation is never deleted.
+      Relations: incident_id and event_key are declared in relations. relay_id is the handoffkeep relay row id, so it has no relation line.
   - table: delivery_incidents
     tableComment: |
       Why: one incident per fault on one machine for one design lane, grouping the obligations that share it so a single notice covers them (hk 4289, hk 6821). open_slot holds the key while the incident is open.
       Role: source of record.
-      Read: delivery_incident_store.go:openIncidents, joinIncident (open_slot lookup), incidentMembers through delivery_obligations.incident_id.
+      Read: delivery_incident_store.go:openIncidents, joinIncident (open_slot lookup); delivery_obligation_surface.go:deliveryCounts. Its members are read through delivery_obligations.incident_id (see relations).
       Write: delivery_incident_store.go:joinIncident (INSERT, then UPDATE counts), recordNotice and markNoticePosted (notice fields), closeIncident (state closed, open_slot NULL).
-      Retention: none. A closed incident keeps its row with close_reason set; no statement deletes it.
+      Retention: hub_store_retention.go:pruneHubStore deletes a closed incident whose closed_at is older than deliveryObligationRetention (30 days) and that no obligation row still names, in the same pass after the obligations. An open incident is never deleted.
       Relations: see delivery_obligations.incident_id.
   - table: delivery_notice_slots
     tableComment: |
@@ -436,7 +445,7 @@ comments:
       Role: bookkeeping.
       Read: delivery_incident_store.go:noticeSlot.
       Write: delivery_incident_store.go:recordNotice (INSERT IGNORE, then UPDATE notice_at and notices).
-      Retention: none: one row per key, never deleted.
+      Retention: hub_store_retention.go:pruneHubStore deletes a slot whose notice_at is older than deliveryObligationRetention (30 days) and whose key no open incident still holds.
       Relations: none by design. Keyed by (design_lane, machine, fault) and read by that key only.
   - table: delivery_reconciler_state
     tableComment: |
