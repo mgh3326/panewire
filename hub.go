@@ -325,10 +325,6 @@ type hubJobRecord struct {
 	LastSeen  time.Time
 	Orphaned  bool
 	Completed bool
-	// CompletedAt is the hub time the job first became Completed. LastSeen is
-	// not a completion time: a later revocation or loss rewrites it. Zero means
-	// the hub did not stamp the end (relay_route_pane.go).
-	CompletedAt time.Time
 	// LostSettled is set with Completed when the node's final job.lost ended
 	// the job (its hk record is lost). Role admission reads it (hk 5351).
 	LostSettled bool

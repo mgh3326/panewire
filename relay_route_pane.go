@@ -1,6 +1,9 @@
 package panewire
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // A completed job keeps its lane route only while the job's own agent holds the
 // route's pane (hk 6900). Completion alone does not keep it: a worker's pane stays
@@ -56,22 +59,57 @@ func (h *HubServer) markJobPaneGone(node, job string) {
 }
 
 // markPaneJobsGone records that node closed pane, or found it gone, on a pane.close
-// the hub issued at commandStart. Only jobs that completed before commandStart are
-// marked. A pane id can be reused by a job that completes after the close began,
-// and that job must not inherit a close that was not its own. A job with no
-// recorded completion time (CompletedAt zero) is marked as before.
+// the hub issued at commandStart. A pane id can be reused: a job placed on it
+// after the close began must not inherit a close that was not its own. So a
+// completed job is marked only when its spawn started before commandStart, whenever
+// its completion arrived. The start is the spawn's bind time (the pane is made
+// then), or its created time when it was never bound. A job with no spawn record
+// is marked as before.
 func (h *HubServer) markPaneJobsGone(node, pane string, commandStart time.Time) {
 	if pane == "" {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, rec := range h.jobs {
-		if !rec.Completed || rec.Node != node || rec.Pane != pane {
-			continue
+	var candidates []string
+	for id, rec := range h.jobs {
+		if rec.Completed && rec.Node == node && rec.Pane == pane {
+			candidates = append(candidates, id)
 		}
-		if rec.CompletedAt.IsZero() || rec.CompletedAt.Before(commandStart) {
+	}
+	h.mu.Unlock()
+	// The spawn lookups read the store, so they run outside h.mu.
+	var marks []string
+	for _, id := range candidates {
+		if h.jobStartedBefore(id, commandStart) {
+			marks = append(marks, id)
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, id := range marks {
+		if rec := h.jobs[id]; rec != nil && rec.Completed && rec.Node == node && rec.Pane == pane {
 			rec.PaneGone = true
 		}
 	}
+}
+
+// jobStartedBefore reports whether the job's latest spawn started before at, or
+// has no spawn record the hub can read (then the job is treated as before, as the
+// base code did).
+func (h *HubServer) jobStartedBefore(job string, at time.Time) bool {
+	if h.inbox == nil || h.inbox.store == nil {
+		return true
+	}
+	task, err := h.inbox.store.latestSpawnForJob(context.Background(), job)
+	if err != nil {
+		return true
+	}
+	start := task.Placed
+	if start.IsZero() {
+		start = task.Created
+	}
+	if start.IsZero() {
+		return true
+	}
+	return start.Before(at)
 }

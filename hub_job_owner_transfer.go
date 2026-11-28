@@ -174,9 +174,6 @@ func (h *HubServer) recoverOwnerTransfer(ctx context.Context, intent hubOwnerTra
 		}
 		h.mu.Lock()
 		if job := h.jobs[intent.Job]; job != nil {
-			if !job.Completed {
-				job.CompletedAt = h.now()
-			}
 			job.Completed, job.Orphaned = true, false
 		}
 		h.mu.Unlock()
