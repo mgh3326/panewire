@@ -12,11 +12,13 @@ import (
 )
 
 // spawnTraceChain are the steps a node reports that run one after another, in
-// the order the trace names them. The window's queue is what is left of the
-// window once their sum is taken away (see layoutSpawnWindow). The checkout
-// sub-stages (checkoutStageKeys) are parts of the checkout step, not steps of
-// their own, so they stay out of the chain and out of that sum.
-var spawnTraceChain = []string{"claim", "placement", "checkout", "launch", "submit", "landing"}
+// the order they run: the hub's placement, then the node's checkout, the spawn
+// engine's claim, then launch, submit and landing. The window's queue is what is
+// left of the window once their sum is taken away (see layoutSpawnWindow). The
+// placement key also carries the hub's placement time, so it cannot be split.
+// The checkout sub-stages (checkoutStageKeys) are parts of the checkout step,
+// not steps of their own, so they stay out of the chain and out of that sum.
+var spawnTraceChain = []string{"placement", "checkout", "claim", "launch", "submit", "landing"}
 
 // spawnTraceAttempt is one attempt that ended unstarted and was renewed: the
 // hub retried the request, so the next attempt's window opens at EndMS. It is

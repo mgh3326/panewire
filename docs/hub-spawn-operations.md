@@ -1887,12 +1887,14 @@ at the instant the last one ended, so the windows cover acceptance to landed.
 
 In the trace, each renewed attempt is an `attempt` span with the reason as a tag,
 and the landed attempt's steps follow it. A `queue` span is the window less the
-sum of its steps (claim, placement, checkout, launch, submit, landing), so it is
+sum of its steps (placement, checkout, claim, launch, submit, landing, in the order they run), so it is
 the wait before the first step, such as a wait for a node slot (hk 7112). The
 checkout sub-stages `lock_wait`, `fetch` and `worktree_add` are drawn inside the
 checkout step and are not counted again. The landed trace also carries the
-`node_open_dispatches` tag: the node's open dispatches counted when the request
-was dispatched to it. The count is held in memory, so a hub restart drops the tag.
+`node_open_dispatches` tag: the node's in-flight dispatches counted at the
+request's first send, capped by the node's slots; spawns that wait behind them
+are not counted. A replay of a dispatched request carries no tag. The count is
+held in memory, so a hub restart drops the tag.
 Refusal text, briefs and argv never reach the trace. A row from before the column has no acceptance
 time in the history and keeps the attempt window as its start.
 

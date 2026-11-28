@@ -39,15 +39,15 @@ func TestSpawnTraceQueueIsWindowLessSumOfSteps_t7112(t *testing.T) {
 	at := func(ms int64) time.Time { return open.Add(time.Duration(ms) * time.Millisecond) }
 	want := map[string][2]int64{
 		"queue":                  {0, 4000},
-		"claim":                  {4000, 5000},
-		"placement":              {5000, 5500},
-		"checkout":               {5500, 7500},
+		"placement":              {4000, 4500},
+		"checkout":               {4500, 6500},
+		"claim":                  {6500, 7500},
 		"launch":                 {7500, 9000},
 		"submit":                 {9000, 9400},
 		"landing":                {9400, 10000},
-		checkoutStageLockWait:    {5500, 5800},
-		checkoutStageFetch:       {5800, 6600},
-		checkoutStageWorktreeAdd: {6600, 7500},
+		checkoutStageLockWait:    {4500, 4800},
+		checkoutStageFetch:       {4800, 5600},
+		checkoutStageWorktreeAdd: {5600, 6500},
 	}
 	for op, bounds := range want {
 		got := spans[op]
@@ -132,8 +132,11 @@ func TestSpawnTraceTagsNodeOpenDispatches_t7112(t *testing.T) {
 	if _, err = h.inbox.store.completeSpawn(t.Context(), sent, landed, landedAt); err != nil {
 		t.Fatal(err)
 	}
-	// The dispatch counted three open dispatches on the node, itself included.
-	h.spawnDispatchOpen.Store(req.RequestID, 3)
+	// The first send counted three open dispatches on the node, itself included.
+	var firstSend hubSpawnTask
+	firstSend.Status = "bound"
+	firstSend.Request.RequestID = req.RequestID
+	h.noteSpawnDispatch(firstSend, 3)
 	h.recordSpawnTrace(sent, landed)
 
 	event := spawnTransactionNamed(t, transport, "runtug.spawn")
@@ -155,4 +158,30 @@ func spawnTransactionNamed(t *testing.T, transport *spawnSentryTransport, name s
 	}
 	t.Fatalf("no transaction %q among %d events", name, len(transport.events))
 	return nil
+}
+
+// hk 7112 (review): a replay of a dispatched request must not overwrite the
+// first send's count, so the landed trace of a replay carries no tag.
+func TestSpawnDispatchOpenNotedOnlyOnFirstSend_t7112(t *testing.T) {
+	h := &HubServer{}
+	var replay hubSpawnTask
+	replay.Status = "dispatching"
+	replay.Request.RequestID = "req-replay"
+	h.noteSpawnDispatch(replay, 1)
+	if _, ok := h.spawnDispatchOpen.Load("req-replay"); ok {
+		t.Fatal("a replay stored an open-dispatch count")
+	}
+
+	var first hubSpawnTask
+	first.Status = "bound"
+	first.Request.RequestID = "req-first"
+	h.noteSpawnDispatch(first, 3)
+	h.noteSpawnDispatch(replay, 1)
+	got, ok := h.spawnDispatchOpen.Load("req-first")
+	if !ok || got.(int) != 3 {
+		t.Fatalf("first send count = %v (present %v), want 3", got, ok)
+	}
+	if _, ok := h.spawnDispatchOpen.Load("req-replay"); ok {
+		t.Fatal("a later replay stored a count")
+	}
 }

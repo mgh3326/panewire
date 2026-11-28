@@ -424,7 +424,7 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 				for _, n := range nodeActive[task.Node.Machine] {
 					open += n
 				}
-				h.spawnDispatchOpen.Store(task.Request.RequestID, open)
+				h.noteSpawnDispatch(task, open)
 			}
 		}
 		mu.Unlock()
