@@ -31,7 +31,7 @@ func TestSpawnBurstQueueTagsLaterSpawns_t7125(t *testing.T) {
 		if i > 0 {
 			inFlight = 1
 		}
-		h.recordSpawnQueueAtFirstPass(ctx, task, inFlight, dispatching)
+		firstPassQueue(t, h, task, inFlight, dispatching)
 
 		open, queued, recorded, err := h.inbox.store.spawnDispatchQueue(ctx, task.Request.RequestID, task.Attempt)
 		if err != nil {
@@ -57,9 +57,9 @@ func TestSpawnQueueRecordedOnlyOnFirstPass_t7125(t *testing.T) {
 	base := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
 	ctx := t.Context()
 	task := bindDrainRow(t, h.inbox.store, drainRow{n: 1, created: base}, base)
-	h.recordSpawnQueueAtFirstPass(ctx, task, 0, false)
+	firstPassQueue(t, h, task, 0, false)
 	// A later pass after the queue drained would count differently.
-	h.recordSpawnQueueAtFirstPass(ctx, task, 4, true)
+	firstPassQueue(t, h, task, 4, true)
 
 	open, queued, recorded, err := h.inbox.store.spawnDispatchQueue(ctx, task.Request.RequestID, task.Attempt)
 	if err != nil {
@@ -96,7 +96,7 @@ func TestSpawnLandingAfterDispatchCarriesQueue_t7125(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The first pass runs on the bound attempt, before the send.
-	h.recordSpawnQueueAtFirstPass(t.Context(), task, 0, true)
+	firstPassQueue(t, h, task, 0, true)
 	sent := sentSpawnFixture(t, h.inbox.store, task)
 	landed := hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Profile: "model-a", Role: "implementer", StageMS: map[string]int64{"launch": 1000, "landing": 1000}}
 	if _, err = h.inbox.store.completeSpawn(t.Context(), sent, landed, landedAt); err != nil {
@@ -131,5 +131,45 @@ func TestSpawnDispatchQueueWriteOnlyUnrecorded_t7125(t *testing.T) {
 	}
 	if !recorded || open != 1 || queued != 2 {
 		t.Fatalf("record = %d,%d recorded %v, want 1,2 true", open, queued, recorded)
+	}
+}
+
+// firstPassQueue is the scheduler's first pass for task, run in the order the
+// scheduler runs it: the count, then the record. inFlight is the node's
+// dispatches in flight; dispatching is true when that pass sends the attempt.
+func firstPassQueue(t *testing.T, h *HubServer, task hubSpawnTask, inFlight int, dispatching bool) {
+	t.Helper()
+	queued, err := h.inbox.store.countSpawnQueueAhead(t.Context(), task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := inFlight
+	if dispatching {
+		open++
+	}
+	h.recordSpawnQueue(t.Context(), task, open, queued)
+}
+
+// hk 7125 (review): a bind resets the record, so an attempt rebound after an
+// unsent unbind (here to another machine) never carries the earlier binding's
+// counts, and its own first pass records afresh.
+func TestSpawnRebindResetsQueueRecord_t7125(t *testing.T) {
+	h := asyncSpawnHub(t)
+	base := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	ctx := t.Context()
+	task := bindDrainRow(t, h.inbox.store, drainRow{n: 4, created: base}, base)
+	id := task.Request.RequestID
+	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, id, task.Attempt, 2, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.inbox.store.unbindUnsentSpawn(ctx, id, task.Attempt, task.Node.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	bindTo := hubSpawnRequest{RequestID: t14RequestID(6430040), Machine: "machine-b", Args: []string{"--job", task.Job}, WaitSeconds: 300}
+	if _, err := h.inbox.store.bindSpawn(ctx, id, task.Attempt, bindTo, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, recorded, err := h.inbox.store.spawnDispatchQueue(ctx, id, task.Attempt); err != nil || recorded {
+		t.Fatalf("after rebind: recorded=%v err=%v, want no record", recorded, err)
 	}
 }

@@ -398,29 +398,41 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 			}
 			h.mu.Unlock()
 		}
+		// hk 7125: the first pass counts the node's queue before the lock is taken
+		// and stores it after the lock is released, so a slow store never holds the
+		// scheduler's lock. The count is read only for an attempt still unrecorded.
+		queued, counted := 0, false
+		if task.Status == "bound" && task.Node != nil && task.OpenDispatches < 0 {
+			var err error
+			if queued, err = h.inbox.store.countSpawnQueueAhead(ctx, task); err != nil {
+				h.logger.Warn("hub spawn queue unreadable; the trace will not carry it", "request_id", task.Request.RequestID, "error", err)
+			} else {
+				counted = true
+			}
+		}
 		mu.Lock()
-		busy := active[task.Request.RequestID]
+		own := active[task.Request.RequestID]
+		busy := own
 		var key string
+		open := 0
 		if task.Node != nil {
 			key = hubSpawnOverlapKey(task.Node)
-			open := nodeActive[task.Node.Machine]
-			if len(open) > 0 {
-				busy = busy || len(open) >= slots || key == "" || open[""] > 0
-				for held := range open {
-					busy = busy || spawnOverlapConflicts(held, key)
+			held := nodeActive[task.Node.Machine]
+			if len(held) > 0 {
+				busy = busy || len(held) >= slots || key == "" || held[""] > 0
+				for heldKey := range held {
+					busy = busy || spawnOverlapConflicts(heldKey, key)
 				}
 			}
 			busy = busy || drain.holds(task)
-			// The attempt's first pass records the node's queue, busy or not, and
-			// before any send: a waiting spawn keeps the queue it joined (hk 7125).
-			if task.Status == "bound" && task.OpenDispatches < 0 {
-				inFlight := 0
-				for _, n := range nodeActive[task.Node.Machine] {
-					inFlight += n
-				}
-				h.recordSpawnQueueAtFirstPass(ctx, task, inFlight, !busy)
+			for _, n := range nodeActive[task.Node.Machine] {
+				open += n
 			}
 		}
+		// The record is taken only when no placement worker of this request still
+		// holds it: that worker's kick can make this pass see busy only through its
+		// own marker, and an open count taken then would miss the attempt itself.
+		recordQueue := counted && !own
 		if !busy {
 			active[task.Request.RequestID] = true
 			if task.Node != nil {
@@ -428,9 +440,14 @@ func (h *HubServer) runSpawnCoordinator(parent context.Context) {
 					nodeActive[task.Node.Machine] = map[string]int{}
 				}
 				nodeActive[task.Node.Machine][key]++
+				open++
 			}
 		}
 		mu.Unlock()
+		if recordQueue {
+			// open counts this attempt when this pass sends it, as the trace documents.
+			h.recordSpawnQueue(ctx, task, open, queued)
+		}
 		if busy {
 			return false
 		}

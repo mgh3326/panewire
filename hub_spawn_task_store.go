@@ -750,7 +750,7 @@ func (s *laneInboxStore) bindSpawnPlaced(parent context.Context, id string, atte
 	// bound_machine and exclusive let the coordinator find each machine's
 	// oldest waiting exclusive in one query (hk 6433). Every statement that
 	// sets node_id=NULL clears them.
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,start_receipt_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=?,bound_machine=?,exclusive=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, node.Machine, spawnExclusiveMark(&node), id, attempt, node.Machine)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,start_receipt_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=?,bound_machine=?,exclusive=?,open_dispatches=-1,queued_spawns=-1 WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, node.Machine, spawnExclusiveMark(&node), id, attempt, node.Machine)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}

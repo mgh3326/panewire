@@ -1900,7 +1900,7 @@ by the node's slots. `node_queued_spawns` is the other operations bound to the
 same machine that were created earlier and are still in flight or waiting, so a
 burst of N spawns to one node without slots tags the later ones 1..N-1. A busy
 attempt is counted at the pass that first saw it. The record is written once per
-attempt, so a replay (dispatching, reconciling) carries no count it did not
+attempt, and a bind clears it, so a rebound attempt never carries another binding's count. So a replay (dispatching, reconciling) carries no count it did not
 record, and a landing reads the record, so it keeps the tags after the dispatch
 ends and across a hub restart. Only the landed trace carries them.
 Refusal text, briefs and argv never reach the trace. A row from before the column has no acceptance
