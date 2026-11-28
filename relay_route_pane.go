@@ -62,9 +62,9 @@ func (h *HubServer) markJobPaneGone(node, job string) {
 // the hub issued at commandStart. A pane id can be reused: a job placed on it
 // after the close began must not inherit a close that was not its own. So a
 // completed job is marked only when its spawn started before commandStart, whenever
-// its completion arrived. The start is the spawn's bind time (the pane is made
-// then), or its created time when it was never bound. A job with no spawn record
-// is marked as before.
+// its completion arrived. The start is the earliest across the job's spawn rows:
+// each row's bind time (the pane is made then), or its created time when never
+// bound. A job with no spawn record is marked as before.
 func (h *HubServer) markPaneJobsGone(node, pane string, commandStart time.Time) {
 	if pane == "" {
 		return
@@ -93,22 +93,14 @@ func (h *HubServer) markPaneJobsGone(node, pane string, commandStart time.Time) 
 	}
 }
 
-// jobStartedBefore reports whether the job's latest spawn started before at, or
-// has no spawn record the hub can read (then the job is treated as before, as the
-// base code did).
+// jobStartedBefore reports whether the job's earliest spawn start is before at.
+// A job with no readable spawn record is treated as before, as the base code did.
 func (h *HubServer) jobStartedBefore(job string, at time.Time) bool {
 	if h.inbox == nil || h.inbox.store == nil {
 		return true
 	}
-	task, err := h.inbox.store.latestSpawnForJob(context.Background(), job)
-	if err != nil {
-		return true
-	}
-	start := task.Placed
-	if start.IsZero() {
-		start = task.Created
-	}
-	if start.IsZero() {
+	start, found, err := h.inbox.store.earliestSpawnStartForJob(context.Background(), job)
+	if err != nil || !found {
 		return true
 	}
 	return start.Before(at)

@@ -1188,6 +1188,24 @@ func (s *laneInboxStore) latestSpawnForJob(parent context.Context, job string) (
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE job=? ORDER BY created_ms DESC,request_id DESC LIMIT 1`), job))
 }
 
+// earliestSpawnStartForJob returns the earliest start across every spawn row of
+// job, a row's start being its placed time or, when never bound, its created
+// time. ok is false when the job has no spawn row. Unlike latestSpawnForJob, a
+// resubmit row never hides the original placement.
+func (s *laneInboxStore) earliestSpawnStartForJob(parent context.Context, job string) (time.Time, bool, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	var ms sql.NullInt64
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT MIN(CASE WHEN placed_ms>0 THEN placed_ms ELSE created_ms END) FROM spawn_operations WHERE job=?`), job).Scan(&ms)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if !ms.Valid {
+		return time.Time{}, false, nil
+	}
+	return time.UnixMilli(ms.Int64), true, nil
+}
+
 // quotaSuccessorSpawns lists recent quota-stop successors (replaced_from set),
 // newest first.
 func (s *laneInboxStore) quotaSuccessorSpawns(parent context.Context) ([]hubSpawnTask, error) {

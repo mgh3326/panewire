@@ -81,3 +81,49 @@ func TestPaneCloseMarksByJobStartNotCompletionArrival_t7103(t *testing.T) {
 		}
 	}
 }
+
+// A job whose original spawn row was placed on the pane before the close, and
+// whose resubmit row was created after the close began, is still marked gone:
+// the original placement is the occupant the close ended. The newest row alone
+// would hide it.
+func TestPaneCloseMarksJobWhoseResubmitFollowsCommandStart_t7103(t *testing.T) {
+	start := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	clock := start.Add(-time.Hour)
+	hub, err := NewHubServer(HubServerConfig{
+		InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3"),
+		Tokens:         map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
+		Now:            func() time.Time { return clock }, GracePeriod: time.Hour, OrphanGrace: time.Hour, KeepaliveInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hub.Close() })
+	useLegacyOwnerStore(hub)
+	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 2)}
+	hub.connect("node-a", "t7103", "fixture", agent, false)
+
+	const job = "resubmitted"
+	t7103Spawn(t, hub, 10, job, start.Add(-2*time.Minute), start.Add(-time.Minute))
+	// What a cleaned-up attempt leaves (as hub_spawn_retired_by_request_t6284_test.go does):
+	// retryable, unqueued and without a reservation.
+	requestID := t14RequestID(71040)
+	for _, query := range []string{`UPDATE spawn_operations SET status='retryable' WHERE request_id=?`, `DELETE FROM spawn_reservations WHERE request_id=?`, `DELETE FROM spawn_queue WHERE request_id=?`} {
+		if _, err := hub.inbox.store.db.ExecContext(t.Context(), hub.inbox.store.q(query), requestID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t7103Spawn(t, hub, 11, job, start.Add(time.Second), time.Time{})
+
+	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: job, AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1, Pane: "reused-pane"}}, clock)
+	if !hub.observeJobCompletion("node-a", hubJobEventPayload{JobID: job, Epoch: 1}, start.Add(5*time.Second)) {
+		t.Fatal("completion was rejected")
+	}
+	closed := hubNodeCommandResult{Result: []byte(`{"outcome":"closed"}`)}
+	hub.releaseClosedPaneLanes("node-a", nodePaneCloseArgs{PaneID: "reused-pane"}, closed, start)
+
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if !hub.jobs[job].PaneGone {
+		t.Fatal("a job placed before the close, with a resubmit row after it, was not marked pane gone")
+	}
+}
