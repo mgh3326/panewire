@@ -323,8 +323,10 @@ batch's worker lanes, and each member's `relay.dropped` carries
 - The summary's lane is the first lane a member names. A member with no lane
   is counted in `member_count` but names no lane, so a batch that starts with
   one still reaches the hub's decoder.
-- A batch of one row, or a batch with no lane at all, gets no summary; its row
-  warns on its own.
+- A batch with no lane at all still gets the summary, with `lane` empty and no
+  `lanes`. Its rows cannot name a lane, so the hub's per-row warning would be
+  refused; the summary is the one warning for the batch (hk 7100).
+- A batch of one row gets no summary; its row warns on its own.
 - A `queued_banner` batch whose every nonce is proven is delivered and raises
   no warning (panewire-design's decision on #920). Only a member whose nonce is
   missing from the queue joins an uncertain batch, under the same rule as the
