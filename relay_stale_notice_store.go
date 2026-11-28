@@ -20,7 +20,7 @@ var relayStaleNoticeSchema = []string{
  relay_id INTEGER PRIMARY KEY, notice_day VARCHAR(32) NOT NULL, design_lane VARCHAR(255) NOT NULL,
  worker_lane VARCHAR(255) NOT NULL, job VARCHAR(255) NOT NULL DEFAULT '', task_id VARCHAR(32) NOT NULL DEFAULT '',
  kind VARCHAR(64) NOT NULL, sender VARCHAR(32) NOT NULL DEFAULT '', hk_event_id VARCHAR(255) NOT NULL DEFAULT '',
- received_ms BIGINT NOT NULL, retired_ms BIGINT NOT NULL, filed INTEGER NOT NULL DEFAULT 0)`,
+ received_ms BIGINT NOT NULL, retired_ms BIGINT NOT NULL, filed INTEGER NOT NULL DEFAULT 0, job_via VARCHAR(16) NOT NULL DEFAULT '')`,
 	`CREATE INDEX IF NOT EXISTS relay_stale_notice_rows_day ON relay_stale_notice_rows(notice_day, design_lane, filed)`,
 	`CREATE TABLE IF NOT EXISTS relay_stale_notice_lanes (
  worker_lane VARCHAR(255) NOT NULL, job VARCHAR(255) NOT NULL, first_ms BIGINT NOT NULL,
@@ -37,31 +37,49 @@ const (
 	staleReplayWidthKind  = 64
 	staleReplayWidthSend  = 32
 	staleReplayWidthEvent = 255
+	staleReplayWidthVia   = 16
 	// staleReplayFileChunk bounds the ids one filing UPDATE names.
 	staleReplayFileChunk = 500
 )
 
-// staleReplayRow is one retired real message as the notice reads it.
+// staleReplayJobViaLaneName is the job_via of a row whose job is its worker lane
+// name: the lane had no binding or route at receipt, and a spawn of that name
+// (created before the receipt) named the job (hk 7098). A row with no job_via was
+// resolved by its binding or its route, or is not resolved.
+const staleReplayJobViaLaneName = "lane_name"
+
+// staleReplayRow is one retired real message as the notice reads it. JobVia is
+// staleReplayJobViaLaneName when Job was named by the lane name, else empty.
 type staleReplayRow struct {
-	RelayID                 int64
-	NoticeDay               string
-	DesignLane, WorkerLane  string
-	Job, Task, Kind, Sender string
-	HKEventID               string
-	ReceivedMS, RetiredMS   int64
+	RelayID                int64
+	NoticeDay              string
+	DesignLane, WorkerLane string
+	Job, JobVia, Task      string
+	Kind, Sender           string
+	HKEventID              string
+	ReceivedMS, RetiredMS  int64
+}
+
+// addStaleReplayJobVia adds job_via to a SQLite store written before hk 7098. The
+// Postgres and MySQL twins are migrations 0046 and 0043.
+func addStaleReplayJobVia(ctx context.Context, db *sql.DB) error {
+	_, err := addTableColumn(ctx, db, "relay_stale_notice_rows", "job_via", "VARCHAR(16) NOT NULL DEFAULT ''")
+	return err
 }
 
 // bindStaleReplayLane records that a worker lane's job changed at firstMS: one
 // binding per change of the lane's job, keyed by the receipt time (hk 6994). A
 // receipt whose job is the job already in force binds nothing, so a lane that
 // keeps one job adds no rows; a lane that returns to an earlier job gets a new
-// binding for that later stint.
+// binding for that later stint. The job compared against is the one in force at
+// firstMS, not the lane's newest binding: receipts can arrive out of order across
+// a job change (hk 7101).
 func (s *laneInboxStore) bindStaleReplayLane(parent context.Context, lane, job string, firstMS int64) error {
 	ctx, done := s.op(parent)
 	defer done()
 	lane, job = utf8PrefixWithin(lane, staleReplayWidthLane), utf8PrefixWithin(job, staleReplayWidthJob)
 	var current string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT job FROM relay_stale_notice_lanes WHERE worker_lane=? ORDER BY first_ms DESC LIMIT 1`), lane).Scan(&current)
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT job FROM relay_stale_notice_lanes WHERE worker_lane=? AND first_ms<=? ORDER BY first_ms DESC LIMIT 1`), lane, firstMS).Scan(&current)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -128,10 +146,11 @@ func (s *laneInboxStore) staleReplayJobAt(parent context.Context, lane string, a
 func (s *laneInboxStore) insertStaleReplayRow(parent context.Context, r staleReplayRow) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO relay_stale_notice_rows(relay_id,notice_day,design_lane,worker_lane,job,task_id,kind,sender,hk_event_id,received_ms,retired_ms,filed) VALUES(?,?,?,?,?,?,?,?,?,?,?,0)`, "relay_id")),
+	_, err := s.db.ExecContext(ctx, s.q(s.dialect.insertIgnore(`INSERT INTO relay_stale_notice_rows(relay_id,notice_day,design_lane,worker_lane,job,task_id,kind,sender,hk_event_id,received_ms,retired_ms,filed,job_via) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?)`, "relay_id")),
 		r.RelayID, r.NoticeDay, utf8PrefixWithin(r.DesignLane, staleReplayWidthLane), utf8PrefixWithin(r.WorkerLane, staleReplayWidthLane),
 		utf8PrefixWithin(r.Job, staleReplayWidthJob), utf8PrefixWithin(r.Task, staleReplayWidthTask), utf8PrefixWithin(r.Kind, staleReplayWidthKind),
-		utf8PrefixWithin(r.Sender, staleReplayWidthSend), utf8PrefixWithin(r.HKEventID, staleReplayWidthEvent), r.ReceivedMS, r.RetiredMS)
+		utf8PrefixWithin(r.Sender, staleReplayWidthSend), utf8PrefixWithin(r.HKEventID, staleReplayWidthEvent), r.ReceivedMS, r.RetiredMS,
+		utf8PrefixWithin(r.JobVia, staleReplayWidthVia))
 	return err
 }
 
@@ -181,7 +200,7 @@ func (s *laneInboxStore) staleReplayLanes(parent context.Context, day string) ([
 func (s *laneInboxStore) staleReplayRowsOf(parent context.Context, day, lane string) ([]staleReplayRow, error) {
 	ctx, done := s.op(parent)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT relay_id,notice_day,design_lane,worker_lane,job,task_id,kind,sender,hk_event_id,received_ms,retired_ms FROM relay_stale_notice_rows WHERE notice_day=? AND design_lane=? AND filed=0 ORDER BY retired_ms,relay_id`), day, lane)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT relay_id,notice_day,design_lane,worker_lane,job,task_id,kind,sender,hk_event_id,received_ms,retired_ms,job_via FROM relay_stale_notice_rows WHERE notice_day=? AND design_lane=? AND filed=0 ORDER BY retired_ms,relay_id`), day, lane)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +208,7 @@ func (s *laneInboxStore) staleReplayRowsOf(parent context.Context, day, lane str
 	var out []staleReplayRow
 	for rows.Next() {
 		var r staleReplayRow
-		if err := rows.Scan(&r.RelayID, &r.NoticeDay, &r.DesignLane, &r.WorkerLane, &r.Job, &r.Task, &r.Kind, &r.Sender, &r.HKEventID, &r.ReceivedMS, &r.RetiredMS); err != nil {
+		if err := rows.Scan(&r.RelayID, &r.NoticeDay, &r.DesignLane, &r.WorkerLane, &r.Job, &r.Task, &r.Kind, &r.Sender, &r.HKEventID, &r.ReceivedMS, &r.RetiredMS, &r.JobVia); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

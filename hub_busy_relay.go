@@ -72,7 +72,18 @@ func decodeRelayBatchedPayload(raw []byte) (relayBatchedPayload, bool) {
 
 func decodeRelayUncertainBatchPayload(raw []byte) (relayUncertainBatchPayload, bool) {
 	var value relayUncertainBatchPayload
-	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || !validLaneReference(value.Lane) || len(value.Lanes) == 0 || value.MemberCount < 2 || (value.Verdict != "maybe_in_pane" && value.Verdict != "nonce_missing") || value.Evidence == "" || len(value.Evidence) > 512 || value.ReplaySource != "hub_unconfirmed_once" {
+	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || value.MemberCount < 2 || (value.Verdict != "maybe_in_pane" && value.Verdict != "nonce_missing") || value.Evidence == "" || len(value.Evidence) > 512 || value.ReplaySource != "hub_unconfirmed_once" {
+		return relayUncertainBatchPayload{}, false
+	}
+	// A batch whose members name no lane carries an empty lane and no lanes
+	// (hk 7100); otherwise the lane is a valid reference and leads the lanes.
+	if value.Lane == "" {
+		if len(value.Lanes) != 0 {
+			return relayUncertainBatchPayload{}, false
+		}
+		return value, true
+	}
+	if !validLaneReference(value.Lane) || len(value.Lanes) == 0 || value.Lanes[0] != value.Lane {
 		return relayUncertainBatchPayload{}, false
 	}
 	seen := make(map[string]struct{}, len(value.Lanes))
@@ -84,9 +95,6 @@ func decodeRelayUncertainBatchPayload(raw []byte) (relayUncertainBatchPayload, b
 			return relayUncertainBatchPayload{}, false
 		}
 		seen[lane] = struct{}{}
-	}
-	if value.Lanes[0] != value.Lane {
-		return relayUncertainBatchPayload{}, false
 	}
 	return value, true
 }

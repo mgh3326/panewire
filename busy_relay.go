@@ -265,18 +265,21 @@ const hubFeatureRelayUncertainBatch = "relay_uncertain_batch"
 
 // uncertainBatch builds the one summary an uncertain batch sends, and reports
 // whether it is sent. When it is not, every row keeps its own warning and
-// batch_uncertain stays false. That happens for a single row, a batch that
-// names no lane (the hub decodes a lane reference, so a summary with no lane
-// would be dropped and its rows silenced), and a hub that did not advertise
-// hubFeatureRelayUncertainBatch.
+// batch_uncertain stays false. That happens for a single row and for a hub that
+// did not advertise hubFeatureRelayUncertainBatch.
+//
+// A batch whose members name no lane still gets the summary, with an empty
+// lane and no lanes: its rows cannot name a lane, so their own relay.dropped
+// would be refused by the hub and the batch would warn nowhere (hk 7100). The
+// hub warns once for such a summary.
 //
 // Every uncertain path goes through here, so the queued_banner path has the
 // same eligibility as the nonce and maybe_in_pane paths. A queued_banner batch
 // whose every nonce is proven never reaches here: its members are delivered
 // and raise no warning (panewire-design's decision on #920). The contract is
 // in docs/relay-harness-delivery.md, "Uncertain batches".
-func (manager *relayBusyManager) uncertainBatch(group []relayHeld, verdict, evidence, harness string) (relayUncertainBatchPayload, bool) {
-	if len(group) < 2 || !manager.client.hubAcceptsRelayUncertainBatch() {
+func (manager *relayBusyManager) uncertainBatch(ctx context.Context, group []relayHeld, verdict, evidence, harness string) (relayUncertainBatchPayload, bool) {
+	if len(group) < 2 || !manager.client.hubAcceptsRelayUncertainBatch(ctx) {
 		return relayUncertainBatchPayload{}, false
 	}
 	lanes := make([]string, 0, len(group))
@@ -291,10 +294,11 @@ func (manager *relayBusyManager) uncertainBatch(group []relayHeld, verdict, evid
 		seen[item.Lane] = struct{}{}
 		lanes = append(lanes, item.Lane)
 	}
-	if len(lanes) == 0 {
-		return relayUncertainBatchPayload{}, false
+	lane := ""
+	if len(lanes) > 0 {
+		lane = lanes[0]
 	}
-	return relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: lanes[0], Lanes: lanes, MemberCount: len(group), Verdict: verdict, Evidence: evidence, Harness: harness, ReplaySource: "hub_unconfirmed_once"}, true
+	return relayUncertainBatchPayload{JobID: group[0].JobID, Pane: group[0].Pane, Lane: lane, Lanes: lanes, MemberCount: len(group), Verdict: verdict, Evidence: evidence, Harness: harness, ReplaySource: "hub_unconfirmed_once"}, true
 }
 
 // hubFeaturesWait bounds how long an uncertain batch waits for its connection's
@@ -303,22 +307,81 @@ func (manager *relayBusyManager) uncertainBatch(group []relayHeld, verdict, evid
 // per-row warnings after the wait.
 const hubFeaturesWait = 5 * time.Second
 
+// hubReplacementPoll is how often a batch whose connection closed looks for the
+// replacement connection (see awaitReplacementFeatures).
+const hubReplacementPoll = 10 * time.Millisecond
+
 // hubAcceptsRelayUncertainBatch reads the current connection's feature state,
-// waiting (bounded) for the feature frame when it has not arrived yet.
-func (client *HubClient) hubAcceptsRelayUncertainBatch() bool {
+// waiting (bounded) for the feature frame when it has not arrived yet. The wait
+// ends early when ctx is done. When the connection closes, the decision moves
+// to its replacement (awaitReplacementFeatures): the closed connection's emitter
+// is the one the batch's row reports would go out on, and it stays bound until
+// the redial binds the next one (hk 7100).
+func (client *HubClient) hubAcceptsRelayUncertainBatch(ctx context.Context) bool {
 	peer := client.signalsPeer.Load()
 	if peer == nil {
 		return false
 	}
-	if !peer.featuresKnown.Load() && peer.featuresReady != nil {
-		timer := time.NewTimer(hubFeaturesWait)
-		defer timer.Stop()
+	timer := time.NewTimer(hubFeaturesWait)
+	defer timer.Stop()
+	// A connection that already closed hands the decision over whatever its
+	// features say: its emitter is dead, whether or not its hub.features came.
+	if peer.isClosed() {
+		return client.awaitReplacementFeatures(ctx, peer, timer.C)
+	}
+	if peer.featuresKnown.Load() || peer.featuresReady == nil {
+		return peer.acceptsRelayUncertainBatch.Load()
+	}
+	select {
+	case <-peer.featuresReady:
+		return peer.acceptsRelayUncertainBatch.Load()
+	case <-timer.C:
+		return peer.acceptsRelayUncertainBatch.Load()
+	case <-ctx.Done():
+		return false
+	case <-peer.closed:
+	}
+	return client.awaitReplacementFeatures(ctx, peer, timer.C)
+}
+
+// isClosed reports whether the connection's session has ended.
+func (peer *hubClientConnection) isClosed() bool {
+	select {
+	case <-peer.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// awaitReplacementFeatures waits, until expired, for a connection other than
+// dead to take over the client and report its features. A replacement's emitter
+// is bound before its read loop starts, so once its featuresReady closes the
+// row reports reach the live connection.
+func (client *HubClient) awaitReplacementFeatures(ctx context.Context, dead *hubClientConnection, expired <-chan time.Time) bool {
+	ticker := time.NewTicker(hubReplacementPoll)
+	defer ticker.Stop()
+	for {
+		if next := client.signalsPeer.Load(); next != nil && next != dead && next.featuresReady != nil {
+			select {
+			case <-next.featuresReady:
+				return next.acceptsRelayUncertainBatch.Load()
+			case <-next.closed:
+				// The replacement died before its features came: look again below.
+			case <-expired:
+				return next.acceptsRelayUncertainBatch.Load()
+			case <-ctx.Done():
+				return false
+			}
+		}
 		select {
-		case <-peer.featuresReady:
-		case <-timer.C:
+		case <-ticker.C:
+		case <-expired:
+			return false
+		case <-ctx.Done():
+			return false
 		}
 	}
-	return peer.acceptsRelayUncertainBatch.Load()
 }
 
 // relayBusyManager serializes each pane, so a returned wait can batch every
@@ -1354,7 +1417,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		switch result.Outcome {
 		case relayInjectRetryable:
 			if previousUncertain {
-				summary, batched := manager.uncertainBatch(group, "maybe_in_pane", result.Evidence, result.Harness)
+				summary, batched := manager.uncertainBatch(parent, group, "maybe_in_pane", result.Evidence, result.Harness)
 				if batched {
 					manager.emit("relay.uncertain_batch", summary)
 				}
@@ -1383,7 +1446,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			if previousUncertain {
 				dropEvidence = "previous_attempt_unproven:" + dropEvidence
 			}
-			summary, batched := manager.uncertainBatch(group, "maybe_in_pane", dropEvidence, result.Harness)
+			summary, batched := manager.uncertainBatch(parent, group, "maybe_in_pane", dropEvidence, result.Harness)
 			if batched {
 				manager.emit("relay.uncertain_batch", summary)
 			}
@@ -1416,7 +1479,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			}
 			landed = append(landed, item)
 		}
-		summary, batched := manager.uncertainBatch(uncertain, "nonce_missing", result.Evidence, result.Harness)
+		summary, batched := manager.uncertainBatch(parent, uncertain, "nonce_missing", result.Evidence, result.Harness)
 		if batched {
 			manager.emit("relay.uncertain_batch", summary)
 		}

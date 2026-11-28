@@ -153,14 +153,20 @@ func (h *HubServer) observeRelayDropped(machine string, dropped relayDroppedPayl
 	})
 }
 
+// observeRelayUncertainBatch warns once for an uncertain batch. A batch that
+// names worker lanes warns only when one of them is a worker. A batch that
+// names no lane always warns once: its rows cannot name a worker, and the
+// summary is the only record of them (hk 7100).
 func (h *HubServer) observeRelayUncertainBatch(machine string, batch relayUncertainBatchPayload) {
-	worker := false
-	for _, lane := range batch.Lanes {
-		laneWorker, _ := h.relayLaneRoles(lane)
-		worker = worker || laneWorker
-	}
-	if !worker {
-		return
+	if len(batch.Lanes) > 0 {
+		worker := false
+		for _, lane := range batch.Lanes {
+			laneWorker, _ := h.relayLaneRoles(lane)
+			worker = worker || laneWorker
+		}
+		if !worker {
+			return
+		}
 	}
 	harness := fleetEventCode(batch.Harness)
 	if harness == "" {

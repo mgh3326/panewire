@@ -1206,6 +1206,14 @@ func (s *laneInboxStore) earliestSpawnStartForJob(parent context.Context, job st
 	return time.UnixMilli(ms.Int64), true, nil
 }
 
+// latestSpawnForJobBefore is latestSpawnForJob over the spawns created no later
+// than atMS (unix milliseconds): the newest spawn of job as of that instant.
+func (s *laneInboxStore) latestSpawnForJobBefore(parent context.Context, job string, atMS int64) (hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE job=? AND created_ms<=? ORDER BY created_ms DESC,request_id DESC LIMIT 1`), job, atMS))
+}
+
 // quotaSuccessorSpawns lists recent quota-stop successors (replaced_from set),
 // newest first.
 func (s *laneInboxStore) quotaSuccessorSpawns(parent context.Context) ([]hubSpawnTask, error) {
