@@ -105,7 +105,7 @@ func (h *HubServer) noteStaleReplayRetire(record handoffkeepRelayEvent, reason s
 		return true
 	}
 	now := h.now().UTC()
-	job, spawn, found, err := h.staleReplayOwnerOf(ctx, record, received)
+	job, via, spawn, found, err := h.staleReplayOwnerOf(ctx, record, received)
 	// A failed lookup holds the row for a later replay, up to its tries; then the
 	// row is kept on the hub notice lane (hk 6994 #3). A row is never dropped on a
 	// lookup error.
@@ -118,7 +118,7 @@ func (h *HubServer) noteStaleReplayRetire(record handoffkeepRelayEvent, reason s
 		h.logger.Warn("stale replay row owner unreadable after repeated tries; listed on the hub notice lane", "event_id", record.ID, "lane", record.OwnerLane, "job", job)
 	}
 	row := staleReplayRow{
-		RelayID: record.ID, NoticeDay: staleReplayDay(now), WorkerLane: record.OwnerLane, Job: job,
+		RelayID: record.ID, NoticeDay: staleReplayDay(now), WorkerLane: record.OwnerLane, Job: job, JobVia: via,
 		Kind: record.Kind, Sender: staleReplaySender(record.Text), HKEventID: record.EventID,
 		ReceivedMS: received.UnixMilli(), RetiredMS: now.UnixMilli(),
 	}
@@ -143,18 +143,43 @@ func (h *HubServer) noteStaleReplayRetire(record handoffkeepRelayEvent, reason s
 	return true
 }
 
-// staleReplayOwnerOf names a retired row's worker job and the design owner of that
-// job. A store read error comes back with found false.
-func (h *HubServer) staleReplayOwnerOf(ctx context.Context, record handoffkeepRelayEvent, received time.Time) (job string, spawn staleReplaySpawn, found bool, err error) {
-	job, err = h.staleReplayJobOf(ctx, record, received)
-	if err != nil {
-		return job, staleReplaySpawn{}, false, err
+// staleReplayOwnerOf names a retired row's worker job, how the job was named
+// (staleReplayJobViaLaneName, or empty), and the design owner of that job. The
+// job comes from durable state, in this order: a job.* row carries its job; a
+// lane.event row takes the job its lane was bound to when the row arrived
+// (noteStaleReplayLane); a row received before any binding was kept takes the
+// lanes.json route's job as a hint, only when that job was spawned before the row
+// arrived; and a row still unnamed takes the job its lane name is, when the spawn
+// of that name was created before the row arrived (hk 7098). An unresolved row
+// comes back with job "" and found false. A store read error comes back with
+// found false.
+func (h *HubServer) staleReplayOwnerOf(ctx context.Context, record handoffkeepRelayEvent, received time.Time) (job, via string, spawn staleReplaySpawn, found bool, err error) {
+	if strings.HasPrefix(record.Kind, "job.") {
+		spawn, found, err = h.staleReplaySpawnOf(ctx, record.JobID)
+		return record.JobID, "", spawn, found, err
 	}
-	spawn, found, err = h.staleReplaySpawnOf(ctx, job)
+	job, bound, err := h.inbox.store.staleReplayJobAt(ctx, record.OwnerLane, received.UnixMilli())
 	if err != nil {
-		return job, staleReplaySpawn{}, false, err
+		return "", "", staleReplaySpawn{}, false, err
 	}
-	return job, spawn, found, nil
+	if bound {
+		spawn, found, err = h.staleReplaySpawnOf(ctx, job)
+		return job, "", spawn, found, err
+	}
+	if hint := loadReportRelayRoutes(h.reportRelayPath)[record.OwnerLane].Job; hint != "" {
+		spawn, found, err = h.staleReplaySpawnOf(ctx, hint)
+		if err != nil {
+			return "", "", staleReplaySpawn{}, false, err
+		}
+		if found && !spawn.created.After(received) {
+			return hint, "", spawn, true, nil
+		}
+	}
+	spawn, found, err = h.staleReplaySpawnBefore(ctx, record.OwnerLane, received)
+	if err != nil || !found {
+		return "", "", staleReplaySpawn{}, false, err
+	}
+	return record.OwnerLane, staleReplayJobViaLaneName, spawn, true, nil
 }
 
 // staleReplayLookupGaveUp records the outcome of one owner lookup of a retired row
@@ -177,31 +202,6 @@ func (h *HubServer) staleReplayLookupGaveUp(id int64, failed bool) bool {
 	}
 	delete(h.staleReplayLookupFails, id)
 	return true
-}
-
-// staleReplayJobOf names the worker job a retired row belongs to, from durable
-// state first. A job.* row carries its job. A lane.event row takes the job its
-// lane was bound to when the row arrived (noteStaleReplayLane). A row received
-// before any binding was kept falls back to the lanes.json route, but only as a
-// hint: the route's job must have been spawned before the row arrived, so a lane
-// taken over later does not pass its job to an older row.
-func (h *HubServer) staleReplayJobOf(ctx context.Context, record handoffkeepRelayEvent, received time.Time) (string, error) {
-	if strings.HasPrefix(record.Kind, "job.") {
-		return record.JobID, nil
-	}
-	job, bound, err := h.inbox.store.staleReplayJobAt(ctx, record.OwnerLane, received.UnixMilli())
-	if err != nil || bound {
-		return job, err
-	}
-	hint := loadReportRelayRoutes(h.reportRelayPath)[record.OwnerLane].Job
-	if hint == "" {
-		return "", nil
-	}
-	spawn, found, err := h.staleReplaySpawnOf(ctx, hint)
-	if err != nil || !found || spawn.created.After(received) {
-		return "", err
-	}
-	return hint, nil
 }
 
 // noteStaleReplayLane binds a worker lane to the job its lanes.json route named
@@ -238,18 +238,57 @@ func (h *HubServer) staleReplaySpawnOf(ctx context.Context, job string) (staleRe
 		return spawn, found, nil
 	}
 	task, err := h.inbox.store.latestSpawnForJob(ctx, job)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && task.Job != job) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return staleReplaySpawn{}, false, nil
 	}
 	if err != nil {
 		return staleReplaySpawn{}, false, err
+	}
+	spawn, found := staleReplaySpawnOfTask(job, task)
+	return spawn, found, nil
+}
+
+// staleReplaySpawnBefore reads the spawn of a job named by a worker lane, for a row
+// received at received: the newest spawn of job created no later than received. A
+// spawn created after the receipt is not the one the row was received for, so it
+// is not found. A test hook answers without a time, so its spawn is checked
+// against received too.
+func (h *HubServer) staleReplaySpawnBefore(ctx context.Context, job string, received time.Time) (staleReplaySpawn, bool, error) {
+	if job == "" {
+		return staleReplaySpawn{}, false, nil
+	}
+	var spawn staleReplaySpawn
+	var found bool
+	if h.staleReplaySpawn != nil {
+		spawn, found = h.staleReplaySpawn(ctx, job)
+	} else {
+		task, err := h.inbox.store.latestSpawnForJobBefore(ctx, job, received.UnixMilli())
+		if errors.Is(err, sql.ErrNoRows) {
+			return staleReplaySpawn{}, false, nil
+		}
+		if err != nil {
+			return staleReplaySpawn{}, false, err
+		}
+		spawn, found = staleReplaySpawnOfTask(job, task)
+	}
+	if !found || spawn.created.After(received) {
+		return staleReplaySpawn{}, false, nil
+	}
+	return spawn, true, nil
+}
+
+// staleReplaySpawnOfTask is the design owner and task of a spawn record of job. A
+// record of another job, or one with no owner, is not found.
+func staleReplaySpawnOfTask(job string, task hubSpawnTask) (staleReplaySpawn, bool) {
+	if task.Job != job {
+		return staleReplaySpawn{}, false
 	}
 	owner := task.Owner
 	if owner == "" {
 		owner = hubSpawnFlagArg(task.Request.Args, "--owner")
 	}
 	spawn := staleReplaySpawn{owner: owner, task: hubSpawnFlagArg(task.Request.Args, "--task"), created: task.Created}
-	return spawn, owner != "", nil
+	return spawn, owner != ""
 }
 
 // staleReplaySender is the sender prefix of a relay text: the "[label]" a
@@ -446,6 +485,16 @@ func staleReplayTaskEnded(state string) bool {
 	return false
 }
 
+// staleReplayJobText is the job a notice entry names. A job the lane name stood
+// for is marked, so a reader can tell it from a bound job (hk 7098).
+func staleReplayJobText(row staleReplayRow) string {
+	job := orDash(utf8PrefixWithin(row.Job, staleReplayEntryWidth))
+	if row.JobVia == staleReplayJobViaLaneName {
+		job += " (via lane name)"
+	}
+	return job
+}
+
 // staleReplayNoticeText is the inbox item's text: the listed rows first, then
 // the count of overtaken rows. Each entry names the handoffkeep row id, the key
 // a reader looks the row up by, and is bounded, so the item stays inside one
@@ -464,7 +513,7 @@ func staleReplayNoticeText(day, lane string, listed []staleReplayRow, overtaken 
 		age := time.Duration(row.RetiredMS-row.ReceivedMS) * time.Millisecond
 		entry := fmt.Sprintf(" | %s %s lane %s job %s received %s age %s row %d hk %s", orDash(utf8PrefixWithin(row.Sender, staleReplayWidthSend)),
 			orDash(utf8PrefixWithin(row.Kind, staleReplayWidthKind)), orDash(utf8PrefixWithin(row.WorkerLane, staleReplayEntryWidth)),
-			orDash(utf8PrefixWithin(row.Job, staleReplayEntryWidth)), received.Format(time.RFC3339), age.Round(time.Minute),
+			staleReplayJobText(row), received.Format(time.RFC3339), age.Round(time.Minute),
 			row.RelayID, orDash(utf8PrefixWithin(row.HKEventID, 48)))
 		if i == staleReplayListLimit || b.Len()+len(entry)+reserve > laneEventTextLimit {
 			fmt.Fprintf(&b, " +%d more not listed.", len(listed)-i)

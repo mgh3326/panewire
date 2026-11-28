@@ -299,6 +299,10 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := addStaleReplayJobVia(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	store := newLaneInboxStore(db, dialectSQLite)
 	if err := store.migrateStaleReplayBindingKey(ctx); err != nil {
 		store.close()

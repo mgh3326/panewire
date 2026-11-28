@@ -67,8 +67,12 @@ var storeCopyOlderSourceTables = map[string]bool{
 
 // storeCopyOlderSourceColumns are columns a source's table may lack: a store
 // written before them has no value to copy, and the target keeps the column's
-// default. The notice columns came with hk 6821.
-var storeCopyOlderSourceColumns = map[string][]string{"delivery_obligations": {"notice_due_at", "told_at"}}
+// default. The notice columns came with hk 6821; job_via, the stale-replay
+// notice's job source, came with hk 7098.
+var storeCopyOlderSourceColumns = map[string][]string{
+	"delivery_obligations":    {"notice_due_at", "told_at"},
+	"relay_stale_notice_rows": {"job_via"},
+}
 
 // storeCopyColumnsFrom is the target's columns of table less the ones an older
 // source lacks. Any other difference stays, and refuses the copy.
