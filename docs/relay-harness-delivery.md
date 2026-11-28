@@ -526,9 +526,15 @@ closed.
      with the latest first sighting at or before the receipt wins, so a lane that
      moves A -> B -> A keeps a binding for each stint);
   3. for a row received before any binding was kept, the lanes.json route is a
-     hint, used only when that route's job was spawned before the row arrived.
-  The job's spawn record gives the design owner and the hk task. A job whose
-  owner is not a design lane is left out, as before.
+     hint, used only when that route's job was spawned before the row arrived;
+  4. otherwise, the job is the row's worker lane name, when a spawn record of
+     that name (a job id) exists and was created before the row arrived: the
+     newest such spawn as of the receipt (hk 7098). The row is marked
+     `job_via` `lane_name`, and its notice entry reads `job <lane> (via lane
+     name)`, so a reader can tell it from a bound job.
+  Only a row with no binding at its receipt reaches 3 or 4; a binding always
+  wins. The job's spawn record gives the design owner and the hk task. A job
+  whose owner is not a design lane is left out, as before.
 - **Unresolved rows are listed, not dropped.** A row with no job, or with no
   spawn record or owner, is filed on the hub's notice lane (`panewire-design`
   by default) with the job shown as `-`, so no retired row disappears silently.
@@ -554,7 +560,8 @@ closed.
   row retired while the pass runs stays owed for the next pass.
 - **Survival.** The rows live in `relay_stale_notice_rows`, and the lane
   bindings in `relay_stale_notice_lanes` (hub store, SQLite, Postgres migrations
-  0043 and 0045, MySQL migrations 0039 and 0042), so a restart mid-day keeps
+  0043, 0045 and 0046 (the `job_via` column), MySQL migrations 0039, 0042 and
+  0043), so a restart mid-day keeps
   them. A filed day's rows are pruned after 14 days. Bindings are kept: one row
   per change of a lane's job, keyed `(worker_lane, first_ms)`. A SQLite store
   with the first key is rebuilt on open. Rolling back past this change is a
