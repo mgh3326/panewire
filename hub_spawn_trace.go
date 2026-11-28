@@ -87,7 +87,9 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	}
 	// The node's in-flight dispatches counted at this request's first send, capped
 	// by the node's slots; spawns that wait behind them are not counted (hk 7112).
-	if open, ok := h.spawnDispatchOpen.Load(task.Request.RequestID); ok {
+	// Only the landed trace carries it: a refused, deadline or orphan outcome of
+	// the same first send does not (hk 7112).
+	if open, ok := h.spawnDispatchOpen.Load(task.Request.RequestID); ok && result.RC == 0 {
 		trace.SetTag("node_open_dispatches", strconv.Itoa(open.(int)))
 	}
 	// Node replies provide elapsed durations, not synchronized clocks. Stage spans

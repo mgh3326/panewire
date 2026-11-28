@@ -185,3 +185,45 @@ func TestSpawnDispatchOpenNotedOnlyOnFirstSend_t7112(t *testing.T) {
 		t.Fatal("a later replay stored a count")
 	}
 }
+
+// hk 7112 (review): only the landed trace carries the first send's count; a
+// refused outcome of the same request does not.
+func TestSpawnDispatchOpenTagOnlyOnLandedTrace_t7112(t *testing.T) {
+	h := asyncSpawnHub(t)
+	transport := &spawnSentryTransport{}
+	client, err := sentry.NewClient(sentry.ClientOptions{Dsn: "https://public@example.invalid/1", EnableTracing: true, TracesSampleRate: 1, Transport: transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.spawnSentry = client
+
+	accepted := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	refusedAt := accepted.Add(time.Minute)
+	h.now = func() time.Time { return refusedAt }
+
+	req := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), req, "test-job", "parent", accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindTo := hubSpawnRequest{RequestID: t14RequestID(9881), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300}
+	task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, bindTo, accepted.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := sentSpawnFixture(t, h.inbox.store, task)
+	refused := hubSpawnOutcome{RC: 1, Stage: "launch", Host: "machine-a", Reason: "spawn_failed:launch_refused", StageMS: map[string]int64{"launch": 1000}}
+	if _, err = h.inbox.store.completeSpawn(t.Context(), sent, refused, refusedAt); err != nil {
+		t.Fatal(err)
+	}
+	var firstSend hubSpawnTask
+	firstSend.Status = "bound"
+	firstSend.Request.RequestID = req.RequestID
+	h.noteSpawnDispatch(firstSend, 3)
+	h.recordSpawnTrace(sent, refused)
+
+	event := spawnTransactionNamed(t, transport, "runtug.spawn")
+	if got, ok := event.Tags["node_open_dispatches"]; ok {
+		t.Fatalf("refused trace carries node_open_dispatches=%q, want none", got)
+	}
+}
