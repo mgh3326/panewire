@@ -557,15 +557,19 @@ closed.
   0043 and 0045, MySQL migrations 0039 and 0042), so a restart mid-day keeps
   them. A filed day's rows are pruned after 14 days. Bindings are kept: one row
   per change of a lane's job, keyed `(worker_lane, first_ms)`. A SQLite store
-  with the first key is rebuilt on open. Rolling back past this change is a
-  known degradation: an older binary's binding writes fail, so rows received in
-  that window fall back to the lanes.json hint or the notice lane.
+  with the first key is rebuilt on open. Rolling back past this change: on
+  Postgres and SQLite an older binary's binding writes fail, a known degradation,
+  so rows received in that window fall back to the lanes.json hint or the notice
+  lane. On MySQL the older binary's writes go through `ON DUPLICATE KEY UPDATE`
+  and do not fail; a write for an already-held `(worker_lane, first_ms)` is a
+  no-op, and the rest insert rows that resolve as usual.
 
 Code: `relay_stale_notice.go`, `relay_stale_notice_store.go`, and the two hooks
 in `relay.go` (`noteStaleReplayLane` once a lane.event is persisted,
 `noteStaleReplayRetire` before the close in `retireRelayReplay`). Tests:
 `relay_stale_notice_t6924_test.go`, `relay_stale_notice_t6976_test.go`,
-`relay_stale_notice_t6994_test.go`, `relay_stale_notice_host_t6994_test.go`.
+`relay_stale_notice_t6994_test.go`, `relay_stale_notice_host_t6994_test.go`,
+`relay_stale_notice_binding_t7101_test.go`.
 
 ## Tests
 
