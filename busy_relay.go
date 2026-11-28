@@ -307,27 +307,63 @@ func (manager *relayBusyManager) uncertainBatch(ctx context.Context, group []rel
 // per-row warnings after the wait.
 const hubFeaturesWait = 5 * time.Second
 
+// hubReplacementPoll is how often a batch whose connection closed looks for the
+// replacement connection (see awaitReplacementFeatures).
+const hubReplacementPoll = 10 * time.Millisecond
+
 // hubAcceptsRelayUncertainBatch reads the current connection's feature state,
 // waiting (bounded) for the feature frame when it has not arrived yet. The wait
-// also ends when the connection closes or ctx is done: a connection that is gone
-// has no hub to summarise to, so the batch must not hold the pane for the whole
-// hubFeaturesWait (hk 7100).
+// ends early when ctx is done. When the connection closes, the decision moves
+// to its replacement (awaitReplacementFeatures): the closed connection's emitter
+// is the one the batch's row reports would go out on, and it stays bound until
+// the redial binds the next one (hk 7100).
 func (client *HubClient) hubAcceptsRelayUncertainBatch(ctx context.Context) bool {
 	peer := client.signalsPeer.Load()
 	if peer == nil {
 		return false
 	}
-	if !peer.featuresKnown.Load() && peer.featuresReady != nil {
-		timer := time.NewTimer(hubFeaturesWait)
-		defer timer.Stop()
+	if peer.featuresKnown.Load() || peer.featuresReady == nil {
+		return peer.acceptsRelayUncertainBatch.Load()
+	}
+	timer := time.NewTimer(hubFeaturesWait)
+	defer timer.Stop()
+	select {
+	case <-peer.featuresReady:
+		return peer.acceptsRelayUncertainBatch.Load()
+	case <-timer.C:
+		return peer.acceptsRelayUncertainBatch.Load()
+	case <-ctx.Done():
+		return false
+	case <-peer.closed:
+	}
+	return client.awaitReplacementFeatures(ctx, peer, timer.C)
+}
+
+// awaitReplacementFeatures waits, until expired, for a connection other than
+// dead to take over the client and report its features. A replacement's emitter
+// is bound before its read loop starts, so once its featuresReady closes the
+// row reports reach the live connection.
+func (client *HubClient) awaitReplacementFeatures(ctx context.Context, dead *hubClientConnection, expired <-chan time.Time) bool {
+	ticker := time.NewTicker(hubReplacementPoll)
+	defer ticker.Stop()
+	for {
+		if next := client.signalsPeer.Load(); next != nil && next != dead && next.featuresReady != nil {
+			select {
+			case <-next.featuresReady:
+			case <-expired:
+			case <-ctx.Done():
+				return false
+			}
+			return next.acceptsRelayUncertainBatch.Load()
+		}
 		select {
-		case <-peer.featuresReady:
-		case <-timer.C:
-		case <-peer.closed:
+		case <-ticker.C:
+		case <-expired:
+			return false
 		case <-ctx.Done():
+			return false
 		}
 	}
-	return peer.acceptsRelayUncertainBatch.Load()
 }
 
 // relayBusyManager serializes each pane, so a returned wait can batch every

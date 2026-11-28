@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,25 +42,85 @@ func TestT7100NoLaneUncertainBatchWarnsOnce(t *testing.T) {
 	}
 }
 
-// The capability wait returns as soon as the connection closes, instead of
-// holding the batch for the full hubFeaturesWait while no hub can answer.
-func TestT7100CapabilityWaitEndsWhenConnectionCloses(t *testing.T) {
-	peer := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+// When the connection closes, the decision waits for its replacement's features
+// instead of deciding on the dead connection. The replacement binds its emitter
+// before its featuresReady closes, so the decision returns at once once it
+// arrives, not after the full hubFeaturesWait.
+func TestT7100CapabilityWaitDecidesOnReplacementConnection(t *testing.T) {
+	dead := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+	close(dead.closed)
 	client := &HubClient{}
-	client.signalsPeer.Store(peer)
-	// Simulated latency: the connection closes while the batch is waiting.
+	client.signalsPeer.Store(dead)
+	// Simulated redial latency: the replacement connection takes over mid-wait.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		close(peer.closed)
+		live := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+		live.acceptsRelayUncertainBatch.Store(true)
+		client.signalsPeer.Store(live)
+		live.markFeaturesReady()
 	}()
 
 	start := time.Now()
-	accepts := client.hubAcceptsRelayUncertainBatch(context.Background())
-	if elapsed := time.Since(start); elapsed >= hubFeaturesWait/2 {
-		t.Fatalf("wait lasted %s after the connection closed, want it to end at once", elapsed)
+	if !client.hubAcceptsRelayUncertainBatch(context.Background()) {
+		t.Fatal("the replacement connection accepts the summary, but the decision did not use it")
 	}
-	if accepts {
-		t.Fatal("a closed connection with no feature frame must not accept the summary")
+	if elapsed := time.Since(start); elapsed >= hubFeaturesWait/2 {
+		t.Fatalf("decision took %s, want it to follow the replacement at once", elapsed)
+	}
+}
+
+// The uncertain batch's reports reach the replacement connection, not the dead
+// one: a closed connection's emitter would send them into a socket that is gone,
+// and the hub would never learn the rows were dropped.
+func TestT7100RowReportsReachReplacementConnection(t *testing.T) {
+	items := t6887Items("worker-a", "worker-a", "worker-a")
+	dead := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+	close(dead.closed)
+	deadEvents := make(chan hubClientEvent, 64)
+	liveEvents := make(chan hubClientEvent, 64)
+	client := &HubClient{}
+	client.setRelayEmitter(func(event hubClientEvent) { deadEvents <- event })
+	client.signalsPeer.Store(dead)
+	// Simulated redial latency. serveConnection stores the replacement, binds
+	// its emitter, then starts its read loop, which marks its features ready.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		live := &hubClientConnection{featuresReady: make(chan struct{}), closed: make(chan struct{})}
+		live.acceptsRelayUncertainBatch.Store(true)
+		client.signalsPeer.Store(live)
+		client.setRelayEmitter(func(event hubClientEvent) { liveEvents <- event })
+		live.markFeaturesReady()
+	}()
+
+	shown := items[:1]
+	text, _ := task687Batch(shown...)
+	lines := append(append([]string{}, task626Transcript...), text)
+	_, _ = task683FakeHerdr(t, "claude",
+		[]string{task626ClaudeEmpty, task626Claude(lines, "❯")},
+		[]string{task626TranscriptOnly, strings.Join(lines, "\n")})
+	client.relayBusyManager().deliver(context.Background(), items, false)
+
+	drain := func(ch chan hubClientEvent) []hubClientEvent {
+		var out []hubClientEvent
+		for {
+			select {
+			case event := <-ch:
+				out = append(out, event)
+			default:
+				return out
+			}
+		}
+	}
+	if stale := drain(deadEvents); len(stale) != 0 {
+		t.Fatalf("the dead connection's emitter got %d reports, want none: %s", len(stale), stale[0].Payload)
+	}
+	live := drain(liveEvents)
+	if summaries := t6887Kind(live, "relay.uncertain_batch"); len(summaries) != 1 {
+		t.Fatalf("replacement got summaries=%d, want one", len(summaries))
+	}
+	dropped := t6887Kind(live, "relay.dropped")
+	if len(dropped) != 2 {
+		t.Fatalf("replacement got dropped=%d, want the two unproven rows", len(dropped))
 	}
 }
 
