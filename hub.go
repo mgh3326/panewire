@@ -545,12 +545,8 @@ type HubServer struct {
 	spawnWakeCounts map[string]uint64
 	spawnWakeHeld   bool
 	spawnWorkers    sync.WaitGroup
-	// spawnDispatchOpen maps a request to the node's open dispatches counted
-	// when the request was dispatched to it, while that dispatch runs. The
-	// landed trace carries it so a burst queue shows (hk 7112). A restart drops it.
-	spawnDispatchOpen sync.Map
-	placementKick     chan struct{}
-	placementAsync    atomic.Bool
+	placementKick   chan struct{}
+	placementAsync  atomic.Bool
 	// placementRecordClient is the App the outbox delivers hk placement
 	// records through; built on first use by placementRecordApp.
 	placementRecordClient *fleet.App

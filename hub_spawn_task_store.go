@@ -146,8 +146,13 @@ type hubSpawnTask struct {
 	// quota-stop or hand-over successor), and empty for a row whose replaced_from
 	// was derived from its name by the startup backfill: a derived lineage is no
 	// proof that the job replaced anything (hk 5690).
-	ReplacedReason    string
-	Created, Deadline time.Time
+	ReplacedReason string
+	// OpenDispatches and QueuedSpawns are the node's queue as this attempt's
+	// first scheduling pass counted it (hk 7125): the in-flight dispatches, and
+	// the other operations on the same machine in flight or waiting ahead. -1
+	// (the column default) means no pass recorded them.
+	OpenDispatches, QueuedSpawns int
+	Created, Deadline            time.Time
 	// Expires is the request's time limit (hk 4660): past it, a request whose
 	// start is not unproven ends given_up. Zero on a row from before the
 	// column: such a row is never given up.
@@ -313,8 +318,9 @@ func (s *laneInboxStore) ensureSpawnTasks() error {
 	// replaced_from is hk 5300's (postgres: 0031), replaced_reason is hk 5690's
 	// (postgres: 0035), trace_history is hk 6074's (postgres: 0037, mysql:
 	// 0030), and bound_machine and exclusive are hk 6433's (postgres: 0041,
-	// mysql: 0037).
-	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`, `replaced_reason TEXT NOT NULL DEFAULT ''`, `start_receipt_ms BIGINT NOT NULL DEFAULT 0`, `trace_history TEXT NOT NULL DEFAULT '[]'`, `bound_machine TEXT NOT NULL DEFAULT ''`, `exclusive INTEGER NOT NULL DEFAULT 0`} {
+	// mysql: 0037), and open_dispatches and queued_spawns are hk 7125's
+	// (postgres: 0048, mysql: 0045).
+	for _, column := range []string{`placed_ms BIGINT NOT NULL DEFAULT 0`, `claimed_ms BIGINT NOT NULL DEFAULT 0`, `exclusions TEXT NOT NULL DEFAULT '[]'`, `claimed_host TEXT NOT NULL DEFAULT ''`, `refresh_waits TEXT NOT NULL DEFAULT '[]'`, `tried TEXT NOT NULL DEFAULT '[]'`, `expires_ms BIGINT NOT NULL DEFAULT 0`, `conditions_met_ms BIGINT NOT NULL DEFAULT 0`, `condition_result TEXT NOT NULL DEFAULT ''`, `park_reason TEXT NOT NULL DEFAULT ''`, `next_check_ms BIGINT NOT NULL DEFAULT 0`, `failed_attempts INTEGER NOT NULL DEFAULT 0`, `claim_result TEXT NOT NULL DEFAULT ''`, `park_since_ms BIGINT NOT NULL DEFAULT 0`, `park_priority INTEGER NOT NULL DEFAULT -1`, `park_notice_ms BIGINT NOT NULL DEFAULT 0`, `park_judged_reason TEXT NOT NULL DEFAULT ''`, `park_priority_failures INTEGER NOT NULL DEFAULT 0`, `placed_account_key TEXT NOT NULL DEFAULT ''`, `placed_attempt INTEGER NOT NULL DEFAULT 0`, `task_fail_notice_ms BIGINT NOT NULL DEFAULT 0`, `task_fail_retry_ms BIGINT NOT NULL DEFAULT 0`, `replaced_from TEXT`, `replaced_reason TEXT NOT NULL DEFAULT ''`, `start_receipt_ms BIGINT NOT NULL DEFAULT 0`, `trace_history TEXT NOT NULL DEFAULT '[]'`, `bound_machine TEXT NOT NULL DEFAULT ''`, `exclusive INTEGER NOT NULL DEFAULT 0`, `open_dispatches INTEGER NOT NULL DEFAULT -1`, `queued_spawns INTEGER NOT NULL DEFAULT -1`} {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE spawn_operations ADD COLUMN `+column); err != nil {
 			if err := ignoreDuplicateColumn(err); err != nil {
 				return err
@@ -744,7 +750,7 @@ func (s *laneInboxStore) bindSpawnPlaced(parent context.Context, id string, atte
 	// bound_machine and exclusive let the coordinator find each machine's
 	// oldest waiting exclusive in one query (hk 6433). Every statement that
 	// sets node_id=NULL clears them.
-	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,start_receipt_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=?,bound_machine=?,exclusive=? WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, node.Machine, spawnExclusiveMark(&node), id, attempt, node.Machine)
+	_, err = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=?,node_payload=?,status=?,placed_ms=?,claimed_ms=0,start_receipt_ms=0,refresh_waits='[]',tried='[]',park_reason='',placed_account_key=?,placed_attempt=?,bound_machine=?,exclusive=?,open_dispatches=-1,queued_spawns=-1 WHERE request_id=? AND attempt=? AND node_id IS NULL AND status='accepted' AND (claimed_host='' OR claimed_host=?)`), node.RequestID, string(raw), spawnStoredStatus("bound", &node), now.UnixMilli(), accountKey, placedAttempt, node.Machine, spawnExclusiveMark(&node), id, attempt, node.Machine)
 	if err != nil {
 		return hubSpawnTask{}, err
 	}
@@ -987,12 +993,14 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	var created, deadline, lastRun, placed, expires, conditionsMet, nextCheck, parkSince, parkNoticeAt, placedAttempt int64
 	var replacedFrom sql.NullString
 	var replacedReason string
-	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult, &parkSince, &task.ParkPriority, &parkNoticeAt, &parkJudgedReason, &task.ParkPriorityFailures, &placedAccountKey, &placedAttempt, &replacedFrom, &tried, &replacedReason)
+	var openDispatches, queuedSpawns int
+	err := row.Scan(&task.Job, &task.Owner, &payload, &task.Status, &created, &deadline, &node, &result, &task.Attempt, &lastRun, &placed, &exclusions, &task.ClaimedHost, &refreshWaits, &expires, &conditionsMet, &conditionResult, &task.ParkReason, &nextCheck, &task.FailedAttempts, &claimResult, &parkSince, &task.ParkPriority, &parkNoticeAt, &parkJudgedReason, &task.ParkPriorityFailures, &placedAccountKey, &placedAttempt, &replacedFrom, &tried, &replacedReason, &openDispatches, &queuedSpawns)
 	if err != nil {
 		return task, err
 	}
 	task.ReplacedFrom = replacedFrom.String
 	task.ReplacedReason = replacedReason
+	task.OpenDispatches, task.QueuedSpawns = openDispatches, queuedSpawns
 	task.PlacedAccountKey = placedAccountKey
 	if placedAttempt > 0 {
 		task.PlacedAttempt = int(placedAttempt)
@@ -1175,7 +1183,7 @@ func spawnTaskColumnsOf(alias string) string {
 	return strings.Join(columns, ",")
 }
 
-const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,park_since_ms,park_priority,park_notice_ms,park_judged_reason,park_priority_failures,placed_account_key,placed_attempt,replaced_from,tried,replaced_reason`
+const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt,last_run_ms,placed_ms,exclusions,claimed_host,refresh_waits,expires_ms,conditions_met_ms,condition_result,park_reason,next_check_ms,failed_attempts,claim_result,park_since_ms,park_priority,park_notice_ms,park_judged_reason,park_priority_failures,placed_account_key,placed_attempt,replaced_from,tried,replaced_reason,open_dispatches,queued_spawns`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)

@@ -102,8 +102,8 @@ func TestSpawnTraceRenewedAttemptWindowUnchanged_t7112(t *testing.T) {
 	}
 }
 
-// hk 7112: the landed trace carries the node's open dispatches counted when the
-// request was dispatched, so a burst on one node is visible on the trace.
+// hk 7112, hk 7125: the landed trace carries the node's queue as the attempt's
+// first scheduling pass recorded it, so a burst on one node is visible on the trace.
 func TestSpawnTraceTagsNodeOpenDispatches_t7112(t *testing.T) {
 	h := asyncSpawnHub(t)
 	transport := &spawnSentryTransport{}
@@ -132,16 +132,19 @@ func TestSpawnTraceTagsNodeOpenDispatches_t7112(t *testing.T) {
 	if _, err = h.inbox.store.completeSpawn(t.Context(), sent, landed, landedAt); err != nil {
 		t.Fatal(err)
 	}
-	// The first send counted three open dispatches on the node, itself included.
-	var firstSend hubSpawnTask
-	firstSend.Status = "bound"
-	firstSend.Request.RequestID = req.RequestID
-	h.noteSpawnDispatch(firstSend, 3)
+	// The first pass counted three open dispatches on the node, itself included,
+	// and two operations ahead of it.
+	if err := h.inbox.store.recordSpawnDispatchQueue(t.Context(), req.RequestID, sent.Node.RequestID, sent.Attempt, 3, 2); err != nil {
+		t.Fatal(err)
+	}
 	h.recordSpawnTrace(sent, landed)
 
 	event := spawnTransactionNamed(t, transport, "runtug.spawn")
 	if got := event.Tags["node_open_dispatches"]; got != "3" {
 		t.Fatalf("node_open_dispatches = %q, want 3", got)
+	}
+	if got := event.Tags["node_queued_spawns"]; got != "2" {
+		t.Fatalf("node_queued_spawns = %q, want 2", got)
 	}
 }
 
@@ -158,32 +161,6 @@ func spawnTransactionNamed(t *testing.T, transport *spawnSentryTransport, name s
 	}
 	t.Fatalf("no transaction %q among %d events", name, len(transport.events))
 	return nil
-}
-
-// hk 7112 (review): a replay of a dispatched request must not overwrite the
-// first send's count, so the landed trace of a replay carries no tag.
-func TestSpawnDispatchOpenNotedOnlyOnFirstSend_t7112(t *testing.T) {
-	h := &HubServer{}
-	var replay hubSpawnTask
-	replay.Status = "dispatching"
-	replay.Request.RequestID = "req-replay"
-	h.noteSpawnDispatch(replay, 1)
-	if _, ok := h.spawnDispatchOpen.Load("req-replay"); ok {
-		t.Fatal("a replay stored an open-dispatch count")
-	}
-
-	var first hubSpawnTask
-	first.Status = "bound"
-	first.Request.RequestID = "req-first"
-	h.noteSpawnDispatch(first, 3)
-	h.noteSpawnDispatch(replay, 1)
-	got, ok := h.spawnDispatchOpen.Load("req-first")
-	if !ok || got.(int) != 3 {
-		t.Fatalf("first send count = %v (present %v), want 3", got, ok)
-	}
-	if _, ok := h.spawnDispatchOpen.Load("req-replay"); ok {
-		t.Fatal("a later replay stored a count")
-	}
 }
 
 // hk 7112 (review): only the landed trace carries the first send's count; a
@@ -216,10 +193,9 @@ func TestSpawnDispatchOpenTagOnlyOnLandedTrace_t7112(t *testing.T) {
 	if _, err = h.inbox.store.completeSpawn(t.Context(), sent, refused, refusedAt); err != nil {
 		t.Fatal(err)
 	}
-	var firstSend hubSpawnTask
-	firstSend.Status = "bound"
-	firstSend.Request.RequestID = req.RequestID
-	h.noteSpawnDispatch(firstSend, 3)
+	if err := h.inbox.store.recordSpawnDispatchQueue(t.Context(), req.RequestID, sent.Node.RequestID, sent.Attempt, 3, 2); err != nil {
+		t.Fatal(err)
+	}
 	h.recordSpawnTrace(sent, refused)
 
 	event := spawnTransactionNamed(t, transport, "runtug.spawn")

@@ -85,12 +85,17 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 			hub.Scope().SetTag(key, value)
 		}
 	}
-	// The node's in-flight dispatches counted at this request's first send, capped
-	// by the node's slots; spawns that wait behind them are not counted (hk 7112).
-	// Only the landed trace carries it: a refused, deadline or orphan outcome of
-	// the same first send does not (hk 7112).
-	if open, ok := h.spawnDispatchOpen.Load(task.Request.RequestID); ok && result.RC == 0 {
-		trace.SetTag("node_open_dispatches", strconv.Itoa(open.(int)))
+	// The node's queue as this attempt's first scheduling pass counted it (hk
+	// 7112, hk 7125). Only the landed trace carries it: a refused, deadline or
+	// orphan outcome does not. A read failure leaves the tags off this trace.
+	if result.RC == 0 {
+		open, queued, recorded, err := h.inbox.store.spawnDispatchQueue(ctx, task.Request.RequestID, task.Attempt)
+		if err != nil {
+			h.logger.Warn("hub spawn queue unreadable; the landed trace has no queue tags", "request_id", task.Request.RequestID, "error", err)
+		} else if recorded {
+			trace.SetTag("node_open_dispatches", strconv.Itoa(open))
+			trace.SetTag("node_queued_spawns", strconv.Itoa(queued))
+		}
 	}
 	// Node replies provide elapsed durations, not synchronized clocks. Stage spans
 	// run back to back and end at the window's end instead of inventing a
@@ -113,17 +118,6 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		trace.StartTime = earliest
 	}
 	trace.Finish()
-}
-
-// noteSpawnDispatch records the node's open dispatches for a request's first
-// send (status bound). A replay (dispatching, reconciling, deadline_exceeded)
-// stores nothing: it would carry the count at replay time, not at the dispatch
-// the trace belongs to (hk 7112). The first send's dispatch goroutine removes
-// the entry when it ends, after its trace is written.
-func (h *HubServer) noteSpawnDispatch(task hubSpawnTask, open int) {
-	if task.Status == "bound" {
-		h.spawnDispatchOpen.Store(task.Request.RequestID, open)
-	}
 }
 
 // spawnSentryRefusalPolicies are the closed set of requester-side refusal

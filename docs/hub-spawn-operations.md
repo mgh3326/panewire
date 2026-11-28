@@ -1891,10 +1891,18 @@ sum of its steps (placement, checkout, claim, launch, submit, landing, in the or
 the wait before the first step, such as a wait for a node slot (hk 7112). The
 checkout sub-stages `lock_wait`, `fetch` and `worktree_add` are drawn inside the
 checkout step and are not counted again. The landed trace also carries the
-`node_open_dispatches` tag: the node's in-flight dispatches counted at the
-request's first send, capped by the node's slots; spawns that wait behind them
-are not counted. A replay of a dispatched request carries no tag. The count is
-held in memory, so a hub restart drops the tag.
+`node_open_dispatches` and `node_queued_spawns` tags (hk 7125): the queue the
+attempt joined, counted at its first scheduling pass and stored on the operation
+(`spawn_operations.open_dispatches` and `queued_spawns`, postgres 0048, mysql
+0045; -1 means no pass recorded them). `node_open_dispatches` is the node's
+in-flight dispatches, the attempt itself included when that pass sends it, capped
+by the node's slots. `node_queued_spawns` is the other operations bound to the
+same machine that were created earlier and are still in flight or waiting, so a
+burst of N spawns to one node without slots tags the later ones 1..N-1. A busy
+attempt is counted at the pass that first saw it. The record is written once per
+attempt, and a bind clears it, so a rebound attempt never carries another binding's count. So a replay (dispatching, reconciling) carries no count it did not
+record, and a landing reads the record, so it keeps the tags after the dispatch
+ends and across a hub restart. Only the landed trace carries them.
 Refusal text, briefs and argv never reach the trace. A row from before the column has no acceptance
 time in the history and keeps the attempt window as its start.
 
