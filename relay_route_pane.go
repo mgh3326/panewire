@@ -54,18 +54,28 @@ func (h *HubServer) markJobPaneGone(node, job string) {
 }
 
 // markPaneJobsGone records that node closed pane, or found it gone, on a pane.close
-// the hub issued. Only completed jobs are marked. A pane id can be reused by a
-// live job that is recorded later on the same node, and its record must not
-// inherit a close that was not its own.
-func (h *HubServer) markPaneJobsGone(node, pane string) {
+// the hub issued for the agent named label: the label the node checks before it
+// closes. Only the job that agent ran is marked, however late its completion
+// arrived. A job another agent ran on a reused pane id is not marked. With no
+// name the close cannot be attributed, so only completed jobs on the pane are
+// marked, as before.
+func (h *HubServer) markPaneJobsGone(node, pane, label string) {
 	if pane == "" {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, rec := range h.jobs {
-		if rec.Completed && rec.Node == node && rec.Pane == pane {
-			rec.PaneGone = true
+		if rec.Node != node || rec.Pane != pane {
+			continue
 		}
+		if label == "" {
+			if !rec.Completed {
+				continue
+			}
+		} else if rec.AgentLabel != label {
+			continue
+		}
+		rec.PaneGone = true
 	}
 }
