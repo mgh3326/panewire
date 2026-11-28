@@ -59,7 +59,9 @@ func TestSpawnTraceRefusedAttemptsAndQueueWait_t6074(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := sentSpawnFixture(t, h.inbox.store, bound)
-	landed := hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Profile: "model-a", Role: "implementer", StageMS: map[string]int64{"launch": 30_000, "landing": 40_000}}
+	// The steps run after the bind and fit in the 40 s from bind to landed, so
+	// the queue is the 130 s before the bind (window minus the steps' sum).
+	landed := hubSpawnOutcome{RC: 0, Stage: "landing", Host: "machine-a", Profile: "model-a", Role: "implementer", StageMS: map[string]int64{"launch": 20_000, "landing": 20_000}}
 	if _, err = h.inbox.store.completeSpawn(t.Context(), sent, landed, landedAt); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +120,7 @@ func TestSpawnTraceRefusedAttemptsAndQueueWait_t6074(t *testing.T) {
 			if span.StartTime.Before(boundAt) {
 				t.Fatalf("landed step %q starts %v, before its bind %v", span.Op, span.StartTime, boundAt)
 			}
-			landedSteps = max(landedSteps, span.EndTime.Sub(span.StartTime))
+			landedSteps += span.EndTime.Sub(span.StartTime)
 		}
 	}
 	if got, want := refusedWindow.EndTime.Sub(refusedWindow.StartTime)+queueWait.EndTime.Sub(queueWait.StartTime)+landedSteps, landedAt.Sub(accepted); got != want {

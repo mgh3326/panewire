@@ -85,8 +85,14 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 			hub.Scope().SetTag(key, value)
 		}
 	}
-	// Node replies provide elapsed durations, not synchronized clocks. End-align
-	// stage spans instead of inventing a cross-host causal timeline. The steps
+	// The node's open dispatches when this request was dispatched: a burst of
+	// spawns on one node shows as a queue with a high count (hk 7112).
+	if open, ok := h.spawnDispatchOpen.Load(task.Request.RequestID); ok {
+		trace.SetTag("node_open_dispatches", strconv.Itoa(open.(int)))
+	}
+	// Node replies provide elapsed durations, not synchronized clocks. Stage spans
+	// run back to back and end at the window's end instead of inventing a
+	// cross-host causal timeline (hk 7112). The steps
 	// after placement are node claim, pane start (launch), brief submit (submit)
 	// and landing proof (landing); see docs/hub-spawn-operations.md (hk 5585).
 	// Each attempt renewed before this one is a window of its own, and the
