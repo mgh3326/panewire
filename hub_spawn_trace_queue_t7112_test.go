@@ -134,7 +134,7 @@ func TestSpawnTraceTagsNodeOpenDispatches_t7112(t *testing.T) {
 	}
 	// The first pass counted three open dispatches on the node, itself included,
 	// and two operations ahead of it.
-	if err := h.inbox.store.recordSpawnDispatchQueue(t.Context(), req.RequestID, sent.Attempt, 3, 2); err != nil {
+	if err := h.inbox.store.recordSpawnDispatchQueue(t.Context(), req.RequestID, sent.Node.RequestID, sent.Attempt, 3, 2); err != nil {
 		t.Fatal(err)
 	}
 	h.recordSpawnTrace(sent, landed)
@@ -193,7 +193,7 @@ func TestSpawnDispatchOpenTagOnlyOnLandedTrace_t7112(t *testing.T) {
 	if _, err = h.inbox.store.completeSpawn(t.Context(), sent, refused, refusedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.inbox.store.recordSpawnDispatchQueue(t.Context(), req.RequestID, sent.Attempt, 3, 2); err != nil {
+	if err := h.inbox.store.recordSpawnDispatchQueue(t.Context(), req.RequestID, sent.Node.RequestID, sent.Attempt, 3, 2); err != nil {
 		t.Fatal(err)
 	}
 	h.recordSpawnTrace(sent, refused)

@@ -17,7 +17,7 @@ import (
 // landing reads the record. A failed write is logged; the record stays unset and
 // the trace has no queue tags.
 func (h *HubServer) recordSpawnQueue(ctx context.Context, task hubSpawnTask, open, queued int) {
-	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, task.Request.RequestID, task.Attempt, open, queued); err != nil {
+	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, task.Request.RequestID, task.Node.RequestID, task.Attempt, open, queued); err != nil {
 		h.logger.Warn("hub spawn queue unrecorded; the trace will not carry it", "request_id", task.Request.RequestID, "error", err)
 	}
 }
@@ -35,11 +35,13 @@ func (s *laneInboxStore) countSpawnQueueAhead(parent context.Context, task hubSp
 }
 
 // recordSpawnDispatchQueue stores the queue of an attempt's first pass. Only an
-// unrecorded attempt is written, so a later pass never moves the count.
-func (s *laneInboxStore) recordSpawnDispatchQueue(parent context.Context, requestID string, attempt, open, queued int) error {
+// unrecorded attempt of the named node binding is written, so a later pass never
+// moves the count, and a write for an earlier binding matches no row once the
+// attempt is rebound (node_id is unique per binding).
+func (s *laneInboxStore) recordSpawnDispatchQueue(parent context.Context, requestID, nodeID string, attempt, open, queued int) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET open_dispatches=?,queued_spawns=? WHERE request_id=? AND attempt=? AND open_dispatches<0`), open, queued, requestID, attempt)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET open_dispatches=?,queued_spawns=? WHERE request_id=? AND attempt=? AND node_id=? AND open_dispatches<0`), open, queued, requestID, attempt, nodeID)
 	return err
 }
 

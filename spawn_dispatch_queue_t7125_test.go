@@ -119,10 +119,10 @@ func TestSpawnDispatchQueueWriteOnlyUnrecorded_t7125(t *testing.T) {
 	base := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
 	ctx := context.Background()
 	task := bindDrainRow(t, h.inbox.store, drainRow{n: 2, created: base}, base)
-	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, task.Request.RequestID, task.Attempt, 1, 2); err != nil {
+	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, task.Request.RequestID, task.Node.RequestID, task.Attempt, 1, 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, task.Request.RequestID, task.Attempt, 9, 9); err != nil {
+	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, task.Request.RequestID, task.Node.RequestID, task.Attempt, 9, 9); err != nil {
 		t.Fatal(err)
 	}
 	open, queued, recorded, err := h.inbox.store.spawnDispatchQueue(ctx, task.Request.RequestID, task.Attempt)
@@ -159,14 +159,20 @@ func TestSpawnRebindResetsQueueRecord_t7125(t *testing.T) {
 	ctx := t.Context()
 	task := bindDrainRow(t, h.inbox.store, drainRow{n: 4, created: base}, base)
 	id := task.Request.RequestID
-	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, id, task.Attempt, 2, 1); err != nil {
+	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, id, task.Node.RequestID, task.Attempt, 2, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.inbox.store.unbindUnsentSpawn(ctx, id, task.Attempt, task.Node.RequestID); err != nil {
+	staleNode := task.Node.RequestID
+	if _, err := h.inbox.store.unbindUnsentSpawn(ctx, id, task.Attempt, staleNode); err != nil {
 		t.Fatal(err)
 	}
 	bindTo := hubSpawnRequest{RequestID: t14RequestID(6430040), Machine: "machine-b", Args: []string{"--job", task.Job}, WaitSeconds: 300}
 	if _, err := h.inbox.store.bindSpawn(ctx, id, task.Attempt, bindTo, base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// A first pass that read the earlier binding before the rebind writes late:
+	// the write names the old node request and matches no row.
+	if err := h.inbox.store.recordSpawnDispatchQueue(ctx, id, staleNode, task.Attempt, 7, 7); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, recorded, err := h.inbox.store.spawnDispatchQueue(ctx, id, task.Attempt); err != nil || recorded {
