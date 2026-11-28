@@ -5,6 +5,12 @@
 -- Only unsent batches move: a batch already sent keeps sent=1, and no row is
 -- deleted, so the quarantine rows and their inbox references stay as they are.
 -- Rerunning changes nothing: the WHERE matches only sent=0 rows.
--- Rollback: an older hub reads sent=2 as neither pending nor sent; a quarantined
--- batch it leaves at sent=0 is still excluded by its quarantine anti-join.
+-- Rollback: an older hub (before hk 7117) does not read sent=2 as released. Its
+-- unclaimedUnread and recoverMustAct free a quarantined batch's claim only when
+-- sent=0, and its retention guard keeps items only for sent=0, so a must-act
+-- item claimed by a terminal batch stays claimed and is never re-escalated. Before
+-- starting an older binary the operator must stop the hub and run:
+--   UPDATE lane_inbox_batches SET sent=0 WHERE sent=2;
+-- (the older hub's pending page still excludes the quarantined rows via its
+-- anti-join). Then start the older hub.
 UPDATE lane_inbox_batches SET sent=2 WHERE sent=0 AND id IN (SELECT batch_id FROM lane_inbox_batch_quarantine);

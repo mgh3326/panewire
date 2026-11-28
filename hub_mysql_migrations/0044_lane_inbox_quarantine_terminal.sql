@@ -3,5 +3,9 @@
 -- unsent quarantined batches move; sent batches and quarantine rows are kept.
 -- The guard reads sent=2, which no batch has before this migration; a guard
 -- above zero skips the run, and the statement is idempotent if it runs again.
+-- Rollback: an older hub (before hk 7117) does not release a quarantined batch's
+-- claim while sent=2. Before starting it, stop the hub and run:
+--   UPDATE lane_inbox_batches SET sent=0 WHERE sent=2;
+-- See the Postgres twin, migration 0047.
 -- applied-if: SELECT COUNT(*) FROM lane_inbox_batches WHERE sent=2
 UPDATE lane_inbox_batches b JOIN lane_inbox_batch_quarantine q ON q.batch_id=b.id SET b.sent=2 WHERE b.sent=0;

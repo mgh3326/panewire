@@ -547,7 +547,7 @@ func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
 func (s *laneInboxStore) quarantineBatch(id, reason string) error {
 	ctx, done := s.op(s.life)
 	defer done()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
