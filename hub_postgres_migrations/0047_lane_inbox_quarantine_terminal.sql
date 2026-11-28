@@ -1,0 +1,16 @@
+-- hk 7117: a quarantined batch is terminal (sent=2), so the pending batch page's
+-- sent=0 partial index (lane_inbox_batches_pending) never reaches it. Quarantine
+-- now sets sent=2 in the same transaction as its quarantine row (quarantineBatch);
+-- this moves the batches quarantined before that. The MySQL twin is migration 0044.
+-- Only unsent batches move: a batch already sent keeps sent=1, and no row is
+-- deleted, so the quarantine rows and their inbox references stay as they are.
+-- Rerunning changes nothing: the WHERE matches only sent=0 rows.
+-- Rollback: an older hub (before hk 7117) does not read sent=2 as released. Its
+-- unclaimedUnread and recoverMustAct free a quarantined batch's claim only when
+-- sent=0, and its retention guard keeps items only for sent=0, so a must-act
+-- item claimed by a terminal batch stays claimed and is never re-escalated. Before
+-- starting an older binary the operator must stop the hub and run:
+--   UPDATE lane_inbox_batches SET sent=0 WHERE sent=2;
+-- (the older hub's pending page still excludes the quarantined rows via its
+-- anti-join). Then start the older hub.
+UPDATE lane_inbox_batches SET sent=2 WHERE sent=0 AND id IN (SELECT batch_id FROM lane_inbox_batch_quarantine);
